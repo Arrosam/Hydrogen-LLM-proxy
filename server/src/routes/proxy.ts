@@ -16,26 +16,13 @@ import { incrementUsage } from "../services/tokens";
 import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
+import { serializeForLog } from "../util/logPayload";
 import type { AttemptRecord } from "../core/mub/engine";
 import type { ModelUseBehavior, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
 
 const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-
-function truncate(s: string, max: number): string {
-  if (max <= 0 || s.length <= max) return s;
-  return `${s.slice(0, max)}\n...[truncated ${s.length - max} chars]`;
-}
-
-/** Pretty-print for storage; falls back to a compact/string form on error. */
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
 
 interface LogParams {
   token: Token | null;
@@ -71,11 +58,13 @@ function recordLog(p: LogParams): void {
     latencyMs: p.latencyMs,
     attempts: p.attempts ?? 0,
     attemptPath: p.attemptPath ?? [],
-    // Stored pretty-printed so the log viewer stays readable even when truncated.
-    requestPayload: p.requestBody !== undefined ? truncate(safeStringify(p.requestBody), max) : null,
+    // Serialized to VALID JSON within the char budget (long string fields are
+    // shortened rather than cutting the JSON mid-structure) so the log viewer
+    // can always render a formatted transcript.
+    requestPayload: p.requestBody !== undefined ? serializeForLog(p.requestBody, max) : null,
     responsePayload:
       p.responseBody !== undefined && p.responseBody !== null
-        ? truncate(safeStringify(p.responseBody), max)
+        ? serializeForLog(p.responseBody, max)
         : null,
     error: p.error ?? null,
   });

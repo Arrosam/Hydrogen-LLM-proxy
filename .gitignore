@@ -142,3 +142,6 @@ dist
 *.db-shm
 .preview-data
 hydrogen-secrets.json
+
+# Local scratch / security-review attack scripts
+/.test/

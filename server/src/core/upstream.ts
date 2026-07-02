@@ -1,6 +1,24 @@
 import { request } from "undici";
 import type { Readable } from "node:stream";
 import { familyForProviderType, type ProviderType } from "./formats";
+import { assertUpstreamAllowed } from "./ssrf";
+
+/**
+ * Headers a caller-supplied `extraHeaders` map may not set: hop-by-hop headers
+ * and framing/routing headers that must be controlled by the proxy, not by
+ * whoever configured the provider.
+ */
+const BLOCKED_EXTRA_HEADERS = new Set([
+  "host",
+  "content-length",
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+]);
 
 export interface UpstreamProvider {
   type: ProviderType;
@@ -38,13 +56,20 @@ export function modelsUrl(p: UpstreamProvider): string {
 
 export function buildHeaders(p: UpstreamProvider, extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
+  // Custom headers are applied first, with hop-by-hop/routing headers stripped,
+  // so a provider's configured auth (below) always wins over extraHeaders and
+  // the proxy keeps control of framing/Host.
+  if (p.extraHeaders) {
+    for (const [k, v] of Object.entries(p.extraHeaders)) {
+      if (!BLOCKED_EXTRA_HEADERS.has(k.toLowerCase())) headers[k] = v;
+    }
+  }
   if (familyForProviderType(p.type) === "anthropic") {
     if (p.apiKey) headers["x-api-key"] = p.apiKey;
     headers["anthropic-version"] = ANTHROPIC_VERSION;
   } else if (p.apiKey) {
     headers["authorization"] = `Bearer ${p.apiKey}`;
   }
-  if (p.extraHeaders) Object.assign(headers, p.extraHeaders);
   if (extra) Object.assign(headers, extra);
   return headers;
 }
@@ -71,6 +96,7 @@ export async function postJson(
   body: unknown,
   opts: UpstreamCallOptions,
 ): Promise<UpstreamJsonResult> {
+  await assertUpstreamAllowed(url);
   const res = await request(url, {
     method: "POST",
     headers,
@@ -104,6 +130,7 @@ export async function postStream(
   body: unknown,
   opts: UpstreamCallOptions,
 ): Promise<UpstreamStreamResult> {
+  await assertUpstreamAllowed(url);
   const res = await request(url, {
     method: "POST",
     headers,
@@ -121,6 +148,7 @@ export async function getJson(
   headers: Record<string, string>,
   opts: UpstreamCallOptions,
 ): Promise<UpstreamJsonResult> {
+  await assertUpstreamAllowed(url);
   const res = await request(url, {
     method: "GET",
     headers,

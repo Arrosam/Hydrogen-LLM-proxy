@@ -14,10 +14,20 @@ import {
 const TypeSchema = z.enum(["openai", "anthropic", "openai_compatible"]);
 const HeadersSchema = z.record(z.string()).nullable().optional();
 
+// Only http/https upstreams — reject file:, gopher:, etc. (The SSRF guard in
+// core/ssrf.ts additionally blocks private/loopback/link-local hosts at call
+// time, since a hostname's resolved address can't be known here.)
+const BaseUrlSchema = z
+  .string()
+  .url()
+  .refine((u) => /^https?:$/.test(new URL(u).protocol), {
+    message: "baseUrl must use http or https",
+  });
+
 const CreateSchema = z.object({
   name: z.string().min(1).max(120),
   type: TypeSchema,
-  baseUrl: z.string().url(),
+  baseUrl: BaseUrlSchema,
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   enabled: z.boolean().optional(),
@@ -26,7 +36,7 @@ const CreateSchema = z.object({
 const UpdateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   type: TypeSchema.optional(),
-  baseUrl: z.string().url().optional(),
+  baseUrl: BaseUrlSchema.optional(),
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   enabled: z.boolean().optional(),
