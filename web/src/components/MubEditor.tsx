@@ -3,7 +3,21 @@ import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
-import type { AdvanceTrigger, Mapping, Model, Mub, MubStep, MubSteps, Provider, Trigger } from "../types";
+import { StageEditor } from "./StageEditor";
+import type {
+  AdvanceTrigger,
+  ChainMub,
+  ChainStage,
+  Mapping,
+  Model,
+  Mub,
+  MubDef,
+  MubStep,
+  MubSteps,
+  Provider,
+  Trigger,
+} from "../types";
+import { isChainDef } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 500, 502, 503, 529];
 
@@ -33,6 +47,9 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
   const [enabled, setEnabled] = useState(true);
   const [timeoutMs, setTimeoutMs] = useState(60000);
   const [steps, setSteps] = useState<MubStep[]>([]);
+  const [kind, setKind] = useState<"resilience" | "chain">("resilience");
+  const [stages, setStages] = useState<ChainStage[]>([]);
+  const [output, setOutput] = useState("");
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -61,7 +78,17 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
       setDescription(mub.description ?? "");
       setEnabled(mub.enabled);
       setTimeoutMs(mub.steps?.timeoutMs ?? 60000);
-      setSteps(mub.steps?.steps ?? []);
+      if (isChainDef(mub.steps)) {
+        setKind("chain");
+        setStages(mub.steps.stages ?? []);
+        setOutput(mub.steps.output ?? "");
+        setSteps([]);
+      } else {
+        setKind("resilience");
+        setSteps((mub.steps as MubSteps)?.steps ?? []);
+        setStages([]);
+        setOutput("");
+      }
     } else {
       const firstModel = models[0]?.name ?? "";
       const firstProvider = providersForModel(firstModel)[0] ?? "";
@@ -69,14 +96,20 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
       setDescription("");
       setEnabled(true);
       setTimeoutMs(60000);
+      setKind("resilience");
       setSteps(firstModel && firstProvider ? [blankStep(firstModel, firstProvider)] : []);
+      setStages([]);
+      setOutput("");
     }
     setRaw(false);
     setSummary("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mub]);
 
-  const buildSteps = (): MubSteps => ({ timeoutMs, steps });
+  const buildDef = (): MubDef =>
+    kind === "chain"
+      ? ({ kind: "chain", timeoutMs, stages, ...(output ? { output } : {}) } as ChainMub)
+      : ({ timeoutMs, steps } as MubSteps);
 
   const patchStep = (i: number, patch: Partial<MubStep>) =>
     setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
@@ -116,11 +149,18 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
     setDragIndex(null);
   };
 
-  const syncFromRaw = (): MubSteps | null => {
+  const syncFromRaw = (): MubDef | null => {
     try {
-      const parsed = JSON.parse(rawText) as MubSteps;
+      const parsed = JSON.parse(rawText) as MubDef;
       setTimeoutMs(parsed.timeoutMs ?? 60000);
-      setSteps(parsed.steps ?? []);
+      if (isChainDef(parsed)) {
+        setKind("chain");
+        setStages(parsed.stages ?? []);
+        setOutput(parsed.output ?? "");
+      } else {
+        setKind("resilience");
+        setSteps((parsed as MubSteps).steps ?? []);
+      }
       return parsed;
     } catch {
       toast.error("Steps JSON is invalid");
@@ -128,12 +168,12 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
     }
   };
 
-  const currentSteps = (): MubSteps => (raw ? JSON.parse(rawText || "{}") : buildSteps());
+  const currentDef = (): MubDef => (raw ? (JSON.parse(rawText || "{}") as MubDef) : buildDef());
 
   const validate = async () => {
-    let s: MubSteps;
+    let s: MubDef;
     try {
-      s = currentSteps();
+      s = currentDef();
     } catch {
       toast.error("Steps JSON is invalid");
       return;
@@ -149,9 +189,9 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
   };
 
   const dryRun = async () => {
-    let s: MubSteps;
+    let s: MubDef;
     try {
-      s = currentSteps();
+      s = currentDef();
     } catch {
       toast.error("Steps JSON is invalid");
       return;
@@ -172,9 +212,9 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
   };
 
   const save = async () => {
-    let s: MubSteps;
+    let s: MubDef;
     try {
-      s = currentSteps();
+      s = currentDef();
     } catch {
       toast.error("Steps JSON is invalid");
       return;
@@ -199,7 +239,7 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
   };
 
   const toggleRaw = () => {
-    if (!raw) setRawText(JSON.stringify(buildSteps(), null, 2));
+    if (!raw) setRawText(JSON.stringify(buildDef(), null, 2));
     else syncFromRaw();
     setRaw(!raw);
   };
@@ -251,6 +291,31 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
         </div>
         <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
 
+        {!raw && (
+          <div>
+            <label className="label">Type</label>
+            <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
+              {(["resilience", "chain"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setKind(k)}
+                  className={`rounded-md px-3 py-1 font-medium transition-colors ${
+                    kind === k ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
+                  }`}
+                >
+                  {k === "resilience" ? "Resilience (fallback)" : "Chain (compose)"}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-ink-500">
+              {kind === "resilience"
+                ? "Try each (model, provider) in turn until one succeeds."
+                : "Run stages in order; each stage's output can feed the next. Streams only the final stage."}
+            </p>
+          </div>
+        )}
+
         {summary && (
           <div className="flex items-start gap-2 rounded-lg border border-brand-700/40 bg-brand-700/10 px-3 py-2 text-sm text-brand-400">
             <i className="bi bi-signpost-split mt-0.5" />
@@ -260,9 +325,20 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
 
         {raw ? (
           <div>
-            <label className="label">Steps JSON</label>
+            <label className="label">{kind === "chain" ? "Chain JSON" : "Steps JSON"}</label>
             <textarea className="input min-h-[320px] font-mono text-xs" value={rawText} onChange={(e) => setRawText(e.target.value)} />
           </div>
+        ) : kind === "chain" ? (
+          <StageEditor
+            stages={stages}
+            output={output}
+            onChange={(s, o) => {
+              setStages(s);
+              setOutput(o);
+            }}
+            models={models}
+            providersForModel={providersForModel}
+          />
         ) : (
           <div>
             <div className="mb-2 flex items-center justify-between">

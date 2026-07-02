@@ -1,6 +1,6 @@
 import dns from "node:dns/promises";
 import net from "node:net";
-import { getConfig } from "../context";
+import { getConfig, getUpstreamAllowlist } from "../context";
 
 /**
  * Thrown when an upstream URL is rejected by the SSRF guard. Callers treat this
@@ -122,6 +122,41 @@ function isBlockedAddress(addr: string, allowPrivate: boolean): boolean {
   return true; // not a parseable IP → block
 }
 
+// --- admin allowlist --------------------------------------------------------
+
+function entryMatchesIp(entry: string, addrs: string[]): boolean {
+  if (entry.includes("/")) {
+    const [base, bitsStr] = entry.split("/");
+    const bits = Number(bitsStr);
+    if (net.isIP(base) !== 4 || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+    return addrs.some((a) => net.isIP(a) === 4 && inV4Cidr(v4ToInt(a), base, bits));
+  }
+  const v = net.isIP(entry);
+  if (v === 4) return addrs.some((a) => net.isIP(a) === 4 && v4ToInt(a) === v4ToInt(entry));
+  if (v === 6) return addrs.some((a) => net.isIP(a) === 6 && a.toLowerCase() === entry);
+  return false;
+}
+
+/**
+ * True when the host or any resolved address matches an admin-configured
+ * allowlist entry: an exact/suffix (leading-dot) hostname, an exact IP, or a
+ * v4 CIDR. An entry is an explicit admin decision and overrides the block.
+ */
+function hostAllowed(host: string, addrs: string[], allowlist: string[]): boolean {
+  const h = host.toLowerCase();
+  for (const raw of allowlist) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry.startsWith(".")) {
+      if (h === entry.slice(1) || h.endsWith(entry)) return true;
+    } else if (h === entry) {
+      return true;
+    }
+    if (entryMatchesIp(entry, addrs)) return true;
+  }
+  return false;
+}
+
 /**
  * Reject an upstream URL that uses a non-HTTP scheme or that resolves to a
  * private/loopback/link-local address. Prevents authenticated operators from
@@ -159,6 +194,11 @@ export async function assertUpstreamAllowed(rawUrl: string): Promise<void> {
     }
     if (addrs.length === 0) throw new UpstreamUrlError(`upstream host "${host}" did not resolve`);
   }
+
+  // An explicit admin allowlist entry overrides the private/loopback/link-local
+  // block, so trusted internal hosts can be used without ALLOW_PRIVATE_UPSTREAMS.
+  const allowlist = getUpstreamAllowlist();
+  if (allowlist.length && hostAllowed(host, addrs, allowlist)) return;
 
   for (const addr of addrs) {
     if (isBlockedAddress(addr, allowPrivate)) {

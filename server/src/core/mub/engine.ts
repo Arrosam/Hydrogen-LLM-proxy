@@ -25,6 +25,8 @@ export interface AttemptRecord {
   kind: FailureKind | "ok";
   latencyMs: number;
   error?: string;
+  /** Chain MUBs only: the stage this attempt belongs to. */
+  stage?: string;
 }
 
 export interface RunOutput<T> {

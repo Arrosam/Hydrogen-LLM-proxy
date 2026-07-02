@@ -7,6 +7,7 @@ import { catalogRoutes } from "./catalogRoutes";
 import { mubRoutes } from "./mubRoutes";
 import { tokenRoutes } from "./tokenRoutes";
 import { logRoutes } from "./logRoutes";
+import { settingsRoutes } from "./settingsRoutes";
 
 /** Registered by the app under the /admin/api prefix. */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
@@ -22,5 +23,6 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     await scoped.register(mubRoutes, { prefix: "/mubs" });
     await scoped.register(tokenRoutes, { prefix: "/tokens" });
     await scoped.register(logRoutes); // /logs, /stats/*
+    await scoped.register(settingsRoutes, { prefix: "/settings" });
   });
 }

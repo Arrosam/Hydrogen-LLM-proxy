@@ -3,21 +3,23 @@ import { Readable } from "node:stream";
 import type { Family, IRRequest, IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
-import { runMubJson, runMubStream } from "../core/proxy/run";
+import { runMubJson, runMubStream, type StreamSuccess } from "../core/proxy/run";
+import { runMubChain, runMubChainStream } from "../core/mub/chain";
+import { isChain, type MubDef } from "../core/mub/schema";
 import {
   parseUpstreamStream,
   serializeClientStream,
   tapStream,
   type StreamAccumulator,
 } from "../core/formats/stream";
-import { getMubByName, getMubSteps } from "../services/mubs";
+import { getMubByName, getMubDef } from "../services/mubs";
 import { listMubs } from "../services/mubs";
 import { incrementUsage } from "../services/tokens";
 import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptRecord } from "../core/mub/engine";
+import type { AttemptFailure, AttemptRecord } from "../core/mub/engine";
 import type { ModelUseBehavior, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
@@ -116,14 +118,14 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     return replyError(reply, ingress, 403, `This token is not allowed to use '${mubName}'.`);
   }
 
-  const steps = getMubSteps(mub);
+  const def = getMubDef(mub);
   const started = Date.now();
 
   if (ir.stream) {
-    return handleStream(reply, ingress, ir, steps, { token, mub, mubName, body, started });
+    return handleStream(reply, ingress, ir, def, { token, mub, mubName, body, started });
   }
 
-  const { result, path } = await runMubJson(ir, steps);
+  const { result, path } = isChain(def) ? await runMubChain(ir, def) : await runMubJson(ir, def);
   const latencyMs = Date.now() - started;
 
   if (!result.ok) {
@@ -160,10 +162,22 @@ async function handleStream(
   reply: FastifyReply,
   ingress: Family,
   ir: IRRequest,
-  steps: ReturnType<typeof getMubSteps>,
+  def: MubDef,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path } = await runMubStream(ir, steps);
+  let result: { ok: true; value: StreamSuccess } | AttemptFailure;
+  let path: AttemptRecord[];
+  let priorUsage: IRUsage = ZERO_USAGE;
+  if (isChain(def)) {
+    const r = await runMubChainStream(ir, def);
+    result = r.result;
+    path = r.path;
+    priorUsage = r.priorUsage;
+  } else {
+    const r = await runMubStream(ir, def);
+    result = r.result;
+    path = r.path;
+  }
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
@@ -189,7 +203,13 @@ async function handleStream(
     } catch (e) {
       streamError = e instanceof Error ? e.message : String(e);
     } finally {
-      const usage = acc.usage ?? ZERO_USAGE;
+      // For chains, add the usage of the buffered pre-output stages.
+      const streamed = acc.usage ?? ZERO_USAGE;
+      const usage: IRUsage = {
+        promptTokens: streamed.promptTokens + priorUsage.promptTokens,
+        completionTokens: streamed.completionTokens + priorUsage.completionTokens,
+        totalTokens: streamed.totalTokens + priorUsage.totalTokens,
+      };
       // Reconstruct the (streamed) assistant response for the log.
       const responseBody: Record<string, unknown> = {
         streamed: true,
@@ -258,8 +278,11 @@ async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promi
     return replyError(reply, "openai", 403, `This token is not allowed to use '${mubName}'.`);
   }
 
-  const steps = getMubSteps(mub);
-  const first = steps.steps[0];
+  const def = getMubDef(mub);
+  if (isChain(def)) {
+    return replyError(reply, "openai", 400, "Embeddings are not supported for chain MUBs.");
+  }
+  const first = def.steps[0];
   const res = resolveMapping(first.model, first.provider);
   if (!res.ok || !res.mapping) {
     return replyError(reply, "openai", 502, `No usable upstream for '${mubName}'.`);
@@ -271,7 +294,7 @@ async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promi
   const started = Date.now();
   const upstreamBody = { ...body, model: res.mapping.upstreamModel };
   const r = await postJson(embeddingsUrl(res.mapping.upstream), buildHeaders(res.mapping.upstream), upstreamBody, {
-    timeoutMs: steps.timeoutMs,
+    timeoutMs: def.timeoutMs,
   });
   const usageObj = (r.json as { usage?: { prompt_tokens?: number; total_tokens?: number } } | undefined)?.usage;
   const usage: IRUsage = {
