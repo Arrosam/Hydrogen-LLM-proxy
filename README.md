@@ -173,6 +173,9 @@ Hydrogen can be published as a one-click Rainyun Cloud Application. A GitHub Act
 the persistent `/data` volume, and env vars). The `/data` volume is required so the
 auto-generated master key stays stable across restarts.
 
+New to Rainyun? Register with this invitation link:
+[https://www.rainyun.com/MTA1NzAwNA==_](https://www.rainyun.com/MTA1NzAwNA==_)
+
 ## Roadmap
 
 - **Virtual Providers** — a future MUB step type (`type: "workflow"`) that packages a multi-call

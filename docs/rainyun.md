@@ -7,6 +7,9 @@ secrets it generates itself.
 
 There are three steps: **publish the image → fill in the RCA template → submit for review.**
 
+> **Don't have a Rainyun account yet?** Register with this invitation link:
+> <https://www.rainyun.com/MTA1NzAwNA==_>
+
 ---
 
 ## 1. Publish the image to GHCR
@@ -106,7 +109,9 @@ Leave empty — the image already starts with `node server/dist/server.cjs`.
 2. Add a provider, a model + mapping, a MUB, and a token; call `/v1/chat/completions` to confirm.
 3. In the app-template tab, **submit the template for review** (提交上架审核).
 4. Once approved, share your promotion link from
-   **https://app.rainyun.com/apps/rca/store** (append `?ref=<your-UID>`).
+   **https://app.rainyun.com/apps/rca/store** (append `?ref=<your-UID>`, e.g. `?ref=1057004`).
+   You can also share the account invitation link above (<https://www.rainyun.com/MTA1NzAwNA==_>)
+   to earn referral credit when new users sign up.
 
 ---
 
