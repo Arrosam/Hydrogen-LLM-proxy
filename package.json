@@ -1,0 +1,29 @@
+{
+  "name": "hydrogen-llm-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hydrogen - a lightweight, self-hosted personal LLM proxy",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "build": "npm run build:web && npm run build:server",
+    "build:server": "npm run build --workspace server",
+    "build:web": "npm run build --workspace web",
+    "db:generate": "npm run db:generate --workspace server",
+    "test": "npm run test --workspace server",
+    "typecheck": "npm run typecheck --workspace server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

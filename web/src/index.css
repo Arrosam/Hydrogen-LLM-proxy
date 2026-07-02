@@ -1,0 +1,103 @@
+@import "bootstrap-icons/font/bootstrap-icons.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-950 text-ink-200 font-sans antialiased;
+}
+
+/* Bootstrap Icons ship with vertical-align:-.125em on the glyph, which makes
+   icons sit low next to text inside flex buttons/badges. Render each icon as a
+   centered inline-flex box so the glyph aligns with adjacent text. */
+.bi {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.bi::before {
+  vertical-align: 0;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-800 bg-ink-900/70 shadow-lg shadow-black/20;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
+      transition-colors focus:outline-none focus:ring-2 focus:ring-brand-500/50 disabled:opacity-50
+      disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-500;
+  }
+  .btn-ghost {
+    @apply btn border border-ink-700 bg-ink-850 text-ink-200 hover:bg-ink-800;
+  }
+  .btn-danger {
+    @apply btn border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40;
+  }
+  .btn-xs {
+    @apply px-2 py-1 text-xs;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-ink-700 bg-ink-950/60 px-3 py-2 text-sm text-ink-100
+      placeholder:text-ink-500 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600;
+  }
+  .label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-ink-400;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium;
+  }
+  .badge-green {
+    @apply badge bg-emerald-950/60 text-emerald-300 ring-1 ring-emerald-800/50;
+  }
+  .badge-red {
+    @apply badge bg-red-950/60 text-red-300 ring-1 ring-red-800/50;
+  }
+  .badge-gray {
+    @apply badge bg-ink-800 text-ink-300 ring-1 ring-ink-700;
+  }
+  .badge-blue {
+    @apply badge bg-brand-700/30 text-brand-400 ring-1 ring-brand-700/50;
+  }
+
+  .table {
+    @apply w-full text-left text-sm;
+  }
+  .table thead th {
+    @apply border-b border-ink-800 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink-400;
+  }
+  .table tbody td {
+    @apply border-b border-ink-850 px-3 py-2.5 align-middle text-ink-200;
+  }
+  .table tbody tr:hover {
+    @apply bg-ink-850/40;
+  }
+
+  .nav-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-ink-400
+      transition-colors hover:bg-ink-800 hover:text-ink-100;
+  }
+  .nav-link.active {
+    @apply bg-brand-700/20 text-brand-400;
+  }
+}

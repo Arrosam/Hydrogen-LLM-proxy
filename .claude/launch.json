@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hydrogen-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["preview-server.cjs"],
+      "port": 8094
+    }
+  ]
+}

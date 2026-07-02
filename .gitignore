@@ -134,3 +134,11 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# --- Hydrogen ---
+/data
+*.db
+*.db-wal
+*.db-shm
+.preview-data
+hydrogen-secrets.json

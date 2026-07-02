@@ -1,0 +1,27 @@
+services:
+  hydrogen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hydrogen-llm-proxy:latest
+    container_name: hydrogen
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      DATA_DIR: /data
+      NODE_ENV: production
+      # Leave blank to auto-generate on first boot (persisted in the /data volume).
+      PROXY_MASTER_KEY: ${PROXY_MASTER_KEY:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      # Blank: a temporary password is generated and printed in the logs on first boot.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_TTL: ${SESSION_TTL:-12h}
+      LOG_PAYLOAD_MAX_CHARS: ${LOG_PAYLOAD_MAX_CHARS:-100000}
+    volumes:
+      - hydrogen-data:/data
+
+volumes:
+  hydrogen-data:

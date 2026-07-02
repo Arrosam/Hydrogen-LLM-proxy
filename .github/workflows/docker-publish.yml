@@ -1,0 +1,61 @@
+name: Publish Docker image (GHCR)
+
+# Builds the Hydrogen image and pushes it to the GitHub Container Registry so
+# Rainyun (and anyone else) can pull a pre-built public image by URL:
+#   ghcr.io/<owner>/hydrogen-llm-proxy:latest
+#
+# No extra secrets required - the built-in GITHUB_TOKEN can push to GHCR.
+# After the first successful run, make the package Public once:
+#   GitHub -> your profile -> Packages -> hydrogen-llm-proxy
+#   -> Package settings -> Change visibility -> Public
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      # Rainyun runs an amd64 Kubernetes cluster; build linux/amd64 by default.
+      # Add linux/arm64 to `platforms` if you also need ARM (slower: native
+      # modules compile under QEMU).
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
