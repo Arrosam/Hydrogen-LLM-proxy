@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
+import { useAuth } from "../auth";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
@@ -34,6 +35,7 @@ const EMPTY: FormState = {
 
 export function Providers() {
   const { data, loading, error, reload } = useAsync(() => api.get<{ providers: Provider[] }>("/providers"));
+  const { user } = useAuth();
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
   const [form, setForm] = useState<FormState | null>(null);
@@ -181,6 +183,8 @@ export function Providers() {
         </div>
       )}
 
+      {user?.role === "admin" && <AllowlistCard />}
+
       <Modal
         open={form !== null}
         title={form?.id ? "Edit provider" : "New provider"}
@@ -230,6 +234,74 @@ export function Providers() {
         )}
       </Modal>
       {confirmEl}
+    </div>
+  );
+}
+
+function AllowlistCard() {
+  const toast = useToast();
+  const { data, reload } = useAsync(() => api.get<{ entries: string[] }>("/settings/upstream-allowlist"));
+  const [entry, setEntry] = useState("");
+  const [saving, setSaving] = useState(false);
+  const entries = data?.entries ?? [];
+
+  const put = async (next: string[]) => {
+    setSaving(true);
+    try {
+      await api.put("/settings/upstream-allowlist", { entries: next });
+      reload();
+      toast.success("Allowlist updated");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const add = () => {
+    const v = entry.trim();
+    if (!v || entries.includes(v)) {
+      setEntry("");
+      return;
+    }
+    void put([...entries, v]).then(() => setEntry(""));
+  };
+
+  return (
+    <div className="card card-pad mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <i className="bi bi-shield-lock text-brand-400" />
+        <h3 className="font-medium text-ink-100">Trusted private upstreams</h3>
+      </div>
+      <p className="mb-3 text-xs text-ink-500">
+        Provider URLs resolving to private/loopback/LAN addresses are blocked by default. Add a trusted IP, CIDR, or
+        hostname to permit it — e.g. <code className="text-ink-300">10.0.0.5</code>,{" "}
+        <code className="text-ink-300">192.168.0.0/16</code>, <code className="text-ink-300">models.lan</code>.
+      </p>
+      <div className="mb-3 flex flex-wrap gap-2">
+        {entries.length === 0 && <span className="text-xs text-ink-600">No entries — all private hosts blocked.</span>}
+        {entries.map((e) => (
+          <span key={e} className="inline-flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 font-mono text-xs text-ink-200">
+            {e}
+            <button className="text-ink-500 hover:text-red-400" title="Remove" disabled={saving} onClick={() => void put(entries.filter((x) => x !== e))}>
+              <i className="bi bi-x-lg" />
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          className="input font-mono text-xs"
+          value={entry}
+          onChange={(e) => setEntry(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+          placeholder="IP, CIDR, or hostname"
+        />
+        <button className="btn-ghost btn-xs whitespace-nowrap" onClick={add} disabled={saving}>
+          <i className="bi bi-plus-lg" />
+          Add
+        </button>
+      </div>
     </div>
   );
 }

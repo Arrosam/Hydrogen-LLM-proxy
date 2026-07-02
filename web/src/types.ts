@@ -59,11 +59,49 @@ export interface MubSteps {
   steps: MubStep[];
 }
 
+// --- Chain (compositional) MUB ---
+export type ChainPart =
+  | { source: "literal"; text: string }
+  | { source: "original_text" }
+  | { source: "original_images" }
+  | { source: "original_system" }
+  | { source: "original_messages" }
+  | { source: "stage"; name: string };
+
+export interface ChainBlock {
+  role: "user" | "assistant";
+  parts: ChainPart[];
+}
+
+export interface ChainStage {
+  name: string;
+  steps: MubStep[];
+  input: ChainBlock[];
+  system?: ChainPart[];
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+}
+
+export interface ChainMub {
+  kind: "chain";
+  timeoutMs: number;
+  stages: ChainStage[];
+  output?: string;
+}
+
+/** A MUB definition is either the resilience workflow or a chain. */
+export type MubDef = MubSteps | ChainMub;
+
+export function isChainDef(def: MubDef | null | undefined): def is ChainMub {
+  return !!def && (def as ChainMub).kind === "chain";
+}
+
 export interface Mub {
   id: number;
   name: string;
   description: string | null;
-  steps: MubSteps;
+  steps: MubDef;
   enabled: boolean;
   summary: string;
   createdAt: number;

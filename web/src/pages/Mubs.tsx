@@ -5,7 +5,8 @@ import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common";
 import { MubEditor } from "../components/MubEditor";
 import { useToast } from "../components/Toast";
-import type { Mapping, Model, Mub, Provider } from "../types";
+import type { Mapping, Model, Mub, MubSteps, Provider } from "../types";
+import { isChainDef } from "../types";
 
 interface Data {
   mubs: Mub[];
@@ -87,7 +88,11 @@ export function Mubs() {
                 </div>
                 {m.description && <p className="mt-1 text-xs text-ink-400">{m.description}</p>}
               </div>
-              <span className="badge-gray shrink-0">{m.steps?.steps?.length ?? 0} steps</span>
+              <span className="badge-gray shrink-0">
+                {isChainDef(m.steps)
+                  ? `${m.steps.stages?.length ?? 0} stages`
+                  : `${(m.steps as MubSteps)?.steps?.length ?? 0} steps`}
+              </span>
             </div>
 
             <div className="mt-3 flex items-start gap-2 rounded-lg bg-ink-950/50 px-3 py-2 text-xs text-ink-300">

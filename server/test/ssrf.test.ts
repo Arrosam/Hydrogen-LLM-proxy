@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { setConfig } from "../src/context";
+import { afterEach, describe, expect, it } from "vitest";
+import { setConfig, setUpstreamAllowlist } from "../src/context";
 import type { AppConfig } from "../src/config";
 import { assertUpstreamAllowed, UpstreamUrlError } from "../src/core/ssrf";
 import { buildHeaders } from "../src/core/upstream";
@@ -78,6 +78,30 @@ describe("SSRF guard (assertUpstreamAllowed)", () => {
     for (const u of ["http://[fe80::1]/v1", "http://[fe90::1]/v1", "http://[febf::1]/v1"]) {
       await expect(assertUpstreamAllowed(u)).rejects.toBeInstanceOf(UpstreamUrlError);
     }
+  });
+});
+
+describe("trusted-upstream allowlist", () => {
+  afterEach(() => setUpstreamAllowlist([]));
+
+  it("permits an exact private IP that is otherwise blocked", async () => {
+    configure(false);
+    setUpstreamAllowlist(["10.0.0.5"]);
+    await expect(assertUpstreamAllowed("http://10.0.0.5/v1")).resolves.toBeUndefined();
+    await expect(assertUpstreamAllowed("http://10.0.0.6/v1")).rejects.toBeInstanceOf(UpstreamUrlError);
+  });
+
+  it("permits a private range via CIDR", async () => {
+    configure(false);
+    setUpstreamAllowlist(["192.168.0.0/16"]);
+    await expect(assertUpstreamAllowed("http://192.168.5.9/v1")).resolves.toBeUndefined();
+    await expect(assertUpstreamAllowed("http://10.0.0.5/v1")).rejects.toBeInstanceOf(UpstreamUrlError);
+  });
+
+  it("permits a hostname (e.g. localhost) that resolves to loopback", async () => {
+    configure(false);
+    setUpstreamAllowlist(["localhost"]);
+    await expect(assertUpstreamAllowed("http://localhost:8080/v1")).resolves.toBeUndefined();
   });
 });
 

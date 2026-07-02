@@ -6,14 +6,15 @@ import {
   createMub,
   deleteMub,
   getMub,
-  getMubSteps,
+  getMubDef,
   listMubs,
   MubValidationError,
   updateMub,
-  validateSteps,
+  validateMub,
 } from "../../services/mubs";
-import { summarizeMub } from "../../core/mub/schema";
+import { isChain, summarizeMub, type MubDef } from "../../core/mub/schema";
 import { runMubJson } from "../../core/proxy/run";
+import { runMubChain } from "../../core/mub/chain";
 import { extractUpstreamMessage } from "../../core/proxy/errors";
 import { textOf, type IRRequest } from "../../core/ir";
 import type { ModelUseBehavior } from "../../db/schema";
@@ -34,7 +35,7 @@ const UpdateSchema = z.object({
 function present(m: ModelUseBehavior): Record<string, unknown> {
   let summary = "";
   try {
-    summary = summarizeMub(getMubSteps(m));
+    summary = summarizeMub(getMubDef(m));
   } catch {
     summary = "(invalid steps)";
   }
@@ -67,8 +68,10 @@ export async function mubRoutes(app: FastifyInstance): Promise<void> {
   app.post("/validate", async (req, reply) => {
     const body = (req.body ?? {}) as { steps?: unknown };
     try {
-      const { steps, summary } = validateSteps(body.steps);
-      return { valid: true, summary, timeoutMs: steps.timeoutMs, stepCount: steps.steps.length };
+      const { def, summary } = validateMub(body.steps);
+      const kind = isChain(def) ? "chain" : "resilience";
+      const count = isChain(def) ? def.stages.length : def.steps.length;
+      return { valid: true, summary, kind, count };
     } catch (e) {
       const mapped = validationError(e);
       if (mapped) return reply.code(200).send({ valid: false, ...mapped.body });
@@ -115,14 +118,14 @@ export async function mubRoutes(app: FastifyInstance): Promise<void> {
   // Dry-run: fire a small request through a MUB (saved id or ad-hoc steps).
   app.post("/test", async (req, reply) => {
     const body = (req.body ?? {}) as { mubId?: number; steps?: unknown; prompt?: string };
-    let steps;
+    let def: MubDef;
     try {
       if (body.mubId) {
         const mub = getMub(body.mubId);
         if (!mub) return reply.code(404).send({ error: "MUB not found" });
-        steps = getMubSteps(mub);
+        def = getMubDef(mub);
       } else {
-        steps = validateSteps(body.steps).steps;
+        def = validateMub(body.steps).def;
       }
     } catch (e) {
       const mapped = validationError(e);
@@ -133,10 +136,11 @@ export async function mubRoutes(app: FastifyInstance): Promise<void> {
     const ir: IRRequest = {
       requestedModel: "(dry-run)",
       messages: [{ role: "user", content: [{ type: "text", text: body.prompt || "ping" }] }],
-      maxTokens: 16,
+      maxTokens: isChain(def) ? 64 : 16,
       stream: false,
     };
-    const { result, path } = await runMubJson(ir, steps);
+
+    const { result, path } = isChain(def) ? await runMubChain(ir, def) : await runMubJson(ir, def);
     if (result.ok) {
       return {
         ok: true,

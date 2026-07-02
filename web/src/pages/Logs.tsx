@@ -16,6 +16,7 @@ interface AttemptRecord {
   kind: string;
   latencyMs: number;
   error?: string;
+  stage?: string;
 }
 
 interface LogDetail extends LogSummary {
@@ -207,11 +208,17 @@ export function Logs() {
               <div className="card overflow-hidden">
                 <table className="table">
                   <thead>
-                    <tr><th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th></tr>
+                    <tr>
+                      {(detail.attemptPath ?? []).some((a) => a.stage) && <th>Stage</th>}
+                      <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {(detail.attemptPath ?? []).map((a, i) => (
                       <tr key={i}>
+                        {(detail.attemptPath ?? []).some((x) => x.stage) && (
+                          <td className="font-mono text-xs text-brand-400">{a.stage ?? "-"}</td>
+                        )}
                         <td>{a.step}</td>
                         <td>{a.attempt}</td>
                         <td className="font-mono text-xs">{a.model}</td>

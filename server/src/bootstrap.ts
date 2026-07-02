@@ -3,6 +3,7 @@ import { setConfig } from "./context";
 import { openDatabase, type DB } from "./db";
 import { seedAdminIfEmpty, type SeedResult } from "./db/bootstrap";
 import { verifyOrInitMasterKey } from "./security/masterKey";
+import { loadUpstreamAllowlist } from "./services/settings";
 
 export interface BootResult {
   config: AppConfig;
@@ -19,6 +20,7 @@ export async function bootstrap(): Promise<BootResult> {
 
   const db = openDatabase(config.dataDir);
   verifyOrInitMasterKey(db, config.masterKey);
+  loadUpstreamAllowlist(); // populate the SSRF-guard allowlist cache from the DB
 
   const seed = await seedAdminIfEmpty(db, config.admin);
   if (seed.created) printInitialAdmin(seed);
