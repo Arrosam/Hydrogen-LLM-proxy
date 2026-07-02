@@ -53,6 +53,32 @@ describe("SSRF guard (assertUpstreamAllowed)", () => {
     await expect(assertUpstreamAllowed("file:///etc/passwd")).rejects.toBeInstanceOf(UpstreamUrlError);
     await expect(assertUpstreamAllowed("gopher://127.0.0.1/")).rejects.toBeInstanceOf(UpstreamUrlError);
   });
+
+  it("blocks IPv4-mapped/compatible IPv6 (no dotted-vs-hex bypass)", async () => {
+    configure(false);
+    for (const u of [
+      "http://[::ffff:192.168.1.1]/v1",
+      "http://[::ffff:127.0.0.1]/v1",
+      "http://[0:0:0:0:0:ffff:c0a8:0101]/v1", // ::ffff:192.168.1.1 spelled long
+      "http://[::127.0.0.1]/v1", // v4-compatible
+    ]) {
+      await expect(assertUpstreamAllowed(u)).rejects.toBeInstanceOf(UpstreamUrlError);
+    }
+  });
+
+  it("blocks IPv4-mapped cloud metadata even when private is allowed", async () => {
+    configure(true);
+    await expect(
+      assertUpstreamAllowed("http://[::ffff:169.254.169.254]/latest/meta-data/"),
+    ).rejects.toBeInstanceOf(UpstreamUrlError);
+  });
+
+  it("blocks the whole fe80::/10 link-local range, not just fe80", async () => {
+    configure(false);
+    for (const u of ["http://[fe80::1]/v1", "http://[fe90::1]/v1", "http://[febf::1]/v1"]) {
+      await expect(assertUpstreamAllowed(u)).rejects.toBeInstanceOf(UpstreamUrlError);
+    }
+  });
 });
 
 describe("buildHeaders sanitization", () => {
@@ -61,6 +87,14 @@ describe("buildHeaders sanitization", () => {
   it("does not let extraHeaders override the provider's configured auth", () => {
     const h = buildHeaders({ ...base, extraHeaders: { authorization: "Bearer attacker" } });
     expect(h["authorization"]).toBe("Bearer sk-real");
+  });
+
+  it("blocks a case-variant extraHeaders auth from co-existing on the wire", () => {
+    const h = buildHeaders({ ...base, extraHeaders: { Authorization: "Bearer attacker" } });
+    // Only one, lowercase, provider-owned auth header survives.
+    expect(h["authorization"]).toBe("Bearer sk-real");
+    expect(h["Authorization"]).toBeUndefined();
+    expect(Object.keys(h).filter((k) => k.toLowerCase() === "authorization")).toHaveLength(1);
   });
 
   it("strips hop-by-hop and host headers", () => {

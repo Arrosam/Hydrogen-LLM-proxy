@@ -18,6 +18,33 @@ export function safeStringify(value: unknown): string {
   }
 }
 
+// Object keys whose value is a credential, not content — redacted before a
+// payload is ever written to the log store.
+const REDACT_KEYS = new Set([
+  "authorization",
+  "api_key",
+  "apikey",
+  "api-key",
+  "x-api-key",
+  "x_api_key",
+  "access_token",
+  "secret",
+  "password",
+]);
+
+/** Deep-copy `value`, replacing values of credential-named keys with a marker. */
+function redactSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = REDACT_KEYS.has(k.toLowerCase()) ? "[redacted]" : redactSensitive(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 /** Deep-copy `value`, truncating any string longer than `perStringMax`. */
 function truncateStrings(value: unknown, perStringMax: number): unknown {
   if (typeof value === "string") {
@@ -43,21 +70,29 @@ function truncateStrings(value: unknown, perStringMax: number): unknown {
  * number of fields falls back to a small valid envelope.
  */
 export function serializeForLog(value: unknown, maxChars: number): string {
-  const full = safeStringify(value);
+  const redacted = redactSensitive(value);
+  const full = safeStringify(redacted);
   if (maxChars <= 0 || full.length <= maxChars) return full;
 
+  let prevLen = Infinity;
   for (
     let perString = Math.max(2000, Math.floor(maxChars / 4));
     perString >= 200;
     perString = Math.floor(perString / 2)
   ) {
-    const clamped = safeStringify(truncateStrings(value, perString));
+    const clamped = safeStringify(truncateStrings(redacted, perString));
     if (clamped.length <= maxChars) return clamped;
+    // Size comes from many fields, not long strings — shrinking has plateaued,
+    // so stop wasting deep-copy passes and fall through to the envelope.
+    if (clamped.length >= prevLen) break;
+    prevLen = clamped.length;
   }
 
-  return safeStringify({
+  const envelope = safeStringify({
     _truncated: true,
     _originalChars: full.length,
     note: "payload exceeded LOG_PAYLOAD_MAX_CHARS; raise it to capture full payloads",
   });
+  // Honour the budget even for an absurdly small maxChars (< the envelope).
+  return envelope.length <= maxChars ? envelope : full.slice(0, maxChars);
 }

@@ -56,12 +56,15 @@ export function modelsUrl(p: UpstreamProvider): string {
 
 export function buildHeaders(p: UpstreamProvider, extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  // Custom headers are applied first, with hop-by-hop/routing headers stripped,
-  // so a provider's configured auth (below) always wins over extraHeaders and
-  // the proxy keeps control of framing/Host.
+  // Custom headers are applied first, with hop-by-hop/routing headers stripped.
+  // Keys are lowercased so the provider's configured auth (below) reliably
+  // OVERWRITES a caller-supplied one — otherwise a case-variant like
+  // "Authorization" would coexist with the proxy's "authorization" and both
+  // would be sent, letting extraHeaders inject a second auth header.
   if (p.extraHeaders) {
     for (const [k, v] of Object.entries(p.extraHeaders)) {
-      if (!BLOCKED_EXTRA_HEADERS.has(k.toLowerCase())) headers[k] = v;
+      const key = k.toLowerCase();
+      if (!BLOCKED_EXTRA_HEADERS.has(key)) headers[key] = v;
     }
   }
   if (familyForProviderType(p.type) === "anthropic") {
@@ -70,7 +73,7 @@ export function buildHeaders(p: UpstreamProvider, extra?: Record<string, string>
   } else if (p.apiKey) {
     headers["authorization"] = `Bearer ${p.apiKey}`;
   }
-  if (extra) Object.assign(headers, extra);
+  if (extra) for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v;
   return headers;
 }
 
