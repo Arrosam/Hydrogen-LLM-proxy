@@ -199,6 +199,10 @@ async function* parseAnthropicStream(
         if (delta.stop_reason) stopReason = anthStopToIR(delta.stop_reason as string);
         const usage = (data.usage ?? {}) as Record<string, unknown>;
         if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
+        // Some providers (e.g. GLM / 智谱 Anthropic-compatible endpoints) send
+        // input_tokens: 0 in message_start and only report the real prompt count
+        // in the final message_delta usage. Prefer any non-zero value we see here.
+        if (num(usage.input_tokens) > 0) inputTokens = num(usage.input_tokens);
         break;
       }
       case "message_stop": {

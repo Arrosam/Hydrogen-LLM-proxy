@@ -34,6 +34,18 @@ const ANTHROPIC_STREAM = [
   ``,
 ].join("\n\n");
 
+// GLM / 智谱-style: input_tokens is 0 at message_start and only reported in the
+// final message_delta usage. The prompt count must still surface to the client.
+const ANTHROPIC_STREAM_LATE_USAGE = [
+  `event: message_start\ndata: {"type":"message_start","message":{"id":"m2","model":"glm","usage":{"input_tokens":0,"output_tokens":1}}}`,
+  `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`,
+  `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}`,
+  `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":37,"output_tokens":320}}`,
+  `event: message_stop\ndata: {"type":"message_stop"}`,
+  ``,
+].join("\n\n");
+
 describe("streaming translation", () => {
   it("OpenAI upstream -> Anthropic client SSE", async () => {
     const out = await translate("openai", "anthropic", OPENAI_STREAM);
@@ -54,6 +66,13 @@ describe("streaming translation", () => {
     expect(out).toContain('"prompt_tokens":4');
     expect(out).toContain('"completion_tokens":2');
     expect(out.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("captures prompt tokens reported only in the final message_delta", async () => {
+    const out = await translate("anthropic", "openai", ANTHROPIC_STREAM_LATE_USAGE);
+    expect(out).toContain('"prompt_tokens":37');
+    expect(out).toContain('"completion_tokens":320');
+    expect(out).toContain('"total_tokens":357');
   });
 
   it("same-family passthrough stays well-formed", async () => {
