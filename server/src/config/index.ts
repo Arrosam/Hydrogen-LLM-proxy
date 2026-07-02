@@ -42,10 +42,15 @@ const EnvSchema = z.object({
   // X-Forwarded-Proto). Use "false" behind a plain-HTTP proxy, "true" to force.
   COOKIE_SECURE: z.enum(["auto", "true", "false"]).default("auto"),
   // SSRF guard: by default upstream provider URLs may not resolve to private,
-  // loopback, or link-local addresses. Set "true" to permit local upstreams
-  // (e.g. a LAN model server or Ollama at 127.0.0.1). Link-local/metadata
-  // addresses (169.254.0.0/16) stay blocked regardless.
-  ALLOW_PRIVATE_UPSTREAMS: z.enum(["true", "false"]).default("false"),
+  // loopback, or link-local addresses. Set to a truthy value to permit local
+  // upstreams (e.g. a LAN model server or Ollama at 127.0.0.1). Link-local/
+  // metadata addresses (169.254.0.0/16) stay blocked regardless. Accepts the
+  // usual boolean spellings (1/true/yes/on) so a common "=1" doesn't crash boot.
+  ALLOW_PRIVATE_UPSTREAMS: z
+    .string()
+    .optional()
+    .default("false")
+    .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -93,7 +98,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sessionTtlMs: parseDuration(e.SESSION_TTL),
     logPayloadMaxChars: e.LOG_PAYLOAD_MAX_CHARS,
     cookieSecure: e.COOKIE_SECURE,
-    allowPrivateUpstreams: e.ALLOW_PRIVATE_UPSTREAMS === "true",
+    allowPrivateUpstreams: e.ALLOW_PRIVATE_UPSTREAMS,
   };
 }
 

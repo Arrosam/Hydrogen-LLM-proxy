@@ -31,8 +31,7 @@ function inV4Cidr(ipInt: number, base: string, bits: number): boolean {
   return (ipInt & mask) === (v4ToInt(base) & mask);
 }
 
-function isBlockedV4(ip: string, allowPrivate: boolean): boolean {
-  const n = v4ToInt(ip);
+function v4IntBlocked(n: number, allowPrivate: boolean): boolean {
   // Always blocked, even when private upstreams are allowed: "this host",
   // link-local (includes 169.254.169.254 cloud metadata), and broadcast.
   if (inV4Cidr(n, "0.0.0.0", 8)) return true;
@@ -55,17 +54,64 @@ function isBlockedV4(ip: string, allowPrivate: boolean): boolean {
   );
 }
 
+function isBlockedV4(ip: string, allowPrivate: boolean): boolean {
+  return v4IntBlocked(v4ToInt(ip), allowPrivate);
+}
+
 // --- IPv6 -------------------------------------------------------------------
 
+/**
+ * Expand an IPv6 address (already validated by net.isIP) into its 8 16-bit
+ * hextets, resolving "::" compression and any embedded IPv4 tail. Returns null
+ * if it can't be parsed — the caller treats that as blocked.
+ */
+function ipv6ToHextets(addr: string): number[] | null {
+  const s = addr.split("%")[0]; // drop any zone id
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+
+  const parseGroups = (str: string): number[] | null => {
+    if (str === "") return [];
+    const groups = str.split(":");
+    const out: number[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      if (g.includes(".")) {
+        if (i !== groups.length - 1 || net.isIP(g) !== 4) return null; // v4 only as the tail
+        const n = v4ToInt(g);
+        out.push((n >>> 16) & 0xffff, n & 0xffff);
+      } else {
+        if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+        out.push(parseInt(g, 16));
+      }
+    }
+    return out;
+  };
+
+  const head = parseGroups(halves[0]);
+  if (!head) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const tail = parseGroups(halves[1]);
+  if (!tail) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 1) return null; // "::" must stand for at least one zero group
+  return [...head, ...new Array<number>(missing).fill(0), ...tail];
+}
+
 function isBlockedV6(ip: string, allowPrivate: boolean): boolean {
-  const a = ip.toLowerCase();
-  // IPv4-mapped (::ffff:1.2.3.4) — evaluate the embedded v4 address.
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(a);
-  if (mapped) return isBlockedV4(mapped[1], allowPrivate);
-  if (a === "::") return true; // unspecified
-  if (a.startsWith("fe80")) return true; // link-local — always blocked
-  if (a === "::1") return !allowPrivate; // loopback
-  if (a.startsWith("fc") || a.startsWith("fd")) return !allowPrivate; // ULA
+  const h = ipv6ToHextets(ip);
+  if (!h) return true; // unparseable → block
+
+  // v4-mapped (::ffff:a.b.c.d) and v4-compatible (::/96, incl. ::1 and ::) both
+  // carry an IPv4 in the low 32 bits, whatever the spelling. The WHATWG URL
+  // parser normalises these to hex (e.g. ::ffff:c0a8:101), so we must inspect
+  // the bits — a dotted-decimal regex would miss them and let 169.254/private
+  // through. Evaluate the embedded IPv4 against the v4 rules.
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && (h[5] === 0xffff || h[5] === 0)) {
+    return v4IntBlocked(((h[6] << 16) >>> 0) + h[7], allowPrivate);
+  }
+  if ((h[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local — always blocked
+  if ((h[0] & 0xfe00) === 0xfc00) return !allowPrivate; // fc00::/7 unique-local
   return false;
 }
 

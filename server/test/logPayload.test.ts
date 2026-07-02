@@ -50,4 +50,22 @@ describe("serializeForLog", () => {
     const naiveCut = pretty.slice(0, 5000);
     expect(() => JSON.parse(naiveCut)).toThrow(); // regression guard
   });
+
+  it("redacts credential-named fields (case-insensitive) at any depth", () => {
+    const out = serializeForLog(
+      {
+        model: "m",
+        api_key: "sk-secret-123",
+        headers: { Authorization: "Bearer sk-secret-456" },
+        messages: [{ role: "user", content: "hello" }],
+      },
+      100000,
+    );
+    expect(out).not.toContain("sk-secret-123");
+    expect(out).not.toContain("sk-secret-456");
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    expect(parsed.api_key).toBe("[redacted]");
+    expect((parsed.headers as Record<string, unknown>).Authorization).toBe("[redacted]");
+    expect(parsed.model).toBe("m"); // non-sensitive content preserved
+  });
 });
