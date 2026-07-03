@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "../db";
 import { modelUseBehaviors, type ModelUseBehavior } from "../db/schema";
-import { isChain, parseMub, summarizeMub, type ChainPart, type MubDef } from "../core/mub/schema";
+import { isChain, parseMub, summarizeMub, type MubDef } from "../core/mub/schema";
 import type { StageResolver } from "../core/mub/chain";
 import { mappingExists } from "./catalog";
 
@@ -22,10 +22,6 @@ export class MubValidationError extends Error {
     super(message);
     this.name = "MubValidationError";
   }
-}
-
-function stageRefs(parts: ChainPart[]): string[] {
-  return parts.filter((p) => p.source === "stage").map((p) => (p as { name: string }).name);
 }
 
 /** Validate steps_json against the schema AND the live catalog (resilience or chain). */
@@ -49,10 +45,18 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
         throw new MubValidationError(`stage "${stage.name}": ${msg}`, []);
       };
 
-      // Content-part stage references must point at an earlier stage.
-      const partRefs = [...stageRefs(stage.system ?? []), ...stage.input.flatMap((b) => stageRefs(b.parts))];
-      for (const ref of partRefs) {
-        if (!earlier.has(ref)) bad(`references "${ref}", which is not an earlier stage`);
+      // Context blocks: stage-output refs must be earlier; tool args must be JSON.
+      for (const b of stage.input) {
+        if (b.kind === "stage_output" && !earlier.has(b.stage)) {
+          bad(`references "${b.stage}", which is not an earlier stage`);
+        }
+        if (b.kind === "tool_turn" && b.input) {
+          try {
+            JSON.parse(b.input);
+          } catch {
+            bad(`tool turn "${b.name}" has invalid JSON arguments`);
+          }
+        }
       }
 
       // Execution unit: a referenced resilience MUB, inline steps, or a router (neither).

@@ -20,7 +20,7 @@ describe("validateMub", () => {
       timeoutMs: 60_000,
       stages: [
         { name: "a", steps: [step] },
-        { name: "b", steps: [step], input: [{ role: "user", parts: [{ source: "stage", name: "a" }] }] },
+        { name: "b", steps: [step], input: [{ kind: "stage_output", stage: "a", role: "user" }] },
       ],
     });
     expect(summary).toBe("chain: a → b");
@@ -38,7 +38,7 @@ describe("validateMub", () => {
         kind: "chain",
         timeoutMs: 60_000,
         stages: [
-          { name: "a", steps: [step], input: [{ role: "user", parts: [{ source: "stage", name: "b" }] }] },
+          { name: "a", steps: [step], input: [{ kind: "stage_output", stage: "b", role: "user" }] },
           { name: "b", steps: [step] },
         ],
       }),
@@ -96,6 +96,12 @@ describe("validateMub", () => {
     expect(() =>
       validateMub(chainOf([{ name: "a", transitions: [{ when: { type: "output_contains", value: "x" }, goto: "end" }] }])),
     ).toThrow(/router/);
+  });
+
+  it("rejects a tool_turn with invalid JSON arguments", () => {
+    expect(() =>
+      validateMub(chainOf([{ name: "a", steps: [step], input: [{ kind: "tool_turn", name: "t", input: "{not json" }] }])),
+    ).toThrow(/invalid JSON/);
   });
 
   it("still validates and summarizes legacy resilience MUBs", () => {

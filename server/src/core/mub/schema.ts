@@ -44,20 +44,34 @@ export const MubStepsSchema = z.object({
 // not tied to any specific workflow.
 // ---------------------------------------------------------------------------
 
-/** A single piece of content fed into a stage's message. */
-export const ChainPartSchema = z.discriminatedUnion("source", [
-  z.object({ source: z.literal("literal"), text: z.string() }),
-  z.object({ source: z.literal("original_text") }),
-  z.object({ source: z.literal("original_images") }),
-  z.object({ source: z.literal("original_system") }),
-  z.object({ source: z.literal("original_messages") }),
-  z.object({ source: z.literal("stage"), name: z.string().min(1) }),
+/**
+ * A whole "context block" in a stage's input. Blocks are assembled, in order,
+ * into the message list sent to the stage's model — letting you build a fresh
+ * minimal request or the original conversation plus appended turns.
+ */
+export const ChainContextBlockSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("original_conversation") }), // all original messages, images included
+  z.object({ kind: z.literal("text_conversation") }), // all original messages, images stripped
+  z.object({ kind: z.literal("last_user") }), // the last original user message
+  z.object({
+    kind: z.literal("stage_output"),
+    stage: z.string().min(1),
+    role: z.enum(["user", "assistant"]).default("assistant"),
+  }),
+  z.object({
+    kind: z.literal("message"), // an authored turn ("plain text" = this with role user)
+    role: z.enum(["user", "assistant"]).default("user"),
+    text: z.string().default(""),
+  }),
+  z.object({
+    kind: z.literal("tool_turn"), // one call+result exchange
+    name: z.string().min(1),
+    input: z.string().default(""), // JSON arguments
+    result: z.string().default(""),
+    isError: z.boolean().optional(),
+    id: z.string().optional(),
+  }),
 ]);
-
-export const ChainBlockSchema = z.object({
-  role: z.enum(["user", "assistant"]).default("user"),
-  parts: z.array(ChainPartSchema).default([]),
-});
 
 /** A routing condition, tested against the original input or a stage's output. */
 export const ChainConditionSchema = z.discriminatedUnion("type", [
@@ -82,10 +96,10 @@ export const ChainStageSchema = z.object({
   mub: z.string().min(1).optional(),
   /** Legacy inline resilience steps (v0.1.3). No mub/steps = a router (no model call). */
   steps: z.array(StepSchema).min(1).optional(),
-  /** Messages to send. [] = pass the original request's messages through. */
-  input: z.array(ChainBlockSchema).default([]),
-  /** Optional system-prompt override (text parts); omitted = inherit original. */
-  system: z.array(ChainPartSchema).optional(),
+  /** Context blocks assembled into the messages. [] = pass the original messages through. */
+  input: z.array(ChainContextBlockSchema).default([]),
+  /** Optional system-prompt override; omitted = inherit the original system prompt. */
+  system: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
@@ -111,8 +125,7 @@ export type AdvanceTrigger = z.infer<typeof AdvanceTriggerSchema>;
 export type RetryPolicy = z.infer<typeof RetrySchema>;
 export type MubStep = z.infer<typeof StepSchema>;
 export type MubSteps = z.infer<typeof MubStepsSchema>;
-export type ChainPart = z.infer<typeof ChainPartSchema>;
-export type ChainBlock = z.infer<typeof ChainBlockSchema>;
+export type ChainContextBlock = z.infer<typeof ChainContextBlockSchema>;
 export type ChainCondition = z.infer<typeof ChainConditionSchema>;
 export type ChainTransition = z.infer<typeof ChainTransitionSchema>;
 export type ChainStage = z.infer<typeof ChainStageSchema>;

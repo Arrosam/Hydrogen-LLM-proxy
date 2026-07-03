@@ -63,13 +63,60 @@ const textOnly: IRRequest = {
   stream: false,
 };
 
-describe("buildStageIR (structured content builder)", () => {
-  it("routes original images into a stage and drops them elsewhere", () => {
-    const ocr = buildStageIR(withImage, stage("ocr", "K", { input: [{ role: "user", parts: [{ source: "literal", text: "OCR:" }, { source: "original_images" }] }] }), {}, false);
-    expect(ocr.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(true);
-    const main = buildStageIR(withImage, stage("main", "G", { input: [{ role: "user", parts: [{ source: "original_text" }, { source: "stage", name: "ocr" }] }] }), { ocr: "HELLO" }, false);
-    expect(textOf(main.messages[0].content)).toBe("hiHELLO");
-    expect(main.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(false);
+describe("buildStageIR (context blocks)", () => {
+  it("original_conversation keeps images; text_conversation strips them", () => {
+    const full = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "original_conversation" }] }), {}, false);
+    expect(full.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(true);
+    const textConv = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "text_conversation" }] }), {}, false);
+    expect(textConv.messages.every((m) => m.content.every((p: IRContentPart) => p.type !== "image"))).toBe(true);
+    expect(textOf(textConv.messages[0].content)).toBe("hi");
+  });
+
+  it("last_user picks the last user turn", () => {
+    const multi: IRRequest = {
+      requestedModel: "m",
+      stream: false,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+        { role: "user", content: [{ type: "text", text: "second" }] },
+      ],
+    };
+    const out = buildStageIR(multi, stage("s", "M", { input: [{ kind: "last_user" }] }), {}, false);
+    expect(out.messages).toHaveLength(1);
+    expect(textOf(out.messages[0].content)).toBe("second");
+  });
+
+  it("adjacent same-role message + stage_output merge into one turn", () => {
+    const s = stage("s", "M", {
+      input: [
+        { kind: "message", role: "user", text: "Evaluate: " },
+        { kind: "stage_output", stage: "draft", role: "user" },
+      ],
+    });
+    const out = buildStageIR(textOnly, s, { draft: "DRAFT" }, false);
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0].role).toBe("user");
+    expect(textOf(out.messages[0].content)).toBe("Evaluate: DRAFT");
+  });
+
+  it("tool_turn emits a linked assistant tool_use + user tool_result", () => {
+    const s = stage("s", "M", { input: [{ kind: "tool_turn", name: "get_weather", input: '{"city":"SF"}', result: "72F" }] });
+    const out = buildStageIR(textOnly, s, {}, false);
+    expect(out.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+    const tu = out.messages[0].content[0] as { type: string; id: string; name: string; input: unknown };
+    expect(tu.type).toBe("tool_use");
+    expect(tu.name).toBe("get_weather");
+    expect(tu.input).toEqual({ city: "SF" });
+    const tr = out.messages[1].content[0] as { type: string; toolUseId: string; content: IRContentPart[] };
+    expect(tr.type).toBe("tool_result");
+    expect(tr.toolUseId).toBe(tu.id);
+    expect(textOf(tr.content)).toBe("72F");
+  });
+
+  it("empty input passes the original conversation through", () => {
+    const out = buildStageIR(textOnly, stage("s", "M"), {}, false);
+    expect(textOf(out.messages[0].content)).toBe("hi");
   });
 });
 
@@ -79,7 +126,7 @@ describe("runMubChain (decision tree)", () => {
   });
 
   it("runs linearly, feeds outputs forward, sums usage, labels the path", async () => {
-    const chain = chainOf([stage("draft", "D"), stage("final", "F", { input: [{ role: "user", parts: [{ source: "stage", name: "draft" }] }] })]);
+    const chain = chainOf([stage("draft", "D"), stage("final", "F", { input: [{ kind: "stage_output", stage: "draft", role: "user" }] })]);
     const { result, usage, path } = await runMubChain(textOnly, chain, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(D(hi))");

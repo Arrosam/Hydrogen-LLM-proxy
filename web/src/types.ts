@@ -60,18 +60,13 @@ export interface MubSteps {
 }
 
 // --- Chain (compositional) MUB ---
-export type ChainPart =
-  | { source: "literal"; text: string }
-  | { source: "original_text" }
-  | { source: "original_images" }
-  | { source: "original_system" }
-  | { source: "original_messages" }
-  | { source: "stage"; name: string };
-
-export interface ChainBlock {
-  role: "user" | "assistant";
-  parts: ChainPart[];
-}
+export type ChainContextBlock =
+  | { kind: "original_conversation" }
+  | { kind: "text_conversation" }
+  | { kind: "last_user" }
+  | { kind: "stage_output"; stage: string; role: "user" | "assistant" }
+  | { kind: "message"; role: "user" | "assistant"; text: string }
+  | { kind: "tool_turn"; name: string; input: string; result: string; isError?: boolean; id?: string };
 
 export type ChainCondition =
   | { type: "always" }
@@ -90,8 +85,8 @@ export interface ChainStage {
   name: string;
   mub?: string; // referenced resilience MUB (its fallback chain runs for the stage)
   steps?: MubStep[]; // legacy inline steps
-  input: ChainBlock[];
-  system?: ChainPart[];
+  input: ChainContextBlock[];
+  system?: string;
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;

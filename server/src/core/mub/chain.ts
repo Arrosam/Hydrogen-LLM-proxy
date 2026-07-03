@@ -1,16 +1,8 @@
-import {
-  normalizeMessages,
-  textOf,
-  type IRContentPart,
-  type IRImagePart,
-  type IRMessage,
-  type IRRequest,
-  type IRTextPart,
-  type IRUsage,
-} from "../ir";
+import { normalizeMessages, textOf, type IRMessage, type IRRequest, type IRUsage } from "../ir";
+import { genId } from "../../util/ids";
 import { runMubJson, type JsonSuccess } from "../proxy/run";
 import type { AttemptFailure, AttemptRecord } from "./engine";
-import type { ChainCondition, ChainDef, ChainPart, ChainStage, MubSteps } from "./schema";
+import type { ChainCondition, ChainDef, ChainStage, MubSteps } from "./schema";
 
 const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -22,67 +14,65 @@ function addUsage(a: IRUsage, b: IRUsage): IRUsage {
   };
 }
 
-interface OriginalCtx {
-  text: string; // concatenated text of the original user messages
-  images: IRImagePart[]; // all image parts from the original request
-  system?: string;
-  messages: IRMessage[];
-}
-
-function originalContext(ir: IRRequest): OriginalCtx {
+/** Concatenated text of the original user messages (used only as a fallback). */
+function originalUserText(ir: IRRequest): string {
   let text = "";
-  const images: IRImagePart[] = [];
   for (const m of ir.messages) {
-    for (const p of m.content) {
-      if (p.type === "text" && m.role === "user") text += (text ? "\n" : "") + p.text;
-      if (p.type === "image") images.push(p);
-    }
+    if (m.role !== "user") continue;
+    for (const p of m.content) if (p.type === "text") text += (text ? "\n" : "") + p.text;
   }
-  return { text, images, system: ir.system, messages: ir.messages };
+  return text;
 }
 
-/** Resolve one content part to IR content parts. `original_messages` is handled
- * at the block level (it splices whole messages), so it yields nothing here. */
-function partToContent(
-  part: ChainPart,
-  orig: OriginalCtx,
-  outputs: Record<string, string>,
-): IRContentPart[] {
-  switch (part.source) {
-    case "literal":
-      return part.text ? [{ type: "text", text: part.text }] : [];
-    case "original_text":
-      return orig.text ? [{ type: "text", text: orig.text }] : [];
-    case "original_system":
-      return orig.system ? [{ type: "text", text: orig.system }] : [];
-    case "original_images":
-      return orig.images.map((im) => ({ ...im }));
-    case "stage": {
-      const out = outputs[part.name] ?? "";
-      return out ? [{ type: "text", text: out }] : [];
-    }
-    case "original_messages":
-      return [];
-  }
-}
-
+/** Assemble a stage's context blocks into IR messages. */
 function buildStageMessages(
   stage: ChainStage,
-  orig: OriginalCtx,
+  ir: IRRequest,
   outputs: Record<string, string>,
 ): IRMessage[] {
   if (stage.input.length === 0) {
-    return orig.messages.map((m) => ({ role: m.role, content: [...m.content] }));
+    return ir.messages.map((m) => ({ role: m.role, content: [...m.content] }));
   }
+  const lastUser = [...ir.messages].reverse().find((m) => m.role === "user");
   const out: IRMessage[] = [];
   for (const block of stage.input) {
-    if (block.parts.some((p) => p.source === "original_messages")) {
-      for (const m of orig.messages) out.push({ role: m.role, content: [...m.content] });
-      continue;
+    switch (block.kind) {
+      case "original_conversation":
+        for (const m of ir.messages) out.push({ role: m.role, content: [...m.content] });
+        break;
+      case "text_conversation":
+        for (const m of ir.messages) {
+          const content = m.content.filter((p) => p.type !== "image");
+          if (content.length) out.push({ role: m.role, content: [...content] });
+        }
+        break;
+      case "last_user":
+        if (lastUser) out.push({ role: "user", content: [...lastUser.content] });
+        break;
+      case "stage_output": {
+        const text = outputs[block.stage] ?? "";
+        if (text) out.push({ role: block.role, content: [{ type: "text", text }] });
+        break;
+      }
+      case "message":
+        if (block.text) out.push({ role: block.role, content: [{ type: "text", text: block.text }] });
+        break;
+      case "tool_turn": {
+        const id = block.id || genId("toolu");
+        let input: unknown = {};
+        try {
+          input = block.input ? JSON.parse(block.input) : {};
+        } catch {
+          input = {};
+        }
+        out.push({ role: "assistant", content: [{ type: "tool_use", id, name: block.name, input }] });
+        out.push({
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: id, content: [{ type: "text", text: block.result }], isError: block.isError }],
+        });
+        break;
+      }
     }
-    const content: IRContentPart[] = [];
-    for (const part of block.parts) content.push(...partToContent(part, orig, outputs));
-    if (content.length) out.push({ role: block.role, content });
   }
   return out;
 }
@@ -94,25 +84,14 @@ export function buildStageIR(
   outputs: Record<string, string>,
   stream: boolean,
 ): IRRequest {
-  const orig = originalContext(ir);
-  let messages = normalizeMessages(buildStageMessages(stage, orig, outputs));
+  let messages = normalizeMessages(buildStageMessages(stage, ir, outputs));
   if (messages.length === 0) {
-    messages = [{ role: "user", content: [{ type: "text", text: orig.text }] }];
-  }
-
-  let system = ir.system;
-  if (stage.system) {
-    const sysText = stage.system
-      .flatMap((p) => partToContent(p, orig, outputs))
-      .filter((c): c is IRTextPart => c.type === "text")
-      .map((c) => c.text)
-      .join("");
-    system = sysText || undefined;
+    messages = [{ role: "user", content: [{ type: "text", text: originalUserText(ir) }] }];
   }
 
   return {
     requestedModel: ir.requestedModel,
-    system,
+    system: stage.system && stage.system.trim() ? stage.system : ir.system,
     messages,
     tools: ir.tools,
     toolChoice: ir.toolChoice,
@@ -162,9 +141,20 @@ function safeRegex(pattern: string): RegExp {
   }
 }
 
+interface InputCtx {
+  text: string; // concatenated original user text
+  hasImage: boolean;
+}
+
+function inputContext(ir: IRRequest): InputCtx {
+  let hasImage = false;
+  for (const m of ir.messages) for (const p of m.content) if (p.type === "image") hasImage = true;
+  return { text: originalUserText(ir), hasImage };
+}
+
 function conditionHolds(
   cond: ChainCondition,
-  orig: OriginalCtx,
+  input: InputCtx,
   outputs: Record<string, string>,
   currentStage: string,
 ): boolean {
@@ -172,11 +162,11 @@ function conditionHolds(
     case "always":
       return true;
     case "input_has_image":
-      return orig.images.length > 0;
+      return input.hasImage;
     case "input_contains":
-      return orig.text.includes(cond.value);
+      return input.text.includes(cond.value);
     case "input_matches":
-      return safeRegex(cond.value).test(orig.text);
+      return safeRegex(cond.value).test(input.text);
     case "output_contains":
       return (outputs[cond.stage ?? currentStage] ?? "").includes(cond.value);
     case "output_matches":
@@ -189,11 +179,11 @@ function nextStageIndex(
   stage: ChainStage,
   idx: number,
   byName: Map<string, number>,
-  orig: OriginalCtx,
+  input: InputCtx,
   outputs: Record<string, string>,
 ): number | "end" {
   for (const t of stage.transitions ?? []) {
-    if (conditionHolds(t.when, orig, outputs, stage.name)) {
+    if (conditionHolds(t.when, input, outputs, stage.name)) {
       if (t.goto === "end") return "end";
       const j = byName.get(t.goto);
       return j != null && j > idx ? j : "end"; // forward-only (validation enforces)
@@ -223,7 +213,7 @@ export async function runMubChain(
   chain: ChainDef,
   resolve: StageResolver,
 ): Promise<ChainRunResult> {
-  const orig = originalContext(ir);
+  const input = inputContext(ir);
   const byName = new Map(chain.stages.map((s, i) => [s.name, i]));
   const outputs: Record<string, string> = {};
   const values: Record<string, JsonSuccess> = {};
@@ -253,7 +243,7 @@ export async function runMubChain(
       usage = addUsage(usage, result.value.ir.usage);
     }
 
-    const next = nextStageIndex(stage, idx, byName, orig, outputs);
+    const next = nextStageIndex(stage, idx, byName, input, outputs);
     if (next === "end") break;
     idx = next;
   }

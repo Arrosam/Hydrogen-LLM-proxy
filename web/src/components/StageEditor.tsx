@@ -1,16 +1,35 @@
 import { useEffect, useState } from "react";
-import type { ChainBlock, ChainCondition, ChainPart, ChainStage, ChainTransition, Mub } from "../types";
+import type { ChainContextBlock, ChainCondition, ChainStage, ChainTransition, Mub } from "../types";
 
 const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.currentTarget.select();
 
-const PART_SOURCES: { source: ChainPart["source"]; label: string }[] = [
-  { source: "original_text", label: "Original text" },
-  { source: "original_images", label: "Original images" },
-  { source: "original_system", label: "Original system" },
-  { source: "original_messages", label: "Original conversation" },
-  { source: "stage", label: "Stage output" },
-  { source: "literal", label: "Literal text" },
+const BLOCK_KINDS: { value: string; label: string }[] = [
+  { value: "original_conversation", label: "Original full conversation" },
+  { value: "text_conversation", label: "Text-only conversation" },
+  { value: "last_user", label: "Last user request" },
+  { value: "stage_output", label: "Output from another stage" },
+  { value: "message", label: "New conversation turn" },
+  { value: "tool_turn", label: "Tool use turn" },
+  { value: "plain_text", label: "Plain text" },
 ];
+
+function newContextBlock(value: string, earlier: string[]): ChainContextBlock {
+  switch (value) {
+    case "text_conversation":
+      return { kind: "text_conversation" };
+    case "last_user":
+      return { kind: "last_user" };
+    case "stage_output":
+      return { kind: "stage_output", stage: earlier[0] ?? "", role: "assistant" };
+    case "message":
+    case "plain_text":
+      return { kind: "message", role: "user", text: "" };
+    case "tool_turn":
+      return { kind: "tool_turn", name: "", input: "", result: "" };
+    default:
+      return { kind: "original_conversation" };
+  }
+}
 
 const CONDITION_TYPES: { type: ChainCondition["type"]; label: string }[] = [
   { type: "always", label: "always" },
@@ -33,11 +52,6 @@ function newCondition(type: ChainCondition["type"]): ChainCondition {
 }
 const condHasValue = (c: ChainCondition) => c.type.endsWith("_contains") || c.type.endsWith("_matches");
 const condIsOutput = (c: ChainCondition) => c.type === "output_contains" || c.type === "output_matches";
-function newPart(source: ChainPart["source"], earlier: string[]): ChainPart {
-  if (source === "literal") return { source, text: "" };
-  if (source === "stage") return { source, name: earlier[0] ?? "" };
-  return { source };
-}
 
 interface Props {
   stages: ChainStage[];
@@ -172,7 +186,7 @@ function StageBody({
   const [advanced, setAdvanced] = useState(false);
   const model = isModelStage(stage);
   const legacyInline = !stage.mub && !!(stage.steps && stage.steps.length);
-  const setBlocks = (blocks: ChainBlock[]) => onPatch({ input: blocks });
+  const setBlocks = (blocks: ChainContextBlock[]) => onPatch({ input: blocks });
   const setTransitions = (transitions: ChainTransition[]) => onPatch({ transitions });
 
   return (
@@ -207,18 +221,35 @@ function StageBody({
           <div className="mt-3">
             <div className="mb-1.5 flex items-center justify-between">
               <label className="label mb-0">Input <span className="normal-case text-ink-500">(empty = pass the original messages through)</span></label>
-              <button className="btn-ghost btn-xs" onClick={() => setBlocks([...stage.input, { role: "user", parts: [] }])}>
-                <i className="bi bi-plus-lg" />
-                Add message
-              </button>
+              <select
+                className="input h-7 w-auto py-0 text-xs"
+                value=""
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  setBlocks([...stage.input, newContextBlock(e.target.value, earlier)]);
+                }}
+              >
+                <option value="">+ add context block…</option>
+                {BLOCK_KINDS.map((b) => (
+                  <option key={b.value} value={b.value}>{b.label}</option>
+                ))}
+              </select>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {stage.input.map((block, bi) => (
-                <BlockRow
+                <ContextBlockRow
                   key={bi}
                   block={block}
                   earlier={earlier}
                   onChange={(b) => setBlocks(stage.input.map((x, idx) => (idx === bi ? b : x)))}
+                  onMove={(dir) => {
+                    const to = bi + dir;
+                    if (to < 0 || to >= stage.input.length) return;
+                    const next = [...stage.input];
+                    const [m] = next.splice(bi, 1);
+                    next.splice(to, 0, m);
+                    setBlocks(next);
+                  }}
                   onRemove={() => setBlocks(stage.input.filter((_, idx) => idx !== bi))}
                 />
               ))}
@@ -235,8 +266,8 @@ function StageBody({
                 <label className="label">System override (optional)</label>
                 <textarea
                   className="input min-h-[56px] font-mono text-xs"
-                  value={stage.system?.map((p) => (p.source === "literal" ? p.text : "")).join("") ?? ""}
-                  onChange={(e) => onPatch({ system: e.target.value ? [{ source: "literal", text: e.target.value }] : undefined })}
+                  value={stage.system ?? ""}
+                  onChange={(e) => onPatch({ system: e.target.value || undefined })}
                   placeholder="Leave empty to inherit the original system prompt"
                 />
               </div>
@@ -342,92 +373,121 @@ function TransitionRow({
   );
 }
 
-function BlockRow({
+const BLOCK_LABEL: Record<ChainContextBlock["kind"], string> = {
+  original_conversation: "Full conversation",
+  text_conversation: "Text-only conversation",
+  last_user: "Last user request",
+  stage_output: "Stage output",
+  message: "Turn",
+  tool_turn: "Tool turn",
+};
+const BLOCK_HINT: Partial<Record<ChainContextBlock["kind"], string>> = {
+  original_conversation: "The original messages, images included.",
+  text_conversation: "The original messages with images stripped.",
+  last_user: "The last user message from the original request.",
+};
+
+function ContextBlockRow({
   block,
   earlier,
   onChange,
+  onMove,
   onRemove,
 }: {
-  block: ChainBlock;
+  block: ChainContextBlock;
   earlier: string[];
-  onChange: (b: ChainBlock) => void;
+  onChange: (b: ChainContextBlock) => void;
+  onMove: (dir: number) => void;
   onRemove: () => void;
 }) {
-  const setParts = (parts: ChainPart[]) => onChange({ ...block, parts });
-  const move = (from: number, to: number) => {
-    if (to < 0 || to >= block.parts.length) return;
-    const next = [...block.parts];
-    const [m] = next.splice(from, 1);
-    next.splice(to, 0, m);
-    setParts(next);
-  };
-
   return (
-    <div className="rounded-lg border border-ink-800 bg-ink-900/60 p-2">
-      <div className="mb-1.5 flex items-center gap-2">
-        <select
-          className="input h-7 w-28 py-0 text-xs"
-          value={block.role}
-          onChange={(e) => onChange({ ...block, role: e.target.value as ChainBlock["role"] })}
-        >
-          <option value="user">user</option>
-          <option value="assistant">assistant</option>
-        </select>
-        <div className="flex-1" />
-        <button className="btn-ghost btn-xs" onClick={() => setParts([...block.parts, newPart("literal", earlier)])}>
-          <i className="bi bi-plus-lg" />
-          Add part
-        </button>
-        <button className="btn-danger btn-xs" onClick={onRemove}>
-          <i className="bi bi-trash3" />
-        </button>
-      </div>
-      {block.parts.length === 0 && <p className="px-1 py-1 text-[11px] text-ink-600">Empty message — add a content part.</p>}
-      <div className="space-y-1.5">
-        {block.parts.map((part, pi) => (
-          <div key={pi} className="flex items-start gap-1.5">
+    <div className="rounded-lg border border-ink-800 bg-ink-900/60 p-2 text-xs">
+      <div className="flex items-center gap-2">
+        <span className="badge-gray">{BLOCK_LABEL[block.kind]}</span>
+        {block.kind === "stage_output" && (
+          <>
             <select
-              className="input h-8 w-44 py-0 text-xs"
-              value={part.source}
-              onChange={(e) => setParts(block.parts.map((x, idx) => (idx === pi ? newPart(e.target.value as ChainPart["source"], earlier) : x)))}
+              className="input h-7 w-28 py-0 text-xs"
+              value={block.stage}
+              onChange={(e) => onChange({ ...block, stage: e.target.value })}
             >
-              {PART_SOURCES.map((s) => (
-                <option key={s.source} value={s.source}>{s.label}</option>
+              {earlier.length === 0 && <option value="">(no earlier stage)</option>}
+              {earlier.map((n) => (
+                <option key={n} value={n}>{n}</option>
               ))}
             </select>
-            {part.source === "literal" && (
-              <textarea
-                className="input min-h-[32px] flex-1 py-1 font-mono text-xs"
-                value={part.text}
-                onChange={(e) => setParts(block.parts.map((x, idx) => (idx === pi ? { source: "literal", text: e.target.value } : x)))}
-                placeholder="literal text"
-              />
-            )}
-            {part.source === "stage" && (
-              <select
-                className="input h-8 flex-1 py-0 text-xs"
-                value={part.name}
-                onChange={(e) => setParts(block.parts.map((x, idx) => (idx === pi ? { source: "stage", name: e.target.value } : x)))}
-              >
-                {earlier.length === 0 && <option value="">(no earlier stage)</option>}
-                {earlier.map((n) => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
-            )}
-            {part.source !== "literal" && part.source !== "stage" && <div className="flex-1" />}
-            <button className="btn-ghost btn-xs" title="Move up" onClick={() => move(pi, pi - 1)}>
-              <i className="bi bi-arrow-up" />
-            </button>
-            <button className="btn-ghost btn-xs" title="Move down" onClick={() => move(pi, pi + 1)}>
-              <i className="bi bi-arrow-down" />
-            </button>
-            <button className="btn-danger btn-xs" onClick={() => setParts(block.parts.filter((_, idx) => idx !== pi))}>
-              <i className="bi bi-x-lg" />
-            </button>
-          </div>
-        ))}
+            <span className="text-ink-500">as</span>
+            <select
+              className="input h-7 w-24 py-0 text-xs"
+              value={block.role}
+              onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
+            >
+              <option value="assistant">assistant</option>
+              <option value="user">user</option>
+            </select>
+          </>
+        )}
+        {block.kind === "message" && (
+          <select
+            className="input h-7 w-24 py-0 text-xs"
+            value={block.role}
+            onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
+          >
+            <option value="user">user</option>
+            <option value="assistant">assistant</option>
+          </select>
+        )}
+        <div className="flex-1" />
+        <button className="btn-ghost btn-xs" title="Move up" onClick={() => onMove(-1)}>
+          <i className="bi bi-arrow-up" />
+        </button>
+        <button className="btn-ghost btn-xs" title="Move down" onClick={() => onMove(1)}>
+          <i className="bi bi-arrow-down" />
+        </button>
+        <button className="btn-danger btn-xs" onClick={onRemove}>
+          <i className="bi bi-x-lg" />
+        </button>
       </div>
+
+      {block.kind === "message" && (
+        <textarea
+          className="input mt-1.5 min-h-[36px] font-mono text-xs"
+          value={block.text}
+          onChange={(e) => onChange({ ...block, text: e.target.value })}
+          placeholder="message text"
+        />
+      )}
+      {block.kind === "tool_turn" && (
+        <div className="mt-1.5 space-y-1.5">
+          <input
+            className="input h-8 py-0 font-mono text-xs"
+            value={block.name}
+            onChange={(e) => onChange({ ...block, name: e.target.value })}
+            placeholder="tool name"
+          />
+          <textarea
+            className="input min-h-[32px] font-mono text-xs"
+            value={block.input}
+            onChange={(e) => onChange({ ...block, input: e.target.value })}
+            placeholder={'arguments (JSON), e.g. {"city":"SF"}'}
+          />
+          <textarea
+            className="input min-h-[32px] font-mono text-xs"
+            value={block.result}
+            onChange={(e) => onChange({ ...block, result: e.target.value })}
+            placeholder="tool result text"
+          />
+          <label className="flex items-center gap-2 text-ink-400">
+            <input
+              type="checkbox"
+              checked={!!block.isError}
+              onChange={(e) => onChange({ ...block, isError: e.target.checked || undefined })}
+            />
+            mark as error
+          </label>
+        </div>
+      )}
+      {BLOCK_HINT[block.kind] && <p className="mt-1 text-[11px] text-ink-600">{BLOCK_HINT[block.kind]}</p>}
     </div>
   );
 }
