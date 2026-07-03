@@ -49,6 +49,16 @@ function buildStageMessages(
       case "last_user":
         if (lastUser) out.push({ role: "user", content: [...lastUser.content] });
         break;
+      case "last_user_text": {
+        const content = lastUser?.content.filter((p) => p.type === "text") ?? [];
+        if (content.length) out.push({ role: "user", content: [...content] });
+        break;
+      }
+      case "last_user_images": {
+        const content = lastUser?.content.filter((p) => p.type === "image") ?? [];
+        if (content.length) out.push({ role: "user", content: [...content] });
+        break;
+      }
       case "stage_output": {
         const text = outputs[block.stage] ?? "";
         if (text) out.push({ role: block.role, content: [{ type: "text", text }] });

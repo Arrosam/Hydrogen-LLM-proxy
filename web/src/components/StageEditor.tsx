@@ -7,6 +7,8 @@ const BLOCK_KINDS: { value: string; label: string }[] = [
   { value: "original_conversation", label: "Original full conversation" },
   { value: "text_conversation", label: "Text-only conversation" },
   { value: "last_user", label: "Last user request" },
+  { value: "last_user_text", label: "Last user text only" },
+  { value: "last_user_images", label: "Last user images only" },
   { value: "stage_output", label: "Output from another stage" },
   { value: "message", label: "New conversation turn" },
   { value: "tool_turn", label: "Tool use turn" },
@@ -19,6 +21,10 @@ function newContextBlock(value: string, earlier: string[]): ChainContextBlock {
       return { kind: "text_conversation" };
     case "last_user":
       return { kind: "last_user" };
+    case "last_user_text":
+      return { kind: "last_user_text" };
+    case "last_user_images":
+      return { kind: "last_user_images" };
     case "stage_output":
       return { kind: "stage_output", stage: earlier[0] ?? "", role: "assistant" };
     case "message":
@@ -377,6 +383,8 @@ const BLOCK_LABEL: Record<ChainContextBlock["kind"], string> = {
   original_conversation: "Full conversation",
   text_conversation: "Text-only conversation",
   last_user: "Last user request",
+  last_user_text: "Last user text",
+  last_user_images: "Last user images",
   stage_output: "Stage output",
   message: "Turn",
   tool_turn: "Tool turn",
@@ -385,6 +393,8 @@ const BLOCK_HINT: Partial<Record<ChainContextBlock["kind"], string>> = {
   original_conversation: "The original messages, images included.",
   text_conversation: "The original messages with images stripped.",
   last_user: "The last user message from the original request.",
+  last_user_text: "Only the text of the last user message.",
+  last_user_images: "Only the image(s) of the last user message.",
 };
 
 function ContextBlockRow({

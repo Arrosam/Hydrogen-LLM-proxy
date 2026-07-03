@@ -64,6 +64,8 @@ export type ChainContextBlock =
   | { kind: "original_conversation" }
   | { kind: "text_conversation" }
   | { kind: "last_user" }
+  | { kind: "last_user_text" }
+  | { kind: "last_user_images" }
   | { kind: "stage_output"; stage: string; role: "user" | "assistant" }
   | { kind: "message"; role: "user" | "assistant"; text: string }
   | { kind: "tool_turn"; name: string; input: string; result: string; isError?: boolean; id?: string };

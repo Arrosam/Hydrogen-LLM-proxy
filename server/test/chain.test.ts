@@ -87,6 +87,18 @@ describe("buildStageIR (context blocks)", () => {
     expect(textOf(out.messages[0].content)).toBe("second");
   });
 
+  it("last_user_text and last_user_images split the last user turn", () => {
+    const txt = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_text" }] }), {}, false);
+    expect(txt.messages).toHaveLength(1);
+    expect(textOf(txt.messages[0].content)).toBe("hi");
+    expect(txt.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(false);
+
+    const imgs = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_images" }] }), {}, false);
+    expect(imgs.messages).toHaveLength(1);
+    expect(imgs.messages[0].content.every((p: IRContentPart) => p.type === "image")).toBe(true);
+    expect(textOf(imgs.messages[0].content)).toBe("");
+  });
+
   it("adjacent same-role message + stage_output merge into one turn", () => {
     const s = stage("s", "M", {
       input: [

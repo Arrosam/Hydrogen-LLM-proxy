@@ -53,6 +53,8 @@ export const ChainContextBlockSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("original_conversation") }), // all original messages, images included
   z.object({ kind: z.literal("text_conversation") }), // all original messages, images stripped
   z.object({ kind: z.literal("last_user") }), // the last original user message
+  z.object({ kind: z.literal("last_user_text") }), // the last user message, text parts only
+  z.object({ kind: z.literal("last_user_images") }), // the last user message, image parts only
   z.object({
     kind: z.literal("stage_output"),
     stage: z.string().min(1),
