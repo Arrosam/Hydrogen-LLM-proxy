@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ChainBlock, ChainCondition, ChainPart, ChainStage, ChainTransition, Mub } from "../types";
 
 const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.currentTarget.select();
@@ -432,6 +432,15 @@ function BlockRow({
   );
 }
 
+function cleanNumeric(raw: string, decimal: boolean): string {
+  let s = raw.replace(decimal ? /[^\d.]/g : /[^\d]/g, "");
+  if (decimal) {
+    const dot = s.indexOf(".");
+    if (dot >= 0) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, ""); // keep only the first dot
+  }
+  return s;
+}
+
 function NumOverride({
   label,
   value,
@@ -443,6 +452,17 @@ function NumOverride({
   onChange: (v: number | undefined) => void;
   decimal?: boolean;
 }) {
+  // Hold the raw text so intermediate values ("0.", "0.70") aren't collapsed by
+  // the numeric round-trip; only re-sync from the prop when it truly differs.
+  const [text, setText] = useState<string>(value == null ? "" : String(value));
+  useEffect(() => {
+    const cur = text.trim() === "" ? undefined : Number(text);
+    if (cur !== value && !(Number.isNaN(cur as number) && value === undefined)) {
+      setText(value == null ? "" : String(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
   return (
     <div>
       <label className="label">{label}</label>
@@ -450,13 +470,14 @@ function NumOverride({
         className="input"
         type="text"
         inputMode="decimal"
-        value={value ?? ""}
+        value={text}
         placeholder="inherit"
         onFocus={selectAll}
         onChange={(e) => {
-          const t = e.target.value.trim();
-          if (!t) return onChange(undefined);
-          const n = Number(decimal ? t.replace(/[^\d.]/g, "") : t.replace(/[^\d]/g, ""));
+          const cleaned = cleanNumeric(e.target.value, !!decimal);
+          setText(cleaned);
+          if (cleaned.trim() === "") return onChange(undefined);
+          const n = Number(cleaned);
           onChange(Number.isFinite(n) ? n : undefined);
         }}
       />
