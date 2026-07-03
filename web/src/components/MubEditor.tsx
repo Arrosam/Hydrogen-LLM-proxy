@@ -24,6 +24,7 @@ const CODE_PRESETS: Trigger[] = [429, 500, 502, 503, 529];
 interface Props {
   open: boolean;
   mub: Mub | null; // null = new
+  mubs: Mub[]; // all MUBs (chain stages reference the resilience ones)
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
@@ -40,7 +41,7 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
 }
 
-export function MubEditor({ open, mub, models, providers, mappings, onClose, onSaved }: Props) {
+export function MubEditor({ open, mub, mubs, models, providers, mappings, onClose, onSaved }: Props) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -311,7 +312,7 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
             <p className="mt-1 text-xs text-ink-500">
               {kind === "resilience"
                 ? "Try each (model, provider) in turn until one succeeds."
-                : "Run stages in order; each stage's output can feed the next. Streams only the final stage."}
+                : "A decision tree of stages — each runs a resilience MUB; transitions route by input or output."}
             </p>
           </div>
         )}
@@ -336,8 +337,7 @@ export function MubEditor({ open, mub, models, providers, mappings, onClose, onS
               setStages(s);
               setOutput(o);
             }}
-            models={models}
-            providersForModel={providersForModel}
+            mubs={mubs.filter((m) => !isChainDef(m.steps) && m.id !== mub?.id)}
           />
         ) : (
           <div>

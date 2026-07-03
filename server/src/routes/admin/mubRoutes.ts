@@ -9,6 +9,7 @@ import {
   getMubDef,
   listMubs,
   MubValidationError,
+  resolveChainStage,
   updateMub,
   validateMub,
 } from "../../services/mubs";
@@ -140,7 +141,9 @@ export async function mubRoutes(app: FastifyInstance): Promise<void> {
       stream: false,
     };
 
-    const { result, path } = isChain(def) ? await runMubChain(ir, def) : await runMubJson(ir, def);
+    const { result, path } = isChain(def)
+      ? await runMubChain(ir, def, resolveChainStage)
+      : await runMubJson(ir, def);
     if (result.ok) {
       return {
         ok: true,

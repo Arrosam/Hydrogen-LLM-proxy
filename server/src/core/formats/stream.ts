@@ -1,4 +1,4 @@
-import type { Family, IRStopReason, IRUsage } from "../ir";
+import type { Family, IRResponse, IRStopReason, IRUsage } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
 import { finishReasonToIR } from "./openai";
 import { irToStopReason } from "./anthropic";
@@ -489,6 +489,34 @@ export function serializeClientStream(
   return family === "anthropic"
     ? serializeAnthropicStream(events, ctx)
     : serializeOpenAIStream(events, ctx);
+}
+
+/**
+ * Synthesize a client SSE stream from an already-complete IRResponse. Chains
+ * buffer their stages (to evaluate routing conditions) then emit the final
+ * result as a single-shot stream so streaming clients still get SSE.
+ */
+export function streamFromIRResponse(
+  family: Family,
+  ir: IRResponse,
+  ctx: StreamContext,
+): AsyncGenerator<string> {
+  async function* events(): AsyncGenerator<StreamEvent> {
+    yield { type: "start", id: ir.id, model: ir.model, created: ir.created, inputTokens: ir.usage.promptTokens };
+    let toolIndex = 0;
+    for (const p of ir.content) {
+      if (p.type === "text") {
+        if (p.text) yield { type: "text_delta", text: p.text };
+      } else if (p.type === "tool_use") {
+        yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
+        yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };
+        yield { type: "tool_stop", index: toolIndex };
+        toolIndex++;
+      }
+    }
+    yield { type: "finish", stopReason: ir.stopReason, usage: ir.usage };
+  }
+  return serializeClientStream(family, events(), ctx);
 }
 
 function num(v: unknown): number {

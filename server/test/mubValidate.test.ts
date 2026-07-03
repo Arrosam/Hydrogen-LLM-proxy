@@ -7,6 +7,7 @@ import { mappingExists } from "../src/services/catalog";
 import { MubValidationError, validateMub } from "../src/services/mubs";
 
 const step = { model: "m", provider: "p" };
+const chainOf = (stages: unknown[]) => ({ kind: "chain", timeoutMs: 60_000, stages });
 
 beforeEach(() => {
   vi.mocked(mappingExists).mockReturnValue(true);
@@ -59,6 +60,42 @@ describe("validateMub", () => {
       expect(e).toBeInstanceOf(MubValidationError);
       expect((e as MubValidationError).invalidPairs).toEqual(["m@p"]);
     }
+  });
+
+  it("rejects a backward transition goto (forward-only)", () => {
+    expect(() =>
+      validateMub(chainOf([
+        { name: "a", steps: [step] },
+        { name: "b", steps: [step], transitions: [{ when: { type: "always" }, goto: "a" }] },
+      ])),
+    ).toThrow(/forward-only|later stage/);
+  });
+
+  it("rejects a transition goto to an unknown stage", () => {
+    expect(() =>
+      validateMub(chainOf([{ name: "a", steps: [step], transitions: [{ when: { type: "always" }, goto: "zzz" }] }])),
+    ).toThrow(/not a stage/);
+  });
+
+  it("rejects an output condition referencing a later stage", () => {
+    expect(() =>
+      validateMub(chainOf([
+        { name: "a", steps: [step], transitions: [{ when: { type: "output_contains", value: "x", stage: "b" }, goto: "end" }] },
+        { name: "b", steps: [step] },
+      ])),
+    ).toThrow(/later stage/);
+  });
+
+  it("rejects an invalid regex condition", () => {
+    expect(() =>
+      validateMub(chainOf([{ name: "a", steps: [step], transitions: [{ when: { type: "output_matches", value: "(" }, goto: "end" }] }])),
+    ).toThrow(/invalid regex/);
+  });
+
+  it("rejects a router that tests output (it makes no model call)", () => {
+    expect(() =>
+      validateMub(chainOf([{ name: "a", transitions: [{ when: { type: "output_contains", value: "x" }, goto: "end" }] }])),
+    ).toThrow(/router/);
   });
 
   it("still validates and summarizes legacy resilience MUBs", () => {

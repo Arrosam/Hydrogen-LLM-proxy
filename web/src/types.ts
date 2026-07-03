@@ -73,14 +73,29 @@ export interface ChainBlock {
   parts: ChainPart[];
 }
 
+export type ChainCondition =
+  | { type: "always" }
+  | { type: "input_has_image" }
+  | { type: "input_contains"; value: string }
+  | { type: "input_matches"; value: string }
+  | { type: "output_contains"; value: string; stage?: string }
+  | { type: "output_matches"; value: string; stage?: string };
+
+export interface ChainTransition {
+  when: ChainCondition;
+  goto: string; // a later stage's name, or "end"
+}
+
 export interface ChainStage {
   name: string;
-  steps: MubStep[];
+  mub?: string; // referenced resilience MUB (its fallback chain runs for the stage)
+  steps?: MubStep[]; // legacy inline steps
   input: ChainBlock[];
   system?: ChainPart[];
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  transitions?: ChainTransition[];
 }
 
 export interface ChainMub {

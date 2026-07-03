@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "../db";
 import { modelUseBehaviors, type ModelUseBehavior } from "../db/schema";
 import { isChain, parseMub, summarizeMub, type ChainPart, type MubDef } from "../core/mub/schema";
+import type { StageResolver } from "../core/mub/chain";
 import { mappingExists } from "./catalog";
 
 export interface MubInput {
@@ -33,26 +34,64 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
   const invalidPairs: string[] = [];
 
   if (isChain(def)) {
-    const seen = new Set<string>();
-    for (const stage of def.stages) {
-      if (seen.has(stage.name)) {
-        throw new MubValidationError(`duplicate stage name "${stage.name}"`, []);
+    const names = def.stages.map((s) => s.name);
+    const nameSet = new Set(names);
+    if (nameSet.size !== names.length) {
+      const dup = names.find((n, i) => names.indexOf(n) !== i);
+      throw new MubValidationError(`duplicate stage name "${dup}"`, []);
+    }
+    const indexByName = new Map(names.map((n, i) => [n, i]));
+
+    for (let i = 0; i < def.stages.length; i++) {
+      const stage = def.stages[i];
+      const earlier = new Set(names.slice(0, i));
+      const bad = (msg: string): never => {
+        throw new MubValidationError(`stage "${stage.name}": ${msg}`, []);
+      };
+
+      // Content-part stage references must point at an earlier stage.
+      const partRefs = [...stageRefs(stage.system ?? []), ...stage.input.flatMap((b) => stageRefs(b.parts))];
+      for (const ref of partRefs) {
+        if (!earlier.has(ref)) bad(`references "${ref}", which is not an earlier stage`);
       }
-      const refs = [...stageRefs(stage.system ?? []), ...stage.input.flatMap((b) => stageRefs(b.parts))];
-      for (const ref of refs) {
-        if (!seen.has(ref)) {
-          throw new MubValidationError(
-            `stage "${stage.name}" references "${ref}", which is not an earlier stage`,
-            [],
-          );
+
+      // Execution unit: a referenced resilience MUB, inline steps, or a router (neither).
+      const isRouter = !stage.mub && (!stage.steps || stage.steps.length === 0);
+      if (stage.mub) {
+        const m = getMubByName(stage.mub);
+        if (!m) bad(`references unknown MUB "${stage.mub}"`);
+        else if (isChain(parseMub(m.steps))) bad(`references chain MUB "${stage.mub}" (stages must use resilience MUBs)`);
+      } else if (stage.steps && stage.steps.length) {
+        for (const s of stage.steps) {
+          if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
         }
       }
-      for (const s of stage.steps) {
-        if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
+
+      // Transitions: forward-only goto; condition sanity.
+      for (const t of stage.transitions ?? []) {
+        if (t.goto !== "end") {
+          const j = indexByName.get(t.goto);
+          if (j == null) bad(`transition goto "${t.goto}" is not a stage`);
+          else if (j <= i) bad(`transition goto "${t.goto}" must be a later stage (forward-only)`);
+        }
+        const c = t.when;
+        if ((c.type === "input_matches" || c.type === "output_matches")) {
+          try {
+            new RegExp(c.value);
+          } catch {
+            bad(`invalid regex "${c.value}"`);
+          }
+        }
+        if (c.type === "output_contains" || c.type === "output_matches") {
+          if (isRouter) bad("cannot test output — a router makes no model call");
+          const ref = c.stage ?? stage.name;
+          const j = indexByName.get(ref);
+          if (j == null) bad(`condition references unknown stage "${ref}"`);
+          else if (j > i) bad(`condition references later stage "${ref}"`);
+        }
       }
-      seen.add(stage.name);
     }
-    if (def.output && !seen.has(def.output)) {
+    if (def.output && !nameSet.has(def.output)) {
       throw new MubValidationError(`output stage "${def.output}" is not a defined stage`, []);
     }
   } else {
@@ -86,6 +125,15 @@ export function getMubByName(name: string): ModelUseBehavior | undefined {
 export function getMubDef(mub: ModelUseBehavior): MubDef {
   return parseMub(mub.steps);
 }
+
+/** Resolve a chain stage's referenced MUB name to its resilience steps. */
+export const resolveChainStage: StageResolver = (mubName) => {
+  const m = getMubByName(mubName);
+  if (!m || !m.enabled) return { ok: false, message: `stage references unknown or disabled MUB "${mubName}"` };
+  const d = parseMub(m.steps);
+  if (isChain(d)) return { ok: false, message: `stage MUB "${mubName}" is a chain; nested chains are not allowed` };
+  return { ok: true, steps: d };
+};
 
 export function createMub(input: MubInput): ModelUseBehavior {
   const { def } = validateMub(input.steps);

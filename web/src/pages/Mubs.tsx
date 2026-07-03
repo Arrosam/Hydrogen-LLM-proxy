@@ -117,6 +117,7 @@ export function Mubs() {
         <MubEditor
           open={creating || editing !== null}
           mub={editing}
+          mubs={data.mubs}
           models={data.models}
           providers={data.providers}
           mappings={data.mappings}

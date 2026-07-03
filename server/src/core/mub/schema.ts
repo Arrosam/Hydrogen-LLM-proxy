@@ -59,11 +59,29 @@ export const ChainBlockSchema = z.object({
   parts: z.array(ChainPartSchema).default([]),
 });
 
+/** A routing condition, tested against the original input or a stage's output. */
+export const ChainConditionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("always") }),
+  z.object({ type: z.literal("input_has_image") }),
+  z.object({ type: z.literal("input_contains"), value: z.string().min(1) }),
+  z.object({ type: z.literal("input_matches"), value: z.string().min(1) }), // regex
+  z.object({ type: z.literal("output_contains"), value: z.string().min(1), stage: z.string().optional() }),
+  z.object({ type: z.literal("output_matches"), value: z.string().min(1), stage: z.string().optional() }), // regex
+]);
+
+/** A forward-only edge: when the condition holds, go to `goto` (a later stage or "end"). */
+export const ChainTransitionSchema = z.object({
+  when: ChainConditionSchema,
+  goto: z.string().min(1),
+});
+
 export const ChainStageSchema = z.object({
-  /** Unique id within the chain; later stages reference it by name. */
+  /** Unique id within the chain; referenced by name in conditions/transitions. */
   name: z.string().min(1).max(60),
-  /** How to call this stage's model — reuses the resilience step engine. */
-  steps: z.array(StepSchema).min(1, "a stage needs at least one (model, provider) step"),
+  /** Name of a saved *resilience* MUB run for this stage (its retry/fallback chain). */
+  mub: z.string().min(1).optional(),
+  /** Legacy inline resilience steps (v0.1.3). No mub/steps = a router (no model call). */
+  steps: z.array(StepSchema).min(1).optional(),
   /** Messages to send. [] = pass the original request's messages through. */
   input: z.array(ChainBlockSchema).default([]),
   /** Optional system-prompt override (text parts); omitted = inherit original. */
@@ -71,6 +89,8 @@ export const ChainStageSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+  /** Forward-only conditional edges. Absent/no-match = fall through to the next stage. */
+  transitions: z.array(ChainTransitionSchema).optional(),
 });
 
 export const ChainSchema = z.object({
@@ -93,6 +113,8 @@ export type MubStep = z.infer<typeof StepSchema>;
 export type MubSteps = z.infer<typeof MubStepsSchema>;
 export type ChainPart = z.infer<typeof ChainPartSchema>;
 export type ChainBlock = z.infer<typeof ChainBlockSchema>;
+export type ChainCondition = z.infer<typeof ChainConditionSchema>;
+export type ChainTransition = z.infer<typeof ChainTransitionSchema>;
 export type ChainStage = z.infer<typeof ChainStageSchema>;
 export type ChainDef = z.infer<typeof ChainSchema>;
 export type ResilienceDef = z.infer<typeof ResilienceSchema>;
@@ -119,8 +141,9 @@ export function parseMubSteps(raw: unknown): MubSteps {
 export function summarizeMub(def: MubDef): string {
   if (isChain(def)) {
     const names = def.stages.map((s) => s.name);
+    const branching = def.stages.some((s) => s.transitions && s.transitions.length > 0);
     const returns = def.output && def.output !== names[names.length - 1] ? ` (returns ${def.output})` : "";
-    return `chain: ${names.join(" → ")}${returns}`;
+    return `chain: ${names.join(" → ")}${branching ? " (branching)" : ""}${returns}`;
   }
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;

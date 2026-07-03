@@ -1,25 +1,26 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
-import type { Family, IRRequest, IRUsage } from "../core/ir";
+import { textOf, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
-import { runMubJson, runMubStream, type StreamSuccess } from "../core/proxy/run";
-import { runMubChain, runMubChainStream } from "../core/mub/chain";
-import { isChain, type MubDef } from "../core/mub/schema";
+import { runMubJson, runMubStream } from "../core/proxy/run";
+import { runMubChain } from "../core/mub/chain";
+import { isChain, type ChainDef, type MubSteps } from "../core/mub/schema";
 import {
   parseUpstreamStream,
   serializeClientStream,
+  streamFromIRResponse,
   tapStream,
   type StreamAccumulator,
 } from "../core/formats/stream";
-import { getMubByName, getMubDef } from "../services/mubs";
+import { getMubByName, getMubDef, resolveChainStage } from "../services/mubs";
 import { listMubs } from "../services/mubs";
 import { incrementUsage } from "../services/tokens";
 import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptFailure, AttemptRecord } from "../core/mub/engine";
+import type { AttemptRecord } from "../core/mub/engine";
 import type { ModelUseBehavior, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
@@ -122,10 +123,13 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   const started = Date.now();
 
   if (ir.stream) {
+    if (isChain(def)) return handleChainStream(reply, ingress, ir, def, { token, mub, mubName, body, started });
     return handleStream(reply, ingress, ir, def, { token, mub, mubName, body, started });
   }
 
-  const { result, path } = isChain(def) ? await runMubChain(ir, def) : await runMubJson(ir, def);
+  const { result, path } = isChain(def)
+    ? await runMubChain(ir, def, resolveChainStage)
+    : await runMubJson(ir, def);
   const latencyMs = Date.now() - started;
 
   if (!result.ok) {
@@ -158,26 +162,23 @@ interface StreamCtx {
   started: number;
 }
 
+function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply {
+  reply.header("content-type", "text/event-stream; charset=utf-8");
+  reply.header("cache-control", "no-cache, no-transform");
+  reply.header("connection", "keep-alive");
+  reply.header("x-accel-buffering", "no");
+  return reply.send(Readable.from(gen));
+}
+
+/** Streaming for a resilience MUB: relay the upstream SSE, tapping it for the log. */
 async function handleStream(
   reply: FastifyReply,
   ingress: Family,
   ir: IRRequest,
-  def: MubDef,
+  def: MubSteps,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  let result: { ok: true; value: StreamSuccess } | AttemptFailure;
-  let path: AttemptRecord[];
-  let priorUsage: IRUsage = ZERO_USAGE;
-  if (isChain(def)) {
-    const r = await runMubChainStream(ir, def);
-    result = r.result;
-    path = r.path;
-    priorUsage = r.priorUsage;
-  } else {
-    const r = await runMubStream(ir, def);
-    result = r.result;
-    path = r.path;
-  }
+  const { result, path } = await runMubStream(ir, def);
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
@@ -203,37 +204,61 @@ async function handleStream(
     } catch (e) {
       streamError = e instanceof Error ? e.message : String(e);
     } finally {
-      // For chains, add the usage of the buffered pre-output stages.
-      const streamed = acc.usage ?? ZERO_USAGE;
-      const usage: IRUsage = {
-        promptTokens: streamed.promptTokens + priorUsage.promptTokens,
-        completionTokens: streamed.completionTokens + priorUsage.completionTokens,
-        totalTokens: streamed.totalTokens + priorUsage.totalTokens,
-      };
-      // Reconstruct the (streamed) assistant response for the log.
+      const usage = acc.usage ?? ZERO_USAGE;
       const responseBody: Record<string, unknown> = {
-        streamed: true,
-        role: "assistant",
-        content: acc.text,
-        stop_reason: acc.stopReason,
-        usage,
+        streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
       };
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
       recordLog({
         token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress, streaming: true,
         httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
-        attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody,
-        error: streamError,
+        attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody, error: streamError,
       });
       incrementUsage(ctx.token.id, 1, usage.totalTokens);
     }
   }
 
-  reply.header("content-type", "text/event-stream; charset=utf-8");
-  reply.header("cache-control", "no-cache, no-transform");
-  reply.header("connection", "keep-alive");
-  reply.header("x-accel-buffering", "no");
-  return reply.send(Readable.from(streamAndLog()));
+  return sendSse(reply, streamAndLog());
+}
+
+/**
+ * Streaming for a chain: run the decision tree buffered (routing needs each
+ * stage's full output), then emit the final result as a single-shot SSE stream.
+ */
+async function handleChainStream(
+  reply: FastifyReply,
+  ingress: Family,
+  ir: IRRequest,
+  chain: ChainDef,
+  ctx: StreamCtx,
+): Promise<unknown> {
+  const { result, path } = await runMubChain(ir, chain, resolveChainStage);
+
+  if (!result.ok) {
+    const status = result.status >= 400 ? result.status : 502;
+    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
+    recordLog({
+      token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: null, streaming: true,
+      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: path.length,
+      attemptPath: path, requestBody: ctx.body, error: message,
+    });
+    incrementUsage(ctx.token.id, 1, 0);
+    return reply.code(status).send(buildErrorBody(ingress, status, message));
+  }
+
+  const respIR = result.value.ir;
+  const responseBody: Record<string, unknown> = {
+    streamed: true, role: "assistant", content: textOf(respIR.content),
+    stop_reason: respIR.stopReason, usage: respIR.usage,
+  };
+  recordLog({
+    token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: result.value.family,
+    streaming: true, httpStatus: 200, usage: respIR.usage, latencyMs: Date.now() - ctx.started,
+    attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody,
+  });
+  incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
+
+  return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.mubName }));
 }
 
 /** GET /v1/models - lists MUBs as the available models. */
