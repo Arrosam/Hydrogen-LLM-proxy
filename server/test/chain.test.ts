@@ -221,4 +221,24 @@ describe("runMubChain (decision tree)", () => {
     expect(result.ok).toBe(false);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
+
+  it("records the request tools in the per-stage payload", async () => {
+    const irWithTools: IRRequest = {
+      ...textOnly,
+      tools: [{ name: "get_weather", parameters: { type: "object" } }],
+      toolChoice: { type: "auto" },
+    };
+    const { path } = await runMubChain(irWithTools, chainOf([stage("a", "A")]), noResolver);
+    expect(path[0].request).toContain("get_weather");
+    expect(path[0].request).toContain("tool_choice");
+  });
+
+  it("never throws — a resolver error becomes a failure result (so it gets logged)", async () => {
+    const throwing: StageResolver = () => {
+      throw new Error("boom resolve");
+    };
+    const { result } = await runMubChain(textOnly, chainOf([{ name: "s", mub: "x", input: [] }]), throwing);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("chain execution error");
+  });
 });

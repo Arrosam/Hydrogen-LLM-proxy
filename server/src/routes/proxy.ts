@@ -5,7 +5,7 @@ import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
 import { runMubJson, runMubStream } from "../core/proxy/run";
 import { runMubChain } from "../core/mub/chain";
-import { isChain, type ChainDef, type MubSteps } from "../core/mub/schema";
+import { isChain, type ChainDef, type MubDef, type MubSteps } from "../core/mub/schema";
 import {
   parseUpstreamStream,
   serializeClientStream,
@@ -119,8 +119,19 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     return replyError(reply, ingress, 403, `This token is not allowed to use '${mubName}'.`);
   }
 
-  const def = getMubDef(mub);
   const started = Date.now();
+  let def: MubDef;
+  try {
+    def = getMubDef(mub);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    recordLog({
+      token, mub, mubName, ingress, egress: null, streaming: ir.stream, httpStatus: 500,
+      latencyMs: Date.now() - started, requestBody: body, error: `invalid MUB definition: ${message}`,
+    });
+    incrementUsage(token.id, 1, 0);
+    return replyError(reply, ingress, 500, `Model '${mubName}' has an invalid definition.`);
+  }
 
   if (ir.stream) {
     if (isChain(def)) return handleChainStream(reply, ingress, ir, def, { token, mub, mubName, body, started });

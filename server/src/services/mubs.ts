@@ -134,7 +134,12 @@ export function getMubDef(mub: ModelUseBehavior): MubDef {
 export const resolveChainStage: StageResolver = (mubName) => {
   const m = getMubByName(mubName);
   if (!m || !m.enabled) return { ok: false, message: `stage references unknown or disabled MUB "${mubName}"` };
-  const d = parseMub(m.steps);
+  let d;
+  try {
+    d = parseMub(m.steps);
+  } catch {
+    return { ok: false, message: `stage MUB "${mubName}" has an invalid definition` };
+  }
   if (isChain(d)) return { ok: false, message: `stage MUB "${mubName}" is a chain; nested chains are not allowed` };
   return { ok: true, steps: d };
 };

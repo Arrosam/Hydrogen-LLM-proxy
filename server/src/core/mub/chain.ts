@@ -215,6 +215,8 @@ function stageRequestPayload(stageIR: IRRequest, stage: ChainStage): string {
       mub: stage.mub,
       system: stageIR.system,
       messages: stageIR.messages,
+      tools: stageIR.tools,
+      tool_choice: stageIR.toolChoice,
       temperature: stageIR.temperature,
       max_tokens: stageIR.maxTokens,
     },
@@ -273,40 +275,47 @@ export async function runMubChain(
   let lastValue: JsonSuccess | null = null;
   let terminal = chain.stages[0]?.name ?? "";
 
-  let idx = 0;
-  while (idx >= 0 && idx < chain.stages.length) {
-    const stage = chain.stages[idx];
-    terminal = stage.name;
+  // Never throw: any unexpected error becomes a failure result so the caller
+  // always logs the request (a chain must not escape to an unlogged 500).
+  try {
+    let idx = 0;
+    while (idx >= 0 && idx < chain.stages.length) {
+      const stage = chain.stages[idx];
+      terminal = stage.name;
 
-    if (isRouter(stage)) {
-      outputs[stage.name] = "";
-      path.push({ step: 1, attempt: 1, model: "(router)", provider: "-", status: 200, kind: "ok", latencyMs: 0, stage: stage.name });
-    } else {
-      const steps = resolveStageSteps(chain, stage, resolve);
-      if (!steps.ok) return { result: { ok: false, status: 0, kind: "error", message: steps.message }, path, usage };
-      const stageIR = buildStageIR(ir, stage, outputs, false);
-      const request = stageRequestPayload(stageIR, stage);
-      const { result, path: stagePath } = await runMubJson(stageIR, steps.steps);
-      const response = result.ok ? stageResponsePayload(result.value.ir) : undefined;
-      stagePath.forEach((rec, k) =>
-        path.push({ ...rec, stage: stage.name, mub: stage.mub, ...(k === 0 ? { request, response } : {}) }),
-      );
-      if (!result.ok) return { result, path, usage };
-      outputs[stage.name] = textOf(result.value.ir.content);
-      values[stage.name] = result.value;
-      lastValue = result.value;
-      usage = addUsage(usage, result.value.ir.usage);
+      if (isRouter(stage)) {
+        outputs[stage.name] = "";
+        path.push({ step: 1, attempt: 1, model: "(router)", provider: "-", status: 200, kind: "ok", latencyMs: 0, stage: stage.name });
+      } else {
+        const steps = resolveStageSteps(chain, stage, resolve);
+        if (!steps.ok) return { result: { ok: false, status: 0, kind: "error", message: steps.message }, path, usage };
+        const stageIR = buildStageIR(ir, stage, outputs, false);
+        const request = stageRequestPayload(stageIR, stage);
+        const { result, path: stagePath } = await runMubJson(stageIR, steps.steps);
+        const response = result.ok ? stageResponsePayload(result.value.ir) : undefined;
+        stagePath.forEach((rec, k) =>
+          path.push({ ...rec, stage: stage.name, mub: stage.mub, ...(k === 0 ? { request, response } : {}) }),
+        );
+        if (!result.ok) return { result, path, usage };
+        outputs[stage.name] = textOf(result.value.ir.content);
+        values[stage.name] = result.value;
+        lastValue = result.value;
+        usage = addUsage(usage, result.value.ir.usage);
+      }
+
+      const next = nextStageIndex(stage, idx, byName, input, outputs);
+      if (next === "end") break;
+      idx = next;
     }
 
-    const next = nextStageIndex(stage, idx, byName, input, outputs);
-    if (next === "end") break;
-    idx = next;
+    const chosen = (chain.output && values[chain.output]) || values[terminal] || lastValue;
+    if (!chosen) {
+      return { result: { ok: false, status: 0, kind: "error", message: "chain produced no model output" }, path, usage };
+    }
+    const value: JsonSuccess = { ...chosen, ir: { ...chosen.ir, usage } };
+    return { result: { ok: true, value }, path, usage };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { result: { ok: false, status: 0, kind: "error", message: `chain execution error: ${message}` }, path, usage };
   }
-
-  const chosen = (chain.output && values[chain.output]) || values[terminal] || lastValue;
-  if (!chosen) {
-    return { result: { ok: false, status: 0, kind: "error", message: "chain produced no model output" }, path, usage };
-  }
-  const value: JsonSuccess = { ...chosen, ir: { ...chosen.ir, usage } };
-  return { result: { ok: true, value }, path, usage };
 }
