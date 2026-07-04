@@ -192,9 +192,11 @@ describe("runMubChain (decision tree)", () => {
     const resolver: StageResolver = (name) =>
       name === "resmub" ? { ok: true, steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p" }] } } : { ok: false, message: "unknown" };
     const chain = chainOf([{ name: "s", mub: "resmub", input: [] }]);
-    const { result } = await runMubChain(textOnly, chain, resolver);
+    const { result, path } = await runMubChain(textOnly, chain, resolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("R(hi)");
+    expect(path[0].stage).toBe("s");
+    expect(path[0].mub).toBe("resmub"); // the resilience MUB the stage ran is recorded
   });
 
   it("fails the chain when a referenced MUB can't be resolved", async () => {

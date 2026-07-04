@@ -247,7 +247,7 @@ export async function runMubChain(
       if (!steps.ok) return { result: { ok: false, status: 0, kind: "error", message: steps.message }, path, usage };
       const stageIR = buildStageIR(ir, stage, outputs, false);
       const { result, path: stagePath } = await runMubJson(stageIR, steps.steps);
-      for (const rec of stagePath) path.push({ ...rec, stage: stage.name });
+      for (const rec of stagePath) path.push({ ...rec, stage: stage.name, mub: stage.mub });
       if (!result.ok) return { result, path, usage };
       outputs[stage.name] = textOf(result.value.ir.content);
       values[stage.name] = result.value;

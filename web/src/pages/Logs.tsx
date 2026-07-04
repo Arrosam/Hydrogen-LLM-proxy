@@ -17,6 +17,7 @@ interface AttemptRecord {
   latencyMs: number;
   error?: string;
   stage?: string;
+  mub?: string;
 }
 
 interface LogDetail extends LogSummary {
@@ -210,6 +211,7 @@ export function Logs() {
                   <thead>
                     <tr>
                       {(detail.attemptPath ?? []).some((a) => a.stage) && <th>Stage</th>}
+                      {(detail.attemptPath ?? []).some((a) => a.mub) && <th>MUB</th>}
                       <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
                     </tr>
                   </thead>
@@ -218,6 +220,9 @@ export function Logs() {
                       <tr key={i}>
                         {(detail.attemptPath ?? []).some((x) => x.stage) && (
                           <td className="font-mono text-xs text-brand-400">{a.stage ?? "-"}</td>
+                        )}
+                        {(detail.attemptPath ?? []).some((x) => x.mub) && (
+                          <td className="font-mono text-xs text-ink-300">{a.mub ?? "-"}</td>
                         )}
                         <td>{a.step}</td>
                         <td>{a.attempt}</td>

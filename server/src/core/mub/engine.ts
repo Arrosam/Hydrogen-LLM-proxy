@@ -27,6 +27,8 @@ export interface AttemptRecord {
   error?: string;
   /** Chain MUBs only: the stage this attempt belongs to. */
   stage?: string;
+  /** Chain MUBs only: the resilience MUB the stage ran (omitted for inline steps / routers). */
+  mub?: string;
 }
 
 export interface RunOutput<T> {
