@@ -184,7 +184,8 @@ function conditionHolds(
   }
 }
 
-/** The next stage index to run: first matching forward transition, else fall through. */
+/** The next stage index to run: the first matching forward transition, else end
+ * the chain here (no automatic fall-through to the next stage). */
 function nextStageIndex(
   stage: ChainStage,
   idx: number,
@@ -199,7 +200,7 @@ function nextStageIndex(
       return j != null && j > idx ? j : "end"; // forward-only (validation enforces)
     }
   }
-  return idx + 1; // fall through to the next stage (caller ends if out of range)
+  return "end"; // no matching transition → stop and return this stage's output
 }
 
 // --- chain execution --------------------------------------------------------
@@ -213,10 +214,11 @@ export interface ChainRunResult {
 /**
  * Run a chain as a forward-only decision tree. Starting at the first stage, run
  * the stage's resilience MUB (buffered), then take the first transition whose
- * condition holds (a later stage or "end"); with no matching transition, fall
- * through to the next stage. Usage is summed across every stage that runs; the
- * response returned is the terminal stage's (or the `output`-named stage's),
- * carrying the summed usage.
+ * condition holds (a later stage or "end"). With no matching transition the
+ * chain STOPS at that stage and returns its output — stages never advance
+ * automatically, so continuing requires an explicit transition. Usage is summed
+ * across every stage that runs; the response returned is the terminal stage's
+ * (or the `output`-named stage's), carrying the summed usage.
  */
 export async function runMubChain(
   ir: IRRequest,

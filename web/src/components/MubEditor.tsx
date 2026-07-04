@@ -312,7 +312,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
             <p className="mt-1 text-xs text-ink-500">
               {kind === "resilience"
                 ? "Try each (model, provider) in turn until one succeeds."
-                : "A decision tree of stages — each runs a resilience MUB; transitions route by input or output."}
+                : "A decision tree of stages, each running a resilience MUB. Add a transition to continue to another stage; a stage with no matching transition ends the chain and returns its output."}
             </p>
           </div>
         )}

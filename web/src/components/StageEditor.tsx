@@ -289,7 +289,7 @@ function StageBody({
 
       <div className="mt-3">
         <div className="mb-1.5 flex items-center justify-between">
-          <label className="label mb-0">Transitions <span className="normal-case text-ink-500">(first match wins; none = fall through to the next stage)</span></label>
+          <label className="label mb-0">Transitions <span className="normal-case text-ink-500">(first match wins; no match = end here and return this stage's output)</span></label>
           <button
             className="btn-ghost btn-xs"
             onClick={() => setTransitions([...(stage.transitions ?? []), { when: { type: "always" }, goto: later[0] ?? "end" }])}

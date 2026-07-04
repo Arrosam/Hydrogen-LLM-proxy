@@ -137,13 +137,25 @@ describe("runMubChain (decision tree)", () => {
     runJsonMock.mockClear();
   });
 
-  it("runs linearly, feeds outputs forward, sums usage, labels the path", async () => {
-    const chain = chainOf([stage("draft", "D"), stage("final", "F", { input: [{ kind: "stage_output", stage: "draft", role: "user" }] })]);
+  it("runs linearly via explicit transitions, feeds outputs forward, sums usage", async () => {
+    const chain = chainOf([
+      stage("draft", "D", { transitions: [t(always, "final")] }),
+      stage("final", "F", { input: [{ kind: "stage_output", stage: "draft", role: "user" }] }),
+    ]);
     const { result, usage, path } = await runMubChain(textOnly, chain, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(D(hi))");
     expect(usage.totalTokens).toBe(4);
     expect(path.map((p) => p.stage)).toEqual(["draft", "final"]);
+  });
+
+  it("stops and returns when a stage has no matching transition (no auto-advance)", async () => {
+    const chain = chainOf([stage("a", "A"), stage("b", "B")]);
+    const { result, path } = await runMubChain(textOnly, chain, noResolver);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(textOf(result.value.ir.content)).toBe("A(hi)");
+    expect(path.map((p) => p.stage)).toEqual(["a"]); // b never runs
+    expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
   it("branches on input_has_image via a router (no model call for the router)", async () => {
@@ -164,7 +176,9 @@ describe("runMubChain (decision tree)", () => {
   it("branches on a stage's output text (decision: pass/fail)", async () => {
     const build = (decision: string) =>
       chainOf([
-        stage("decide", `OUT:{decision: ${decision}}`, { transitions: [t({ type: "output_contains", value: "{decision: pass}" }, "pass")] }),
+        stage("decide", `OUT:{decision: ${decision}}`, {
+          transitions: [t({ type: "output_contains", value: "{decision: pass}" }, "pass"), t(always, "fail")],
+        }),
         stage("fail", "FAILC", { transitions: [t(always, "end")] }),
         stage("pass", "PASSC"),
       ]);
