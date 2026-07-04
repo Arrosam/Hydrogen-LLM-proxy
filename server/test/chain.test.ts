@@ -35,6 +35,11 @@ vi.mock("../src/core/proxy/run", () => {
 
 import { runMubJson } from "../src/core/proxy/run";
 import { buildStageIR, runMubChain, type StageResolver } from "../src/core/mub/chain";
+import { setConfig } from "../src/context";
+import type { AppConfig } from "../src/config";
+
+// runMubChain serializes per-stage payloads via getConfig(); provide a config.
+setConfig({ logPayloadMaxChars: 100000 } as unknown as AppConfig);
 
 const runJsonMock = vi.mocked(runMubJson);
 const noResolver: StageResolver = () => ({ ok: false, message: "no resolver" });
@@ -147,6 +152,10 @@ describe("runMubChain (decision tree)", () => {
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(D(hi))");
     expect(usage.totalTokens).toBe(4);
     expect(path.map((p) => p.stage)).toEqual(["draft", "final"]);
+    // each stage's first record carries its request + response payloads
+    expect(path[0].request).toContain("messages");
+    expect(path[0].response).toContain("D(hi)");
+    expect(path[1].response).toContain("F(D(hi))");
   });
 
   it("stops and returns when a stage has no matching transition (no auto-advance)", async () => {

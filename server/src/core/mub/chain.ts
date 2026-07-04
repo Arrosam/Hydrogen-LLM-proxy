@@ -1,5 +1,7 @@
-import { normalizeMessages, textOf, type IRMessage, type IRRequest, type IRUsage } from "../ir";
+import { normalizeMessages, textOf, type IRMessage, type IRRequest, type IRResponse, type IRUsage } from "../ir";
 import { genId } from "../../util/ids";
+import { getConfig } from "../../context";
+import { serializeForLog } from "../../util/logPayload";
 import { runMubJson, type JsonSuccess } from "../proxy/run";
 import type { AttemptFailure, AttemptRecord } from "./engine";
 import type { ChainCondition, ChainDef, ChainStage, MubSteps } from "./schema";
@@ -203,6 +205,43 @@ function nextStageIndex(
   return "end"; // no matching transition → stop and return this stage's output
 }
 
+// --- per-stage payload capture (for the log) --------------------------------
+
+/** Serialize the request sent to a stage's model (bounded by LOG_PAYLOAD_MAX_CHARS). */
+function stageRequestPayload(stageIR: IRRequest, stage: ChainStage): string {
+  return serializeForLog(
+    {
+      stage: stage.name,
+      mub: stage.mub,
+      system: stageIR.system,
+      messages: stageIR.messages,
+      temperature: stageIR.temperature,
+      max_tokens: stageIR.maxTokens,
+    },
+    getConfig().logPayloadMaxChars,
+  );
+}
+
+/** Serialize a stage's model response (bounded by LOG_PAYLOAD_MAX_CHARS). */
+function stageResponsePayload(ir: IRResponse): string {
+  const toolCalls = ir.content
+    .filter((p) => p.type === "tool_use")
+    .map((p) => {
+      const t = p as { name: string; input: unknown };
+      return { name: t.name, args: JSON.stringify(t.input ?? {}) };
+    });
+  return serializeForLog(
+    {
+      role: "assistant",
+      content: textOf(ir.content),
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      stop_reason: ir.stopReason,
+      usage: ir.usage,
+    },
+    getConfig().logPayloadMaxChars,
+  );
+}
+
 // --- chain execution --------------------------------------------------------
 
 export interface ChainRunResult {
@@ -246,8 +285,12 @@ export async function runMubChain(
       const steps = resolveStageSteps(chain, stage, resolve);
       if (!steps.ok) return { result: { ok: false, status: 0, kind: "error", message: steps.message }, path, usage };
       const stageIR = buildStageIR(ir, stage, outputs, false);
+      const request = stageRequestPayload(stageIR, stage);
       const { result, path: stagePath } = await runMubJson(stageIR, steps.steps);
-      for (const rec of stagePath) path.push({ ...rec, stage: stage.name, mub: stage.mub });
+      const response = result.ok ? stageResponsePayload(result.value.ir) : undefined;
+      stagePath.forEach((rec, k) =>
+        path.push({ ...rec, stage: stage.name, mub: stage.mub, ...(k === 0 ? { request, response } : {}) }),
+      );
       if (!result.ok) return { result, path, usage };
       outputs[stage.name] = textOf(result.value.ir.content);
       values[stage.name] = result.value;

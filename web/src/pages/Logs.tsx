@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle } from "../components/common";
@@ -18,6 +18,8 @@ interface AttemptRecord {
   error?: string;
   stage?: string;
   mub?: string;
+  request?: string;
+  response?: string;
 }
 
 interface LogDetail extends LogSummary {
@@ -56,6 +58,15 @@ export function Logs() {
   const [detail, setDetail] = useState<LogDetail | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [payloadView, setPayloadView] = useState<PayloadView>("formatted");
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+
+  const toggleRow = (i: number) =>
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
 
   useEffect(() => {
     api.get<{ mubs: Mub[] }>("/mubs").then((r) => setMubs(r.mubs)).catch(() => {});
@@ -95,6 +106,7 @@ export function Logs() {
 
   const openDetail = async (id: number) => {
     const r = await api.get<{ log: LogDetail }>(`/logs/${id}`);
+    setExpandedRows(new Set());
     setDetail(r.log);
   };
 
@@ -205,36 +217,18 @@ export function Logs() {
             </div>
 
             <div>
-              <h4 className="label">Attempt path</h4>
-              <div className="card overflow-hidden">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      {(detail.attemptPath ?? []).some((a) => a.stage) && <th>Stage</th>}
-                      {(detail.attemptPath ?? []).some((a) => a.mub) && <th>MUB</th>}
-                      <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(detail.attemptPath ?? []).map((a, i) => (
-                      <tr key={i}>
-                        {(detail.attemptPath ?? []).some((x) => x.stage) && (
-                          <td className="font-mono text-xs text-brand-400">{a.stage ?? "-"}</td>
-                        )}
-                        {(detail.attemptPath ?? []).some((x) => x.mub) && (
-                          <td className="font-mono text-xs text-ink-300">{a.mub ?? "-"}</td>
-                        )}
-                        <td>{a.step}</td>
-                        <td>{a.attempt}</td>
-                        <td className="font-mono text-xs">{a.model}</td>
-                        <td className="font-mono text-xs">{a.provider}</td>
-                        <td>{a.kind === "ok" ? <span className="badge-green">ok</span> : <span className="badge-red">{a.status || a.kind}</span>}</td>
-                        <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <h4 className="label">
+                Attempt path
+                {(detail.attemptPath ?? []).some((a) => a.request || a.response) && (
+                  <span className="ml-2 normal-case text-ink-500">(click a stage to see its request &amp; response)</span>
+                )}
+              </h4>
+              <AttemptPathTable
+                path={detail.attemptPath ?? []}
+                view={payloadView}
+                expanded={expandedRows}
+                onToggle={toggleRow}
+              />
             </div>
 
             <div className="flex items-center justify-between">
@@ -268,6 +262,73 @@ function Meta({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg bg-ink-950/50 px-3 py-2">
       <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
       <div className="mt-0.5 text-ink-200">{value}</div>
+    </div>
+  );
+}
+
+function AttemptPathTable({
+  path,
+  view,
+  expanded,
+  onToggle,
+}: {
+  path: AttemptRecord[];
+  view: PayloadView;
+  expanded: Set<number>;
+  onToggle: (i: number) => void;
+}) {
+  const hasStage = path.some((a) => a.stage);
+  const hasMub = path.some((a) => a.mub);
+  const cols = 6 + (hasStage ? 1 : 0) + (hasMub ? 1 : 0);
+  return (
+    <div className="card overflow-hidden">
+      <table className="table">
+        <thead>
+          <tr>
+            {hasStage && <th>Stage</th>}
+            {hasMub && <th>MUB</th>}
+            <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {path.map((a, i) => {
+            const canExpand = Boolean(a.request || a.response);
+            const isOpen = expanded.has(i);
+            return (
+              <Fragment key={i}>
+                <tr
+                  className={canExpand ? "cursor-pointer hover:bg-ink-850/50" : ""}
+                  onClick={() => canExpand && onToggle(i)}
+                >
+                  {hasStage && (
+                    <td className="font-mono text-xs text-brand-400">
+                      {canExpand && <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mr-1 text-ink-500`} />}
+                      {a.stage ?? "-"}
+                    </td>
+                  )}
+                  {hasMub && <td className="font-mono text-xs text-ink-300">{a.mub ?? "-"}</td>}
+                  <td>{a.step}</td>
+                  <td>{a.attempt}</td>
+                  <td className="font-mono text-xs">{a.model}</td>
+                  <td className="font-mono text-xs">{a.provider}</td>
+                  <td>{a.kind === "ok" ? <span className="badge-green">ok</span> : <span className="badge-red">{a.status || a.kind}</span>}</td>
+                  <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
+                </tr>
+                {isOpen && canExpand && (
+                  <tr>
+                    <td colSpan={cols} className="bg-ink-950/40 p-3">
+                      <div className="space-y-3">
+                        <PayloadBlock title={`Stage "${a.stage}" request`} raw={a.request ?? null} view={view} />
+                        <PayloadBlock title={`Stage "${a.stage}" response`} raw={a.response ?? null} view={view} />
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
