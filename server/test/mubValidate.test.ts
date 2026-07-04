@@ -23,7 +23,7 @@ describe("validateMub", () => {
         { name: "b", steps: [step], input: [{ kind: "stage_output", stage: "a", role: "user" }] },
       ],
     });
-    expect(summary).toBe("chain: a → b");
+    expect(summary).toBe("agent: a → b");
   });
 
   it("rejects duplicate stage names", () => {
@@ -77,6 +77,32 @@ describe("validateMub", () => {
     ).toThrow(/not a stage/);
   });
 
+  it("accepts a transition that returns an earlier stage's output", () => {
+    const { summary } = validateMub(chainOf([
+      { name: "a", steps: [step] },
+      { name: "b", steps: [step], transitions: [{ when: { type: "always" }, goto: "end", output: "a" }] },
+    ]));
+    expect(summary).toBe("agent: a → b (branching)");
+  });
+
+  it("rejects a transition that returns a later stage", () => {
+    expect(() =>
+      validateMub(chainOf([
+        { name: "a", steps: [step], transitions: [{ when: { type: "always" }, goto: "end", output: "b" }] },
+        { name: "b", steps: [step] },
+      ])),
+    ).toThrow(/returns later stage/);
+  });
+
+  it("rejects a transition that returns a router stage", () => {
+    expect(() =>
+      validateMub(chainOf([
+        { name: "r", transitions: [{ when: { type: "always" }, goto: "a" }] },
+        { name: "a", steps: [step], transitions: [{ when: { type: "always" }, goto: "end", output: "r" }] },
+      ])),
+    ).toThrow(/router stage/);
+  });
+
   it("rejects an output condition referencing a later stage", () => {
     expect(() =>
       validateMub(chainOf([
@@ -102,6 +128,33 @@ describe("validateMub", () => {
     expect(() =>
       validateMub(chainOf([{ name: "a", steps: [step], input: [{ kind: "tool_turn", name: "t", input: "{not json" }] }])),
     ).toThrow(/invalid JSON/);
+  });
+
+  it("accepts a chain with an OCR pre-pass and notes it in the summary", () => {
+    const { summary } = validateMub({
+      kind: "chain",
+      timeoutMs: 60_000,
+      stages: [{ name: "a", steps: [step] }],
+      ocr: { steps: [step] },
+    });
+    expect(summary).toBe("agent: OCR → a");
+  });
+
+  it("rejects an OCR pre-pass with no model", () => {
+    expect(() =>
+      validateMub({ kind: "chain", timeoutMs: 60_000, stages: [{ name: "a", steps: [step] }], ocr: {} }),
+    ).toThrow(/OCR.*no model/);
+  });
+
+  it("rejects an OCR pre-pass with an unmapped (model, provider) pair", () => {
+    vi.mocked(mappingExists).mockReturnValue(false);
+    try {
+      validateMub({ kind: "chain", timeoutMs: 60_000, stages: [{ name: "a", steps: [step] }], ocr: { steps: [step] } });
+      throw new Error("expected validateMub to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(MubValidationError);
+      expect((e as MubValidationError).invalidPairs).toContain("m@p");
+    }
   });
 
   it("still validates and summarizes legacy resilience MUBs", () => {

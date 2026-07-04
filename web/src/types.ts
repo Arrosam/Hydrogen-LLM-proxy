@@ -81,6 +81,7 @@ export type ChainCondition =
 export interface ChainTransition {
   when: ChainCondition;
   goto: string; // a later stage's name, or "end"
+  output?: string; // when goto="end": which stage's output to return (this/earlier stage)
 }
 
 export interface ChainStage {
@@ -89,10 +90,20 @@ export interface ChainStage {
   steps?: MubStep[]; // legacy inline steps
   input: ChainContextBlock[];
   system?: string;
+  tools?: "inherit" | "none"; // "none" keeps the tool list but forces tool_choice "none" (not callable)
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
   transitions?: ChainTransition[];
+}
+
+export interface ChainOcr {
+  mub?: string; // referenced resilience MUB running the OCR/multimodal model
+  steps?: MubStep[]; // legacy inline steps
+  prompt?: string; // OCR system prompt; empty = built-in default
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
 }
 
 export interface ChainMub {
@@ -100,6 +111,7 @@ export interface ChainMub {
   timeoutMs: number;
   stages: ChainStage[];
   output?: string;
+  ocr?: ChainOcr; // optional image→text pre-pass run before the first stage
 }
 
 /** A MUB definition is either the resilience workflow or a chain. */

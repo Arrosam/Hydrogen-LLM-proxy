@@ -135,6 +135,27 @@ describe("buildStageIR (context blocks)", () => {
     const out = buildStageIR(textOnly, stage("s", "M"), {}, false);
     expect(textOf(out.messages[0].content)).toBe("hi");
   });
+
+  it("inherits tools by default; tools:'none' keeps them listed but forces tool_choice none", () => {
+    const irWithTools: IRRequest = {
+      ...textOnly,
+      tools: [{ name: "get_weather", parameters: { type: "object" } }],
+      toolChoice: { type: "auto" },
+    };
+    const inherit = buildStageIR(irWithTools, stage("s", "M"), {}, false);
+    expect(inherit.tools).toHaveLength(1);
+    expect(inherit.toolChoice).toEqual({ type: "auto" });
+
+    const noCall = buildStageIR(irWithTools, stage("s", "M", { tools: "none" }), {}, false);
+    expect(noCall.tools).toHaveLength(1); // still listed, so the stage can judge tool use
+    expect(noCall.toolChoice).toEqual({ type: "none" }); // but the model can't call them
+  });
+
+  it("tools:'none' with no tools in the request sets no tool_choice", () => {
+    const out = buildStageIR(textOnly, stage("s", "M", { tools: "none" }), {}, false);
+    expect(out.tools).toBeUndefined();
+    expect(out.toolChoice).toBeUndefined();
+  });
 });
 
 describe("runMubChain (decision tree)", () => {
@@ -199,7 +220,7 @@ describe("runMubChain (decision tree)", () => {
 
   it("resolves a stage's referenced resilience MUB via the resolver", async () => {
     const resolver: StageResolver = (name) =>
-      name === "resmub" ? { ok: true, steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p" }] } } : { ok: false, message: "unknown" };
+      name === "resmub" ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p" }] } } : { ok: false, message: "unknown" };
     const chain = chainOf([{ name: "s", mub: "resmub", input: [] }]);
     const { result, path } = await runMubChain(textOnly, chain, resolver);
     expect(result.ok).toBe(true);
@@ -240,5 +261,158 @@ describe("runMubChain (decision tree)", () => {
     const { result } = await runMubChain(textOnly, chainOf([{ name: "s", mub: "x", input: [] }]), throwing);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("chain execution error");
+  });
+});
+
+describe("runMubChain (nesting & return output)", () => {
+  beforeEach(() => {
+    runJsonMock.mockClear();
+  });
+
+  it("runs a nested Micro Agent stage (a chain referencing another chain)", async () => {
+    const subChain = chainOf([stage("inner", "SUB")]);
+    const resolver: StageResolver = (name) =>
+      name === "agent" ? { ok: true, kind: "chain", chain: subChain } : { ok: false, message: "unknown" };
+    const parent = chainOf([{ name: "outer", mub: "agent", input: [{ kind: "last_user" }] }]);
+    const { result, path } = await runMubChain(textOnly, parent, resolver);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(textOf(result.value.ir.content)).toBe("SUB(hi)");
+    // The sub-agent's stage is nested under the outer stage's name in the path.
+    expect(path.some((r) => r.stage === "outer › inner")).toBe(true);
+  });
+
+  it("sums usage across the outer and nested agents", async () => {
+    const subChain = chainOf([stage("inner", "SUB")]);
+    const resolver: StageResolver = (name) =>
+      name === "agent" ? { ok: true, kind: "chain", chain: subChain } : { ok: false, message: "unknown" };
+    const parent = chainOf([
+      stage("pre", "P", { transitions: [t(always, "outer")] }),
+      { name: "outer", mub: "agent", input: [{ kind: "last_user" }] },
+    ]);
+    const { result } = await runMubChain(textOnly, parent, resolver);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.ir.usage.totalTokens).toBe(4); // pre (2) + inner (2)
+  });
+
+  it("fails on a Micro Agent cycle (self-reference)", async () => {
+    const selfChain = chainOf([{ name: "s", mub: "A", input: [] }]);
+    const resolver: StageResolver = (name) =>
+      name === "A" ? { ok: true, kind: "chain", chain: selfChain } : { ok: false, message: "unknown" };
+    const { result } = await runMubChain(textOnly, selfChain, resolver, ["A"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("cycle");
+    expect(runJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("a transition to end can return an earlier stage's output", async () => {
+    const chain = chainOf([
+      stage("first", "F", { transitions: [t(always, "second")] }),
+      stage("second", "S", {
+        input: [{ kind: "stage_output", stage: "first", role: "user" }],
+        transitions: [{ when: always, goto: "end", output: "first" }],
+      }),
+    ]);
+    const { result, path } = await runMubChain(textOnly, chain, noResolver);
+    expect(result.ok).toBe(true);
+    expect(path.map((p) => p.stage)).toEqual(["first", "second"]); // both ran
+    if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(hi)"); // but first's output is returned
+  });
+});
+
+describe("runMubChain (OCR pre-pass)", () => {
+  beforeEach(() => {
+    runJsonMock.mockClear();
+  });
+
+  const ocrChain = (ocrModel: string, extra: Partial<ChainStage> = {}): ChainDef => ({
+    kind: "chain",
+    timeoutMs: 60_000,
+    stages: [stage("s", "M", { input: [{ kind: "original_conversation" }], ...extra })],
+    ocr: { steps: [{ model: ocrModel, provider: "p" }] },
+  });
+
+  it("transcribes images to text before the stages run", async () => {
+    const chain = ocrChain('OUT:[{"index":1,"image":"A red cat"}]');
+    const { result, path } = await runMubChain(withImage, chain, noResolver);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(textOf(result.value.ir.content)).toContain("A red cat");
+
+    // The OCR call (first) received the image plus an "Image 1:" index marker.
+    const ocrIR = runJsonMock.mock.calls[0][0] as IRRequest;
+    expect(ocrIR.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(true);
+    expect(textOf(ocrIR.messages[0].content)).toContain("Image 1:");
+
+    // The stage call (second) saw NO images — they were replaced with text.
+    const stageIR = runJsonMock.mock.calls[1][0] as IRRequest;
+    expect(stageIR.messages.every((m) => m.content.every((p: IRContentPart) => p.type !== "image"))).toBe(true);
+    expect(textOf(stageIR.messages[0].content)).toContain("A red cat");
+
+    // The OCR pass is recorded in the attempt path (so its resilience MUB is logged).
+    expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
+  });
+
+  it("skips the OCR pre-pass when the request has no images", async () => {
+    const { result, path } = await runMubChain(textOnly, ocrChain("OCR"), noResolver);
+    expect(result.ok).toBe(true);
+    expect(path.some((r) => r.stage === "(ocr)")).toBe(false);
+    expect(runJsonMock).toHaveBeenCalledTimes(1); // the stage only — no OCR call
+  });
+
+  it("aborts the chain (logged failure) when the OCR pass fails", async () => {
+    const { result, path } = await runMubChain(withImage, ocrChain("BOOM"), noResolver);
+    expect(result.ok).toBe(false);
+    expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
+    expect(runJsonMock).toHaveBeenCalledTimes(1); // never reaches the stage
+  });
+
+  it("places each transcription by its returned index, not array order", async () => {
+    const twoImages: IRRequest = {
+      requestedModel: "m",
+      stream: false,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image", source: { kind: "url", url: "http://a" } },
+            { type: "image", source: { kind: "url", url: "http://b" } },
+          ],
+        },
+      ],
+    };
+    const chain = ocrChain('OUT:[{"index":2,"image":"SECOND"},{"index":1,"image":"FIRST"}]');
+    const { result } = await runMubChain(twoImages, chain, noResolver);
+    expect(result.ok).toBe(true);
+    const stageIR = runJsonMock.mock.calls[1][0] as IRRequest;
+    const text = textOf(stageIR.messages[0].content);
+    expect(text).toContain("FIRST");
+    expect(text.indexOf("SECOND")).toBeGreaterThan(text.indexOf("FIRST"));
+  });
+
+  it("uses a referenced resilience MUB for the OCR model and records it", async () => {
+    const resolver: StageResolver = (name) =>
+      name === "vision" ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: 'OUT:[{"index":1,"image":"TXT"}]', provider: "p" }] } } : { ok: false, message: "unknown" };
+    const chain: ChainDef = {
+      kind: "chain",
+      timeoutMs: 60_000,
+      stages: [stage("s", "M", { input: [{ kind: "original_conversation" }] })],
+      ocr: { mub: "vision" },
+    };
+    const { result, path } = await runMubChain(withImage, chain, resolver);
+    expect(result.ok).toBe(true);
+    const ocrRec = path.find((r) => r.stage === "(ocr)");
+    expect(ocrRec?.mub).toBe("vision");
+  });
+
+  it("fails the chain when the OCR MUB can't be resolved", async () => {
+    const chain: ChainDef = {
+      kind: "chain",
+      timeoutMs: 60_000,
+      stages: [stage("s", "M")],
+      ocr: { mub: "missing" },
+    };
+    const { result } = await runMubChain(withImage, chain, () => ({ ok: false, message: "unknown MUB" }));
+    expect(result.ok).toBe(false);
+    expect(runJsonMock).not.toHaveBeenCalled();
   });
 });

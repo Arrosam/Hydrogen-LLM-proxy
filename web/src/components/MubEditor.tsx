@@ -3,10 +3,11 @@ import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
-import { StageEditor } from "./StageEditor";
+import { OcrEditor, StageEditor } from "./StageEditor";
 import type {
   AdvanceTrigger,
   ChainMub,
+  ChainOcr,
   ChainStage,
   Mapping,
   Model,
@@ -24,10 +25,11 @@ const CODE_PRESETS: Trigger[] = [429, 500, 502, 503, 529];
 interface Props {
   open: boolean;
   mub: Mub | null; // null = new
-  mubs: Mub[]; // all MUBs (chain stages reference the resilience ones)
+  mubs: Mub[]; // all MUBs (stages reference resilience MUBs and other Micro Agents)
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
+  defaultKind?: "resilience" | "chain"; // kind for a NEW mub (fixed by the page)
   onClose: () => void;
   onSaved: () => void;
 }
@@ -41,7 +43,7 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
 }
 
-export function MubEditor({ open, mub, mubs, models, providers, mappings, onClose, onSaved }: Props) {
+export function MubEditor({ open, mub, mubs, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -51,6 +53,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
   const [kind, setKind] = useState<"resilience" | "chain">("resilience");
   const [stages, setStages] = useState<ChainStage[]>([]);
   const [output, setOutput] = useState("");
+  const [ocr, setOcr] = useState<ChainOcr | undefined>(undefined);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -83,12 +86,14 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
         setKind("chain");
         setStages(mub.steps.stages ?? []);
         setOutput(mub.steps.output ?? "");
+        setOcr(mub.steps.ocr);
         setSteps([]);
       } else {
         setKind("resilience");
         setSteps((mub.steps as MubSteps)?.steps ?? []);
         setStages([]);
         setOutput("");
+        setOcr(undefined);
       }
     } else {
       const firstModel = models[0]?.name ?? "";
@@ -97,10 +102,11 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
       setDescription("");
       setEnabled(true);
       setTimeoutMs(60000);
-      setKind("resilience");
-      setSteps(firstModel && firstProvider ? [blankStep(firstModel, firstProvider)] : []);
+      setKind(defaultKind);
+      setSteps(defaultKind === "resilience" && firstModel && firstProvider ? [blankStep(firstModel, firstProvider)] : []);
       setStages([]);
       setOutput("");
+      setOcr(undefined);
     }
     setRaw(false);
     setSummary("");
@@ -109,7 +115,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
 
   const buildDef = (): MubDef =>
     kind === "chain"
-      ? ({ kind: "chain", timeoutMs, stages, ...(output ? { output } : {}) } as ChainMub)
+      ? ({ kind: "chain", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as ChainMub)
       : ({ timeoutMs, steps } as MubSteps);
 
   const patchStep = (i: number, patch: Partial<MubStep>) =>
@@ -158,6 +164,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
         setKind("chain");
         setStages(parsed.stages ?? []);
         setOutput(parsed.output ?? "");
+        setOcr(parsed.ocr);
       } else {
         setKind("resilience");
         setSteps((parsed as MubSteps).steps ?? []);
@@ -249,8 +256,8 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
     <Modal
       open={open}
       wide
-      title={mub ? `Edit "${mub.name}"` : "New Model Use Behavior"}
-      icon="bi-diagram-3"
+      title={mub ? `Edit "${mub.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Use Behavior"}
+      icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
       onClose={onClose}
       footer={
         <>
@@ -293,28 +300,11 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
         <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
 
         {!raw && (
-          <div>
-            <label className="label">Type</label>
-            <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
-              {(["resilience", "chain"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setKind(k)}
-                  className={`rounded-md px-3 py-1 font-medium transition-colors ${
-                    kind === k ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
-                  }`}
-                >
-                  {k === "resilience" ? "Resilience (fallback)" : "Chain (compose)"}
-                </button>
-              ))}
-            </div>
-            <p className="mt-1 text-xs text-ink-500">
-              {kind === "resilience"
-                ? "Try each (model, provider) in turn until one succeeds."
-                : "A decision tree of stages, each running a resilience MUB. Add a transition to continue to another stage; a stage with no matching transition ends the chain and returns its output."}
-            </p>
-          </div>
+          <p className="text-xs text-ink-500">
+            {kind === "resilience"
+              ? "Resilience MUB: try each (model, provider) in turn until one succeeds."
+              : "Micro Agent: a decision tree of stages, each running a resilience MUB or another Micro Agent. Add a transition to continue to another stage; a stage with no matching transition ends and returns its output."}
+          </p>
         )}
 
         {summary && (
@@ -330,15 +320,18 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, onClos
             <textarea className="input min-h-[320px] font-mono text-xs" value={rawText} onChange={(e) => setRawText(e.target.value)} />
           </div>
         ) : kind === "chain" ? (
-          <StageEditor
-            stages={stages}
-            output={output}
-            onChange={(s, o) => {
-              setStages(s);
-              setOutput(o);
-            }}
-            mubs={mubs.filter((m) => !isChainDef(m.steps) && m.id !== mub?.id)}
-          />
+          <div className="space-y-4">
+            <OcrEditor ocr={ocr} onChange={setOcr} mubs={mubs.filter((m) => m.id !== mub?.id)} />
+            <StageEditor
+              stages={stages}
+              output={output}
+              onChange={(s, o) => {
+                setStages(s);
+                setOutput(o);
+              }}
+              mubs={mubs.filter((m) => m.id !== mub?.id)}
+            />
+          </div>
         ) : (
           <div>
             <div className="mb-2 flex items-center justify-between">

@@ -139,7 +139,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   }
 
   const { result, path } = isChain(def)
-    ? await runMubChain(ir, def, resolveChainStage)
+    ? await runMubChain(ir, def, resolveChainStage, [mubName])
     : await runMubJson(ir, def);
   const latencyMs = Date.now() - started;
 
@@ -243,7 +243,7 @@ async function handleChainStream(
   chain: ChainDef,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path } = await runMubChain(ir, chain, resolveChainStage);
+  const { result, path } = await runMubChain(ir, chain, resolveChainStage, [ctx.mubName]);
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;

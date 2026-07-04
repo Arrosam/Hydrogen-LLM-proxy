@@ -15,7 +15,28 @@ interface Data {
   mappings: Mapping[];
 }
 
-export function Mubs() {
+type Kind = "resilience" | "chain";
+
+const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLabel: string; emptyTitle: string; emptyHint: string }> = {
+  resilience: {
+    title: "Model Use Behaviors",
+    subtitle: "Client endpoints that try a chain of (model, provider) attempts until one succeeds.",
+    icon: "bi-diagram-3",
+    newLabel: "New MUB",
+    emptyTitle: "No Model Use Behaviors yet",
+    emptyHint: "Create a MUB to expose a resilient endpoint (e.g. sonnet-any: sonnet then fall back to gpt).",
+  },
+  chain: {
+    title: "Micro Agents",
+    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your MUBs.",
+    icon: "bi-robot",
+    newLabel: "New Micro Agent",
+    emptyTitle: "No Micro Agents yet",
+    emptyHint: "Build a Micro Agent: stages that each run a resilience MUB (or another Micro Agent), routed by conditions.",
+  },
+};
+
+export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
   const { data, loading, error, reload } = useAsync<Data>(async () => {
     const [mubs, models, providers, mappings] = await Promise.all([
       api.get<{ mubs: Mub[] }>("/mubs"),
@@ -30,13 +51,20 @@ export function Mubs() {
   const [editing, setEditing] = useState<Mub | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const canCreate = (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
+  const copy = COPY[kind];
+  const isKind = (m: Mub) => (kind === "chain" ? isChainDef(m.steps) : !isChainDef(m.steps));
+  const visible = data?.mubs.filter(isKind) ?? [];
+  // A Micro Agent needs at least one resilience MUB to run; a MUB needs a mapping.
+  const canCreate =
+    kind === "chain"
+      ? (data?.mubs.some((m) => !isChainDef(m.steps)) ?? false)
+      : (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
 
   const remove = async (m: Mub) => {
-    if (!(await confirm("Delete MUB", `Delete "${m.name}"? Clients using this endpoint will start receiving 404s.`))) return;
+    if (!(await confirm(`Delete ${copy.newLabel.replace("New ", "")}`, `Delete "${m.name}"? Clients using this endpoint will start receiving 404s.`))) return;
     try {
       await api.del(`/mubs/${m.id}`);
-      toast.success("MUB deleted");
+      toast.success("Deleted");
       reload();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : "Delete failed");
@@ -45,7 +73,11 @@ export function Mubs() {
 
   const startNew = () => {
     if (!canCreate) {
-      toast.error("Create at least one model and provider mapping first");
+      toast.error(
+        kind === "chain"
+          ? "Create at least one resilience MUB first — Micro Agent stages run them."
+          : "Create at least one model and provider mapping first",
+      );
       return;
     }
     setCreating(true);
@@ -54,35 +86,35 @@ export function Mubs() {
   return (
     <div>
       <PageHeader
-        title="Model Use Behaviors"
-        subtitle="The only endpoints exposed to clients. Each is a retry/fallback workflow over your catalog."
-        icon="bi-diagram-3"
+        title={copy.title}
+        subtitle={copy.subtitle}
+        icon={copy.icon}
         action={
           <button className="btn-primary" onClick={startNew}>
             <i className="bi bi-plus-lg" />
-            New MUB
+            {copy.newLabel}
           </button>
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
 
-      {data && data.mubs.length === 0 && (
+      {data && visible.length === 0 && (
         <EmptyState
-          icon="bi-diagram-3"
-          title="No Model Use Behaviors yet"
-          hint={canCreate ? "Create a MUB to expose a resilient endpoint (e.g. sonnet-any: sonnet then fall back to gpt)." : "First add a provider, a model, and map them. Then build a MUB here."}
-          action={canCreate ? <button className="btn-primary" onClick={startNew}><i className="bi bi-plus-lg" />New MUB</button> : undefined}
+          icon={copy.icon}
+          title={copy.emptyTitle}
+          hint={canCreate ? copy.emptyHint : kind === "chain" ? "First create a resilience MUB. Then compose Micro Agents here." : "First add a provider, a model, and map them. Then build a MUB here."}
+          action={canCreate ? <button className="btn-primary" onClick={startNew}><i className="bi bi-plus-lg" />{copy.newLabel}</button> : undefined}
         />
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        {data?.mubs.map((m) => (
+        {visible.map((m) => (
           <div key={m.id} className="card card-pad">
             <div className="flex items-start justify-between">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <i className="bi bi-diagram-3 text-brand-400" />
+                  <i className={`bi ${copy.icon} text-brand-400`} />
                   <span className="truncate font-mono text-sm font-semibold text-ink-100">{m.name}</span>
                   {m.enabled ? <span className="badge-green">enabled</span> : <span className="badge-red">disabled</span>}
                 </div>
@@ -121,6 +153,7 @@ export function Mubs() {
           models={data.models}
           providers={data.providers}
           mappings={data.mappings}
+          defaultKind={kind}
           onClose={() => {
             setCreating(false);
             setEditing(null);

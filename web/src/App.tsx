@@ -32,7 +32,8 @@ export default function App() {
         <Route index element={<Overview />} />
         <Route path="providers" element={<Providers />} />
         <Route path="models" element={<Models />} />
-        <Route path="mubs" element={<Mubs />} />
+        <Route path="mubs" element={<Mubs kind="resilience" />} />
+        <Route path="micro-agents" element={<Mubs kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
         <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />

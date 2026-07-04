@@ -59,24 +59,35 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
         }
       }
 
-      // Execution unit: a referenced resilience MUB, inline steps, or a router (neither).
+      // Execution unit: a referenced MUB (resilience or a nested Micro Agent),
+      // inline steps, or a router (neither). Cycles among Micro Agents are caught
+      // at run time by the chain engine.
       const isRouter = !stage.mub && (!stage.steps || stage.steps.length === 0);
       if (stage.mub) {
         const m = getMubByName(stage.mub);
         if (!m) bad(`references unknown MUB "${stage.mub}"`);
-        else if (isChain(parseMub(m.steps))) bad(`references chain MUB "${stage.mub}" (stages must use resilience MUBs)`);
       } else if (stage.steps && stage.steps.length) {
         for (const s of stage.steps) {
           if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
         }
       }
 
-      // Transitions: forward-only goto; condition sanity.
+      // Transitions: forward-only goto; a return "output" must name a stage that
+      // has already run and produces a value; condition sanity.
       for (const t of stage.transitions ?? []) {
         if (t.goto !== "end") {
           const j = indexByName.get(t.goto);
           if (j == null) bad(`transition goto "${t.goto}" is not a stage`);
           else if (j <= i) bad(`transition goto "${t.goto}" must be a later stage (forward-only)`);
+        } else if (t.output) {
+          const j = indexByName.get(t.output);
+          if (j == null) bad(`transition returns unknown stage "${t.output}"`);
+          else if (j > i) bad(`transition returns later stage "${t.output}" (must be this or an earlier stage)`);
+          else {
+            const target = def.stages[j];
+            const targetIsRouter = !target.mub && (!target.steps || target.steps.length === 0);
+            if (targetIsRouter) bad(`transition returns router stage "${t.output}", which produces no output`);
+          }
         }
         const c = t.when;
         if ((c.type === "input_matches" || c.type === "output_matches")) {
@@ -97,6 +108,24 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
     }
     if (def.output && !nameSet.has(def.output)) {
       throw new MubValidationError(`output stage "${def.output}" is not a defined stage`, []);
+    }
+
+    // OCR pre-pass: must call a model (a resilience MUB or inline steps), never a router.
+    if (def.ocr) {
+      const o = def.ocr;
+      if (o.mub) {
+        const m = getMubByName(o.mub);
+        if (!m) throw new MubValidationError(`image translation (OCR) references unknown MUB "${o.mub}"`, []);
+        if (isChain(parseMub(m.steps))) {
+          throw new MubValidationError(`image translation (OCR) references chain MUB "${o.mub}" (must be a resilience MUB)`, []);
+        }
+      } else if (o.steps && o.steps.length) {
+        for (const s of o.steps) {
+          if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
+        }
+      } else {
+        throw new MubValidationError("image translation (OCR) is enabled but has no model (pick a resilience MUB)", []);
+      }
     }
   } else {
     for (const step of def.steps) {
@@ -130,18 +159,19 @@ export function getMubDef(mub: ModelUseBehavior): MubDef {
   return parseMub(mub.steps);
 }
 
-/** Resolve a chain stage's referenced MUB name to its resilience steps. */
+/** Resolve a MUB name (stage or OCR ref) to its definition: a resilience MUB or
+ * a nested Micro Agent (chain). Cycle/depth guards live in the chain engine. */
 export const resolveChainStage: StageResolver = (mubName) => {
   const m = getMubByName(mubName);
-  if (!m || !m.enabled) return { ok: false, message: `stage references unknown or disabled MUB "${mubName}"` };
+  if (!m || !m.enabled) return { ok: false, message: `references unknown or disabled MUB "${mubName}"` };
   let d;
   try {
     d = parseMub(m.steps);
   } catch {
-    return { ok: false, message: `stage MUB "${mubName}" has an invalid definition` };
+    return { ok: false, message: `MUB "${mubName}" has an invalid definition` };
   }
-  if (isChain(d)) return { ok: false, message: `stage MUB "${mubName}" is a chain; nested chains are not allowed` };
-  return { ok: true, steps: d };
+  if (isChain(d)) return { ok: true, kind: "chain", chain: d };
+  return { ok: true, kind: "resilience", steps: d };
 };
 
 export function createMub(input: MubInput): ModelUseBehavior {

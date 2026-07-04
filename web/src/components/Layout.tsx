@@ -16,6 +16,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: "bi-speedometer2", end: true },
   { to: "/mubs", label: "Model Use Behaviors", icon: "bi-diagram-3" },
+  { to: "/micro-agents", label: "Micro Agents", icon: "bi-robot" },
   { to: "/models", label: "Models", icon: "bi-box" },
   { to: "/providers", label: "Providers", icon: "bi-hdd-network" },
   { to: "/tokens", label: "Tokens", icon: "bi-key" },

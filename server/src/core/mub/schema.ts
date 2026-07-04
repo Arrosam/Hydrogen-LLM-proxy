@@ -89,6 +89,9 @@ export const ChainConditionSchema = z.discriminatedUnion("type", [
 export const ChainTransitionSchema = z.object({
   when: ChainConditionSchema,
   goto: z.string().min(1),
+  /** When goto="end": which stage's output to return (this or an earlier stage).
+   * Omitted = the stage that ends the chain. */
+  output: z.string().optional(),
 });
 
 export const ChainStageSchema = z.object({
@@ -102,11 +105,38 @@ export const ChainStageSchema = z.object({
   input: z.array(ChainContextBlockSchema).default([]),
   /** Optional system-prompt override; omitted = inherit the original system prompt. */
   system: z.string().optional(),
+  /**
+   * Whether the stage's model may call the original request's tools. "none"
+   * keeps the tool list visible (so an evaluate/compose stage can still judge or
+   * reference tool use) but forces tool_choice "none", so the model returns text
+   * or JSON instead of a tool call. Omitted/"inherit" passes the tools and the
+   * original tool_choice through unchanged (the prior behaviour).
+   */
+  tools: z.enum(["inherit", "none"]).optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
   /** Forward-only conditional edges. Absent/no-match = fall through to the next stage. */
   transitions: z.array(ChainTransitionSchema).optional(),
+});
+
+/**
+ * Optional image-translation (OCR) pre-pass. When present, every image in the
+ * incoming request is sent — before any stage runs — to a multimodal/OCR model
+ * that transcribes it to text; each image is then replaced in the conversation
+ * by that text, so text-only stage models can process the request. Runs a
+ * resilience MUB (by name) or inline steps, never a router.
+ */
+export const ChainOcrSchema = z.object({
+  /** Name of a saved *resilience* MUB running the OCR/multimodal model. */
+  mub: z.string().min(1).optional(),
+  /** Legacy inline resilience steps (alternative to `mub`). */
+  steps: z.array(StepSchema).min(1).optional(),
+  /** System prompt for the OCR model; omitted = the built-in default prompt. */
+  prompt: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
 });
 
 export const ChainSchema = z.object({
@@ -115,6 +145,8 @@ export const ChainSchema = z.object({
   stages: z.array(ChainStageSchema).min(1, "a chain needs at least one stage"),
   /** Name of the stage whose output is returned; omitted = the last stage. */
   output: z.string().optional(),
+  /** Optional image→text OCR pre-pass run before the first stage. */
+  ocr: ChainOcrSchema.optional(),
 });
 
 /** The existing resilience workflow, now with an optional explicit discriminant. */
@@ -131,6 +163,7 @@ export type ChainContextBlock = z.infer<typeof ChainContextBlockSchema>;
 export type ChainCondition = z.infer<typeof ChainConditionSchema>;
 export type ChainTransition = z.infer<typeof ChainTransitionSchema>;
 export type ChainStage = z.infer<typeof ChainStageSchema>;
+export type ChainOcr = z.infer<typeof ChainOcrSchema>;
 export type ChainDef = z.infer<typeof ChainSchema>;
 export type ResilienceDef = z.infer<typeof ResilienceSchema>;
 export type MubDef = ChainDef | ResilienceDef;
@@ -158,7 +191,8 @@ export function summarizeMub(def: MubDef): string {
     const names = def.stages.map((s) => s.name);
     const branching = def.stages.some((s) => s.transitions && s.transitions.length > 0);
     const returns = def.output && def.output !== names[names.length - 1] ? ` (returns ${def.output})` : "";
-    return `chain: ${names.join(" → ")}${branching ? " (branching)" : ""}${returns}`;
+    const ocr = def.ocr ? "OCR → " : "";
+    return `agent: ${ocr}${names.join(" → ")}${branching ? " (branching)" : ""}${returns}`;
   }
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;
