@@ -136,9 +136,10 @@ describe("buildStageIR (context blocks)", () => {
     expect(textOf(out.messages[0].content)).toBe("hi");
   });
 
-  it("inherits tools by default; tools:'none' keeps them listed but forces tool_choice none", () => {
+  it("inherits tools by default; tools:'none' lists them in the prompt instead of registering them", () => {
     const irWithTools: IRRequest = {
       ...textOnly,
+      system: "Be helpful.",
       tools: [{ name: "get_weather", parameters: { type: "object" } }],
       toolChoice: { type: "auto" },
     };
@@ -147,14 +148,17 @@ describe("buildStageIR (context blocks)", () => {
     expect(inherit.toolChoice).toEqual({ type: "auto" });
 
     const noCall = buildStageIR(irWithTools, stage("s", "M", { tools: "none" }), {}, false);
-    expect(noCall.tools).toHaveLength(1); // still listed, so the stage can judge tool use
-    expect(noCall.toolChoice).toEqual({ type: "none" }); // but the model can't call them
+    expect(noCall.tools).toBeUndefined(); // not registered → uncallable, no tool_choice to be rejected
+    expect(noCall.toolChoice).toBeUndefined();
+    expect(noCall.system).toContain("Be helpful."); // original system kept
+    expect(noCall.system).toContain("get_weather"); // and the tool is now visible as reference text
   });
 
-  it("tools:'none' with no tools in the request sets no tool_choice", () => {
-    const out = buildStageIR(textOnly, stage("s", "M", { tools: "none" }), {}, false);
+  it("tools:'none' with no tools in the request leaves the prompt untouched", () => {
+    const out = buildStageIR({ ...textOnly, system: "S" }, stage("s", "M", { tools: "none" }), {}, false);
     expect(out.tools).toBeUndefined();
     expect(out.toolChoice).toBeUndefined();
+    expect(out.system).toBe("S"); // nothing appended when there are no tools
   });
 });
 

@@ -236,7 +236,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
       const payload = { name, description: description || null, steps: s, enabled };
       if (mub) await api.patch(`/mubs/${mub.id}`, payload);
       else await api.post("/mubs", payload);
-      toast.success(mub ? "MUB updated" : "MUB created");
+      toast.success(`${kind === "chain" ? "Micro Agent" : "Model Service"} ${mub ? "updated" : "created"}`);
       onSaved();
       onClose();
     } catch (e) {
@@ -256,7 +256,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     <Modal
       open={open}
       wide
-      title={mub ? `Edit "${mub.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Use Behavior"}
+      title={mub ? `Edit "${mub.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Service"}
       icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
       onClose={onClose}
       footer={
@@ -302,8 +302,8 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
         {!raw && (
           <p className="text-xs text-ink-500">
             {kind === "resilience"
-              ? "Resilience MUB: try each (model, provider) in turn until one succeeds."
-              : "Micro Agent: a decision tree of stages, each running a resilience MUB or another Micro Agent. Add a transition to continue to another stage; a stage with no matching transition ends and returns its output."}
+              ? "Model Service: try each (model, provider) in turn until one succeeds."
+              : "Micro Agent: a decision tree of stages, each running a Model Service or another Micro Agent. Add a transition to continue to another stage; a stage with no matching transition ends and returns its output."}
           </p>
         )}
 

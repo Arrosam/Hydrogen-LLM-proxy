@@ -19,20 +19,20 @@ type Kind = "resilience" | "chain";
 
 const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLabel: string; emptyTitle: string; emptyHint: string }> = {
   resilience: {
-    title: "Model Use Behaviors",
-    subtitle: "Client endpoints that try a chain of (model, provider) attempts until one succeeds.",
+    title: "Model Services",
+    subtitle: "How this proxy serves a model to clients: try a chain of (model, provider) attempts until one succeeds.",
     icon: "bi-diagram-3",
-    newLabel: "New MUB",
-    emptyTitle: "No Model Use Behaviors yet",
-    emptyHint: "Create a MUB to expose a resilient endpoint (e.g. sonnet-any: sonnet then fall back to gpt).",
+    newLabel: "New Model Service",
+    emptyTitle: "No Model Services yet",
+    emptyHint: "Create a Model Service to expose a resilient endpoint (e.g. sonnet-any: sonnet then fall back to gpt).",
   },
   chain: {
     title: "Micro Agents",
-    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your MUBs.",
+    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your Model Services.",
     icon: "bi-robot",
     newLabel: "New Micro Agent",
     emptyTitle: "No Micro Agents yet",
-    emptyHint: "Build a Micro Agent: stages that each run a resilience MUB (or another Micro Agent), routed by conditions.",
+    emptyHint: "Build a Micro Agent: stages that each run a Model Service (or another Micro Agent), routed by conditions.",
   },
 };
 
@@ -54,7 +54,7 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
   const copy = COPY[kind];
   const isKind = (m: Mub) => (kind === "chain" ? isChainDef(m.steps) : !isChainDef(m.steps));
   const visible = data?.mubs.filter(isKind) ?? [];
-  // A Micro Agent needs at least one resilience MUB to run; a MUB needs a mapping.
+  // A Micro Agent needs at least one Model Service to run; a Model Service needs a mapping.
   const canCreate =
     kind === "chain"
       ? (data?.mubs.some((m) => !isChainDef(m.steps)) ?? false)
@@ -75,7 +75,7 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
     if (!canCreate) {
       toast.error(
         kind === "chain"
-          ? "Create at least one resilience MUB first — Micro Agent stages run them."
+          ? "Create at least one Model Service first — Micro Agent stages run them."
           : "Create at least one model and provider mapping first",
       );
       return;
@@ -103,7 +103,7 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
         <EmptyState
           icon={copy.icon}
           title={copy.emptyTitle}
-          hint={canCreate ? copy.emptyHint : kind === "chain" ? "First create a resilience MUB. Then compose Micro Agents here." : "First add a provider, a model, and map them. Then build a MUB here."}
+          hint={canCreate ? copy.emptyHint : kind === "chain" ? "First create a Model Service. Then compose Micro Agents here." : "First add a provider, a model, and map them. Then build a Model Service here."}
           action={canCreate ? <button className="btn-primary" onClick={startNew}><i className="bi bi-plus-lg" />{copy.newLabel}</button> : undefined}
         />
       )}

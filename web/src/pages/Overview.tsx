@@ -54,7 +54,7 @@ function EndpointsCard() {
                 <i className="bi bi-clipboard" />
               </button>
             </div>
-            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}. Use a MUB name as the model.</div>
+            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}. Use a Model Service or Micro Agent name as the model.</div>
           </div>
         ))}
       </div>
@@ -116,7 +116,7 @@ export function Overview() {
 
   return (
     <div>
-      <PageHeader title="Overview" subtitle="Traffic and usage across all Model Use Behaviors" icon="bi-speedometer2" />
+      <PageHeader title="Overview" subtitle="Traffic and usage across all Model Services and Micro Agents" icon="bi-speedometer2" />
       <div className="mb-6">
         <EndpointsCard />
       </div>
@@ -137,7 +137,7 @@ export function Overview() {
               Requests over time
             </h3>
             {data.points.length === 0 ? (
-              <EmptyState icon="bi-bar-chart-line" title="No requests logged yet" hint="Send a request through one of your MUB endpoints to see traffic here." />
+              <EmptyState icon="bi-bar-chart-line" title="No requests logged yet" hint="Send a request through one of your Model Service endpoints to see traffic here." />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <AreaChart data={data.points} margin={{ top: 4, right: 8, bottom: 0, left: -12 }}>
@@ -161,7 +161,7 @@ export function Overview() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
-            <TopList title="Top MUBs" icon="bi-diagram-3" groups={data.mubs} />
+            <TopList title="Top Model Services" icon="bi-diagram-3" groups={data.mubs} />
             <TopList title="Top models" icon="bi-box" groups={data.models} />
             <TopList title="Top providers" icon="bi-hdd-network" groups={data.providers} />
           </div>

@@ -90,7 +90,7 @@ export interface ChainStage {
   steps?: MubStep[]; // legacy inline steps
   input: ChainContextBlock[];
   system?: string;
-  tools?: "inherit" | "none"; // "none" keeps the tool list but forces tool_choice "none" (not callable)
+  tools?: "inherit" | "none"; // "none" lists tools in the prompt as reference, not registered/callable
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;

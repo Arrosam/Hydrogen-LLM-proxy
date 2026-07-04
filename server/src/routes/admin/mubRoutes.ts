@@ -123,7 +123,7 @@ export async function mubRoutes(app: FastifyInstance): Promise<void> {
     try {
       if (body.mubId) {
         const mub = getMub(body.mubId);
-        if (!mub) return reply.code(404).send({ error: "MUB not found" });
+        if (!mub) return reply.code(404).send({ error: "Model Service not found" });
         def = getMubDef(mub);
       } else {
         def = validateMub(body.steps).def;

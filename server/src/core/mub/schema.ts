@@ -33,7 +33,7 @@ export const StepSchema = z.object({
 
 export const MubStepsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
-  steps: z.array(StepSchema).min(1, "a MUB needs at least one step"),
+  steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
 });
 
 // ---------------------------------------------------------------------------
@@ -108,9 +108,10 @@ export const ChainStageSchema = z.object({
   /**
    * Whether the stage's model may call the original request's tools. "none"
    * keeps the tool list visible (so an evaluate/compose stage can still judge or
-   * reference tool use) but forces tool_choice "none", so the model returns text
-   * or JSON instead of a tool call. Omitted/"inherit" passes the tools and the
-   * original tool_choice through unchanged (the prior behaviour).
+   * reference tool use) by rendering the tool definitions into the system prompt
+   * as reference — but it does NOT register them as callable, so the model
+   * returns text/JSON. (This is portable: tool_choice "none" is rejected by many
+   * upstreams.) Omitted/"inherit" passes tools + tool_choice through unchanged.
    */
   tools: z.enum(["inherit", "none"]).optional(),
   temperature: z.number().min(0).max(2).optional(),

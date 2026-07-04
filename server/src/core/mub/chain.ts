@@ -7,6 +7,7 @@ import {
   type IRRequest,
   type IRResponse,
   type IRTextPart,
+  type IRTool,
   type IRUsage,
 } from "../ir";
 import { genId } from "../../util/ids";
@@ -99,6 +100,22 @@ function buildStageMessages(
   return out;
 }
 
+/** Render tool definitions as reference text (used when a stage lists tools but
+ * forbids calling them — tool_choice "none" isn't portable across upstreams). */
+function renderToolsAsText(tools: IRTool[]): string {
+  const blocks = tools.map((t) => {
+    const params = JSON.stringify(t.parameters ?? {});
+    return `## ${t.name}\n${t.description ?? ""}\nParameters (JSON Schema): ${params}`;
+  });
+  return `# Tools the assistant had available (reference only — you cannot call them)\n\n${blocks.join("\n\n")}`;
+}
+
+/** Append the tool reference to a system prompt (creating one if absent). */
+function appendToolReference(system: string | undefined, tools: IRTool[]): string {
+  const ref = renderToolsAsText(tools);
+  return system && system.trim() ? `${system}\n\n${ref}` : ref;
+}
+
 /** Assemble the IRRequest sent to a single chain stage. */
 export function buildStageIR(
   ir: IRRequest,
@@ -111,18 +128,26 @@ export function buildStageIR(
     messages = [{ role: "user", content: [{ type: "text", text: originalUserText(ir) }] }];
   }
 
-  // A stage can forbid tool *calls* while keeping the tool list visible: the
-  // model still sees the tools (so an evaluate stage can judge or reference tool
-  // use) but tool_choice "none" makes it return text/JSON instead of a call.
-  // Default: inherit tools and tool_choice unchanged.
-  const noToolCalls = stage.tools === "none";
-  const toolChoice = noToolCalls ? (ir.tools && ir.tools.length ? { type: "none" as const } : undefined) : ir.toolChoice;
+  let system = stage.system && stage.system.trim() ? stage.system : ir.system;
+  let tools = ir.tools;
+  let toolChoice = ir.toolChoice;
+
+  // "none" = the model may NOT call tools but should still SEE them (so an
+  // evaluate stage can judge tool use). tool_choice "none" isn't portable — many
+  // OpenAI-compatible upstreams reject it — so instead we don't register the
+  // tools at all and render them into the system prompt as reference. They're
+  // then visible but uncallable, on every provider. Default: inherit unchanged.
+  if (stage.tools === "none") {
+    if (ir.tools && ir.tools.length) system = appendToolReference(system, ir.tools);
+    tools = undefined;
+    toolChoice = undefined;
+  }
 
   return {
     requestedModel: ir.requestedModel,
-    system: stage.system && stage.system.trim() ? stage.system : ir.system,
+    system,
     messages,
-    tools: ir.tools,
+    tools,
     toolChoice,
     maxTokens: stage.maxTokens ?? ir.maxTokens,
     temperature: stage.temperature ?? ir.temperature,
@@ -170,7 +195,7 @@ function resolveStageExec(chain: ChainDef, stage: ChainStage, resolve: StageReso
   if (stage.steps && stage.steps.length) {
     return { ok: true, kind: "resilience", steps: { timeoutMs: stage.timeoutMs ?? chain.timeoutMs, steps: stage.steps } };
   }
-  return { ok: false, message: `stage "${stage.name}" has no MUB or steps` };
+  return { ok: false, message: `stage "${stage.name}" has no Model Service or steps` };
 }
 
 // --- image-translation (OCR) pre-pass ---------------------------------------
@@ -226,7 +251,7 @@ function resolveOcrSteps(
   if (ocr.mub) {
     const r = resolve(ocr.mub);
     if (!r.ok) return r;
-    if (r.kind !== "resilience") return { ok: false, message: `OCR MUB "${ocr.mub}" must be a resilience MUB, not a Micro Agent` };
+    if (r.kind !== "resilience") return { ok: false, message: `OCR reference "${ocr.mub}" must be a Model Service, not a Micro Agent` };
     return { ok: true, steps: { timeoutMs: ocr.timeoutMs ?? r.steps.timeoutMs, steps: r.steps.steps } };
   }
   if (ocr.steps && ocr.steps.length) {

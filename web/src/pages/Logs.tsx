@@ -125,7 +125,7 @@ export function Logs() {
             setMubId(e.target.value === "" ? "" : Number(e.target.value));
           }}
         >
-          <option value="">All MUBs</option>
+          <option value="">All Model Services</option>
           {mubs.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
@@ -151,7 +151,7 @@ export function Logs() {
 
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
-      {!loading && rows.length === 0 && <EmptyState icon="bi-journal-text" title="No log entries" hint="Requests through your MUB endpoints appear here." />}
+      {!loading && rows.length === 0 && <EmptyState icon="bi-journal-text" title="No log entries" hint="Requests through your Model Service endpoints appear here." />}
 
       {rows.length > 0 && (
         <div className="card overflow-hidden">
@@ -159,7 +159,7 @@ export function Logs() {
             <thead>
               <tr>
                 <th>Time</th>
-                <th>MUB</th>
+                <th>Model Service</th>
                 <th>Route</th>
                 <th>Status</th>
                 <th>Tokens</th>
@@ -208,7 +208,7 @@ export function Logs() {
           <div className="space-y-4">
             {detail.error && <ErrorNote message={detail.error} />}
             <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label="MUB" value={detail.mubName ?? "-"} />
+              <Meta label="Model Service" value={detail.mubName ?? "-"} />
               <Meta label="Status" value={String(detail.httpStatus)} />
               <Meta label="Latency" value={`${detail.latencyMs} ms`} />
               <Meta label="Route" value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
@@ -286,7 +286,7 @@ function AttemptPathTable({
         <thead>
           <tr>
             {hasStage && <th>Stage</th>}
-            {hasMub && <th>MUB</th>}
+            {hasMub && <th>Model Service</th>}
             <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
           </tr>
         </thead>

@@ -109,12 +109,12 @@ export function StageEditor({ stages, output, onChange, mubs }: Props) {
 
       {mubs.length === 0 && (
         <p className="mb-2 rounded-lg border border-amber-700/40 bg-amber-700/10 px-3 py-2 text-xs text-amber-300">
-          No MUBs exist yet. Create a resilience MUB first — each stage runs one (or another Micro Agent).
+          No Model Services exist yet. Create one first — each stage runs a Model Service (or another Micro Agent).
         </p>
       )}
       {stages.length === 0 && (
         <p className="rounded-lg border border-dashed border-ink-700 px-4 py-6 text-center text-xs text-ink-500">
-          No stages. Add one; each stage runs a resilience MUB or Micro Agent (or routes on conditions).
+          No stages. Add one; each stage runs a Model Service or Micro Agent (or routes on conditions).
         </p>
       )}
 
@@ -215,8 +215,8 @@ function StageBody({
             else onPatch({ mub: v || undefined, steps: undefined });
           }}
         >
-          <option value="">— pick a MUB or Micro Agent —</option>
-          <optgroup label="Resilience MUBs">
+          <option value="">— pick a Model Service or Micro Agent —</option>
+          <optgroup label="Model Services">
             {resilienceMubs.map((m) => (
               <option key={m.name} value={m.name}>{m.name}</option>
             ))}
@@ -231,7 +231,7 @@ function StageBody({
           <option value={ROUTER}>router (no model call — route by input only)</option>
         </select>
         {legacyInline && (
-          <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a MUB, or edit via Raw JSON.</p>
+          <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a Model Service, or edit via Raw JSON.</p>
         )}
         {!model && (
           <p className="mt-1 text-xs text-ink-500">Router: evaluates its transitions on the original input; no model runs.</p>
@@ -301,11 +301,11 @@ function StageBody({
                   onChange={(e) => onPatch({ tools: e.target.value === "none" ? "none" : undefined })}
                 >
                   <option value="inherit">Inherit — callable (tool_choice from request)</option>
-                  <option value="none">Listed but not callable (tool_choice: none)</option>
+                  <option value="none">Listed but not callable (shown in the prompt)</option>
                 </select>
                 <p className="mt-1 text-[11px] text-ink-600">
-                  Evaluate/compose stages usually want "Listed but not callable": the model still sees the tools to judge
-                  tool use, but must reply with text/JSON instead of calling one.
+                  Evaluate/compose stages usually want "Listed but not callable": the tools are described in the prompt
+                  so the model can judge tool use, but they aren't registered as callable (portable across providers).
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-3">
@@ -689,17 +689,17 @@ export function OcrEditor({
               value={ocr.mub ?? ""}
               onChange={(e) => patch({ mub: e.target.value || undefined, steps: undefined })}
             >
-              <option value="">— pick a multimodal resilience MUB —</option>
+              <option value="">— pick a multimodal Model Service —</option>
               {resilienceMubs.map((m) => (
                 <option key={m.name} value={m.name}>{m.name}</option>
               ))}
             </select>
             {legacyInline && (
-              <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a MUB, or edit via Raw JSON.</p>
+              <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a Model Service, or edit via Raw JSON.</p>
             )}
             {resilienceMubs.length === 0 && (
               <p className="mt-1 text-xs text-amber-300">
-                No resilience MUBs exist yet — create one that maps to a multimodal model.
+                No Model Services exist yet — create one that maps to a multimodal model.
               </p>
             )}
           </div>

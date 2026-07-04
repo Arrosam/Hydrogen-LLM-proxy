@@ -65,7 +65,7 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
       const isRouter = !stage.mub && (!stage.steps || stage.steps.length === 0);
       if (stage.mub) {
         const m = getMubByName(stage.mub);
-        if (!m) bad(`references unknown MUB "${stage.mub}"`);
+        if (!m) bad(`references unknown Model Service or Micro Agent "${stage.mub}"`);
       } else if (stage.steps && stage.steps.length) {
         for (const s of stage.steps) {
           if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
@@ -115,16 +115,16 @@ export function validateMub(raw: unknown): { def: MubDef; summary: string } {
       const o = def.ocr;
       if (o.mub) {
         const m = getMubByName(o.mub);
-        if (!m) throw new MubValidationError(`image translation (OCR) references unknown MUB "${o.mub}"`, []);
+        if (!m) throw new MubValidationError(`image translation (OCR) references unknown Model Service "${o.mub}"`, []);
         if (isChain(parseMub(m.steps))) {
-          throw new MubValidationError(`image translation (OCR) references chain MUB "${o.mub}" (must be a resilience MUB)`, []);
+          throw new MubValidationError(`image translation (OCR) references a Micro Agent "${o.mub}" (must be a Model Service)`, []);
         }
       } else if (o.steps && o.steps.length) {
         for (const s of o.steps) {
           if (!mappingExists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
         }
       } else {
-        throw new MubValidationError("image translation (OCR) is enabled but has no model (pick a resilience MUB)", []);
+        throw new MubValidationError("image translation (OCR) is enabled but has no model (pick a Model Service)", []);
       }
     }
   } else {
@@ -163,12 +163,12 @@ export function getMubDef(mub: ModelUseBehavior): MubDef {
  * a nested Micro Agent (chain). Cycle/depth guards live in the chain engine. */
 export const resolveChainStage: StageResolver = (mubName) => {
   const m = getMubByName(mubName);
-  if (!m || !m.enabled) return { ok: false, message: `references unknown or disabled MUB "${mubName}"` };
+  if (!m || !m.enabled) return { ok: false, message: `references unknown or disabled Model Service or Micro Agent "${mubName}"` };
   let d;
   try {
     d = parseMub(m.steps);
   } catch {
-    return { ok: false, message: `MUB "${mubName}" has an invalid definition` };
+    return { ok: false, message: `"${mubName}" has an invalid definition` };
   }
   if (isChain(d)) return { ok: true, kind: "chain", chain: d };
   return { ok: true, kind: "resilience", steps: d };

@@ -107,7 +107,7 @@ export function Tokens() {
     <div>
       <PageHeader
         title="Tokens"
-        subtitle="Client API keys. Scope each to specific MUBs and set optional quotas."
+        subtitle="Client API keys. Scope each to specific Model Services and set optional quotas."
         icon="bi-key"
         action={
           isAdmin ? (
@@ -123,7 +123,7 @@ export function Tokens() {
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
       {data && data.tokens.length === 0 && (
-        <EmptyState icon="bi-key" title="No tokens yet" hint={isAdmin ? "Issue a token to let a client call your MUB endpoints." : "Ask an admin to issue a token."} />
+        <EmptyState icon="bi-key" title="No tokens yet" hint={isAdmin ? "Issue a token to let a client call your Model Service endpoints." : "Ask an admin to issue a token."} />
       )}
 
       {data && data.tokens.length > 0 && (
@@ -148,7 +148,7 @@ export function Tokens() {
                   <td className="font-mono text-xs text-ink-400">{t.keyPrefix}...</td>
                   <td className="text-xs">
                     {!t.scopeMubs || t.scopeMubs.length === 0 ? (
-                      <span className="badge-gray">all MUBs</span>
+                      <span className="badge-gray">all Model Services</span>
                     ) : (
                       <span className="text-ink-300">{t.scopeMubs.map(mubName).join(", ")}</span>
                     )}
@@ -201,7 +201,7 @@ export function Tokens() {
               <label className="label">Scope</label>
               <label className="mb-2 flex items-center gap-2 text-sm text-ink-300">
                 <input type="checkbox" checked={form.scopeAll} onChange={(e) => setForm({ ...form, scopeAll: e.target.checked })} />
-                Allow all MUBs
+                Allow all Model Services
               </label>
               {!form.scopeAll && (
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-ink-800 p-2">
@@ -220,7 +220,7 @@ export function Tokens() {
                       <span className="font-mono text-xs">{m.name}</span>
                     </label>
                   ))}
-                  {data?.mubs.length === 0 && <p className="text-xs text-ink-500">No MUBs to scope to.</p>}
+                  {data?.mubs.length === 0 && <p className="text-xs text-ink-500">No Model Services to scope to.</p>}
                 </div>
               )}
             </div>

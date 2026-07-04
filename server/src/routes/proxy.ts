@@ -97,7 +97,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   }
 
   const mubName = ir.requestedModel;
-  if (!mubName) return replyError(reply, ingress, 400, "Missing 'model' (must be a MUB name).");
+  if (!mubName) return replyError(reply, ingress, 400, "Missing 'model' (must be a Model Service or Micro Agent name).");
 
   const mub = getMubByName(mubName);
   if (!mub || !mub.enabled) {
@@ -107,7 +107,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     });
     return replyError(
       reply, ingress, 404,
-      `Model '${mubName}' not found. The 'model' field must be a Model Use Behavior name.`,
+      `Model '${mubName}' not found. The 'model' field must be a Model Service or Micro Agent name.`,
     );
   }
 
@@ -127,7 +127,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     const message = e instanceof Error ? e.message : String(e);
     recordLog({
       token, mub, mubName, ingress, egress: null, streaming: ir.stream, httpStatus: 500,
-      latencyMs: Date.now() - started, requestBody: body, error: `invalid MUB definition: ${message}`,
+      latencyMs: Date.now() - started, requestBody: body, error: `invalid Model Service definition: ${message}`,
     });
     incrementUsage(token.id, 1, 0);
     return replyError(reply, ingress, 500, `Model '${mubName}' has an invalid definition.`);
@@ -316,7 +316,7 @@ async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promi
 
   const def = getMubDef(mub);
   if (isChain(def)) {
-    return replyError(reply, "openai", 400, "Embeddings are not supported for chain MUBs.");
+    return replyError(reply, "openai", 400, "Embeddings are not supported for Micro Agents.");
   }
   const first = def.steps[0];
   const res = resolveMapping(first.model, first.provider);
