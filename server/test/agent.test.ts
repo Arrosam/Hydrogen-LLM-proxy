@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IRContentPart, IRRequest } from "../src/core/ir";
 import { textOf } from "../src/core/ir";
-import type { ChainCondition, ChainDef, ChainStage, ChainTransition } from "../src/core/mub/schema";
+import type { AgentCondition, AgentDef, AgentStage, AgentTransition } from "../src/core/services/schema";
 
 // Mock the per-stage runner. The fake echoes `${model}(${lastUserText})`, unless
 // the model name is "OUT:<text>" (returns <text> verbatim, to drive output-based
@@ -17,13 +17,12 @@ vi.mock("../src/core/proxy/run", () => {
     return "";
   };
   return {
-    runMubJson: vi.fn(
+    runServiceJson: vi.fn(
       async (ir: IRRequest, steps: { timeoutMs: number; steps: { model: string; provider: string }[] }) => {
         const { model, provider } = steps.steps[0];
         const rec = { step: 1, attempt: 1, model, provider, status: model === "BOOM" ? 500 : 200, kind: model === "BOOM" ? "http" : "ok", latencyMs: 1 };
         if (model === "BOOM") return { result: { ok: false, status: 500, kind: "http", message: "boom" }, path: [rec] };
         const out = model.startsWith("OUT:") ? model.slice(4) : `${model}(${lastUserText(ir)})`;
-        // "TOOL:<name>" returns an assistant tool_use (to test tool-call passthrough).
         const content = model.startsWith("TOOL:")
           ? [{ type: "tool_use", id: "tu_1", name: model.slice(5), input: { q: lastUserText(ir) } }]
           : [{ type: "text", text: out }];
@@ -37,28 +36,26 @@ vi.mock("../src/core/proxy/run", () => {
   };
 });
 
-import { runMubJson } from "../src/core/proxy/run";
-import { buildStageIR, isStreamPlan, runMubChain, type StageResolver } from "../src/core/mub/chain";
+import { runServiceJson } from "../src/core/proxy/run";
+import { buildStageIR, isStreamPlan, runAgent, type StageResolver } from "../src/core/agents/engine";
 import { setConfig } from "../src/context";
 import type { AppConfig } from "../src/config";
 
-// runMubChain serializes per-stage payloads via getConfig(); provide a config.
 setConfig({ logPayloadMaxChars: 100000 } as unknown as AppConfig);
 
-const runJsonMock = vi.mocked(runMubJson);
+const runJsonMock = vi.mocked(runServiceJson);
 const noResolver: StageResolver = () => ({ ok: false, message: "no resolver" });
 
-// --- builders ---
-const t = (when: ChainCondition, goto: string): ChainTransition => ({ when, goto });
-const always: ChainCondition = { type: "always" };
-function stage(name: string, model: string, extra: Partial<ChainStage> = {}): ChainStage {
+const t = (when: AgentCondition, goto: string): AgentTransition => ({ when, goto });
+const always: AgentCondition = { type: "always" };
+function stage(name: string, model: string, extra: Partial<AgentStage> = {}): AgentStage {
   return { name, steps: [{ model, provider: "p" }], input: [], ...extra };
 }
-function router(name: string, transitions: ChainTransition[]): ChainStage {
+function router(name: string, transitions: AgentTransition[]): AgentStage {
   return { name, input: [], transitions };
 }
-function chainOf(stages: ChainStage[], output?: string): ChainDef {
-  return { kind: "chain", timeoutMs: 60_000, stages, ...(output ? { output } : {}) };
+function agentOf(stages: AgentStage[], output?: string): AgentDef {
+  return { kind: "agent", timeoutMs: 60_000, stages, ...(output ? { output } : {}) };
 }
 
 const withImage: IRRequest = {
@@ -152,101 +149,111 @@ describe("buildStageIR (context blocks)", () => {
     expect(inherit.toolChoice).toEqual({ type: "auto" });
 
     const noCall = buildStageIR(irWithTools, stage("s", "M", { tools: "none" }), {}, {}, false);
-    expect(noCall.tools).toBeUndefined(); // not registered → uncallable, no tool_choice to be rejected
+    expect(noCall.tools).toBeUndefined();
     expect(noCall.toolChoice).toBeUndefined();
-    expect(noCall.system).toContain("Be helpful."); // original system kept
-    expect(noCall.system).toContain("get_weather"); // and the tool is now visible as reference text
+    expect(noCall.system).toContain("Be helpful.");
+    expect(noCall.system).toContain("get_weather");
   });
 
   it("tools:'none' with no tools in the request leaves the prompt untouched", () => {
     const out = buildStageIR({ ...textOnly, system: "S" }, stage("s", "M", { tools: "none" }), {}, {}, false);
     expect(out.tools).toBeUndefined();
     expect(out.toolChoice).toBeUndefined();
-    expect(out.system).toBe("S"); // nothing appended when there are no tools
+    expect(out.system).toBe("S");
+  });
+
+  it("thinking override propagates to the stage IR", () => {
+    const s = stage("s", "M", { thinking: { budget: 8192 } });
+    const out = buildStageIR(textOnly, s, {}, {}, false);
+    expect(out.thinking).toEqual({ budget: 8192 });
+  });
+
+  it("inherits thinking from the request when stage has no override", () => {
+    const irWithThinking: IRRequest = { ...textOnly, thinking: "enabled" };
+    const out = buildStageIR(irWithThinking, stage("s", "M"), {}, {}, false);
+    expect(out.thinking).toBe("enabled");
   });
 });
-
-describe("runMubChain (decision tree)", () => {
+describe("runAgent (decision tree)", () => {
   beforeEach(() => {
     runJsonMock.mockClear();
   });
 
   it("runs linearly via explicit transitions, feeds outputs forward, sums usage", async () => {
-    const chain = chainOf([
+    const agent = agentOf([
       stage("draft", "D", { transitions: [t(always, "final")] }),
       stage("final", "F", { input: [{ kind: "stage_output", stage: "draft", role: "user" }] }),
     ]);
-    const { result, usage, path } = await runMubChain(textOnly, chain, noResolver);
+    const { result, usage, path } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(D(hi))");
     expect(usage.totalTokens).toBe(4);
     expect(path.map((p) => p.stage)).toEqual(["draft", "final"]);
-    // each stage's first record carries its request + response payloads
     expect(path[0].request).toContain("messages");
     expect(path[0].response).toContain("D(hi)");
     expect(path[1].response).toContain("F(D(hi))");
   });
 
   it("stops and returns when a stage has no matching transition (no auto-advance)", async () => {
-    const chain = chainOf([stage("a", "A"), stage("b", "B")]);
-    const { result, path } = await runMubChain(textOnly, chain, noResolver);
+    const agent = agentOf([stage("a", "A"), stage("b", "B")]);
+    const { result, path } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("A(hi)");
-    expect(path.map((p) => p.stage)).toEqual(["a"]); // b never runs
+    expect(path.map((p) => p.stage)).toEqual(["a"]);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
   it("branches on input_has_image via a router (no model call for the router)", async () => {
-    const chain = chainOf([
+    const agent = agentOf([
       router("route", [t({ type: "input_has_image" }, "ocr"), t(always, "text")]),
       stage("ocr", "OCR", { transitions: [t(always, "end")] }),
       stage("text", "TXT"),
     ]);
-    const img = await runMubChain(withImage, chain, noResolver);
+    const img = await runAgent(withImage, agent, noResolver);
     expect(img.path.map((p) => p.stage)).toEqual(["route", "ocr"]);
     if (img.result.ok) expect(textOf(img.result.value.ir.content)).toBe("OCR(hi)");
 
-    const txt = await runMubChain(textOnly, chain, noResolver);
+    const txt = await runAgent(textOnly, agent, noResolver);
     expect(txt.path.map((p) => p.stage)).toEqual(["route", "text"]);
     if (txt.result.ok) expect(textOf(txt.result.value.ir.content)).toBe("TXT(hi)");
   });
 
   it("branches on a stage's output text (decision: pass/fail)", async () => {
     const build = (decision: string) =>
-      chainOf([
+      agentOf([
         stage("decide", `OUT:{decision: ${decision}}`, {
           transitions: [t({ type: "output_contains", value: "{decision: pass}" }, "pass"), t(always, "fail")],
         }),
         stage("fail", "FAILC", { transitions: [t(always, "end")] }),
         stage("pass", "PASSC"),
       ]);
-    const p = await runMubChain(textOnly, build("pass"), noResolver);
+    const p = await runAgent(textOnly, build("pass"), noResolver);
     expect(p.path.map((x) => x.stage)).toEqual(["decide", "pass"]);
-    const f = await runMubChain(textOnly, build("fail"), noResolver);
+    const f = await runAgent(textOnly, build("fail"), noResolver);
     expect(f.path.map((x) => x.stage)).toEqual(["decide", "fail"]);
   });
 
-  it("resolves a stage's referenced resilience MUB via the resolver", async () => {
+  it("resolves a stage's referenced service via the resolver", async () => {
     const resolver: StageResolver = (name) =>
       name === "resmub" ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p" }] } } : { ok: false, message: "unknown" };
-    const chain = chainOf([{ name: "s", mub: "resmub", input: [] }]);
-    const { result, path } = await runMubChain(textOnly, chain, resolver);
+    const agent = agentOf([{ name: "s", service: "resmub", input: [] }]);
+    const { result, path } = await runAgent(textOnly, agent, resolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("R(hi)");
     expect(path[0].stage).toBe("s");
-    expect(path[0].mub).toBe("resmub"); // the resilience MUB the stage ran is recorded
+    expect(path[0].service).toBe("resmub");
   });
 
-  it("fails the chain when a referenced MUB can't be resolved", async () => {
-    const chain = chainOf([{ name: "s", mub: "missing", input: [] }]);
-    const { result } = await runMubChain(textOnly, chain, () => ({ ok: false, message: "unknown MUB" }));
+  it("fails the agent when a referenced service can't be resolved", async () => {
+    const agent = agentOf([{ name: "s", service: "missing", input: [] }]);
+    const { result } = await runAgent(textOnly, agent, () => ({ ok: false, message: "unknown service" }));
     expect(result.ok).toBe(false);
     expect(runJsonMock).not.toHaveBeenCalled();
   });
 
-  it("aborts on a mid-chain stage failure", async () => {
-    const chain = chainOf([stage("a", "BOOM"), stage("b", "D")]);
-    const { result } = await runMubChain(textOnly, chain, noResolver);
+  it("aborts on a mid-agent stage failure", async () => {
+    const agent = agentOf([stage("a", "BOOM"), stage("b", "D")]);
+    const { result } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(false);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
@@ -257,176 +264,170 @@ describe("runMubChain (decision tree)", () => {
       tools: [{ name: "get_weather", parameters: { type: "object" } }],
       toolChoice: { type: "auto" },
     };
-    const { path } = await runMubChain(irWithTools, chainOf([stage("a", "A")]), noResolver);
+    const { path } = await runAgent(irWithTools, agentOf([stage("a", "A")]), noResolver);
     expect(path[0].request).toContain("get_weather");
     expect(path[0].request).toContain("tool_choice");
   });
 
-  it("never throws — a resolver error becomes a failure result (so it gets logged)", async () => {
+  it("never throws -- a resolver error becomes a failure result (so it gets logged)", async () => {
     const throwing: StageResolver = () => {
       throw new Error("boom resolve");
     };
-    const { result } = await runMubChain(textOnly, chainOf([{ name: "s", mub: "x", input: [] }]), throwing);
+    const { result } = await runAgent(textOnly, agentOf([{ name: "s", service: "x", input: [] }]), throwing);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.message).toContain("chain execution error");
+    if (!result.ok) expect(result.message).toContain("agent execution error");
   });
 });
 
-describe("runMubChain (nesting & return output)", () => {
+describe("runAgent (nesting & return output)", () => {
   beforeEach(() => {
     runJsonMock.mockClear();
   });
 
-  it("runs a nested Micro Agent stage (a chain referencing another chain)", async () => {
-    const subChain = chainOf([stage("inner", "SUB")]);
+  it("runs a nested Micro Agent stage (an agent referencing another agent)", async () => {
+    const subAgent = agentOf([stage("inner", "SUB")]);
     const resolver: StageResolver = (name) =>
-      name === "agent" ? { ok: true, kind: "chain", chain: subChain } : { ok: false, message: "unknown" };
-    const parent = chainOf([{ name: "outer", mub: "agent", input: [{ kind: "last_user" }] }]);
-    const { result, path } = await runMubChain(textOnly, parent, resolver);
+      name === "agent" ? { ok: true, kind: "agent", agent: subAgent } : { ok: false, message: "unknown" };
+    const parent = agentOf([{ name: "outer", service: "agent", input: [{ kind: "last_user" }] }]);
+    const { result, path } = await runAgent(textOnly, parent, resolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("SUB(hi)");
-    // The sub-agent's stage is nested under the outer stage's name in the path.
-    expect(path.some((r) => r.stage === "outer › inner")).toBe(true);
+    expect(path.some((r) => r.stage === "outer > inner")).toBe(true);
   });
 
   it("sums usage across the outer and nested agents", async () => {
-    const subChain = chainOf([stage("inner", "SUB")]);
+    const subAgent = agentOf([stage("inner", "SUB")]);
     const resolver: StageResolver = (name) =>
-      name === "agent" ? { ok: true, kind: "chain", chain: subChain } : { ok: false, message: "unknown" };
-    const parent = chainOf([
+      name === "agent" ? { ok: true, kind: "agent", agent: subAgent } : { ok: false, message: "unknown" };
+    const parent = agentOf([
       stage("pre", "P", { transitions: [t(always, "outer")] }),
-      { name: "outer", mub: "agent", input: [{ kind: "last_user" }] },
+      { name: "outer", service: "agent", input: [{ kind: "last_user" }] },
     ]);
-    const { result } = await runMubChain(textOnly, parent, resolver);
+    const { result } = await runAgent(textOnly, parent, resolver);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.ir.usage.totalTokens).toBe(4); // pre (2) + inner (2)
+    if (result.ok) expect(result.value.ir.usage.totalTokens).toBe(4);
   });
 
   it("fails on a Micro Agent cycle (self-reference)", async () => {
-    const selfChain = chainOf([{ name: "s", mub: "A", input: [] }]);
+    const selfAgent = agentOf([{ name: "s", service: "A", input: [] }]);
     const resolver: StageResolver = (name) =>
-      name === "A" ? { ok: true, kind: "chain", chain: selfChain } : { ok: false, message: "unknown" };
-    const { result } = await runMubChain(textOnly, selfChain, resolver, ["A"]);
+      name === "A" ? { ok: true, kind: "agent", agent: selfAgent } : { ok: false, message: "unknown" };
+    const { result } = await runAgent(textOnly, selfAgent, resolver, ["A"]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("cycle");
     expect(runJsonMock).not.toHaveBeenCalled();
   });
 
   it("preserves a stage's tool call when its output feeds a later stage", async () => {
-    const chain = chainOf([
+    const agent = agentOf([
       stage("call", "TOOL:get_weather", { transitions: [t(always, "eval")] }),
       stage("eval", "E", { input: [{ kind: "stage_output", stage: "call", role: "assistant" }] }),
     ]);
-    await runMubChain(textOnly, chain, noResolver);
-    // The eval stage (2nd call) received the tool call rendered as text, not dropped.
+    await runAgent(textOnly, agent, noResolver);
     const evalIR = runJsonMock.mock.calls[1][0] as IRRequest;
     const fed = textOf(evalIR.messages[0].content);
     expect(fed).toContain("tool_call");
     expect(fed).toContain("get_weather");
-    expect(fed).toContain('"q":"hi"'); // the tool arguments survive too
+    expect(fed).toContain('"q":"hi"');
   });
 
   it("a transition to end can return an earlier stage's output", async () => {
-    const chain = chainOf([
+    const agent = agentOf([
       stage("first", "F", { transitions: [t(always, "second")] }),
       stage("second", "S", {
         input: [{ kind: "stage_output", stage: "first", role: "user" }],
         transitions: [{ when: always, goto: "end", output: "first" }],
       }),
     ]);
-    const { result, path } = await runMubChain(textOnly, chain, noResolver);
+    const { result, path } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
-    expect(path.map((p) => p.stage)).toEqual(["first", "second"]); // both ran
-    if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(hi)"); // but first's output is returned
+    expect(path.map((p) => p.stage)).toEqual(["first", "second"]);
+    if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(hi)");
   });
 });
 
-describe("runMubChain (streaming terminal)", () => {
+describe("runAgent (streaming terminal)", () => {
   beforeEach(() => {
     runJsonMock.mockClear();
   });
 
-  it("returns a stream plan for a single-stage chain (nothing buffered)", async () => {
-    const plan = await runMubChain(textOnly, chainOf([stage("s", "M")]), noResolver, [], { streamTerminal: true });
+  it("returns a stream plan for a single-stage agent (nothing buffered)", async () => {
+    const plan = await runAgent(textOnly, agentOf([stage("s", "M")]), noResolver, [], { streamTerminal: true });
     expect(isStreamPlan(plan)).toBe(true);
     if (isStreamPlan(plan)) {
       expect(plan.stageName).toBe("s");
       expect(plan.steps.steps[0].model).toBe("M");
       expect(plan.stageIR.stream).toBe(true);
     }
-    expect(runJsonMock).not.toHaveBeenCalled(); // the terminal stage is deferred to the caller
+    expect(runJsonMock).not.toHaveBeenCalled();
   });
 
-  it("streams the terminal stage of a linear chain, buffering the earlier ones", async () => {
-    const chain = chainOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")]);
-    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
+  it("streams the terminal stage of a linear agent, buffering the earlier ones", async () => {
+    const agent = agentOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")]);
+    const plan = await runAgent(textOnly, agent, noResolver, [], { streamTerminal: true });
     expect(isStreamPlan(plan)).toBe(true);
     if (isStreamPlan(plan)) expect(plan.stageName).toBe("b");
-    expect(runJsonMock).toHaveBeenCalledTimes(1); // only stage "a" ran buffered
+    expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
-  it("does not stream when routing follows (router stage) — buffers instead", async () => {
-    const chain = chainOf([
+  it("does not stream when routing follows (router stage) -- buffers instead", async () => {
+    const agent = agentOf([
       router("route", [t(always, "s")]),
       stage("s", "M"),
     ]);
-    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
-    // router → s (no transitions) is terminal and streamable
+    const plan = await runAgent(textOnly, agent, noResolver, [], { streamTerminal: true });
     expect(isStreamPlan(plan)).toBe(true);
     if (isStreamPlan(plan)) expect(plan.stageName).toBe("s");
   });
 
-  it("does not stream when chain.output points to an earlier stage", async () => {
-    const chain = chainOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")], "a");
-    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
-    expect(isStreamPlan(plan)).toBe(false); // must buffer to return "a"'s output, not stream "b"
+  it("does not stream when agent.output points to an earlier stage", async () => {
+    const agent = agentOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")], "a");
+    const plan = await runAgent(textOnly, agent, noResolver, [], { streamTerminal: true });
+    expect(isStreamPlan(plan)).toBe(false);
   });
 });
 
-describe("runMubChain (OCR pre-pass)", () => {
+describe("runAgent (OCR pre-pass)", () => {
   beforeEach(() => {
     runJsonMock.mockClear();
   });
 
-  const ocrChain = (ocrModel: string, extra: Partial<ChainStage> = {}): ChainDef => ({
-    kind: "chain",
+  const ocrAgent = (ocrModel: string, extra: Partial<AgentStage> = {}): AgentDef => ({
+    kind: "agent",
     timeoutMs: 60_000,
     stages: [stage("s", "M", { input: [{ kind: "original_conversation" }], ...extra })],
     ocr: { steps: [{ model: ocrModel, provider: "p" }] },
   });
 
   it("transcribes images to text before the stages run", async () => {
-    const chain = ocrChain('OUT:[{"index":1,"image":"A red cat"}]');
-    const { result, path } = await runMubChain(withImage, chain, noResolver);
+    const agent = ocrAgent('OUT:[{"index":1,"image":"A red cat"}]');
+    const { result, path } = await runAgent(withImage, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toContain("A red cat");
 
-    // The OCR call (first) received the image plus an "Image 1:" index marker.
     const ocrIR = runJsonMock.mock.calls[0][0] as IRRequest;
     expect(ocrIR.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(true);
     expect(textOf(ocrIR.messages[0].content)).toContain("Image 1:");
 
-    // The stage call (second) saw NO images — they were replaced with text.
     const stageIR = runJsonMock.mock.calls[1][0] as IRRequest;
     expect(stageIR.messages.every((m) => m.content.every((p: IRContentPart) => p.type !== "image"))).toBe(true);
     expect(textOf(stageIR.messages[0].content)).toContain("A red cat");
 
-    // The OCR pass is recorded in the attempt path (so its resilience MUB is logged).
     expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
   });
 
   it("skips the OCR pre-pass when the request has no images", async () => {
-    const { result, path } = await runMubChain(textOnly, ocrChain("OCR"), noResolver);
+    const { result, path } = await runAgent(textOnly, ocrAgent("OCR"), noResolver);
     expect(result.ok).toBe(true);
     expect(path.some((r) => r.stage === "(ocr)")).toBe(false);
-    expect(runJsonMock).toHaveBeenCalledTimes(1); // the stage only — no OCR call
+    expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
-  it("aborts the chain (logged failure) when the OCR pass fails", async () => {
-    const { result, path } = await runMubChain(withImage, ocrChain("BOOM"), noResolver);
+  it("aborts the agent (logged failure) when the OCR pass fails", async () => {
+    const { result, path } = await runAgent(withImage, ocrAgent("BOOM"), noResolver);
     expect(result.ok).toBe(false);
     expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
-    expect(runJsonMock).toHaveBeenCalledTimes(1); // never reaches the stage
+    expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
   it("places each transcription by its returned index, not array order", async () => {
@@ -444,8 +445,8 @@ describe("runMubChain (OCR pre-pass)", () => {
         },
       ],
     };
-    const chain = ocrChain('OUT:[{"index":2,"image":"SECOND"},{"index":1,"image":"FIRST"}]');
-    const { result } = await runMubChain(twoImages, chain, noResolver);
+    const agent = ocrAgent('OUT:[{"index":2,"image":"SECOND"},{"index":1,"image":"FIRST"}]');
+    const { result } = await runAgent(twoImages, agent, noResolver);
     expect(result.ok).toBe(true);
     const stageIR = runJsonMock.mock.calls[1][0] as IRRequest;
     const text = textOf(stageIR.messages[0].content);
@@ -453,29 +454,29 @@ describe("runMubChain (OCR pre-pass)", () => {
     expect(text.indexOf("SECOND")).toBeGreaterThan(text.indexOf("FIRST"));
   });
 
-  it("uses a referenced resilience MUB for the OCR model and records it", async () => {
+  it("uses a referenced service for the OCR model and records it", async () => {
     const resolver: StageResolver = (name) =>
       name === "vision" ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: 'OUT:[{"index":1,"image":"TXT"}]', provider: "p" }] } } : { ok: false, message: "unknown" };
-    const chain: ChainDef = {
-      kind: "chain",
+    const agent: AgentDef = {
+      kind: "agent",
       timeoutMs: 60_000,
       stages: [stage("s", "M", { input: [{ kind: "original_conversation" }] })],
-      ocr: { mub: "vision" },
+      ocr: { service: "vision" },
     };
-    const { result, path } = await runMubChain(withImage, chain, resolver);
+    const { result, path } = await runAgent(withImage, agent, resolver);
     expect(result.ok).toBe(true);
     const ocrRec = path.find((r) => r.stage === "(ocr)");
-    expect(ocrRec?.mub).toBe("vision");
+    expect(ocrRec?.service).toBe("vision");
   });
 
-  it("fails the chain when the OCR MUB can't be resolved", async () => {
-    const chain: ChainDef = {
-      kind: "chain",
+  it("fails the agent when the OCR service can't be resolved", async () => {
+    const agent: AgentDef = {
+      kind: "agent",
       timeoutMs: 60_000,
       stages: [stage("s", "M")],
-      ocr: { mub: "missing" },
+      ocr: { service: "missing" },
     };
-    const { result } = await runMubChain(withImage, chain, () => ({ ok: false, message: "unknown MUB" }));
+    const { result } = await runAgent(withImage, agent, () => ({ ok: false, message: "unknown service" }));
     expect(result.ok).toBe(false);
     expect(runJsonMock).not.toHaveBeenCalled();
   });

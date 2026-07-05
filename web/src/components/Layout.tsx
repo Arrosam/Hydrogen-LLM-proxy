@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
 import { api, ApiError } from "../api";
@@ -15,7 +15,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: "bi-speedometer2", end: true },
-  { to: "/mubs", label: "Model Services", icon: "bi-diagram-3" },
+  { to: "/services", label: "Model Services", icon: "bi-diagram-3" },
   { to: "/micro-agents", label: "Micro Agents", icon: "bi-robot" },
   { to: "/models", label: "Models", icon: "bi-box" },
   { to: "/providers", label: "Providers", icon: "bi-hdd-network" },

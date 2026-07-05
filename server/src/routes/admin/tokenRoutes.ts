@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+﻿import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { parse, toId } from "../../util/validate";
 import {
@@ -12,7 +12,7 @@ import {
 
 const CreateSchema = z.object({
   name: z.string().min(1).max(120),
-  scopeMubs: z.array(z.number().int().positive()).nullable().optional(),
+  scopeServices: z.array(z.number().int().positive()).nullable().optional(),
   maxRequests: z.number().int().positive().nullable().optional(),
   maxTokens: z.number().int().positive().nullable().optional(),
   expiresAt: z.number().int().positive().nullable().optional(),
@@ -21,7 +21,7 @@ const CreateSchema = z.object({
 
 const UpdateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
-  scopeMubs: z.array(z.number().int().positive()).nullable().optional(),
+  scopeServices: z.array(z.number().int().positive()).nullable().optional(),
   maxRequests: z.number().int().positive().nullable().optional(),
   maxTokens: z.number().int().positive().nullable().optional(),
   expiresAt: z.number().int().positive().nullable().optional(),

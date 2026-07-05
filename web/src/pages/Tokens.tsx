@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { useAsync } from "../lib/hooks";
@@ -8,16 +8,16 @@ import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { copyToClipboard } from "../lib/clipboard";
 import { formatDate, formatNumber } from "../lib/format";
-import type { Mub, Token } from "../types";
+import type { ModelService, Token } from "../types";
 
 interface Data {
   tokens: Token[];
-  mubs: Mub[];
+  services: ModelService[];
 }
 
 interface FormState {
   name: string;
-  scopeMubs: number[];
+  scopeServices: number[];
   scopeAll: boolean;
   maxRequests: string;
   maxTokens: string;
@@ -27,7 +27,7 @@ interface FormState {
 
 const EMPTY: FormState = {
   name: "",
-  scopeMubs: [],
+  scopeServices: [],
   scopeAll: true,
   maxRequests: "",
   maxTokens: "",
@@ -39,11 +39,11 @@ export function Tokens() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [t, m] = await Promise.all([
+    const [t, s] = await Promise.all([
       api.get<{ tokens: Token[] }>("/tokens"),
-      api.get<{ mubs: Mub[] }>("/mubs"),
+      api.get<{ services: ModelService[] }>("/services"),
     ]);
-    return { tokens: t.tokens, mubs: m.mubs };
+    return { tokens: t.tokens, services: s.services };
   });
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
@@ -51,7 +51,7 @@ export function Tokens() {
   const [saving, setSaving] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
 
-  const mubName = (id: number) => data?.mubs.find((m) => m.id === id)?.name ?? `#${id}`;
+  const serviceName = (id: number) => data?.services.find((m) => m.id === id)?.name ?? `#${id}`;
 
   const create = async () => {
     if (!form) return;
@@ -59,7 +59,7 @@ export function Tokens() {
     try {
       const payload: Record<string, unknown> = {
         name: form.name,
-        scopeMubs: form.scopeAll ? null : form.scopeMubs,
+        scopeServices: form.scopeAll ? null : form.scopeServices,
         maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
         maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
         expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
@@ -147,10 +147,10 @@ export function Tokens() {
                   <td className="font-medium text-ink-100">{t.name}</td>
                   <td className="font-mono text-xs text-ink-400">{t.keyPrefix}...</td>
                   <td className="text-xs">
-                    {!t.scopeMubs || t.scopeMubs.length === 0 ? (
+                    {!t.scopeServices || t.scopeServices.length === 0 ? (
                       <span className="badge-gray">all Model Services</span>
                     ) : (
-                      <span className="text-ink-300">{t.scopeMubs.map(mubName).join(", ")}</span>
+                      <span className="text-ink-300">{t.scopeServices.map(serviceName).join(", ")}</span>
                     )}
                   </td>
                   <td className="text-xs text-ink-300">
@@ -205,22 +205,22 @@ export function Tokens() {
               </label>
               {!form.scopeAll && (
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-ink-800 p-2">
-                  {data?.mubs.map((m) => (
+                  {data?.services.map((m) => (
                     <label key={m.id} className="flex items-center gap-2 text-sm text-ink-300">
                       <input
                         type="checkbox"
-                        checked={form.scopeMubs.includes(m.id)}
+                        checked={form.scopeServices.includes(m.id)}
                         onChange={(e) =>
                           setForm({
                             ...form,
-                            scopeMubs: e.target.checked ? [...form.scopeMubs, m.id] : form.scopeMubs.filter((x) => x !== m.id),
+                            scopeServices: e.target.checked ? [...form.scopeServices, m.id] : form.scopeServices.filter((x) => x !== m.id),
                           })
                         }
                       />
                       <span className="font-mono text-xs">{m.name}</span>
                     </label>
                   ))}
-                  {data?.mubs.length === 0 && <p className="text-xs text-ink-500">No Model Services to scope to.</p>}
+                  {data?.services.length === 0 && <p className="text-xs text-ink-500">No Model Services to scope to.</p>}
                 </div>
               )}
             </div>

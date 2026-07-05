@@ -1,11 +1,11 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+﻿import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle } from "../components/common";
 import { Modal } from "../components/Modal";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
-import type { LogSummary, Mub } from "../types";
+import type { LogSummary, ModelService } from "../types";
 
 interface AttemptRecord {
   step: number;
@@ -17,7 +17,7 @@ interface AttemptRecord {
   latencyMs: number;
   error?: string;
   stage?: string;
-  mub?: string;
+  service?: string;
   request?: string;
   response?: string;
 }
@@ -51,8 +51,8 @@ export function Logs() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [errorsOnly, setErrorsOnly] = useState(false);
-  const [mubId, setMubId] = useState<number | "">("");
-  const [mubs, setMubs] = useState<Mub[]>([]);
+  const [serviceId, setServiceId] = useState<number | "">("");
+  const [services, setServices] = useState<ModelService[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<LogDetail | null>(null);
@@ -69,7 +69,7 @@ export function Logs() {
     });
 
   useEffect(() => {
-    api.get<{ mubs: Mub[] }>("/mubs").then((r) => setMubs(r.mubs)).catch(() => {});
+    api.get<{ services: ModelService[] }>("/services").then((r) => setServices(r.services)).catch(() => {});
   }, []);
 
   const load = useCallback(
@@ -77,7 +77,7 @@ export function Logs() {
       if (!silent) setLoading(true);
       const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
       if (errorsOnly) params.set("errorsOnly", "true");
-      if (mubId !== "") params.set("mubId", String(mubId));
+      if (serviceId !== "") params.set("serviceId", String(serviceId));
       api
         .get<{ rows: LogSummary[]; total: number }>(`/logs?${params.toString()}`)
         .then((r) => {
@@ -90,7 +90,7 @@ export function Logs() {
           if (!silent) setLoading(false);
         });
     },
-    [offset, errorsOnly, mubId],
+    [offset, errorsOnly, serviceId],
   );
 
   useEffect(() => {
@@ -110,7 +110,7 @@ export function Logs() {
     setDetail(r.log);
   };
 
-  const mubName = (id: number | null) => (id == null ? "-" : mubs.find((m) => m.id === id)?.name ?? `#${id}`);
+  const serviceName = (id: number | null) => (id == null ? "-" : services.find((m) => m.id === id)?.name ?? `#${id}`);
 
   return (
     <div>
@@ -119,14 +119,14 @@ export function Logs() {
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
           className="input w-auto"
-          value={mubId}
+          value={serviceId}
           onChange={(e) => {
             setOffset(0);
-            setMubId(e.target.value === "" ? "" : Number(e.target.value));
+            setServiceId(e.target.value === "" ? "" : Number(e.target.value));
           }}
         >
           <option value="">All Model Services</option>
-          {mubs.map((m) => (
+          {services.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
@@ -172,7 +172,7 @@ export function Logs() {
               {rows.map((r) => (
                 <tr key={r.id} className="cursor-pointer" onClick={() => openDetail(r.id)}>
                   <td className="whitespace-nowrap text-xs text-ink-400">{relativeTime(r.createdAt)}</td>
-                  <td className="font-mono text-xs text-ink-200">{r.mubName ?? mubName(r.mubId)}</td>
+                  <td className="font-mono text-xs text-ink-200">{r.serviceName ?? serviceName(r.serviceId)}</td>
                   <td className="text-xs">
                     <span className="text-ink-300">{r.ingressFormat}</span>
                     <i className="bi bi-arrow-right mx-1 text-ink-600" />
@@ -208,7 +208,7 @@ export function Logs() {
           <div className="space-y-4">
             {detail.error && <ErrorNote message={detail.error} />}
             <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label="Model Service" value={detail.mubName ?? "-"} />
+              <Meta label="Model Service" value={detail.serviceName ?? "-"} />
               <Meta label="Status" value={String(detail.httpStatus)} />
               <Meta label="Latency" value={`${detail.latencyMs} ms`} />
               <Meta label="Route" value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
@@ -278,15 +278,15 @@ function AttemptPathTable({
   onToggle: (i: number) => void;
 }) {
   const hasStage = path.some((a) => a.stage);
-  const hasMub = path.some((a) => a.mub);
-  const cols = 6 + (hasStage ? 1 : 0) + (hasMub ? 1 : 0);
+  const hasService = path.some((a) => a.service);
+  const cols = 6 + (hasStage ? 1 : 0) + (hasService ? 1 : 0);
   return (
     <div className="card overflow-hidden">
       <table className="table">
         <thead>
           <tr>
             {hasStage && <th>Stage</th>}
-            {hasMub && <th>Model Service</th>}
+            {hasService && <th>Model Service</th>}
             <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
           </tr>
         </thead>
@@ -306,7 +306,7 @@ function AttemptPathTable({
                       {a.stage ?? "-"}
                     </td>
                   )}
-                  {hasMub && <td className="font-mono text-xs text-ink-300">{a.mub ?? "-"}</td>}
+                  {hasService && <td className="font-mono text-xs text-ink-300">{a.service ?? "-"}</td>}
                   <td>{a.step}</td>
                   <td>{a.attempt}</td>
                   <td className="font-mono text-xs">{a.model}</td>

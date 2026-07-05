@@ -1,7 +1,7 @@
-import type { FastifyInstance } from "fastify";
+﻿import type { FastifyInstance } from "fastify";
 import { toId } from "../../util/validate";
 import { getLog, queryLogs, type LogQuery } from "../../services/logs";
-import { byModelProvider, byMub, summary, timeSeries, type StatsQuery } from "../../services/stats";
+import { byModelProvider, byService, summary, timeSeries, type StatsQuery } from "../../services/stats";
 
 function numParam(v: unknown): number | undefined {
   if (v == null || v === "") return undefined;
@@ -20,7 +20,7 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
     const q = req.query as Record<string, string>;
     const query: LogQuery = {
       tokenId: numParam(q.tokenId),
-      mubId: numParam(q.mubId),
+      serviceId: numParam(q.serviceId),
       status: numParam(q.status),
       errorsOnly: boolParam(q.errorsOnly),
       from: numParam(q.from),
@@ -46,6 +46,6 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/stats/summary", async (req) => summary(statsRange(req)));
   app.get("/stats/timeseries", async (req) => ({ points: timeSeries(statsRange(req)) }));
-  app.get("/stats/by-mub", async (req) => ({ groups: byMub(statsRange(req)) }));
+  app.get("/stats/by-service", async (req) => ({ groups: byService(statsRange(req)) }));
   app.get("/stats/by-model-provider", async (req) => byModelProvider(statsRange(req)));
 }

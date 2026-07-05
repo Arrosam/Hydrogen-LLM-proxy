@@ -1,4 +1,4 @@
-import type { AdvanceTrigger, MubStep, MubSteps, Trigger } from "./schema";
+﻿import type { AdvanceTrigger, ServiceStep, ServiceSteps, Trigger } from "../services/schema";
 
 export type FailureKind = "http" | "timeout" | "error";
 
@@ -25,13 +25,13 @@ export interface AttemptRecord {
   kind: FailureKind | "ok";
   latencyMs: number;
   error?: string;
-  /** Chain MUBs only: the stage this attempt belongs to. */
+  /** Agent only: the stage this attempt belongs to. */
   stage?: string;
-  /** Chain MUBs only: the resilience MUB the stage ran (omitted for inline steps / routers). */
-  mub?: string;
-  /** Chain MUBs only: the request sent to this stage's model (on the stage's first record). */
+  /** Agent only: the Model Service the stage ran (omitted for inline steps / routers). */
+  service?: string;
+  /** Agent only: the request sent to this stage's model (on the stage's first record). */
   request?: string;
-  /** Chain MUBs only: this stage's response (on the stage's first record). */
+  /** Agent only: this stage's response (on the stage's first record). */
   response?: string;
 }
 
@@ -54,7 +54,6 @@ function triggerMatches(set: Trigger[], f: AttemptFailure): boolean {
 }
 
 function shouldAdvance(advanceOn: AdvanceTrigger[] | undefined, f: AttemptFailure): boolean {
-  // Default (omitted): advance to the next step on any failure.
   if (!advanceOn) return true;
   if (advanceOn.includes("exhausted")) return true;
   return triggerMatches(advanceOn.filter((t): t is Trigger => t !== "exhausted"), f);
@@ -70,16 +69,16 @@ function errMessage(e: unknown): { kind: FailureKind; message: string } {
 }
 
 /**
- * Execute a MUB's ordered steps against `attempt`, applying per-step retry and
- * step-advance rules. Returns the first success, or the last failure once every
- * step is exhausted (which the caller translates back to the client).
+ * Execute a service's ordered steps against `attempt`, applying per-step retry
+ * and step-advance rules. Returns the first success, or the last failure once
+ * every step is exhausted (which the caller translates back to the client).
  *
  * `attempt` is injected so the engine stays pure and testable: the proxy wires
  * it to do a real upstream call + translation; tests wire it to a fake.
  */
 export async function runSteps<T>(
-  steps: MubSteps,
-  attempt: (step: MubStep, stepIndex: number) => Promise<AttemptResult<T>>,
+  steps: ServiceSteps,
+  attempt: (step: ServiceStep, stepIndex: number) => Promise<AttemptResult<T>>,
   opts: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<RunOutput<T>> {
   const sleep = opts.sleep ?? defaultSleep;
@@ -87,7 +86,7 @@ export async function runSteps<T>(
   let lastFailure: AttemptFailure | null = null;
 
   for (let i = 0; i < steps.steps.length; i++) {
-    const step: MubStep = steps.steps[i];
+    const step: ServiceStep = steps.steps[i];
     const maxAttempts = step.retry?.maxAttempts ?? 1;
     const retryOn = step.retry?.on ?? [];
     const intervalMs = step.retry?.intervalMs ?? 0;

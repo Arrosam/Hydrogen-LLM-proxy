@@ -1,10 +1,10 @@
-import dns from "node:dns/promises";
+﻿import dns from "node:dns/promises";
 import net from "node:net";
 import { getConfig, getUpstreamAllowlist } from "../context";
 
 /**
  * Thrown when an upstream URL is rejected by the SSRF guard. Callers treat this
- * like any other transport error (the MUB engine wraps it into a failed
+ * like any other transport error (the service engine wraps it into a failed
  * attempt; the provider-test route reports the message).
  */
 export class UpstreamUrlError extends Error {

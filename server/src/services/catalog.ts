@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+﻿import { and, eq } from "drizzle-orm";
 import { getDb } from "../db";
 import { modelProviders, models, providers, type ModelProvider } from "../db/schema";
 import { toUpstreamProvider } from "./providers";
@@ -78,8 +78,8 @@ export interface MappingResolution {
 }
 
 /**
- * Resolve a MUB step's (modelName, providerName) pair to a concrete upstream
- * target with a decrypted key. Used by the MUB engine at request time.
+ * Resolve a service step's (modelName, providerName) pair to a concrete upstream
+ * target with a decrypted key. Used by the service engine at request time.
  */
 export function resolveMapping(modelName: string, providerName: string): MappingResolution {
   const db = getDb();

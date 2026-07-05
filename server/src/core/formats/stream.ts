@@ -1,4 +1,4 @@
-import type { Family, IRResponse, IRStopReason, IRUsage } from "../ir";
+﻿import type { Family, IRResponse, IRStopReason, IRUsage } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
 import { finishReasonToIR } from "./openai";
 import { irToStopReason } from "./anthropic";
@@ -11,13 +11,14 @@ import { irToStopReason } from "./anthropic";
 export type StreamEvent =
   | { type: "start"; id: string; model: string; created: number; inputTokens?: number }
   | { type: "text_delta"; text: string }
+  | { type: "reasoning_delta"; text: string }
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
   | { type: "finish"; stopReason: IRStopReason; usage?: IRUsage };
 
 export interface StreamContext {
-  /** Model name echoed to the client (the MUB name). */
+  /** Model name echoed to the client (the service name). */
   model: string;
 }
 
@@ -199,7 +200,7 @@ async function* parseAnthropicStream(
         if (delta.stop_reason) stopReason = anthStopToIR(delta.stop_reason as string);
         const usage = (data.usage ?? {}) as Record<string, unknown>;
         if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
-        // Some providers (e.g. GLM / 智谱 Anthropic-compatible endpoints) send
+        // Some providers (e.g. GLM / 閺呴缚姘?Anthropic-compatible endpoints) send
         // input_tokens: 0 in message_start and only report the real prompt count
         // in the final message_delta usage. Prefer any non-zero value we see here.
         if (num(usage.input_tokens) > 0) inputTokens = num(usage.input_tokens);
@@ -259,6 +260,8 @@ export interface StreamAccumulator {
   stopReason: IRStopReason;
   /** Reconstructed assistant text (concatenated deltas), for logging. */
   text: string;
+  /** Reconstructed reasoning/thinking text (concatenated deltas), for logging. */
+  reasoning: string;
   /** Tool calls seen: name + accumulated JSON argument string. */
   toolCalls: Array<{ name: string; args: string }>;
   upstreamModel: string;
@@ -276,6 +279,9 @@ export async function* tapStream(
         break;
       case "text_delta":
         acc.text += ev.text;
+        break;
+      case "reasoning_delta":
+        acc.reasoning += ev.text;
         break;
       case "tool_start": {
         const tc = { name: ev.name, args: "" };
@@ -332,6 +338,9 @@ async function* serializeOpenAIStream(
         break;
       case "text_delta":
         yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });
+        break;
+      case "reasoning_delta":
+        yield chunk({ choices: [{ index: 0, delta: { reasoning: ev.text }, finish_reason: null }] });
         break;
       case "tool_start":
         yield chunk({
@@ -390,6 +399,8 @@ async function* serializeAnthropicStream(
   let nextIndex = 0;
   let textOpen = false;
   let textIndex = 0;
+  let reasoningOpen = false;
+  let reasoningIndex = 0;
   const toolMap = new Map<number, number>();
 
   const frame = (event: string, data: Record<string, unknown>): string =>
@@ -427,6 +438,20 @@ async function* serializeAnthropicStream(
           delta: { type: "text_delta", text: ev.text },
         });
         break;
+      case "reasoning_delta":
+        if (!reasoningOpen) {
+          reasoningIndex = nextIndex++;
+          reasoningOpen = true;
+          yield frame("content_block_start", {
+            index: reasoningIndex,
+            content_block: { type: "thinking", thinking: "" },
+          });
+        }
+        yield frame("content_block_delta", {
+          index: reasoningIndex,
+          delta: { type: "thinking_delta", thinking: ev.text },
+        });
+        break;
       case "tool_start": {
         if (textOpen) {
           yield frame("content_block_stop", { index: textIndex });
@@ -459,6 +484,10 @@ async function* serializeAnthropicStream(
         break;
       }
       case "finish":
+        if (reasoningOpen) {
+          yield frame("content_block_stop", { index: reasoningIndex });
+          reasoningOpen = false;
+        }
         if (textOpen) {
           yield frame("content_block_stop", { index: textIndex });
           textOpen = false;
@@ -491,7 +520,7 @@ export function serializeClientStream(
     : serializeOpenAIStream(events, ctx);
 }
 
-/** Cap for the fabricated stream below. Fast (most models do 20–100 tok/s), but
+/** Cap for the fabricated stream below. Fast (most models do 20閳?00 tok/s), but
  * paced so a buffered chain response still arrives as smooth progressive output
  * instead of one lump. */
 const FAKE_STREAM_TOKENS_PER_SEC = 5000;

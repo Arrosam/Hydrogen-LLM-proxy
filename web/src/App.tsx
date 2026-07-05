@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+﻿import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { Login } from "./pages/Login";
@@ -6,7 +6,7 @@ import { SetPassword } from "./pages/SetPassword";
 import { Overview } from "./pages/Overview";
 import { Providers } from "./pages/Providers";
 import { Models } from "./pages/Models";
-import { Mubs } from "./pages/Mubs";
+import { ModelServices } from "./pages/ModelServices";
 import { Tokens } from "./pages/Tokens";
 import { Users } from "./pages/Users";
 import { Logs } from "./pages/Logs";
@@ -32,8 +32,8 @@ export default function App() {
         <Route index element={<Overview />} />
         <Route path="providers" element={<Providers />} />
         <Route path="models" element={<Models />} />
-        <Route path="mubs" element={<Mubs kind="resilience" />} />
-        <Route path="micro-agents" element={<Mubs kind="chain" />} />
+        <Route path="services" element={<ModelServices kind="resilience" />} />
+        <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
         <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />

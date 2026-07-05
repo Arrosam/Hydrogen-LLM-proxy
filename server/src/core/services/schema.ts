@@ -1,4 +1,4 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 
 /**
  * A trigger is an HTTP status code, or one of the symbolic classes:
@@ -21,6 +21,20 @@ export const RetrySchema = z.object({
   intervalMs: z.number().int().min(0).max(600_000).default(0),
 });
 
+/**
+ * Thinking/reasoning level for a step or stage.
+ *   "disabled"  - turn extended thinking off
+ *   "auto"      - let the model decide (default when the client requested it)
+ *   "enabled"   - turn extended thinking on
+ *   { budget }  - turn it on and enforce a token budget
+ */
+export const ThinkingLevelSchema = z.union([
+  z.literal("disabled"),
+  z.literal("auto"),
+  z.literal("enabled"),
+  z.object({ budget: z.number().int().min(1024).max(128_000) }),
+]);
+
 export const StepSchema = z.object({
   /** Internal catalog model name. */
   model: z.string().min(1),
@@ -29,27 +43,29 @@ export const StepSchema = z.object({
   retry: RetrySchema.optional(),
   /** When to advance to the next step. Omit = advance on any failure. */
   advanceOn: z.array(AdvanceTriggerSchema).optional(),
+  /** Thinking/reasoning level override for this step. */
+  thinking: ThinkingLevelSchema.optional(),
 });
 
-export const MubStepsSchema = z.object({
+export const ServiceStepsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
   steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
 });
 
 // ---------------------------------------------------------------------------
-// Chain (compositional) MUB: an ordered set of stages, each an independent
+// Agent (compositional): an ordered set of stages, each an independent
 // model call whose prompt is assembled from the original request and any
 // earlier stage's output. One stage's result is returned to the client. This
-// is a general pipeline primitive (map/transform/critique/route/ensemble/…),
+// is a general pipeline primitive (map/transform/critique/route/ensemble/...),
 // not tied to any specific workflow.
 // ---------------------------------------------------------------------------
 
 /**
  * A whole "context block" in a stage's input. Blocks are assembled, in order,
- * into the message list sent to the stage's model — letting you build a fresh
+ * into the message list sent to the stage's model -- letting you build a fresh
  * minimal request or the original conversation plus appended turns.
  */
-export const ChainContextBlockSchema = z.discriminatedUnion("kind", [
+export const AgentContextBlockSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("original_conversation") }), // all original messages, images included
   z.object({ kind: z.literal("text_conversation") }), // all original messages, images stripped
   z.object({ kind: z.literal("last_user") }), // the last original user message
@@ -76,7 +92,7 @@ export const ChainContextBlockSchema = z.discriminatedUnion("kind", [
 ]);
 
 /** A routing condition, tested against the original input or a stage's output. */
-export const ChainConditionSchema = z.discriminatedUnion("type", [
+export const AgentConditionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("always") }),
   z.object({ type: z.literal("input_has_image") }),
   z.object({ type: z.literal("input_contains"), value: z.string().min(1) }),
@@ -86,52 +102,54 @@ export const ChainConditionSchema = z.discriminatedUnion("type", [
 ]);
 
 /** A forward-only edge: when the condition holds, go to `goto` (a later stage or "end"). */
-export const ChainTransitionSchema = z.object({
-  when: ChainConditionSchema,
+export const AgentTransitionSchema = z.object({
+  when: AgentConditionSchema,
   goto: z.string().min(1),
   /** When goto="end": which stage's output to return (this or an earlier stage).
-   * Omitted = the stage that ends the chain. */
+   * Omitted = the stage that ends the agent. */
   output: z.string().optional(),
 });
 
-export const ChainStageSchema = z.object({
-  /** Unique id within the chain; referenced by name in conditions/transitions. */
+export const AgentStageSchema = z.object({
+  /** Unique id within the agent; referenced by name in conditions/transitions. */
   name: z.string().min(1).max(60),
-  /** Name of a saved *resilience* MUB run for this stage (its retry/fallback chain). */
-  mub: z.string().min(1).optional(),
-  /** Legacy inline resilience steps (v0.1.3). No mub/steps = a router (no model call). */
+  /** Name of a saved Model Service for this stage (its retry/fallback chain). */
+  service: z.string().min(1).optional(),
+  /** Legacy inline resilience steps (v0.1.3). No service/steps = a router (no model call). */
   steps: z.array(StepSchema).min(1).optional(),
   /** Context blocks assembled into the messages. [] = pass the original messages through. */
-  input: z.array(ChainContextBlockSchema).default([]),
+  input: z.array(AgentContextBlockSchema).default([]),
   /** Optional system-prompt override; omitted = inherit the original system prompt. */
   system: z.string().optional(),
   /**
    * Whether the stage's model may call the original request's tools. "none"
    * keeps the tool list visible (so an evaluate/compose stage can still judge or
    * reference tool use) by rendering the tool definitions into the system prompt
-   * as reference — but it does NOT register them as callable, so the model
+   * as reference -- but it does NOT register them as callable, so the model
    * returns text/JSON. (This is portable: tool_choice "none" is rejected by many
    * upstreams.) Omitted/"inherit" passes tools + tool_choice through unchanged.
    */
   tools: z.enum(["inherit", "none"]).optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  /** Thinking/reasoning level override for this stage. */
+  thinking: ThinkingLevelSchema.optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
   /** Forward-only conditional edges. Absent/no-match = fall through to the next stage. */
-  transitions: z.array(ChainTransitionSchema).optional(),
+  transitions: z.array(AgentTransitionSchema).optional(),
 });
 
 /**
  * Optional image-translation (OCR) pre-pass. When present, every image in the
- * incoming request is sent — before any stage runs — to a multimodal/OCR model
+ * incoming request is sent -- before any stage runs -- to a multimodal/OCR model
  * that transcribes it to text; each image is then replaced in the conversation
  * by that text, so text-only stage models can process the request. Runs a
- * resilience MUB (by name) or inline steps, never a router.
+ * Model Service (by name) or inline steps, never a router.
  */
-export const ChainOcrSchema = z.object({
-  /** Name of a saved *resilience* MUB running the OCR/multimodal model. */
-  mub: z.string().min(1).optional(),
-  /** Legacy inline resilience steps (alternative to `mub`). */
+export const AgentOcrSchema = z.object({
+  /** Name of a Model Service running the OCR/multimodal model. */
+  service: z.string().min(1).optional(),
+  /** Legacy inline resilience steps (alternative to `service`). */
   steps: z.array(StepSchema).min(1).optional(),
   /** System prompt for the OCR model; omitted = the built-in default prompt. */
   prompt: z.string().optional(),
@@ -140,60 +158,61 @@ export const ChainOcrSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
 });
 
-export const ChainSchema = z.object({
-  kind: z.literal("chain"),
+export const AgentSchema = z.object({
+  kind: z.literal("agent"),
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
-  stages: z.array(ChainStageSchema).min(1, "a chain needs at least one stage"),
+  stages: z.array(AgentStageSchema).min(1, "an agent needs at least one stage"),
   /** Name of the stage whose output is returned; omitted = the last stage. */
   output: z.string().optional(),
-  /** Optional image→text OCR pre-pass run before the first stage. */
-  ocr: ChainOcrSchema.optional(),
+  /** Optional image-to-text OCR pre-pass run before the first stage. */
+  ocr: AgentOcrSchema.optional(),
 });
 
 /** The existing resilience workflow, now with an optional explicit discriminant. */
-export const ResilienceSchema = MubStepsSchema.extend({
+export const ResilienceSchema = ServiceStepsSchema.extend({
   kind: z.literal("resilience").optional(),
 });
 
 export type Trigger = z.infer<typeof TriggerSchema>;
 export type AdvanceTrigger = z.infer<typeof AdvanceTriggerSchema>;
 export type RetryPolicy = z.infer<typeof RetrySchema>;
-export type MubStep = z.infer<typeof StepSchema>;
-export type MubSteps = z.infer<typeof MubStepsSchema>;
-export type ChainContextBlock = z.infer<typeof ChainContextBlockSchema>;
-export type ChainCondition = z.infer<typeof ChainConditionSchema>;
-export type ChainTransition = z.infer<typeof ChainTransitionSchema>;
-export type ChainStage = z.infer<typeof ChainStageSchema>;
-export type ChainOcr = z.infer<typeof ChainOcrSchema>;
-export type ChainDef = z.infer<typeof ChainSchema>;
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+export type ServiceStep = z.infer<typeof StepSchema>;
+export type ServiceSteps = z.infer<typeof ServiceStepsSchema>;
+export type AgentContextBlock = z.infer<typeof AgentContextBlockSchema>;
+export type AgentCondition = z.infer<typeof AgentConditionSchema>;
+export type AgentTransition = z.infer<typeof AgentTransitionSchema>;
+export type AgentStage = z.infer<typeof AgentStageSchema>;
+export type AgentOcr = z.infer<typeof AgentOcrSchema>;
+export type AgentDef = z.infer<typeof AgentSchema>;
 export type ResilienceDef = z.infer<typeof ResilienceSchema>;
-export type MubDef = ChainDef | ResilienceDef;
+export type ServiceDef = AgentDef | ResilienceDef;
 
-export function isChain(def: MubDef): def is ChainDef {
-  return (def as ChainDef).kind === "chain";
+export function isAgent(def: ServiceDef): def is AgentDef {
+  return (def as AgentDef).kind === "agent";
 }
 
-/** Parse & validate raw steps_json (resilience or chain). Throws ZodError. */
-export function parseMub(raw: unknown): MubDef {
-  if (raw && typeof raw === "object" && (raw as { kind?: unknown }).kind === "chain") {
-    return ChainSchema.parse(raw);
+/** Parse & validate raw steps_json (resilience or agent). Throws ZodError. */
+export function parseService(raw: unknown): ServiceDef {
+  if (raw && typeof raw === "object" && (raw as { kind?: unknown }).kind === "agent") {
+    return AgentSchema.parse(raw);
   }
   return ResilienceSchema.parse(raw);
 }
 
 /** Parse & validate raw resilience steps_json. Throws ZodError on invalid. */
-export function parseMubSteps(raw: unknown): MubSteps {
-  return MubStepsSchema.parse(raw);
+export function parseServiceSteps(raw: unknown): ServiceSteps {
+  return ServiceStepsSchema.parse(raw);
 }
 
-/** Human-readable one-line summary of a MUB (for the dashboard). */
-export function summarizeMub(def: MubDef): string {
-  if (isChain(def)) {
+/** Human-readable one-line summary of a service (for the dashboard). */
+export function summarizeService(def: ServiceDef): string {
+  if (isAgent(def)) {
     const names = def.stages.map((s) => s.name);
     const branching = def.stages.some((s) => s.transitions && s.transitions.length > 0);
     const returns = def.output && def.output !== names[names.length - 1] ? ` (returns ${def.output})` : "";
-    const ocr = def.ocr ? "OCR → " : "";
-    return `agent: ${ocr}${names.join(" → ")}${branching ? " (branching)" : ""}${returns}`;
+    const ocr = def.ocr ? "OCR -> " : "";
+    return `agent: ${ocr}${names.join(" -> ")}${branching ? " (branching)" : ""}${returns}`;
   }
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;

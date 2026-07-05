@@ -1,4 +1,4 @@
-import { and, gte, lte, sql, type SQL } from "drizzle-orm";
+﻿import { and, gte, lte, sql, type SQL } from "drizzle-orm";
 import { getDb } from "../db";
 import { requestLogs } from "../db/schema";
 
@@ -72,10 +72,10 @@ export interface GroupCount {
   totalTokens: number;
 }
 
-/** Requests + tokens grouped by MUB name. */
-export function byMub(q: StatsQuery): GroupCount[] {
+/** Requests + tokens grouped by service name. */
+export function byService(q: StatsQuery): GroupCount[] {
   const where = buildWhere(q);
-  const key = sql<string>`coalesce(${requestLogs.mubName}, '(unknown)')`;
+  const key = sql<string>`coalesce(${requestLogs.serviceName}, '(unknown)')`;
   const base = getDb()
     .select({
       key,

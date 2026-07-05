@@ -1,14 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { runSteps, type AttemptResult } from "../src/core/mub/engine";
-import type { MubSteps } from "../src/core/mub/schema";
+﻿import { describe, expect, it } from "vitest";
+import { runSteps, type AttemptResult } from "../src/core/services/engine";
+import type { ServiceSteps } from "../src/core/services/schema";
 
 const noSleep = { sleep: async () => {} };
 
-function steps(partial: Partial<MubSteps> & { steps: MubSteps["steps"] }): MubSteps {
+function steps(partial: Partial<ServiceSteps> & { steps: ServiceSteps["steps"] }): ServiceSteps {
   return { timeoutMs: 60000, ...partial };
 }
 
-describe("MUB engine", () => {
+describe("service engine", () => {
   it("retries the same step on a matching code, then succeeds", async () => {
     let n = 0;
     const attempt = async (): Promise<AttemptResult<string>> => {

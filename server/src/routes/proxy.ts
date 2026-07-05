@@ -1,11 +1,11 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+﻿import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
 import { textOf, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
-import { runMubJson, runMubStream } from "../core/proxy/run";
-import { isStreamPlan, runMubChain, type ChainStreamPlan } from "../core/mub/chain";
-import { isChain, type ChainDef, type MubDef, type MubSteps } from "../core/mub/schema";
+import { runServiceJson, runServiceStream } from "../core/proxy/run";
+import { isStreamPlan, runAgent, type AgentStreamPlan } from "../core/agents/engine";
+import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
 import {
   parseUpstreamStream,
   serializeClientStream,
@@ -13,15 +13,15 @@ import {
   tapStream,
   type StreamAccumulator,
 } from "../core/formats/stream";
-import { getMubByName, getMubDef, resolveChainStage } from "../services/mubs";
-import { listMubs } from "../services/mubs";
+import { getServiceByName, getServiceDef, resolveAgentStage } from "../services/services";
+import { listServices } from "../services/services";
 import { incrementUsage } from "../services/tokens";
 import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptRecord } from "../core/mub/engine";
-import type { ModelUseBehavior, Token } from "../db/schema";
+import type { AttemptRecord } from "../core/services/engine";
+import type { ModelService, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
 
@@ -29,8 +29,8 @@ const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens:
 
 interface LogParams {
   token: Token | null;
-  mub: ModelUseBehavior | null;
-  mubName: string | null;
+  service: ModelService | null;
+  serviceName: string | null;
   ingress: Family;
   egress: Family | null;
   streaming: boolean;
@@ -49,8 +49,8 @@ function recordLog(p: LogParams): void {
   const usage = p.usage ?? ZERO_USAGE;
   insertLog({
     tokenId: p.token?.id ?? null,
-    mubId: p.mub?.id ?? null,
-    mubName: p.mubName,
+    serviceId: p.service?.id ?? null,
+    serviceName: p.serviceName,
     ingressFormat: p.ingress,
     egressFormat: p.egress,
     streaming: p.streaming,
@@ -61,9 +61,6 @@ function recordLog(p: LogParams): void {
     latencyMs: p.latencyMs,
     attempts: p.attempts ?? 0,
     attemptPath: p.attemptPath ?? [],
-    // Serialized to VALID JSON within the char budget (long string fields are
-    // shortened rather than cutting the JSON mid-structure) so the log viewer
-    // can always render a formatted transcript.
     requestPayload: p.requestBody !== undefined ? serializeForLog(p.requestBody, max) : null,
     responsePayload:
       p.responseBody !== undefined && p.responseBody !== null
@@ -77,12 +74,11 @@ function replyError(reply: FastifyReply, family: Family, status: number, message
   return reply.code(status).send(buildErrorBody(family, status, message));
 }
 
-function tokenAllowsMub(token: Token, mubId: number): boolean {
-  const scope = token.scopeMubs;
+function tokenAllowsService(token: Token, serviceId: number): boolean {
+  const scope = token.scopeServices;
   if (!Array.isArray(scope) || scope.length === 0) return true; // unscoped = all
-  return scope.includes(mubId);
+  return scope.includes(serviceId);
 }
-
 /** Shared handler for /v1/chat/completions (openai) and /v1/messages (anthropic). */
 async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> {
   const token = req.clientToken!;
@@ -96,58 +92,58 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     return replyError(reply, ingress, 400, "Invalid request body.");
   }
 
-  const mubName = ir.requestedModel;
-  if (!mubName) return replyError(reply, ingress, 400, "Missing 'model' (must be a Model Service or Micro Agent name).");
+  const serviceName = ir.requestedModel;
+  if (!serviceName) return replyError(reply, ingress, 400, "Missing 'model' (must be a Model Service or Micro Agent name).");
 
-  const mub = getMubByName(mubName);
-  if (!mub || !mub.enabled) {
+  const service = getServiceByName(serviceName);
+  if (!service || !service.enabled) {
     recordLog({
-      token, mub: null, mubName, ingress, egress: null, streaming: ir.stream,
-      httpStatus: 404, latencyMs: 0, requestBody: body, error: `unknown model '${mubName}'`,
+      token, service: null, serviceName, ingress, egress: null, streaming: ir.stream,
+      httpStatus: 404, latencyMs: 0, requestBody: body, error: `unknown model '${serviceName}'`,
     });
     return replyError(
       reply, ingress, 404,
-      `Model '${mubName}' not found. The 'model' field must be a Model Service or Micro Agent name.`,
+      `Model '${serviceName}' not found. The 'model' field must be a Model Service or Micro Agent name.`,
     );
   }
 
-  if (!tokenAllowsMub(token, mub.id)) {
+  if (!tokenAllowsService(token, service.id)) {
     recordLog({
-      token, mub, mubName, ingress, egress: null, streaming: ir.stream,
-      httpStatus: 403, latencyMs: 0, requestBody: body, error: "mub out of token scope",
+      token, service, serviceName, ingress, egress: null, streaming: ir.stream,
+      httpStatus: 403, latencyMs: 0, requestBody: body, error: "service out of token scope",
     });
-    return replyError(reply, ingress, 403, `This token is not allowed to use '${mubName}'.`);
+    return replyError(reply, ingress, 403, `This token is not allowed to use '${serviceName}'.`);
   }
 
   const started = Date.now();
-  let def: MubDef;
+  let def: ServiceDef;
   try {
-    def = getMubDef(mub);
+    def = getServiceDef(service);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordLog({
-      token, mub, mubName, ingress, egress: null, streaming: ir.stream, httpStatus: 500,
+      token, service, serviceName, ingress, egress: null, streaming: ir.stream, httpStatus: 500,
       latencyMs: Date.now() - started, requestBody: body, error: `invalid Model Service definition: ${message}`,
     });
     incrementUsage(token.id, 1, 0);
-    return replyError(reply, ingress, 500, `Model '${mubName}' has an invalid definition.`);
+    return replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
   }
 
   if (ir.stream) {
-    if (isChain(def)) return handleChainStream(reply, ingress, ir, def, { token, mub, mubName, body, started });
-    return handleStream(reply, ingress, ir, def, { token, mub, mubName, body, started });
+    if (isAgent(def)) return handleAgentStream(reply, ingress, ir, def, { token, service, serviceName, body, started });
+    return handleStream(reply, ingress, ir, def, { token, service, serviceName, body, started });
   }
 
-  const { result, path } = isChain(def)
-    ? await runMubChain(ir, def, resolveChainStage, [mubName])
-    : await runMubJson(ir, def);
+  const { result, path } = isAgent(def)
+    ? await runAgent(ir, def, resolveAgentStage, [serviceName])
+    : await runServiceJson(ir, def);
   const latencyMs = Date.now() - started;
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
-      token, mub, mubName, ingress, egress: null, streaming: false, httpStatus: status,
+      token, service, serviceName, ingress, egress: null, streaming: false, httpStatus: status,
       latencyMs, attempts: path.length, attemptPath: path, requestBody: body, error: message,
     });
     incrementUsage(token.id, 1, 0);
@@ -155,9 +151,9 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   }
 
   const respIR = result.value.ir;
-  const clientBody = adapter.irToResponse(respIR, { model: mubName });
+  const clientBody = adapter.irToResponse(respIR, { model: serviceName });
   recordLog({
-    token, mub, mubName, ingress, egress: result.value.family, streaming: false, httpStatus: 200,
+    token, service, serviceName, ingress, egress: result.value.family, streaming: false, httpStatus: 200,
     usage: respIR.usage, latencyMs, attempts: path.length, attemptPath: path,
     requestBody: body, responseBody: clientBody,
   });
@@ -167,8 +163,8 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
 
 interface StreamCtx {
   token: Token;
-  mub: ModelUseBehavior;
-  mubName: string;
+  service: ModelService;
+  serviceName: string;
   body: unknown;
   started: number;
 }
@@ -181,21 +177,21 @@ function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply
   return reply.send(Readable.from(gen));
 }
 
-/** Streaming for a resilience MUB: relay the upstream SSE, tapping it for the log. */
+/** Streaming for a Model Service: relay the upstream SSE, tapping it for the log. */
 async function handleStream(
   reply: FastifyReply,
   ingress: Family,
   ir: IRRequest,
-  def: MubSteps,
+  def: ServiceSteps,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path } = await runMubStream(ir, def);
+  const { result, path } = await runServiceStream(ir, def);
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
-      token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: null, streaming: true,
+      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
       httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: path.length,
       attemptPath: path, requestBody: ctx.body, error: message,
     });
@@ -203,9 +199,9 @@ async function handleStream(
     return reply.code(status).send(buildErrorBody(ingress, status, message));
   }
 
-  const acc: StreamAccumulator = { stopReason: null, text: "", toolCalls: [], upstreamModel: "" };
+  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
   const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
-  const outGen = serializeClientStream(ingress, events, { model: ctx.mubName });
+  const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
   const egress = result.value.family;
 
   async function* streamAndLog(): AsyncGenerator<string> {
@@ -219,9 +215,10 @@ async function handleStream(
       const responseBody: Record<string, unknown> = {
         streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
       };
+      if (acc.reasoning) responseBody.reasoning = acc.reasoning;
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
       recordLog({
-        token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress, streaming: true,
+        token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress, streaming: true,
         httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
         attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody, error: streamError,
       });
@@ -231,22 +228,19 @@ async function handleStream(
 
   return sendSse(reply, streamAndLog());
 }
-
-/**
- * Streaming for a chain: routing needs each stage's full output, so earlier
- * stages run buffered — but the terminal stage (nothing routes after it) is
+/** Streaming for an agent: routing needs each stage's full output, so earlier
+ * stages run buffered -- but the terminal stage (nothing routes after it) is
  * streamed directly so the client gets real token-by-token output instead of
  * waiting for the whole response. Falls back to a single-shot stream when the
- * terminal stage can't be streamed (e.g. it's a nested Micro Agent).
- */
-async function handleChainStream(
+ * terminal stage can't be streamed (e.g. it's a nested Micro Agent). */
+async function handleAgentStream(
   reply: FastifyReply,
   ingress: Family,
   ir: IRRequest,
-  chain: ChainDef,
+  agent: AgentDef,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const outcome = await runMubChain(ir, chain, resolveChainStage, [ctx.mubName], { streamTerminal: true });
+  const outcome = await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
   if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
 
   const { result, path } = outcome;
@@ -255,7 +249,7 @@ async function handleChainStream(
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
-      token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: null, streaming: true,
+      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
       httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: path.length,
       attemptPath: path, requestBody: ctx.body, error: message,
     });
@@ -269,29 +263,28 @@ async function handleChainStream(
     stop_reason: respIR.stopReason, usage: respIR.usage,
   };
   recordLog({
-    token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: result.value.family,
+    token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: result.value.family,
     streaming: true, httpStatus: 200, usage: respIR.usage, latencyMs: Date.now() - ctx.started,
     attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody,
   });
   incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
 
-  return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.mubName }));
+  return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.serviceName }));
 }
 
-/** Stream a chain's terminal stage directly, prepending OCR/earlier-stage path + usage. */
+/** Stream an agent's terminal stage directly, prepending OCR/earlier-stage path + usage. */
 async function streamTerminalStage(
   reply: FastifyReply,
   ingress: Family,
-  plan: ChainStreamPlan,
+  plan: AgentStreamPlan,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path: streamPath } = await runMubStream(plan.stageIR, plan.steps);
+  const { result, path: streamPath } = await runServiceStream(plan.stageIR, plan.steps);
 
-  // Tag the terminal stage's records and prepend anything already run (OCR / earlier stages).
   const stagePath = streamPath.map((rec, k) => ({
     ...rec,
     stage: plan.stageName,
-    mub: plan.mub,
+    service: plan.service,
     ...(k === 0 ? { request: plan.request } : {}),
   }));
   const fullPath = [...plan.path, ...stagePath];
@@ -300,7 +293,7 @@ async function streamTerminalStage(
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
-      token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: null, streaming: true,
+      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
       httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: fullPath.length,
       attemptPath: fullPath, requestBody: ctx.body, error: message,
     });
@@ -308,9 +301,9 @@ async function streamTerminalStage(
     return reply.code(status).send(buildErrorBody(ingress, status, message));
   }
 
-  const acc: StreamAccumulator = { stopReason: null, text: "", toolCalls: [], upstreamModel: "" };
+  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
   const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
-  const outGen = serializeClientStream(ingress, events, { model: ctx.mubName });
+  const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
   const egress = result.value.family;
 
   async function* streamAndLog(): AsyncGenerator<string> {
@@ -321,7 +314,6 @@ async function streamTerminalStage(
       streamError = e instanceof Error ? e.message : String(e);
     } finally {
       const streamUsage = acc.usage ?? ZERO_USAGE;
-      // Total = OCR/earlier stages (plan.usage) + the streamed terminal stage.
       const usage: IRUsage = {
         promptTokens: plan.usage.promptTokens + streamUsage.promptTokens,
         completionTokens: plan.usage.completionTokens + streamUsage.completionTokens,
@@ -330,9 +322,10 @@ async function streamTerminalStage(
       const responseBody: Record<string, unknown> = {
         streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
       };
+      if (acc.reasoning) responseBody.reasoning = acc.reasoning;
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
       recordLog({
-        token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress, streaming: true,
+        token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress, streaming: true,
         httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
         attempts: fullPath.length, attemptPath: fullPath, requestBody: ctx.body, responseBody, error: streamError,
       });
@@ -343,29 +336,29 @@ async function streamTerminalStage(
   return sendSse(reply, streamAndLog());
 }
 
-/** GET /v1/models - lists MUBs as the available models. */
+/** GET /v1/models - lists services as the available models. */
 function handleListModels(req: FastifyRequest): unknown {
   const isAnthropic = typeof req.headers["anthropic-version"] === "string";
-  const mubs = listMubs().filter((m) => m.enabled);
-  const created = (m: ModelUseBehavior) =>
+  const services = listServices().filter((m) => m.enabled);
+  const created = (m: ModelService) =>
     m.createdAt instanceof Date ? m.createdAt.getTime() : Number(m.createdAt);
 
   if (isAnthropic) {
     return {
-      data: mubs.map((m) => ({
+      data: services.map((m) => ({
         type: "model",
         id: m.name,
         display_name: m.name,
         created_at: new Date(created(m)).toISOString(),
       })),
       has_more: false,
-      first_id: mubs[0]?.name ?? null,
-      last_id: mubs[mubs.length - 1]?.name ?? null,
+      first_id: services[0]?.name ?? null,
+      last_id: services[services.length - 1]?.name ?? null,
     };
   }
   return {
     object: "list",
-    data: mubs.map((m) => ({
+    data: services.map((m) => ({
       id: m.name,
       object: "model",
       created: Math.floor(created(m) / 1000),
@@ -378,21 +371,21 @@ function handleListModels(req: FastifyRequest): unknown {
 async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const token = req.clientToken!;
   const body = (req.body ?? {}) as Record<string, unknown>;
-  const mubName = String(body.model ?? "");
-  const mub = getMubByName(mubName);
-  if (!mub || !mub.enabled) return replyError(reply, "openai", 404, `Model '${mubName}' not found.`);
-  if (!tokenAllowsMub(token, mub.id)) {
-    return replyError(reply, "openai", 403, `This token is not allowed to use '${mubName}'.`);
+  const serviceName = String(body.model ?? "");
+  const service = getServiceByName(serviceName);
+  if (!service || !service.enabled) return replyError(reply, "openai", 404, `Model '${serviceName}' not found.`);
+  if (!tokenAllowsService(token, service.id)) {
+    return replyError(reply, "openai", 403, `This token is not allowed to use '${serviceName}'.`);
   }
 
-  const def = getMubDef(mub);
-  if (isChain(def)) {
+  const def = getServiceDef(service);
+  if (isAgent(def)) {
     return replyError(reply, "openai", 400, "Embeddings are not supported for Micro Agents.");
   }
   const first = def.steps[0];
   const res = resolveMapping(first.model, first.provider);
   if (!res.ok || !res.mapping) {
-    return replyError(reply, "openai", 502, `No usable upstream for '${mubName}'.`);
+    return replyError(reply, "openai", 502, `No usable upstream for '${serviceName}'.`);
   }
   if (res.mapping.family !== "openai") {
     return replyError(reply, "openai", 400, "Embeddings are only supported on OpenAI-compatible providers.");
@@ -410,7 +403,7 @@ async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promi
     totalTokens: usageObj?.total_tokens ?? usageObj?.prompt_tokens ?? 0,
   };
   recordLog({
-    token, mub, mubName, ingress: "openai", egress: "openai", streaming: false, httpStatus: r.status,
+    token, service, serviceName, ingress: "openai", egress: "openai", streaming: false, httpStatus: r.status,
     usage, latencyMs: Date.now() - started,
     attempts: 1,
     attemptPath: [

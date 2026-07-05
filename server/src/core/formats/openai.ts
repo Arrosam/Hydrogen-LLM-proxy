@@ -1,10 +1,11 @@
-import {
+﻿import {
   type IRContentPart,
   type IRMessage,
   type IRRequest,
   type IRResponse,
   type IRStopReason,
   type IRTextPart,
+  type IRThinkingLevel,
   type IRToolChoice,
   type IRTool,
   normalizeMessages,
@@ -13,7 +14,7 @@ import {
 import { genId, nowSeconds } from "../../util/ids";
 
 export interface ClientResponseCtx {
-  /** Model name echoed back to the client (the MUB name). */
+  /** Model name echoed back to the client (the service name). */
   model: string;
 }
 
@@ -124,6 +125,9 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
 
     if (role === "assistant") {
       const content: IRContentPart[] = coerceContentToParts(msg.content) as IRContentPart[];
+      // OpenAI reasoning models return reasoning in a top-level "reasoning" or "reasoning_content" field.
+      const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? "");
+      if (reasoning) content.push({ type: "reasoning", text: reasoning });
       const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       for (const tc of toolCalls) {
         if (!tc || typeof tc !== "object") continue;
@@ -144,6 +148,8 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
     messages.push({ role: "user", content: coerceContentToParts(msg.content) as IRContentPart[] });
   }
 
+  const thinking = parseOpenAIThinking(body);
+
   return {
     requestedModel: String(body.model ?? ""),
     system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
@@ -155,6 +161,7 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
     topP: numOrUndef(body.top_p),
     stop: parseStop(body.stop),
     stream: Boolean(body.stream),
+    thinking,
     extra: pickExtra(body, [
       "frequency_penalty",
       "presence_penalty",
@@ -166,6 +173,18 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
       "parallel_tool_calls",
     ]),
   };
+}
+
+/** Parse the thinking/reasoning configuration from an OpenAI-style request body. */
+function parseOpenAIThinking(body: Record<string, unknown>): IRThinkingLevel | undefined {
+  // OpenAI reasoning models use "reasoning_effort": "low"|"medium"|"high" or a budget.
+  const effort = body.reasoning_effort;
+  if (effort === "none" || effort === "disabled") return "disabled";
+  if (effort === "low" || effort === "medium" || effort === "high") return "enabled";
+  if (typeof body.max_completion_tokens === "number" && body.reasoning_effort != null) {
+    return { budget: body.max_completion_tokens as number };
+  }
+  return undefined;
 }
 
 function parseTools(raw: unknown): IRTool[] | undefined {
@@ -205,9 +224,13 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
   for (const m of ir.messages) {
     if (m.role === "assistant") {
       const textParts = m.content.filter((p): p is IRTextPart => p.type === "text");
+      const reasoningParts = m.content.filter((p) => p.type === "reasoning");
       const toolUses = m.content.filter((p) => p.type === "tool_use");
       const entry: Record<string, unknown> = { role: "assistant" };
       entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
+      if (reasoningParts.length) {
+        entry.reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+      }
       if (toolUses.length) {
         entry.tool_calls = toolUses.map((tu) => ({
           id: (tu as { id: string }).id,
@@ -254,8 +277,22 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
     out.stream = true;
     out.stream_options = { include_usage: true };
   }
+  // Apply thinking/reasoning level to the upstream request.
+  if (ir.thinking) applyOpenAIThinking(out, ir.thinking);
   if (ir.extra) Object.assign(out, ir.extra);
   return out;
+}
+
+/** Translate an IRThinkingLevel into the OpenAI reasoning_effort field. */
+function applyOpenAIThinking(out: Record<string, unknown>, thinking: IRThinkingLevel): void {
+  if (thinking === "disabled") {
+    out.reasoning_effort = "none";
+  } else if (thinking === "enabled" || thinking === "auto") {
+    out.reasoning_effort = "medium";
+  } else if (typeof thinking === "object") {
+    out.reasoning_effort = "high";
+    if (out.max_tokens == null) out.max_tokens = thinking.budget;
+  }
 }
 
 function openAiUserContent(parts: IRContentPart[]): unknown {
@@ -287,6 +324,9 @@ export function responseToIR(body: Record<string, unknown>): IRResponse {
   const message = (choice.message ?? {}) as Record<string, unknown>;
 
   const content: IRContentPart[] = [];
+  // OpenAI reasoning models put thinking in "reasoning" or "reasoning_content".
+  const reasoning = String(message.reasoning ?? message.reasoning_content ?? "");
+  if (reasoning) content.push({ type: "reasoning", text: reasoning });
   if (typeof message.content === "string" && message.content) {
     content.push({ type: "text", text: message.content });
   } else if (Array.isArray(message.content)) {
@@ -326,8 +366,12 @@ export function responseToIR(body: Record<string, unknown>): IRResponse {
 
 export function irToResponse(ir: IRResponse, ctx: ClientResponseCtx): Record<string, unknown> {
   const text = textOf(ir.content);
+  const reasoningParts = ir.content.filter((p) => p.type === "reasoning");
   const toolUses = ir.content.filter((p) => p.type === "tool_use");
   const message: Record<string, unknown> = { role: "assistant", content: text || null };
+  if (reasoningParts.length) {
+    message.reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+  }
   if (toolUses.length) {
     message.tool_calls = toolUses.map((tu) => ({
       id: (tu as { id: string }).id,

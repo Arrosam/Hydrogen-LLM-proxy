@@ -1,10 +1,10 @@
-import type { FastifyInstance } from "fastify";
+﻿import type { FastifyInstance } from "fastify";
 import { requireSession } from "../../auth/middleware";
 import { authRoutes } from "./authRoutes";
 import { userRoutes } from "./userRoutes";
 import { providerRoutes } from "./providerRoutes";
 import { catalogRoutes } from "./catalogRoutes";
-import { mubRoutes } from "./mubRoutes";
+import { serviceRoutes } from "./serviceRoutes";
 import { tokenRoutes } from "./tokenRoutes";
 import { logRoutes } from "./logRoutes";
 import { settingsRoutes } from "./settingsRoutes";
@@ -20,7 +20,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     await scoped.register(userRoutes, { prefix: "/users" });
     await scoped.register(providerRoutes, { prefix: "/providers" });
     await scoped.register(catalogRoutes); // /models, /mappings
-    await scoped.register(mubRoutes, { prefix: "/mubs" });
+    await scoped.register(serviceRoutes, { prefix: "/services" });
     await scoped.register(tokenRoutes, { prefix: "/tokens" });
     await scoped.register(logRoutes); // /logs, /stats/*
     await scoped.register(settingsRoutes, { prefix: "/settings" });

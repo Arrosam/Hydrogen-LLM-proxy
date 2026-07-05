@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
@@ -6,35 +6,35 @@ import { useToast } from "./Toast";
 import { OcrEditor, StageEditor } from "./StageEditor";
 import type {
   AdvanceTrigger,
-  ChainMub,
-  ChainOcr,
-  ChainStage,
+  AgentDef,
+  AgentOcr,
+  AgentStage,
   Mapping,
   Model,
-  Mub,
-  MubDef,
-  MubStep,
-  MubSteps,
+  ModelService,
+  ServiceDef,
+  ServiceStep,
+  ServiceSteps,
   Provider,
   Trigger,
 } from "../types";
-import { isChainDef } from "../types";
+import { isAgentDef } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 500, 502, 503, 529];
 
 interface Props {
   open: boolean;
-  mub: Mub | null; // null = new
-  mubs: Mub[]; // all MUBs (stages reference resilience MUBs and other Micro Agents)
+  service: ModelService | null; // null = new
+  services: ModelService[]; // all services (stages reference resilience services and other Micro Agents)
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
-  defaultKind?: "resilience" | "chain"; // kind for a NEW mub (fixed by the page)
+  defaultKind?: "resilience" | "chain"; // kind for a NEW service (fixed by the page)
   onClose: () => void;
   onSaved: () => void;
 }
 
-function blankStep(model: string, provider: string): MubStep {
+function blankStep(model: string, provider: string): ServiceStep {
   return { model, provider, retry: { on: [], maxAttempts: 1, intervalMs: 0 } };
 }
 
@@ -43,17 +43,17 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
 }
 
-export function MubEditor({ open, mub, mubs, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
+export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [timeoutMs, setTimeoutMs] = useState(60000);
-  const [steps, setSteps] = useState<MubStep[]>([]);
+  const [steps, setSteps] = useState<ServiceStep[]>([]);
   const [kind, setKind] = useState<"resilience" | "chain">("resilience");
-  const [stages, setStages] = useState<ChainStage[]>([]);
+  const [stages, setStages] = useState<AgentStage[]>([]);
   const [output, setOutput] = useState("");
-  const [ocr, setOcr] = useState<ChainOcr | undefined>(undefined);
+  const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -77,20 +77,20 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
 
   useEffect(() => {
     if (!open) return;
-    if (mub) {
-      setName(mub.name);
-      setDescription(mub.description ?? "");
-      setEnabled(mub.enabled);
-      setTimeoutMs(mub.steps?.timeoutMs ?? 60000);
-      if (isChainDef(mub.steps)) {
+    if (service) {
+      setName(service.name);
+      setDescription(service.description ?? "");
+      setEnabled(service.enabled);
+      setTimeoutMs(service.steps?.timeoutMs ?? 60000);
+      if (isAgentDef(service.steps)) {
         setKind("chain");
-        setStages(mub.steps.stages ?? []);
-        setOutput(mub.steps.output ?? "");
-        setOcr(mub.steps.ocr);
+        setStages(service.steps.stages ?? []);
+        setOutput(service.steps.output ?? "");
+        setOcr(service.steps.ocr);
         setSteps([]);
       } else {
         setKind("resilience");
-        setSteps((mub.steps as MubSteps)?.steps ?? []);
+        setSteps((service.steps as ServiceSteps)?.steps ?? []);
         setStages([]);
         setOutput("");
         setOcr(undefined);
@@ -111,17 +111,17 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     setRaw(false);
     setSummary("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mub]);
+  }, [open, service]);
 
-  const buildDef = (): MubDef =>
+  const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "chain", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as ChainMub)
-      : ({ timeoutMs, steps } as MubSteps);
+      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
+      : ({ timeoutMs, steps } as ServiceSteps);
 
-  const patchStep = (i: number, patch: Partial<MubStep>) =>
+  const patchStep = (i: number, patch: Partial<ServiceStep>) =>
     setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
 
-  const patchRetry = (i: number, patch: Partial<NonNullable<MubStep["retry"]>>) =>
+  const patchRetry = (i: number, patch: Partial<NonNullable<ServiceStep["retry"]>>) =>
     setSteps((s) =>
       s.map((st, idx) =>
         idx === i ? { ...st, retry: { on: [], maxAttempts: 1, intervalMs: 0, ...st.retry, ...patch } } : st,
@@ -136,7 +136,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
 
   const duplicateStep = (i: number) => {
     setSteps((s) => {
-      const copy = JSON.parse(JSON.stringify(s[i])) as MubStep;
+      const copy = JSON.parse(JSON.stringify(s[i])) as ServiceStep;
       const alt = providersForModel(copy.model).filter((p) => p !== copy.provider);
       if (alt[0]) copy.provider = alt[0]; // shortcut for provider-fallback
       return [...s.slice(0, i + 1), copy, ...s.slice(i + 1)];
@@ -156,18 +156,18 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     setDragIndex(null);
   };
 
-  const syncFromRaw = (): MubDef | null => {
+  const syncFromRaw = (): ServiceDef | null => {
     try {
-      const parsed = JSON.parse(rawText) as MubDef;
+      const parsed = JSON.parse(rawText) as ServiceDef;
       setTimeoutMs(parsed.timeoutMs ?? 60000);
-      if (isChainDef(parsed)) {
+      if (isAgentDef(parsed)) {
         setKind("chain");
         setStages(parsed.stages ?? []);
         setOutput(parsed.output ?? "");
         setOcr(parsed.ocr);
       } else {
         setKind("resilience");
-        setSteps((parsed as MubSteps).steps ?? []);
+        setSteps((parsed as ServiceSteps).steps ?? []);
       }
       return parsed;
     } catch {
@@ -176,17 +176,17 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     }
   };
 
-  const currentDef = (): MubDef => (raw ? (JSON.parse(rawText || "{}") as MubDef) : buildDef());
+  const currentDef = (): ServiceDef => (raw ? (JSON.parse(rawText || "{}") as ServiceDef) : buildDef());
 
   const validate = async () => {
-    let s: MubDef;
+    let s: ServiceDef;
     try {
       s = currentDef();
     } catch {
       toast.error("Steps JSON is invalid");
       return;
     }
-    const r = await api.post<{ valid: boolean; summary?: string; error?: string }>("/mubs/validate", { steps: s });
+    const r = await api.post<{ valid: boolean; summary?: string; error?: string }>("/services/validate", { steps: s });
     if (r.valid) {
       setSummary(r.summary ?? "");
       toast.success("Workflow is valid");
@@ -197,7 +197,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
   };
 
   const dryRun = async () => {
-    let s: MubDef;
+    let s: ServiceDef;
     try {
       s = currentDef();
     } catch {
@@ -207,7 +207,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     setBusy(true);
     try {
       const r = await api.post<{ ok: boolean; served?: { model: string; provider: string }; message?: string; output?: string }>(
-        "/mubs/test",
+        "/services/test",
         { steps: s, prompt: "ping" },
       );
       if (r.ok) toast.success(`Served by ${r.served?.model}@${r.served?.provider}: "${r.output}"`);
@@ -220,7 +220,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
   };
 
   const save = async () => {
-    let s: MubDef;
+    let s: ServiceDef;
     try {
       s = currentDef();
     } catch {
@@ -234,9 +234,9 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     setBusy(true);
     try {
       const payload = { name, description: description || null, steps: s, enabled };
-      if (mub) await api.patch(`/mubs/${mub.id}`, payload);
-      else await api.post("/mubs", payload);
-      toast.success(`${kind === "chain" ? "Micro Agent" : "Model Service"} ${mub ? "updated" : "created"}`);
+      if (service) await api.patch(`/services/${service.id}`, payload);
+      else await api.post("/services", payload);
+      toast.success(`${kind === "chain" ? "Micro Agent" : "Model Service"} ${service ? "updated" : "created"}`);
       onSaved();
       onClose();
     } catch (e) {
@@ -256,7 +256,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
     <Modal
       open={open}
       wide
-      title={mub ? `Edit "${mub.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Service"}
+      title={service ? `Edit "${service.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Service"}
       icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
       onClose={onClose}
       footer={
@@ -321,7 +321,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
           </div>
         ) : kind === "chain" ? (
           <div className="space-y-4">
-            <OcrEditor ocr={ocr} onChange={setOcr} mubs={mubs.filter((m) => m.id !== mub?.id)} />
+            <OcrEditor ocr={ocr} onChange={setOcr} services={services.filter((m) => m.id !== service?.id)} />
             <StageEditor
               stages={stages}
               output={output}
@@ -329,7 +329,7 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
                 setStages(s);
                 setOutput(o);
               }}
-              mubs={mubs.filter((m) => m.id !== mub?.id)}
+              services={services.filter((m) => m.id !== service?.id)}
             />
           </div>
         ) : (
@@ -424,6 +424,38 @@ export function MubEditor({ open, mub, mubs, models, providers, mappings, defaul
                           selected={step.retry?.on ?? []}
                           onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
                         />
+                      </div>
+
+                      <div className="mt-3">
+                        <label className="label">Thinking level <span className="normal-case text-ink-500">(override for this step)</span></label>
+                        <select
+                          className="input"
+                          value={step.thinking ? (typeof step.thinking === "object" ? "budget" : step.thinking) : ""}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (!v) patchStep(i, { thinking: undefined });
+                            else if (v === "budget") patchStep(i, { thinking: { budget: 8192 } });
+                            else patchStep(i, { thinking: v as "disabled" | "auto" | "enabled" });
+                          }}
+                        >
+                          <option value="">inherit (from request)</option>
+                          <option value="disabled">disabled</option>
+                          <option value="auto">auto</option>
+                          <option value="enabled">enabled</option>
+                          <option value="budget">budget (tokens)</option>
+                        </select>
+                        {step.thinking && typeof step.thinking === "object" && (
+                          <input
+                            className="input mt-2"
+                            type="text"
+                            inputMode="numeric"
+                            value={step.thinking.budget}
+                            onFocus={selectAll}
+                            onClick={selectAll}
+                            onChange={(e) => patchStep(i, { thinking: { budget: Math.max(1024, Number(e.target.value.replace(/\D/g, "")) || 8192) } })}
+                            placeholder="token budget (min 1024)"
+                          />
+                        )}
                       </div>
 
                       {i < steps.length - 1 && (

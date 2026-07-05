@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import type { ChainContextBlock, ChainCondition, ChainOcr, ChainStage, ChainTransition, Mub } from "../types";
-import { isChainDef } from "../types";
+﻿import { useEffect, useState } from "react";
+import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
+import { isAgentDef } from "../types";
 import { Toggle } from "./common";
 
 const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.currentTarget.select();
@@ -17,7 +17,7 @@ const BLOCK_KINDS: { value: string; label: string }[] = [
   { value: "plain_text", label: "Plain text" },
 ];
 
-function newContextBlock(value: string, earlier: string[]): ChainContextBlock {
+function newContextBlock(value: string, earlier: string[]): AgentContextBlock {
   switch (value) {
     case "text_conversation":
       return { kind: "text_conversation" };
@@ -39,7 +39,7 @@ function newContextBlock(value: string, earlier: string[]): ChainContextBlock {
   }
 }
 
-const CONDITION_TYPES: { type: ChainCondition["type"]; label: string }[] = [
+const CONDITION_TYPES: { type: AgentCondition["type"]; label: string }[] = [
   { type: "always", label: "always" },
   { type: "input_has_image", label: "input has image" },
   { type: "input_contains", label: "input contains" },
@@ -50,41 +50,41 @@ const CONDITION_TYPES: { type: ChainCondition["type"]; label: string }[] = [
 
 const ROUTER = "__router__";
 
-function isModelStage(s: ChainStage): boolean {
-  return !!s.mub || !!(s.steps && s.steps.length);
+function isModelStage(s: AgentStage): boolean {
+  return !!s.service || !!(s.steps && s.steps.length);
 }
-function newCondition(type: ChainCondition["type"]): ChainCondition {
+function newCondition(type: AgentCondition["type"]): AgentCondition {
   if (type === "input_contains" || type === "input_matches") return { type, value: "" };
   if (type === "output_contains" || type === "output_matches") return { type, value: "" };
-  return { type } as ChainCondition;
+  return { type } as AgentCondition;
 }
-const condHasValue = (c: ChainCondition) => c.type.endsWith("_contains") || c.type.endsWith("_matches");
-const condIsOutput = (c: ChainCondition) => c.type === "output_contains" || c.type === "output_matches";
+const condHasValue = (c: AgentCondition) => c.type.endsWith("_contains") || c.type.endsWith("_matches");
+const condIsOutput = (c: AgentCondition) => c.type === "output_contains" || c.type === "output_matches";
 
 interface Props {
-  stages: ChainStage[];
+  stages: AgentStage[];
   output: string;
-  onChange: (stages: ChainStage[], output: string) => void;
-  mubs: Mub[]; // resilience MUBs available to reference
+  onChange: (stages: AgentStage[], output: string) => void;
+  services: ModelService[]; // resilience services available to reference
 }
 
-export function StageEditor({ stages, output, onChange, mubs }: Props) {
+export function StageEditor({ stages, output, onChange, services }: Props) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
-  const setStages = (next: ChainStage[], nextOutput = output) => onChange(next, nextOutput);
-  const patch = (i: number, p: Partial<ChainStage>) => setStages(stages.map((s, idx) => (idx === i ? { ...s, ...p } : s)));
+  const setStages = (next: AgentStage[], nextOutput = output) => onChange(next, nextOutput);
+  const patch = (i: number, p: Partial<AgentStage>) => setStages(stages.map((s, idx) => (idx === i ? { ...s, ...p } : s)));
 
   const addStage = () => {
     const name = uniqueName(stages, "stage");
-    const first = mubs[0]?.name;
-    setStages([...stages, { name, input: [], ...(first ? { mub: first } : {}) }]);
+    const first = services[0]?.name;
+    setStages([...stages, { name, input: [], ...(first ? { service: first } : {}) }]);
   };
   const removeStage = (i: number) => {
     const gone = stages[i].name;
     setStages(stages.filter((_, idx) => idx !== i), output === gone ? "" : output);
   };
   const duplicateStage = (i: number) => {
-    const copy = JSON.parse(JSON.stringify(stages[i])) as ChainStage;
+    const copy = JSON.parse(JSON.stringify(stages[i])) as AgentStage;
     copy.name = uniqueName(stages, `${stages[i].name}_copy`);
     setStages([...stages.slice(0, i + 1), copy, ...stages.slice(i + 1)]);
   };
@@ -107,7 +107,7 @@ export function StageEditor({ stages, output, onChange, mubs }: Props) {
         </button>
       </div>
 
-      {mubs.length === 0 && (
+      {services.length === 0 && (
         <p className="mb-2 rounded-lg border border-amber-700/40 bg-amber-700/10 px-3 py-2 text-xs text-amber-300">
           No Model Services exist yet. Create one first — each stage runs a Model Service (or another Micro Agent).
         </p>
@@ -154,7 +154,7 @@ export function StageEditor({ stages, output, onChange, mubs }: Props) {
 
             <StageBody
               stage={stage}
-              mubs={mubs}
+              services={services}
               earlier={stages.slice(0, i).map((s) => s.name).filter(Boolean)}
               earlierModel={stages.slice(0, i).filter(isModelStage).map((s) => s.name).filter(Boolean)}
               later={stages.slice(i + 1).map((s) => s.name).filter(Boolean)}
@@ -181,26 +181,26 @@ export function StageEditor({ stages, output, onChange, mubs }: Props) {
 
 function StageBody({
   stage,
-  mubs,
+  services,
   earlier,
   earlierModel,
   later,
   onPatch,
 }: {
-  stage: ChainStage;
-  mubs: Mub[];
+  stage: AgentStage;
+  services: ModelService[];
   earlier: string[];
   earlierModel: string[];
   later: string[];
-  onPatch: (p: Partial<ChainStage>) => void;
+  onPatch: (p: Partial<AgentStage>) => void;
 }) {
   const [advanced, setAdvanced] = useState(false);
   const model = isModelStage(stage);
-  const legacyInline = !stage.mub && !!(stage.steps && stage.steps.length);
-  const resilienceMubs = mubs.filter((m) => !isChainDef(m.steps));
-  const agentMubs = mubs.filter((m) => isChainDef(m.steps));
-  const setBlocks = (blocks: ChainContextBlock[]) => onPatch({ input: blocks });
-  const setTransitions = (transitions: ChainTransition[]) => onPatch({ transitions });
+  const legacyInline = !stage.service && !!(stage.steps && stage.steps.length);
+  const resilienceServices = services.filter((m) => !isAgentDef(m.steps));
+  const agentServices = services.filter((m) => isAgentDef(m.steps));
+  const setBlocks = (blocks: AgentContextBlock[]) => onPatch({ input: blocks });
+  const setTransitions = (transitions: AgentTransition[]) => onPatch({ transitions });
 
   return (
     <>
@@ -208,22 +208,22 @@ function StageBody({
         <label className="label">Runs</label>
         <select
           className="input"
-          value={stage.mub ?? (model ? "" : ROUTER)}
+          value={stage.service ?? (model ? "" : ROUTER)}
           onChange={(e) => {
             const v = e.target.value;
-            if (v === ROUTER) onPatch({ mub: undefined, steps: undefined });
-            else onPatch({ mub: v || undefined, steps: undefined });
+            if (v === ROUTER) onPatch({ service: undefined, steps: undefined });
+            else onPatch({ service: v || undefined, steps: undefined });
           }}
         >
           <option value="">— pick a Model Service or Micro Agent —</option>
           <optgroup label="Model Services">
-            {resilienceMubs.map((m) => (
+            {resilienceServices.map((m) => (
               <option key={m.name} value={m.name}>{m.name}</option>
             ))}
           </optgroup>
-          {agentMubs.length > 0 && (
+          {agentServices.length > 0 && (
             <optgroup label="Micro Agents">
-              {agentMubs.map((m) => (
+              {agentServices.map((m) => (
                 <option key={m.name} value={m.name}>{m.name}</option>
               ))}
             </optgroup>
@@ -312,6 +312,37 @@ function StageBody({
                 <NumOverride label="Temperature" value={stage.temperature} onChange={(v) => onPatch({ temperature: v })} decimal />
                 <NumOverride label="Max tokens" value={stage.maxTokens} onChange={(v) => onPatch({ maxTokens: v })} />
                 <NumOverride label="Timeout (ms)" value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
+              <div>
+                <label className="label">Thinking level</label>
+                <select
+                  className="input"
+                  value={stage.thinking ? (typeof stage.thinking === "object" ? "budget" : stage.thinking) : ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) onPatch({ thinking: undefined });
+                    else if (v === "budget") onPatch({ thinking: { budget: 8192 } });
+                    else onPatch({ thinking: v as "disabled" | "auto" | "enabled" });
+                  }}
+                >
+                  <option value="">inherit (from request)</option>
+                  <option value="disabled">disabled</option>
+                  <option value="auto">auto</option>
+                  <option value="enabled">enabled</option>
+                  <option value="budget">budget (tokens)</option>
+                </select>
+                {stage.thinking && typeof stage.thinking === "object" && (
+                  <input
+                    className="input mt-2"
+                    type="text"
+                    inputMode="numeric"
+                    value={stage.thinking.budget}
+                    onFocus={selectAll}
+                    onClick={selectAll}
+                    onChange={(e) => onPatch({ thinking: { budget: Math.max(1024, Number(e.target.value.replace(/\D/g, "")) || 8192) } })}
+                    placeholder="token budget (min 1024)"
+                  />
+                )}
+              </div>
               </div>
             </div>
           )}
@@ -355,11 +386,11 @@ function TransitionRow({
   onChange,
   onRemove,
 }: {
-  transition: ChainTransition;
+  transition: AgentTransition;
   earlier: string[];
   later: string[];
   outputStages: string[];
-  onChange: (t: ChainTransition) => void;
+  onChange: (t: AgentTransition) => void;
   onRemove: () => void;
 }) {
   const c = transition.when;
@@ -369,7 +400,7 @@ function TransitionRow({
       <select
         className="input h-8 w-40 py-0 text-xs"
         value={c.type}
-        onChange={(e) => onChange({ ...transition, when: newCondition(e.target.value as ChainCondition["type"]) })}
+        onChange={(e) => onChange({ ...transition, when: newCondition(e.target.value as AgentCondition["type"]) })}
       >
         {CONDITION_TYPES.map((o) => (
           <option key={o.type} value={o.type}>{o.label}</option>
@@ -379,7 +410,7 @@ function TransitionRow({
         <select
           className="input h-8 w-32 py-0 text-xs"
           value={(c as { stage?: string }).stage ?? ""}
-          onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as ChainCondition })}
+          onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as AgentCondition })}
         >
           <option value="">this stage</option>
           {earlier.map((s) => (
@@ -391,7 +422,7 @@ function TransitionRow({
         <input
           className="input h-8 flex-1 py-0 font-mono text-xs"
           value={(c as { value: string }).value}
-          onChange={(e) => onChange({ ...transition, when: { ...c, value: e.target.value } as ChainCondition })}
+          onChange={(e) => onChange({ ...transition, when: { ...c, value: e.target.value } as AgentCondition })}
           placeholder={c.type.endsWith("matches") ? "regex" : "text to find"}
         />
       )}
@@ -431,7 +462,7 @@ function TransitionRow({
   );
 }
 
-const BLOCK_LABEL: Record<ChainContextBlock["kind"], string> = {
+const BLOCK_LABEL: Record<AgentContextBlock["kind"], string> = {
   original_conversation: "Full conversation",
   text_conversation: "Text-only conversation",
   last_user: "Last user request",
@@ -441,7 +472,7 @@ const BLOCK_LABEL: Record<ChainContextBlock["kind"], string> = {
   message: "Turn",
   tool_turn: "Tool turn",
 };
-const BLOCK_HINT: Partial<Record<ChainContextBlock["kind"], string>> = {
+const BLOCK_HINT: Partial<Record<AgentContextBlock["kind"], string>> = {
   original_conversation: "The original messages, images included.",
   text_conversation: "The original messages with images stripped.",
   last_user: "The last user message from the original request.",
@@ -456,9 +487,9 @@ function ContextBlockRow({
   onMove,
   onRemove,
 }: {
-  block: ChainContextBlock;
+  block: AgentContextBlock;
   earlier: string[];
-  onChange: (b: ChainContextBlock) => void;
+  onChange: (b: AgentContextBlock) => void;
   onMove: (dir: number) => void;
   onRemove: () => void;
 }) {
@@ -607,7 +638,7 @@ function NumOverride({
   );
 }
 
-function uniqueName(stages: ChainStage[], base: string): string {
+function uniqueName(stages: AgentStage[], base: string): string {
   const taken = new Set(stages.map((s) => s.name));
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) if (!taken.has(`${base}${i}`)) return `${base}${i}`;
@@ -655,24 +686,24 @@ Example for two images:
 export function OcrEditor({
   ocr,
   onChange,
-  mubs,
+  services,
 }: {
-  ocr: ChainOcr | undefined;
-  onChange: (ocr: ChainOcr | undefined) => void;
-  mubs: Mub[];
+  ocr: AgentOcr | undefined;
+  onChange: (ocr: AgentOcr | undefined) => void;
+  services: ModelService[];
 }) {
   const [advanced, setAdvanced] = useState(false);
   const enabled = !!ocr;
-  const legacyInline = enabled && !ocr.mub && !!(ocr.steps && ocr.steps.length);
-  const patch = (p: Partial<ChainOcr>) => onChange({ ...(ocr ?? {}), ...p });
-  // OCR is a single vision-model call — only resilience MUBs, never Micro Agents.
-  const resilienceMubs = mubs.filter((m) => !isChainDef(m.steps));
+  const legacyInline = enabled && !ocr.service && !!(ocr.steps && ocr.steps.length);
+  const patch = (p: Partial<AgentOcr>) => onChange({ ...(ocr ?? {}), ...p });
+  // OCR is a single vision-model call — only resilience services, never Micro Agents.
+  const resilienceServices = services.filter((m) => !isAgentDef(m.steps));
 
   return (
     <div className="rounded-xl border border-ink-700 bg-ink-850/70 p-3">
       <Toggle
         checked={enabled}
-        onChange={(v) => onChange(v ? { mub: resilienceMubs[0]?.name } : undefined)}
+        onChange={(v) => onChange(v ? { service: resilienceServices[0]?.name } : undefined)}
         label="Translate images to text (OCR pre-pass)"
       />
       <p className="mt-1 text-xs text-ink-500">
@@ -686,18 +717,18 @@ export function OcrEditor({
             <label className="label">OCR model runs</label>
             <select
               className="input"
-              value={ocr.mub ?? ""}
-              onChange={(e) => patch({ mub: e.target.value || undefined, steps: undefined })}
+              value={ocr.service ?? ""}
+              onChange={(e) => patch({ service: e.target.value || undefined, steps: undefined })}
             >
               <option value="">— pick a multimodal Model Service —</option>
-              {resilienceMubs.map((m) => (
+              {resilienceServices.map((m) => (
                 <option key={m.name} value={m.name}>{m.name}</option>
               ))}
             </select>
             {legacyInline && (
               <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a Model Service, or edit via Raw JSON.</p>
             )}
-            {resilienceMubs.length === 0 && (
+            {resilienceServices.length === 0 && (
               <p className="mt-1 text-xs text-amber-300">
                 No Model Services exist yet — create one that maps to a multimodal model.
               </p>

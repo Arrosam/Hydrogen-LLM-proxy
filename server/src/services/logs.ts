@@ -1,11 +1,11 @@
-import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
+﻿import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { getDb } from "../db";
 import { requestLogs, type RequestLog } from "../db/schema";
 
 export interface LogInsert {
   tokenId: number | null;
-  mubId: number | null;
-  mubName: string | null;
+  serviceId: number | null;
+  serviceName: string | null;
   ingressFormat: "openai" | "anthropic";
   egressFormat: "openai" | "anthropic" | null;
   streaming: boolean;
@@ -27,7 +27,7 @@ export function insertLog(row: LogInsert): void {
 
 export interface LogQuery {
   tokenId?: number;
-  mubId?: number;
+  serviceId?: number;
   status?: number;
   errorsOnly?: boolean;
   from?: number; // epoch ms
@@ -40,8 +40,8 @@ export interface LogSummary {
   id: number;
   createdAt: number;
   tokenId: number | null;
-  mubId: number | null;
-  mubName: string | null;
+  serviceId: number | null;
+  serviceName: string | null;
   ingressFormat: string;
   egressFormat: string | null;
   streaming: boolean;
@@ -62,7 +62,7 @@ function ms(v: Date | number | null): number {
 function buildWhere(q: LogQuery): SQL | undefined {
   const conds: SQL[] = [];
   if (q.tokenId != null) conds.push(eq(requestLogs.tokenId, q.tokenId));
-  if (q.mubId != null) conds.push(eq(requestLogs.mubId, q.mubId));
+  if (q.serviceId != null) conds.push(eq(requestLogs.serviceId, q.serviceId));
   if (q.status != null) conds.push(eq(requestLogs.httpStatus, q.status));
   if (q.errorsOnly) conds.push(gte(requestLogs.httpStatus, 400));
   if (q.from != null) conds.push(gte(requestLogs.createdAt, new Date(q.from)));
@@ -81,8 +81,8 @@ export function queryLogs(q: LogQuery): { rows: LogSummary[]; total: number } {
       id: requestLogs.id,
       createdAt: requestLogs.createdAt,
       tokenId: requestLogs.tokenId,
-      mubId: requestLogs.mubId,
-      mubName: requestLogs.mubName,
+      serviceId: requestLogs.serviceId,
+      serviceName: requestLogs.serviceName,
       ingressFormat: requestLogs.ingressFormat,
       egressFormat: requestLogs.egressFormat,
       streaming: requestLogs.streaming,

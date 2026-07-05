@@ -1,10 +1,10 @@
-import type { Readable } from "node:stream";
+﻿import type { Readable } from "node:stream";
 import type { Family, IRRequest, IRResponse } from "../ir";
 import { adapterFor } from "../formats";
 import { buildHeaders, chatUrl, postJson, postStream } from "../upstream";
 import { resolveMapping } from "../../services/catalog";
-import { runSteps, type AttemptResult, type RunOutput } from "../mub/engine";
-import type { MubStep, MubSteps } from "../mub/schema";
+import { runSteps, type AttemptResult, type RunOutput } from "../services/engine";
+import type { ServiceStep, ServiceSteps } from "../services/schema";
 
 export interface AttemptTargetInfo {
   family: Family;
@@ -21,7 +21,7 @@ export interface StreamSuccess extends AttemptTargetInfo {
   body: Readable;
 }
 
-function resolveStepMapping(step: MubStep):
+function resolveStepMapping(step: ServiceStep):
   | { ok: true; mapping: NonNullable<ReturnType<typeof resolveMapping>["mapping"]> }
   | { ok: false; message: string } {
   const res = resolveMapping(step.model, step.provider);
@@ -31,9 +31,9 @@ function resolveStepMapping(step: MubStep):
   return { ok: true, mapping: res.mapping };
 }
 
-/** Run a MUB's steps for a non-streaming request. */
-export function runMubJson(ir: IRRequest, steps: MubSteps): Promise<RunOutput<JsonSuccess>> {
-  const attempt = async (step: MubStep): Promise<AttemptResult<JsonSuccess>> => {
+/** Run a service's steps for a non-streaming request. */
+export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunOutput<JsonSuccess>> {
+  const attempt = async (step: ServiceStep): Promise<AttemptResult<JsonSuccess>> => {
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
@@ -66,9 +66,9 @@ export function runMubJson(ir: IRRequest, steps: MubSteps): Promise<RunOutput<Js
   return runSteps(steps, attempt);
 }
 
-/** Run a MUB's steps for a streaming request (commits once headers are 2xx). */
-export function runMubStream(ir: IRRequest, steps: MubSteps): Promise<RunOutput<StreamSuccess>> {
-  const attempt = async (step: MubStep): Promise<AttemptResult<StreamSuccess>> => {
+/** Run a service's steps for a streaming request (commits once headers are 2xx). */
+export function runServiceStream(ir: IRRequest, steps: ServiceSteps): Promise<RunOutput<StreamSuccess>> {
+  const attempt = async (step: ServiceStep): Promise<AttemptResult<StreamSuccess>> => {
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
@@ -88,7 +88,6 @@ export function runMubStream(ir: IRRequest, steps: MubSteps): Promise<RunOutput<
         },
       };
     }
-    // Drain the error body so we can relay a useful message.
     let errText = "";
     try {
       for await (const chunk of r.body) errText += chunk.toString();

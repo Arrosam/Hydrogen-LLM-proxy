@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+﻿import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { tokens, type Token } from "../db/schema";
 import { generateToken, hashToken } from "../security/tokens";
@@ -6,7 +6,7 @@ import { generateToken, hashToken } from "../security/tokens";
 export interface TokenInput {
   name: string;
   ownerUserId?: number | null;
-  scopeMubs?: number[] | null; // null/empty = all MUBs
+  scopeServices?: number[] | null; // null/empty = all services
   maxRequests?: number | null;
   maxTokens?: number | null;
   expiresAt?: number | null; // epoch ms
@@ -18,7 +18,7 @@ export interface PublicToken {
   name: string;
   keyPrefix: string;
   ownerUserId: number | null;
-  scopeMubs: number[] | null;
+  scopeServices: number[] | null;
   maxRequests: number | null;
   maxTokens: number | null;
   usedRequests: number;
@@ -39,7 +39,7 @@ export function toPublicToken(t: Token): PublicToken {
     name: t.name,
     keyPrefix: t.keyPrefix,
     ownerUserId: t.ownerUserId ?? null,
-    scopeMubs: t.scopeMubs ?? null,
+    scopeServices: t.scopeServices ?? null,
     maxRequests: t.maxRequests ?? null,
     maxTokens: t.maxTokens ?? null,
     usedRequests: t.usedRequests,
@@ -68,7 +68,7 @@ export function createToken(input: TokenInput): { token: Token; secret: string }
       keyHash: gen.hash,
       keyPrefix: gen.prefix,
       ownerUserId: input.ownerUserId ?? null,
-      scopeMubs: input.scopeMubs ?? null,
+      scopeServices: input.scopeServices ?? null,
       maxRequests: input.maxRequests ?? null,
       maxTokens: input.maxTokens ?? null,
       expiresAt: input.expiresAt != null ? new Date(input.expiresAt) : null,
@@ -85,7 +85,7 @@ export function updateToken(
 ): Token | undefined {
   const patch: Record<string, unknown> = {};
   if (input.name !== undefined) patch.name = input.name;
-  if (input.scopeMubs !== undefined) patch.scopeMubs = input.scopeMubs;
+  if (input.scopeServices !== undefined) patch.scopeServices = input.scopeServices;
   if (input.maxRequests !== undefined) patch.maxRequests = input.maxRequests;
   if (input.maxTokens !== undefined) patch.maxTokens = input.maxTokens;
   if (input.expiresAt !== undefined)

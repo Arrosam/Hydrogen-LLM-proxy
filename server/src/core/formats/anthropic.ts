@@ -1,4 +1,4 @@
-import {
+﻿import {
   type IRContentPart,
   type IRImagePart,
   type IRMessage,
@@ -6,6 +6,7 @@ import {
   type IRResponse,
   type IRStopReason,
   type IRTextPart,
+  type IRThinkingLevel,
   type IRToolChoice,
   type IRTool,
   normalizeMessages,
@@ -47,7 +48,7 @@ function irToStopReason(reason: IRStopReason): string {
   }
 }
 
-// --- block <-> part coercion ---------------------------------------------
+// --- block <-> part coercion --------------------------------------------
 
 function systemToText(system: unknown): string | undefined {
   if (system == null) return undefined;
@@ -70,6 +71,12 @@ function blocksToParts(content: unknown): IRContentPart[] {
     if (!raw || typeof raw !== "object") continue;
     const b = raw as Record<string, unknown>;
     switch (b.type) {
+      case "thinking":
+        parts.push({ type: "reasoning", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
+        break;
+      case "redacted_thinking":
+        parts.push({ type: "reasoning", text: "(redacted thinking)", signature: b.data != null ? String(b.data) : undefined });
+        break;
       case "text":
         parts.push({ type: "text", text: String(b.text ?? "") });
         break;
@@ -126,6 +133,8 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
     messages.push({ role, content: blocksToParts(m.content) });
   }
 
+  const thinking = parseAnthropicThinking(body);
+
   return {
     requestedModel: String(body.model ?? ""),
     system: systemToText(body.system),
@@ -137,8 +146,22 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
     topP: numOrUndef(body.top_p),
     stop: Array.isArray(body.stop_sequences) ? body.stop_sequences.map(String) : undefined,
     stream: Boolean(body.stream),
+    thinking,
     extra: pickExtra(body, ["top_k", "metadata"]),
   };
+}
+
+/** Parse the thinking configuration from an Anthropic-style request body. */
+function parseAnthropicThinking(body: Record<string, unknown>): IRThinkingLevel | undefined {
+  const t = body.thinking;
+  if (!t || typeof t !== "object") return undefined;
+  const cfg = t as Record<string, unknown>;
+  if (cfg.type === "enabled") {
+    const budget = numOrUndef(cfg.budget_tokens);
+    return budget != null ? { budget } : "enabled";
+  }
+  if (cfg.type === "disabled") return "disabled";
+  return undefined;
 }
 
 function parseTools(raw: unknown): IRTool[] | undefined {
@@ -147,7 +170,7 @@ function parseTools(raw: unknown): IRTool[] | undefined {
   for (const t of raw) {
     if (!t || typeof t !== "object") continue;
     const tool = t as Record<string, unknown>;
-    if (!tool.name) continue; // skip server-side tools without a plain name
+    if (!tool.name) continue;
     tools.push({
       name: String(tool.name),
       description: tool.description ? String(tool.description) : undefined,
@@ -200,8 +223,32 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
   if (ir.topP != null) out.top_p = ir.topP;
   if (ir.stop && ir.stop.length) out.stop_sequences = ir.stop;
   if (ir.stream) out.stream = true;
+  // Apply thinking/reasoning level to the upstream request.
+  if (ir.thinking) applyAnthropicThinking(out, ir.thinking);
   if (ir.extra) Object.assign(out, ir.extra);
   return out;
+}
+
+/** Translate an IRThinkingLevel into the Anthropic thinking parameter. */
+function applyAnthropicThinking(out: Record<string, unknown>, thinking: IRThinkingLevel): void {
+  if (thinking === "disabled") {
+    out.thinking = { type: "disabled" };
+  } else if (thinking === "enabled" || thinking === "auto") {
+    // Anthropic requires a budget; use a sensible default if none specified.
+    const budget = out.max_tokens != null ? Math.min(out.max_tokens as number, 16000) : 16000;
+    out.thinking = { type: "enabled", budget_tokens: budget };
+    // Anthropic requires max_tokens >= budget_tokens + 1
+    const maxTokens = out.max_tokens as number | undefined;
+    if (maxTokens == null || maxTokens <= budget) {
+      out.max_tokens = budget + 4096;
+    }
+  } else if (typeof thinking === "object") {
+    out.thinking = { type: "enabled", budget_tokens: thinking.budget };
+    const maxTokens = out.max_tokens as number | undefined;
+    if (maxTokens == null || maxTokens <= thinking.budget) {
+      out.max_tokens = thinking.budget + 4096;
+    }
+  }
 }
 
 function partsToBlocks(parts: IRContentPart[]): unknown[] {
@@ -210,6 +257,13 @@ function partsToBlocks(parts: IRContentPart[]): unknown[] {
     switch (p.type) {
       case "text":
         blocks.push({ type: "text", text: p.text });
+        break;
+      case "reasoning":
+        blocks.push({
+          type: "thinking",
+          thinking: p.text,
+          ...(p.signature ? { signature: p.signature } : {}),
+        });
         break;
       case "image":
         blocks.push({ type: "image", source: imageSourceToBlock(p.source) });
@@ -247,7 +301,7 @@ function irToolChoiceToAnthropic(choice: IRToolChoice): unknown {
 
 export function responseToIR(body: Record<string, unknown>): IRResponse {
   const content = blocksToParts(body.content).filter(
-    (p) => p.type === "text" || p.type === "tool_use",
+    (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning",
   );
   const usage = (body.usage ?? {}) as Record<string, unknown>;
   const promptTokens = numOrUndef(usage.input_tokens) ?? 0;
@@ -267,9 +321,17 @@ export function responseToIR(body: Record<string, unknown>): IRResponse {
 export function irToResponse(ir: IRResponse, ctx: ClientResponseCtx): Record<string, unknown> {
   const content: unknown[] = [];
   for (const p of ir.content) {
-    if (p.type === "text") content.push({ type: "text", text: p.text });
-    else if (p.type === "tool_use")
+    if (p.type === "reasoning") {
+      content.push({
+        type: "thinking",
+        thinking: p.text,
+        ...(p.signature ? { signature: p.signature } : {}),
+      });
+    } else if (p.type === "text") {
+      content.push({ type: "text", text: p.text });
+    } else if (p.type === "tool_use") {
       content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+    }
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
   return {

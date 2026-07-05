@@ -1,15 +1,15 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common";
-import { MubEditor } from "../components/MubEditor";
+import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
-import type { Mapping, Model, Mub, MubSteps, Provider } from "../types";
-import { isChainDef } from "../types";
+import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
+import { isAgentDef } from "../types";
 
 interface Data {
-  mubs: Mub[];
+  services: ModelService[];
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
@@ -28,7 +28,7 @@ const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLab
   },
   chain: {
     title: "Micro Agents",
-    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your Model Services.",
+    subtitle: "Composable pipelines -?routing, evaluation, image OCR, nested agents -?built on your Model Services.",
     icon: "bi-robot",
     newLabel: "New Micro Agent",
     emptyTitle: "No Micro Agents yet",
@@ -36,34 +36,34 @@ const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLab
   },
 };
 
-export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
+export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
   const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [mubs, models, providers, mappings] = await Promise.all([
-      api.get<{ mubs: Mub[] }>("/mubs"),
+    const [services, models, providers, mappings] = await Promise.all([
+      api.get<{ services: ModelService[] }>("/services"),
       api.get<{ models: Model[] }>("/models"),
       api.get<{ providers: Provider[] }>("/providers"),
       api.get<{ mappings: Mapping[] }>("/mappings"),
     ]);
-    return { mubs: mubs.mubs, models: models.models, providers: providers.providers, mappings: mappings.mappings };
+    return { services: services.services, models: models.models, providers: providers.providers, mappings: mappings.mappings };
   });
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
-  const [editing, setEditing] = useState<Mub | null>(null);
+  const [editing, setEditing] = useState<ModelService | null>(null);
   const [creating, setCreating] = useState(false);
 
   const copy = COPY[kind];
-  const isKind = (m: Mub) => (kind === "chain" ? isChainDef(m.steps) : !isChainDef(m.steps));
-  const visible = data?.mubs.filter(isKind) ?? [];
+  const isKind = (m: ModelService) => (kind === "chain" ? isAgentDef(m.steps) : !isAgentDef(m.steps));
+  const visible = data?.services.filter(isKind) ?? [];
   // A Micro Agent needs at least one Model Service to run; a Model Service needs a mapping.
   const canCreate =
     kind === "chain"
-      ? (data?.mubs.some((m) => !isChainDef(m.steps)) ?? false)
+      ? (data?.services.some((m) => !isAgentDef(m.steps)) ?? false)
       : (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
 
-  const remove = async (m: Mub) => {
+  const remove = async (m: ModelService) => {
     if (!(await confirm(`Delete ${copy.newLabel.replace("New ", "")}`, `Delete "${m.name}"? Clients using this endpoint will start receiving 404s.`))) return;
     try {
-      await api.del(`/mubs/${m.id}`);
+      await api.del(`/services/${m.id}`);
       toast.success("Deleted");
       reload();
     } catch (e) {
@@ -75,7 +75,7 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
     if (!canCreate) {
       toast.error(
         kind === "chain"
-          ? "Create at least one Model Service first — Micro Agent stages run them."
+          ? "Create at least one Model Service first -?Micro Agent stages run them."
           : "Create at least one model and provider mapping first",
       );
       return;
@@ -121,9 +121,9 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
                 {m.description && <p className="mt-1 text-xs text-ink-400">{m.description}</p>}
               </div>
               <span className="badge-gray shrink-0">
-                {isChainDef(m.steps)
+                {isAgentDef(m.steps)
                   ? `${m.steps.stages?.length ?? 0} stages`
-                  : `${(m.steps as MubSteps)?.steps?.length ?? 0} steps`}
+                  : `${(m.steps as ServiceSteps)?.steps?.length ?? 0} steps`}
               </span>
             </div>
 
@@ -146,10 +146,10 @@ export function Mubs({ kind = "resilience" }: { kind?: Kind }) {
       </div>
 
       {data && (
-        <MubEditor
+        <ServiceEditor
           open={creating || editing !== null}
-          mub={editing}
-          mubs={data.mubs}
+          service={editing}
+          services={data.services}
           models={data.models}
           providers={data.providers}
           mappings={data.mappings}

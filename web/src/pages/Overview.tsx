@@ -1,4 +1,4 @@
-import {
+﻿import {
   Area,
   AreaChart,
   CartesianGrid,
@@ -19,7 +19,7 @@ import type { GroupCount, StatsSummary, TimePoint } from "../types";
 interface OverviewData {
   summary: StatsSummary;
   points: TimePoint[];
-  mubs: GroupCount[];
+  services: GroupCount[];
   models: GroupCount[];
   providers: GroupCount[];
 }
@@ -105,13 +105,13 @@ function TopList({ title, icon, groups }: { title: string; icon: string; groups:
 
 export function Overview() {
   const { data, loading, error } = useAsync<OverviewData>(async () => {
-    const [summary, ts, mubs, mp] = await Promise.all([
+    const [summary, ts, svc, mp] = await Promise.all([
       api.get<StatsSummary>("/stats/summary"),
       api.get<{ points: TimePoint[] }>("/stats/timeseries"),
-      api.get<{ groups: GroupCount[] }>("/stats/by-mub"),
+      api.get<{ groups: GroupCount[] }>("/stats/by-service"),
       api.get<{ models: GroupCount[]; providers: GroupCount[] }>("/stats/by-model-provider"),
     ]);
-    return { summary, points: ts.points, mubs: mubs.groups, models: mp.models, providers: mp.providers };
+    return { summary, points: ts.points, services: svc.groups, models: mp.models, providers: mp.providers };
   });
 
   return (
@@ -161,7 +161,7 @@ export function Overview() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
-            <TopList title="Top Model Services" icon="bi-diagram-3" groups={data.mubs} />
+            <TopList title="Top Model Services" icon="bi-diagram-3" groups={data.services} />
             <TopList title="Top models" icon="bi-box" groups={data.models} />
             <TopList title="Top providers" icon="bi-hdd-network" groups={data.providers} />
           </div>

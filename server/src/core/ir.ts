@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Canonical intermediate representation (IR) that both the OpenAI and Anthropic
  * wire formats convert to/from. Translation is always wire -> IR -> wire, so we
  * only implement each format once regardless of ingress/egress direction.
@@ -34,7 +34,15 @@ export interface IRToolResultPart {
   isError?: boolean;
 }
 
-export type IRContentPart = IRTextPart | IRImagePart | IRToolUsePart | IRToolResultPart;
+/** A reasoning/thinking block produced by the model (extended thinking). */
+export interface IRReasoningPart {
+  type: "reasoning";
+  text: string;
+  /** Provider-specific signature for the thinking block (Anthropic redacted_thinking, etc.). */
+  signature?: string;
+}
+
+export type IRContentPart = IRTextPart | IRImagePart | IRToolUsePart | IRToolResultPart | IRReasoningPart;
 
 // --- messages ------------------------------------------------------------
 
@@ -56,8 +64,19 @@ export type IRToolChoice =
   | { type: "required" }
   | { type: "tool"; name: string };
 
+/**
+ * Thinking/reasoning configuration sent to the upstream. "disabled" = off;
+ * "auto"/"enabled" = let the model decide; "budget" = enforce a token budget.
+ * Omitted (undefined) = inherit whatever the client sent (or the upstream default).
+ */
+export type IRThinkingLevel =
+  | "disabled"
+  | "auto"
+  | "enabled"
+  | { budget: number };
+
 export interface IRRequest {
-  /** The model field as sent by the client (a MUB name). Informational. */
+  /** The model field as sent by the client (a Model Service name). Informational. */
   requestedModel: string;
   system?: string;
   messages: IRMessage[];
@@ -68,6 +87,8 @@ export interface IRRequest {
   topP?: number;
   stop?: string[];
   stream: boolean;
+  /** Thinking/reasoning level override (from the Model Service definition). */
+  thinking?: IRThinkingLevel;
   /** Extra provider-agnostic sampling params passed through verbatim. */
   extra?: Record<string, unknown>;
 }
@@ -84,7 +105,7 @@ export interface IRResponse {
   id: string;
   model: string;
   created: number; // epoch seconds
-  content: IRContentPart[]; // assistant output: text + tool_use parts
+  content: IRContentPart[]; // assistant output: text + tool_use + reasoning parts
   stopReason: IRStopReason;
   usage: IRUsage;
 }
@@ -95,6 +116,14 @@ export interface IRResponse {
 export function textOf(parts: IRContentPart[]): string {
   return parts
     .filter((p): p is IRTextPart => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+/** Concatenate the reasoning/thinking text of a content array. */
+export function reasoningOf(parts: IRContentPart[]): string {
+  return parts
+    .filter((p): p is IRReasoningPart => p.type === "reasoning")
     .map((p) => p.text)
     .join("");
 }

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+﻿import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, uniqueIndex, index } from "drizzle-orm/sqlite-core";
 
 /** Epoch-millis timestamp column with a DB-level default of "now". */
@@ -93,11 +93,11 @@ export const modelProviders = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
-// Model Use Behaviors (MUB) - the ONLY entity exposed to clients.
-// steps_json holds the ordered resilience workflow (see core/mub types).
+// Model Services - the ONLY entity exposed to clients.
+// steps_json holds the ordered resilience workflow or agent definition.
 // ---------------------------------------------------------------------------
-export const modelUseBehaviors = sqliteTable(
-  "model_use_behaviors",
+export const modelServices = sqliteTable(
+  "model_services",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     name: text("name").notNull(),
@@ -107,13 +107,13 @@ export const modelUseBehaviors = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => ({
-    nameIdx: uniqueIndex("mub_name_idx").on(t.name),
+    nameIdx: uniqueIndex("service_name_idx").on(t.name),
   }),
 );
 
 // ---------------------------------------------------------------------------
 // Client tokens. Secret stored only as a SHA-256 hash + short prefix.
-// scope_mubs_json = array of MUB ids this token may call (null/empty = all).
+// scope_services_json = array of service ids this token may call (null/empty = all).
 // ---------------------------------------------------------------------------
 export const tokens = sqliteTable(
   "tokens",
@@ -123,7 +123,7 @@ export const tokens = sqliteTable(
     keyHash: text("key_hash").notNull(),
     keyPrefix: text("key_prefix").notNull(),
     ownerUserId: integer("owner_user_id").references(() => users.id, { onDelete: "set null" }),
-    scopeMubs: text("scope_mubs_json", { mode: "json" }).$type<number[] | null>(),
+    scopeServices: text("scope_services_json", { mode: "json" }).$type<number[] | null>(),
     maxRequests: integer("max_requests"),
     maxTokens: integer("max_tokens"),
     usedRequests: integer("used_requests").notNull().default(0),
@@ -138,15 +138,15 @@ export const tokens = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
-// Request logs - one row per client request (across all MUB attempts).
+// Request logs - one row per client request (across all service attempts).
 // ---------------------------------------------------------------------------
 export const requestLogs = sqliteTable(
   "request_logs",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     tokenId: integer("token_id").references(() => tokens.id, { onDelete: "set null" }),
-    mubId: integer("mub_id").references(() => modelUseBehaviors.id, { onDelete: "set null" }),
-    mubName: text("mub_name"),
+    serviceId: integer("service_id").references(() => modelServices.id, { onDelete: "set null" }),
+    serviceName: text("service_name"),
     ingressFormat: text("ingress_format", { enum: ["openai", "anthropic"] }).notNull(),
     egressFormat: text("egress_format", { enum: ["openai", "anthropic"] }),
     streaming: integer("streaming", { mode: "boolean" }).notNull().default(false),
@@ -166,7 +166,7 @@ export const requestLogs = sqliteTable(
   (t) => ({
     createdIdx: index("request_logs_created_idx").on(t.createdAt),
     tokenIdx: index("request_logs_token_idx").on(t.tokenId),
-    mubIdx: index("request_logs_mub_idx").on(t.mubId),
+    serviceIdx: index("request_logs_service_idx").on(t.serviceId),
   }),
 );
 
@@ -182,6 +182,6 @@ export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
 export type Model = typeof models.$inferSelect;
 export type ModelProvider = typeof modelProviders.$inferSelect;
-export type ModelUseBehavior = typeof modelUseBehaviors.$inferSelect;
+export type ModelService = typeof modelServices.$inferSelect;
 export type Token = typeof tokens.$inferSelect;
 export type RequestLog = typeof requestLogs.$inferSelect;

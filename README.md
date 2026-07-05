@@ -1,35 +1,35 @@
-# Hydrogen — Lightweight Personal LLM Proxy
+﻿# Hydrogen — Lightweight Personal LLM Proxy
 
 A small, self-hosted proxy that manages your LLM API keys and lets you switch upstream models
 without touching client code. It speaks both the **OpenAI** and **Anthropic** wire formats,
 translates between them, and routes every request through a user-defined **Model Use Behavior
-(MUB)** — a retry/fallback workflow you build in a visual editor.
+(Model Service)** — a retry/fallback workflow you build in a visual editor.
 
 Everything runs in a single Docker container backed by SQLite. Provider keys are encrypted at
 rest; client tokens are hashed.
 
 ---
 
-## Core idea: clients only ever see a MUB
+## Core idea: clients only ever see a Model Service
 
-Clients never request a raw model. They set `model` to a **MUB name**, and Hydrogen runs that
-MUB's ordered steps over your internal catalog:
+Clients never request a raw model. They set `model` to a **Model Service name**, and Hydrogen runs that
+Model Service's ordered steps over your internal catalog:
 
 ```
-Client request (model = "sonnet-any")     ← only MUBs are exposed to clients
+Client request (model = "sonnet-any")     ← only Model Services are exposed to clients
         │
    Model Use Behavior   (ordered steps: retry → provider-fallback → model-fallback)
         │
    Model  (internal catalog)  ──provided by──▶  Provider(s)   (base URL + encrypted key)
 ```
 
-Each MUB step pins an explicit **(model, provider)** pair. Provider-fallback and model-fallback
+Each Model Service step pins an explicit **(model, provider)** pair. Provider-fallback and model-fallback
 are simply "add another step". If every step is exhausted and still failing, the final upstream
 error is returned to the client (translated into the client's wire format).
 
 Examples:
 
-| MUB | Behavior |
+| Model Service | Behavior |
 |-----|----------|
 | `sonnet-any` | try `sonnet4.6 @ anthropic` → on failure fall back to `gpt5.4 @ openai` |
 | `sonnet-persist` | try `sonnet4.6 @ anthropic`, retry 5× at 1s intervals |
@@ -70,10 +70,10 @@ Examples:
    **create your own password** before continuing. Then:
    - add a **Provider** (e.g. OpenAI or Anthropic) — the API key is encrypted immediately;
    - add a **Model** and map it to that provider (with the upstream model id);
-   - build a **MUB** in the workflow editor;
-   - issue a **Token** scoped to that MUB.
+   - build a **Model Service** in the workflow editor;
+   - issue a **Token** scoped to that Model Service.
 
-4. **Call it** like any OpenAI/Anthropic endpoint, using your Hydrogen token and the MUB name:
+4. **Call it** like any OpenAI/Anthropic endpoint, using your Hydrogen token and the Model Service name:
 
    ```bash
    curl http://localhost:8080/v1/chat/completions \
@@ -94,17 +94,17 @@ Point any OpenAI SDK at `http://localhost:8080/v1` or any Anthropic SDK at `http
 
 ## Endpoints
 
-**Client-facing** (authenticate with `Authorization: Bearer` or `x-api-key`; `model` = a MUB name):
+**Client-facing** (authenticate with `Authorization: Bearer` or `x-api-key`; `model` = a Model Service name):
 
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (streaming + non-streaming) |
 | POST | `/v1/messages` | Anthropic Messages (streaming + non-streaming) |
 | POST | `/v1/embeddings` | Passthrough to the first step's OpenAI-compatible provider |
-| GET  | `/v1/models` | Lists your MUBs (Anthropic shape if `anthropic-version` header is sent) |
+| GET  | `/v1/models` | Lists your Model Services (Anthropic shape if `anthropic-version` header is sent) |
 
 **Admin/console:** `POST /admin/api/login`, then session-cookie-protected CRUD under
-`/admin/api/*` (providers, models, mappings, mubs, tokens, users, logs, stats). Served together
+`/admin/api/*` (providers, models, mappings, services, tokens, users, logs, stats). Served together
 with the dashboard SPA.
 
 **Health:** `GET /healthz`.
@@ -143,7 +143,7 @@ Requires Node 20+.
 npm install
 npm run db:generate           # regenerate SQL migrations after schema changes
 npm run dev                   # server (tsx watch) + web (vite) together
-npm run test                  # server unit tests (translation, MUB engine, streaming)
+npm run test                  # server unit tests (translation, Model Service engine, streaming)
 npm run typecheck             # server typecheck
 ```
 
@@ -156,9 +156,9 @@ production bundle is available via `node preview-server.cjs` (dev secrets only).
 ```
 server/   Fastify + Drizzle (SQLite) backend
   src/core/formats/   OpenAI/Anthropic ⇄ canonical IR translation (+ SSE streaming)
-  src/core/mub/       MUB step schema + retry/fallback engine
+  src/core/service/       Model Service step schema + retry/fallback engine
   src/core/proxy/     request orchestration
-  src/services/       providers, models, catalog, mubs, tokens, users, logs, stats
+  src/services/       providers, models, catalog, services, tokens, users, logs, stats
   src/routes/         proxy endpoints + admin API
 web/      React + Vite + Tailwind dashboard (Bootstrap Icons)
 ```
@@ -178,8 +178,8 @@ New to Rainyun? Register with this invitation link:
 
 ## Roadmap
 
-- **Virtual Providers** — a future MUB step type (`type: "workflow"`) that packages a multi-call
-  pipeline (worker → evaluator → loop-until-done) behind a single MUB endpoint, reusing the same
+- **Virtual Providers** — a future Model Service step type (`type: "workflow"`) that packages a multi-call
+  pipeline (worker → evaluator → loop-until-done) behind a single Model Service endpoint, reusing the same
   translation and resilience layers.
 
 ## License

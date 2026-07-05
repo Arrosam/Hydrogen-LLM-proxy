@@ -1,4 +1,4 @@
-export type Role = "admin" | "manager";
+﻿export type Role = "admin" | "manager";
 export type ProviderType = "openai" | "anthropic" | "openai_compatible";
 
 export interface User {
@@ -47,20 +47,23 @@ export interface RetryPolicy {
   intervalMs: number;
 }
 
-export interface MubStep {
+export type ThinkingLevel = "disabled" | "auto" | "enabled" | { budget: number };
+
+export interface ServiceStep {
   model: string;
   provider: string;
   retry?: RetryPolicy;
   advanceOn?: AdvanceTrigger[];
+  thinking?: ThinkingLevel;
 }
 
-export interface MubSteps {
+export interface ServiceSteps {
   timeoutMs: number;
-  steps: MubStep[];
+  steps: ServiceStep[];
 }
 
-// --- Chain (compositional) MUB ---
-export type ChainContextBlock =
+// --- Agent (compositional Micro Agent) ---
+export type AgentContextBlock =
   | { kind: "original_conversation" }
   | { kind: "text_conversation" }
   | { kind: "last_user" }
@@ -70,7 +73,7 @@ export type ChainContextBlock =
   | { kind: "message"; role: "user" | "assistant"; text: string }
   | { kind: "tool_turn"; name: string; input: string; result: string; isError?: boolean; id?: string };
 
-export type ChainCondition =
+export type AgentCondition =
   | { type: "always" }
   | { type: "input_has_image" }
   | { type: "input_contains"; value: string }
@@ -78,54 +81,55 @@ export type ChainCondition =
   | { type: "output_contains"; value: string; stage?: string }
   | { type: "output_matches"; value: string; stage?: string };
 
-export interface ChainTransition {
-  when: ChainCondition;
+export interface AgentTransition {
+  when: AgentCondition;
   goto: string; // a later stage's name, or "end"
   output?: string; // when goto="end": which stage's output to return (this/earlier stage)
 }
 
-export interface ChainStage {
+export interface AgentStage {
   name: string;
-  mub?: string; // referenced resilience MUB (its fallback chain runs for the stage)
-  steps?: MubStep[]; // legacy inline steps
-  input: ChainContextBlock[];
+  service?: string; // referenced Model Service (its fallback chain runs for the stage)
+  steps?: ServiceStep[]; // legacy inline steps
+  input: AgentContextBlock[];
   system?: string;
   tools?: "inherit" | "none"; // "none" lists tools in the prompt as reference, not registered/callable
   temperature?: number;
   maxTokens?: number;
+  thinking?: ThinkingLevel;
   timeoutMs?: number;
-  transitions?: ChainTransition[];
+  transitions?: AgentTransition[];
 }
 
-export interface ChainOcr {
-  mub?: string; // referenced resilience MUB running the OCR/multimodal model
-  steps?: MubStep[]; // legacy inline steps
+export interface AgentOcr {
+  service?: string; // referenced Model Service running the OCR/multimodal model
+  steps?: ServiceStep[]; // legacy inline steps
   prompt?: string; // OCR system prompt; empty = built-in default
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
 }
 
-export interface ChainMub {
-  kind: "chain";
+export interface AgentDef {
+  kind: "agent";
   timeoutMs: number;
-  stages: ChainStage[];
+  stages: AgentStage[];
   output?: string;
-  ocr?: ChainOcr; // optional image→text pre-pass run before the first stage
+  ocr?: AgentOcr; // optional image-to-text pre-pass run before the first stage
 }
 
-/** A MUB definition is either the resilience workflow or a chain. */
-export type MubDef = MubSteps | ChainMub;
+/** A service definition is either the resilience workflow or an agent. */
+export type ServiceDef = ServiceSteps | AgentDef;
 
-export function isChainDef(def: MubDef | null | undefined): def is ChainMub {
-  return !!def && (def as ChainMub).kind === "chain";
+export function isAgentDef(def: ServiceDef | null | undefined): def is AgentDef {
+  return !!def && (def as AgentDef).kind === "agent";
 }
 
-export interface Mub {
+export interface ModelService {
   id: number;
   name: string;
   description: string | null;
-  steps: MubDef;
+  steps: ServiceDef;
   enabled: boolean;
   summary: string;
   createdAt: number;
@@ -136,7 +140,7 @@ export interface Token {
   name: string;
   keyPrefix: string;
   ownerUserId: number | null;
-  scopeMubs: number[] | null;
+  scopeServices: number[] | null;
   maxRequests: number | null;
   maxTokens: number | null;
   usedRequests: number;
@@ -150,8 +154,8 @@ export interface LogSummary {
   id: number;
   createdAt: number;
   tokenId: number | null;
-  mubId: number | null;
-  mubName: string | null;
+  serviceId: number | null;
+  serviceName: string | null;
   ingressFormat: string;
   egressFormat: string | null;
   streaming: boolean;
