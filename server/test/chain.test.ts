@@ -23,8 +23,12 @@ vi.mock("../src/core/proxy/run", () => {
         const rec = { step: 1, attempt: 1, model, provider, status: model === "BOOM" ? 500 : 200, kind: model === "BOOM" ? "http" : "ok", latencyMs: 1 };
         if (model === "BOOM") return { result: { ok: false, status: 500, kind: "http", message: "boom" }, path: [rec] };
         const out = model.startsWith("OUT:") ? model.slice(4) : `${model}(${lastUserText(ir)})`;
+        // "TOOL:<name>" returns an assistant tool_use (to test tool-call passthrough).
+        const content = model.startsWith("TOOL:")
+          ? [{ type: "tool_use", id: "tu_1", name: model.slice(5), input: { q: lastUserText(ir) } }]
+          : [{ type: "text", text: out }];
         const value = {
-          ir: { id: "x", model, created: 0, content: [{ type: "text", text: out }], stopReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+          ir: { id: "x", model, created: 0, content, stopReason: model.startsWith("TOOL:") ? "tool_use" : "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
           family: "openai", upstreamModel: model, providerName: provider, modelName: model,
         };
         return { result: { ok: true, value }, path: [rec] };
@@ -34,7 +38,7 @@ vi.mock("../src/core/proxy/run", () => {
 });
 
 import { runMubJson } from "../src/core/proxy/run";
-import { buildStageIR, runMubChain, type StageResolver } from "../src/core/mub/chain";
+import { buildStageIR, isStreamPlan, runMubChain, type StageResolver } from "../src/core/mub/chain";
 import { setConfig } from "../src/context";
 import type { AppConfig } from "../src/config";
 
@@ -70,9 +74,9 @@ const textOnly: IRRequest = {
 
 describe("buildStageIR (context blocks)", () => {
   it("original_conversation keeps images; text_conversation strips them", () => {
-    const full = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "original_conversation" }] }), {}, false);
+    const full = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "original_conversation" }] }), {}, {}, false);
     expect(full.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(true);
-    const textConv = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "text_conversation" }] }), {}, false);
+    const textConv = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "text_conversation" }] }), {}, {}, false);
     expect(textConv.messages.every((m) => m.content.every((p: IRContentPart) => p.type !== "image"))).toBe(true);
     expect(textOf(textConv.messages[0].content)).toBe("hi");
   });
@@ -87,18 +91,18 @@ describe("buildStageIR (context blocks)", () => {
         { role: "user", content: [{ type: "text", text: "second" }] },
       ],
     };
-    const out = buildStageIR(multi, stage("s", "M", { input: [{ kind: "last_user" }] }), {}, false);
+    const out = buildStageIR(multi, stage("s", "M", { input: [{ kind: "last_user" }] }), {}, {}, false);
     expect(out.messages).toHaveLength(1);
     expect(textOf(out.messages[0].content)).toBe("second");
   });
 
   it("last_user_text and last_user_images split the last user turn", () => {
-    const txt = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_text" }] }), {}, false);
+    const txt = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_text" }] }), {}, {}, false);
     expect(txt.messages).toHaveLength(1);
     expect(textOf(txt.messages[0].content)).toBe("hi");
     expect(txt.messages[0].content.some((p: IRContentPart) => p.type === "image")).toBe(false);
 
-    const imgs = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_images" }] }), {}, false);
+    const imgs = buildStageIR(withImage, stage("s", "M", { input: [{ kind: "last_user_images" }] }), {}, {}, false);
     expect(imgs.messages).toHaveLength(1);
     expect(imgs.messages[0].content.every((p: IRContentPart) => p.type === "image")).toBe(true);
     expect(textOf(imgs.messages[0].content)).toBe("");
@@ -111,7 +115,7 @@ describe("buildStageIR (context blocks)", () => {
         { kind: "stage_output", stage: "draft", role: "user" },
       ],
     });
-    const out = buildStageIR(textOnly, s, { draft: "DRAFT" }, false);
+    const out = buildStageIR(textOnly, s, { draft: "DRAFT" }, {}, false);
     expect(out.messages).toHaveLength(1);
     expect(out.messages[0].role).toBe("user");
     expect(textOf(out.messages[0].content)).toBe("Evaluate: DRAFT");
@@ -119,7 +123,7 @@ describe("buildStageIR (context blocks)", () => {
 
   it("tool_turn emits a linked assistant tool_use + user tool_result", () => {
     const s = stage("s", "M", { input: [{ kind: "tool_turn", name: "get_weather", input: '{"city":"SF"}', result: "72F" }] });
-    const out = buildStageIR(textOnly, s, {}, false);
+    const out = buildStageIR(textOnly, s, {}, {}, false);
     expect(out.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
     const tu = out.messages[0].content[0] as { type: string; id: string; name: string; input: unknown };
     expect(tu.type).toBe("tool_use");
@@ -132,7 +136,7 @@ describe("buildStageIR (context blocks)", () => {
   });
 
   it("empty input passes the original conversation through", () => {
-    const out = buildStageIR(textOnly, stage("s", "M"), {}, false);
+    const out = buildStageIR(textOnly, stage("s", "M"), {}, {}, false);
     expect(textOf(out.messages[0].content)).toBe("hi");
   });
 
@@ -143,11 +147,11 @@ describe("buildStageIR (context blocks)", () => {
       tools: [{ name: "get_weather", parameters: { type: "object" } }],
       toolChoice: { type: "auto" },
     };
-    const inherit = buildStageIR(irWithTools, stage("s", "M"), {}, false);
+    const inherit = buildStageIR(irWithTools, stage("s", "M"), {}, {}, false);
     expect(inherit.tools).toHaveLength(1);
     expect(inherit.toolChoice).toEqual({ type: "auto" });
 
-    const noCall = buildStageIR(irWithTools, stage("s", "M", { tools: "none" }), {}, false);
+    const noCall = buildStageIR(irWithTools, stage("s", "M", { tools: "none" }), {}, {}, false);
     expect(noCall.tools).toBeUndefined(); // not registered → uncallable, no tool_choice to be rejected
     expect(noCall.toolChoice).toBeUndefined();
     expect(noCall.system).toContain("Be helpful."); // original system kept
@@ -155,7 +159,7 @@ describe("buildStageIR (context blocks)", () => {
   });
 
   it("tools:'none' with no tools in the request leaves the prompt untouched", () => {
-    const out = buildStageIR({ ...textOnly, system: "S" }, stage("s", "M", { tools: "none" }), {}, false);
+    const out = buildStageIR({ ...textOnly, system: "S" }, stage("s", "M", { tools: "none" }), {}, {}, false);
     expect(out.tools).toBeUndefined();
     expect(out.toolChoice).toBeUndefined();
     expect(out.system).toBe("S"); // nothing appended when there are no tools
@@ -308,6 +312,20 @@ describe("runMubChain (nesting & return output)", () => {
     expect(runJsonMock).not.toHaveBeenCalled();
   });
 
+  it("preserves a stage's tool call when its output feeds a later stage", async () => {
+    const chain = chainOf([
+      stage("call", "TOOL:get_weather", { transitions: [t(always, "eval")] }),
+      stage("eval", "E", { input: [{ kind: "stage_output", stage: "call", role: "assistant" }] }),
+    ]);
+    await runMubChain(textOnly, chain, noResolver);
+    // The eval stage (2nd call) received the tool call rendered as text, not dropped.
+    const evalIR = runJsonMock.mock.calls[1][0] as IRRequest;
+    const fed = textOf(evalIR.messages[0].content);
+    expect(fed).toContain("tool_call");
+    expect(fed).toContain("get_weather");
+    expect(fed).toContain('"q":"hi"'); // the tool arguments survive too
+  });
+
   it("a transition to end can return an earlier stage's output", async () => {
     const chain = chainOf([
       stage("first", "F", { transitions: [t(always, "second")] }),
@@ -320,6 +338,48 @@ describe("runMubChain (nesting & return output)", () => {
     expect(result.ok).toBe(true);
     expect(path.map((p) => p.stage)).toEqual(["first", "second"]); // both ran
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(hi)"); // but first's output is returned
+  });
+});
+
+describe("runMubChain (streaming terminal)", () => {
+  beforeEach(() => {
+    runJsonMock.mockClear();
+  });
+
+  it("returns a stream plan for a single-stage chain (nothing buffered)", async () => {
+    const plan = await runMubChain(textOnly, chainOf([stage("s", "M")]), noResolver, [], { streamTerminal: true });
+    expect(isStreamPlan(plan)).toBe(true);
+    if (isStreamPlan(plan)) {
+      expect(plan.stageName).toBe("s");
+      expect(plan.steps.steps[0].model).toBe("M");
+      expect(plan.stageIR.stream).toBe(true);
+    }
+    expect(runJsonMock).not.toHaveBeenCalled(); // the terminal stage is deferred to the caller
+  });
+
+  it("streams the terminal stage of a linear chain, buffering the earlier ones", async () => {
+    const chain = chainOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")]);
+    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
+    expect(isStreamPlan(plan)).toBe(true);
+    if (isStreamPlan(plan)) expect(plan.stageName).toBe("b");
+    expect(runJsonMock).toHaveBeenCalledTimes(1); // only stage "a" ran buffered
+  });
+
+  it("does not stream when routing follows (router stage) — buffers instead", async () => {
+    const chain = chainOf([
+      router("route", [t(always, "s")]),
+      stage("s", "M"),
+    ]);
+    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
+    // router → s (no transitions) is terminal and streamable
+    expect(isStreamPlan(plan)).toBe(true);
+    if (isStreamPlan(plan)) expect(plan.stageName).toBe("s");
+  });
+
+  it("does not stream when chain.output points to an earlier stage", async () => {
+    const chain = chainOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")], "a");
+    const plan = await runMubChain(textOnly, chain, noResolver, [], { streamTerminal: true });
+    expect(isStreamPlan(plan)).toBe(false); // must buffer to return "a"'s output, not stream "b"
   });
 });
 

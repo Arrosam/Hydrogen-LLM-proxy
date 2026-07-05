@@ -4,7 +4,7 @@ import { textOf, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
 import { runMubJson, runMubStream } from "../core/proxy/run";
-import { runMubChain } from "../core/mub/chain";
+import { isStreamPlan, runMubChain, type ChainStreamPlan } from "../core/mub/chain";
 import { isChain, type ChainDef, type MubDef, type MubSteps } from "../core/mub/schema";
 import {
   parseUpstreamStream,
@@ -233,8 +233,11 @@ async function handleStream(
 }
 
 /**
- * Streaming for a chain: run the decision tree buffered (routing needs each
- * stage's full output), then emit the final result as a single-shot SSE stream.
+ * Streaming for a chain: routing needs each stage's full output, so earlier
+ * stages run buffered — but the terminal stage (nothing routes after it) is
+ * streamed directly so the client gets real token-by-token output instead of
+ * waiting for the whole response. Falls back to a single-shot stream when the
+ * terminal stage can't be streamed (e.g. it's a nested Micro Agent).
  */
 async function handleChainStream(
   reply: FastifyReply,
@@ -243,7 +246,10 @@ async function handleChainStream(
   chain: ChainDef,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path } = await runMubChain(ir, chain, resolveChainStage, [ctx.mubName]);
+  const outcome = await runMubChain(ir, chain, resolveChainStage, [ctx.mubName], { streamTerminal: true });
+  if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
+
+  const { result, path } = outcome;
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
@@ -270,6 +276,71 @@ async function handleChainStream(
   incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
 
   return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.mubName }));
+}
+
+/** Stream a chain's terminal stage directly, prepending OCR/earlier-stage path + usage. */
+async function streamTerminalStage(
+  reply: FastifyReply,
+  ingress: Family,
+  plan: ChainStreamPlan,
+  ctx: StreamCtx,
+): Promise<unknown> {
+  const { result, path: streamPath } = await runMubStream(plan.stageIR, plan.steps);
+
+  // Tag the terminal stage's records and prepend anything already run (OCR / earlier stages).
+  const stagePath = streamPath.map((rec, k) => ({
+    ...rec,
+    stage: plan.stageName,
+    mub: plan.mub,
+    ...(k === 0 ? { request: plan.request } : {}),
+  }));
+  const fullPath = [...plan.path, ...stagePath];
+
+  if (!result.ok) {
+    const status = result.status >= 400 ? result.status : 502;
+    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
+    recordLog({
+      token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress: null, streaming: true,
+      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: fullPath.length,
+      attemptPath: fullPath, requestBody: ctx.body, error: message,
+    });
+    incrementUsage(ctx.token.id, 1, 0);
+    return reply.code(status).send(buildErrorBody(ingress, status, message));
+  }
+
+  const acc: StreamAccumulator = { stopReason: null, text: "", toolCalls: [], upstreamModel: "" };
+  const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
+  const outGen = serializeClientStream(ingress, events, { model: ctx.mubName });
+  const egress = result.value.family;
+
+  async function* streamAndLog(): AsyncGenerator<string> {
+    let streamError: string | null = null;
+    try {
+      for await (const chunk of outGen) yield chunk;
+    } catch (e) {
+      streamError = e instanceof Error ? e.message : String(e);
+    } finally {
+      const streamUsage = acc.usage ?? ZERO_USAGE;
+      // Total = OCR/earlier stages (plan.usage) + the streamed terminal stage.
+      const usage: IRUsage = {
+        promptTokens: plan.usage.promptTokens + streamUsage.promptTokens,
+        completionTokens: plan.usage.completionTokens + streamUsage.completionTokens,
+        totalTokens: plan.usage.totalTokens + streamUsage.totalTokens,
+      };
+      const responseBody: Record<string, unknown> = {
+        streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
+      };
+      if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
+      recordLog({
+        token: ctx.token, mub: ctx.mub, mubName: ctx.mubName, ingress, egress, streaming: true,
+        httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
+        attempts: fullPath.length, attemptPath: fullPath, requestBody: ctx.body, responseBody, error: streamError,
+      });
+      incrementUsage(ctx.token.id, 1, usage.totalTokens);
+    }
+  }
+
+  return sendSse(reply, streamAndLog());
 }
 
 /** GET /v1/models - lists MUBs as the available models. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseUpstreamStream, serializeClientStream } from "../src/core/formats/stream";
-import type { Family } from "../src/core/ir";
+import { parseUpstreamStream, serializeClientStream, streamFromIRResponse } from "../src/core/formats/stream";
+import type { Family, IRResponse } from "../src/core/ir";
 
 /** Yield a string in small chunks to exercise cross-chunk SSE buffering. */
 async function* chunked(s: string): AsyncGenerator<string> {
@@ -80,5 +80,42 @@ describe("streaming translation", () => {
     expect(out).toContain('"content":"Hello"');
     expect(out).toContain('"finish_reason":"stop"');
     expect(out).toContain("data: [DONE]");
+  });
+});
+
+describe("streamFromIRResponse (paced fake stream)", () => {
+  const irOf = (text: string): IRResponse => ({
+    id: "x", model: "m", created: 0, content: [{ type: "text", text }],
+    stopReason: "stop", usage: { promptTokens: 5, completionTokens: 20, totalTokens: 25 },
+  });
+
+  it("splits a buffered response into multiple deltas and reconstructs it exactly", async () => {
+    const text = "The quick brown fox jumps over the lazy dog, then does it all over again twice more.";
+    let out = "";
+    for await (const c of streamFromIRResponse("openai", irOf(text), { model: "mub" })) out += c;
+
+    let content = "", deltas = 0;
+    for (const line of out.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") continue;
+      try {
+        const d = JSON.parse(data).choices?.[0]?.delta?.content;
+        if (d) { content += d; deltas++; }
+      } catch { /* non-content chunk */ }
+    }
+    expect(content).toBe(text);
+    expect(deltas).toBeGreaterThan(1); // chunked into a progressive stream, not one lump
+  });
+
+  it("actually paces the output (not an instant dump)", async () => {
+    const text = "x".repeat(2400); // ~600 tokens → ~120ms at 5000 tok/s
+    const start = Date.now();
+    let n = 0;
+    for await (const c of streamFromIRResponse("openai", irOf(text), { model: "mub" })) n += c.length;
+    const elapsed = Date.now() - start;
+    expect(n).toBeGreaterThan(0);
+    expect(elapsed).toBeGreaterThanOrEqual(5); // paced, not instantaneous
+    expect(elapsed).toBeLessThan(3000); // but fast
   });
 });

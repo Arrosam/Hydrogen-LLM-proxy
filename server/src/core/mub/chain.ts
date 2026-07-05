@@ -8,6 +8,7 @@ import {
   type IRResponse,
   type IRTextPart,
   type IRTool,
+  type IRToolUsePart,
   type IRUsage,
 } from "../ir";
 import { genId } from "../../util/ids";
@@ -27,6 +28,22 @@ function addUsage(a: IRUsage, b: IRUsage): IRUsage {
   };
 }
 
+/**
+ * A stage's output as text, preserving any tool calls the model made. Tool calls
+ * are rendered as text (not structured tool_use) so they survive being fed into
+ * a later stage without breaking it: a dangling tool_use with no following
+ * tool_result is rejected by both OpenAI and Anthropic. Plain text output is
+ * unchanged, so this only adds information when a stage actually called a tool.
+ */
+function contentToText(parts: IRContentPart[]): string {
+  const text = textOf(parts);
+  const calls = parts
+    .filter((p): p is IRToolUsePart => p.type === "tool_use")
+    .map((p) => `[tool_call: ${p.name}(${JSON.stringify(p.input ?? {})})]`);
+  if (calls.length === 0) return text;
+  return text ? `${text}\n${calls.join("\n")}` : calls.join("\n");
+}
+
 /** Concatenated text of the original user messages (used only as a fallback). */
 function originalUserText(ir: IRRequest): string {
   let text = "";
@@ -42,6 +59,7 @@ function buildStageMessages(
   stage: ChainStage,
   ir: IRRequest,
   outputs: Record<string, string>,
+  values: Record<string, JsonSuccess>,
 ): IRMessage[] {
   if (stage.input.length === 0) {
     return ir.messages.map((m) => ({ role: m.role, content: [...m.content] }));
@@ -73,7 +91,12 @@ function buildStageMessages(
         break;
       }
       case "stage_output": {
-        const text = outputs[block.stage] ?? "";
+        // Preserve the prior stage's output INCLUDING any tool calls, but render
+        // tool calls as text: a dangling structured tool_use (no following
+        // tool_result) is rejected by both OpenAI and Anthropic and would break
+        // the next stage. Text keeps the information and is valid everywhere.
+        const prior = values[block.stage];
+        const text = prior ? contentToText(prior.ir.content) : (outputs[block.stage] ?? "");
         if (text) out.push({ role: block.role, content: [{ type: "text", text }] });
         break;
       }
@@ -121,9 +144,10 @@ export function buildStageIR(
   ir: IRRequest,
   stage: ChainStage,
   outputs: Record<string, string>,
+  values: Record<string, JsonSuccess>,
   stream: boolean,
 ): IRRequest {
-  let messages = normalizeMessages(buildStageMessages(stage, ir, outputs));
+  let messages = normalizeMessages(buildStageMessages(stage, ir, outputs, values));
   if (messages.length === 0) {
     messages = [{ role: "user", content: [{ type: "text", text: originalUserText(ir) }] }];
   }
@@ -468,6 +492,27 @@ export interface ChainRunResult {
 }
 
 /**
+ * When streaming, a chain can defer its terminal stage so the caller streams it
+ * directly (instead of buffering the whole response). Returned in place of a
+ * ChainRunResult once the run reaches a stage that is guaranteed terminal and
+ * streamable; carries the OCR/earlier-stage path + usage already accumulated.
+ */
+export interface ChainStreamPlan {
+  kind: "stream";
+  stageIR: IRRequest;
+  steps: MubSteps;
+  stageName: string;
+  mub?: string;
+  request: string; // serialized stage request (for the log)
+  path: AttemptRecord[];
+  usage: IRUsage;
+}
+
+export function isStreamPlan(x: ChainRunResult | ChainStreamPlan): x is ChainStreamPlan {
+  return (x as ChainStreamPlan).kind === "stream";
+}
+
+/**
  * Run a chain as a forward-only decision tree. If an OCR pre-pass is configured
  * and the request has images, first transcribe every image to text and replace
  * it in the conversation (so text-only stage models can process the request).
@@ -480,13 +525,26 @@ export interface ChainRunResult {
  * "end" can name which stage's output to return. Usage is summed across the OCR
  * pass and every stage that runs; the response returned is the terminal stage's
  * (or the chosen `output` stage's), carrying the summed usage.
+ *
+ * With `opts.streamTerminal`, once the run reaches a guaranteed-terminal,
+ * streamable stage it returns a ChainStreamPlan instead — letting the caller
+ * stream that stage's tokens directly rather than buffering the whole response.
  */
+export function runMubChain(ir: IRRequest, chain: ChainDef, resolve: StageResolver, stack?: string[]): Promise<ChainRunResult>;
+export function runMubChain(
+  ir: IRRequest,
+  chain: ChainDef,
+  resolve: StageResolver,
+  stack: string[],
+  opts: { streamTerminal: true },
+): Promise<ChainRunResult | ChainStreamPlan>;
 export async function runMubChain(
   ir: IRRequest,
   chain: ChainDef,
   resolve: StageResolver,
   stack: string[] = [],
-): Promise<ChainRunResult> {
+  opts: { streamTerminal?: boolean } = {},
+): Promise<ChainRunResult | ChainStreamPlan> {
   const byName = new Map(chain.stages.map((s, i) => [s.name, i]));
   const outputs: Record<string, string> = {};
   const values: Record<string, JsonSuccess> = {};
@@ -527,13 +585,31 @@ export async function runMubChain(
       const stage = chain.stages[idx];
       terminal = stage.name;
 
+      // Streaming fast-path: a stage with no transitions is guaranteed terminal
+      // (nothing routes after it). If its output is the one we'd return, hand it
+      // back to the caller to stream directly instead of buffering the whole
+      // response. Only resilience stages stream; nested Micro Agents buffer.
+      if (
+        opts.streamTerminal &&
+        !isRouter(stage) &&
+        (!stage.transitions || stage.transitions.length === 0) &&
+        (!chain.output || chain.output === stage.name)
+      ) {
+        const exec = resolveStageExec(chain, stage, resolve);
+        if (exec.ok && exec.kind === "resilience") {
+          const stageIR = buildStageIR(source, stage, outputs, values, true);
+          const request = stageRequestPayload(stageIR, stage);
+          return { kind: "stream", stageIR, steps: exec.steps, stageName: stage.name, mub: stage.mub, request, path, usage };
+        }
+      }
+
       if (isRouter(stage)) {
         outputs[stage.name] = "";
         path.push({ step: 1, attempt: 1, model: "(router)", provider: "-", status: 200, kind: "ok", latencyMs: 0, stage: stage.name });
       } else {
         const exec = resolveStageExec(chain, stage, resolve);
         if (!exec.ok) return { result: { ok: false, status: 0, kind: "error", message: exec.message }, path, usage };
-        const stageIR = buildStageIR(source, stage, outputs, false);
+        const stageIR = buildStageIR(source, stage, outputs, values, false);
 
         if (exec.kind === "resilience") {
           const request = stageRequestPayload(stageIR, stage);

@@ -491,10 +491,18 @@ export function serializeClientStream(
     : serializeOpenAIStream(events, ctx);
 }
 
+/** Cap for the fabricated stream below. Fast (most models do 20–100 tok/s), but
+ * paced so a buffered chain response still arrives as smooth progressive output
+ * instead of one lump. */
+const FAKE_STREAM_TOKENS_PER_SEC = 5000;
+const FAKE_STREAM_CHUNK_CHARS = 24; // chars per delta (~6 tokens); smoothness, not rate
+
 /**
  * Synthesize a client SSE stream from an already-complete IRResponse. Chains
  * buffer their stages (to evaluate routing conditions) then emit the final
- * result as a single-shot stream so streaming clients still get SSE.
+ * result as a stream so streaming clients still get SSE. The text is split into
+ * small deltas and paced to ~FAKE_STREAM_TOKENS_PER_SEC so the client sees it
+ * stream in quickly rather than as a single chunk.
  */
 export function streamFromIRResponse(
   family: Family,
@@ -503,10 +511,25 @@ export function streamFromIRResponse(
 ): AsyncGenerator<string> {
   async function* events(): AsyncGenerator<StreamEvent> {
     yield { type: "start", id: ir.id, model: ir.model, created: ir.created, inputTokens: ir.usage.promptTokens };
+
+    const startedAt = Date.now();
+    let emittedTokens = 0;
+    // ~4 chars/token. Self-correcting against setTimeout jitter so the average
+    // rate holds at the cap.
+    const pace = async (chars: number): Promise<void> => {
+      emittedTokens += Math.max(1, Math.round(chars / 4));
+      const wait = (emittedTokens * 1000) / FAKE_STREAM_TOKENS_PER_SEC - (Date.now() - startedAt);
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    };
+
     let toolIndex = 0;
     for (const p of ir.content) {
       if (p.type === "text") {
-        if (p.text) yield { type: "text_delta", text: p.text };
+        for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
+          const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
+          yield { type: "text_delta", text: piece };
+          await pace(piece.length);
+        }
       } else if (p.type === "tool_use") {
         yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
         yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };
