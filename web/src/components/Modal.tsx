@@ -7,10 +7,12 @@ interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Extra controls rendered in the title bar, before the close button. */
+  headerExtra?: ReactNode;
   wide?: boolean;
 }
 
-export function Modal({ open, title, icon, onClose, children, footer, wide }: ModalProps) {
+export function Modal({ open, title, icon, onClose, children, footer, headerExtra, wide }: ModalProps) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
@@ -23,9 +25,12 @@ export function Modal({ open, title, icon, onClose, children, footer, wide }: Mo
             {icon && <i className={`bi ${icon} text-brand-400`} />}
             {title}
           </h2>
-          <button className="text-ink-500 hover:text-ink-200" onClick={onClose}>
-            <i className="bi bi-x-lg" />
-          </button>
+          <div className="flex items-center gap-3">
+            {headerExtra}
+            <button className="text-ink-500 hover:text-ink-200" onClick={onClose}>
+              <i className="bi bi-x-lg" />
+            </button>
+          </div>
         </div>
         <div className="card-pad min-h-0 flex-1 overflow-y-auto">{children}</div>
         {footer && (

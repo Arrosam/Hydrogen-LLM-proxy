@@ -16,7 +16,7 @@ import { genId } from "../../util/ids";
 import { getConfig } from "../../context";
 import { serializeForLog } from "../../util/logPayload";
 import { runServiceJson, type JsonSuccess } from "../proxy/run";
-import type { AttemptFailure, AttemptRecord } from "../services/engine";
+import type { AttemptFailure, AttemptRecord, AttemptResult } from "../services/engine";
 import type { AgentCondition, AgentDef, AgentOcr, AgentStage, ServiceSteps } from "../services/schema";
 
 const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -411,13 +411,11 @@ function nextStep(
   return { end: true };
 }
 
-// --- per-stage payload capture (for the log) --------------------------------
+// --- per-call payload capture (for the log) ---------------------------------
 
-function stageRequestPayload(stageIR: IRRequest, stage: AgentStage): string {
+function stageRequestPayload(stageIR: IRRequest): string {
   return serializeForLog(
     {
-      stage: stage.name,
-      service: stage.service,
       system: stageIR.system,
       messages: stageIR.messages,
       tools: stageIR.tools,
@@ -425,20 +423,6 @@ function stageRequestPayload(stageIR: IRRequest, stage: AgentStage): string {
       temperature: stageIR.temperature,
       max_tokens: stageIR.maxTokens,
       thinking: stageIR.thinking,
-    },
-    getConfig().logPayloadMaxChars,
-  );
-}
-
-function ocrRequestPayload(ocrIR: IRRequest, ocr: AgentOcr): string {
-  return serializeForLog(
-    {
-      stage: "(ocr)",
-      service: ocr.service,
-      system: ocrIR.system,
-      messages: ocrIR.messages,
-      temperature: ocrIR.temperature,
-      max_tokens: ocrIR.maxTokens,
     },
     getConfig().logPayloadMaxChars,
   );
@@ -462,14 +446,93 @@ function stageResponsePayload(ir: IRResponse): string {
     getConfig().logPayloadMaxChars,
   );
 }
+// --- Model Service call log --------------------------------------------------
+
+/**
+ * One Model Service invocation made by a Micro Agent. The agent's log is an
+ * array of these -- one per service it called (each stage, the OCR pre-pass,
+ * nested Micro Agents) -- and each entry mirrors a top-level request log: the
+ * called service, its own attempt path, request/response payloads, status,
+ * latency and usage. A nested Micro Agent is itself one call whose `calls`
+ * array holds the services IT called.
+ */
+export interface ServiceCall {
+  /** Stage that made the call ("(ocr)" for the image-translation pre-pass). */
+  stage: string;
+  /** Called Model Service / Micro Agent name ("(inline)" legacy steps, "(router)" no call). */
+  service: string;
+  kind: "service" | "agent" | "router";
+  /** 200 on success; upstream HTTP status or 0 (transport/config) on failure; 499 client abort. */
+  status: number;
+  latencyMs: number;
+  usage?: IRUsage;
+  /** The service's own attempt path (step/try/model/provider). Empty for routers/agents. */
+  attempts: AttemptRecord[];
+  request?: string;
+  response?: string;
+  error?: string;
+  /** Nested Micro Agent only: its own Model Service call log. */
+  calls?: ServiceCall[];
+  /** True when this call's output was streamed directly to the client. */
+  streamed?: boolean;
+}
+
+/** Total upstream attempts across a call log (incl. nested Micro Agents). */
+export function countAttempts(calls: ServiceCall[]): number {
+  let n = 0;
+  for (const c of calls) {
+    n += c.attempts.length;
+    if (c.calls) n += countAttempts(c.calls);
+  }
+  return n;
+}
+
+/** Invoke a Model Service (its resilience steps) and record it as one call. */
+async function callModelService(
+  stageIR: IRRequest,
+  steps: ServiceSteps,
+  meta: { stage: string; service?: string },
+): Promise<{ call: ServiceCall; result: AttemptResult<JsonSuccess> }> {
+  const started = Date.now();
+  const { result, path } = await runServiceJson(stageIR, steps);
+  const call: ServiceCall = {
+    stage: meta.stage,
+    service: meta.service ?? "(inline)",
+    kind: "service",
+    status: result.ok ? 200 : result.status,
+    latencyMs: Date.now() - started,
+    attempts: path,
+    request: stageRequestPayload(stageIR),
+  };
+  if (result.ok) {
+    call.usage = result.value.ir.usage;
+    call.response = stageResponsePayload(result.value.ir);
+  } else {
+    call.error = result.message;
+  }
+  return { call, result };
+}
 // --- agent execution --------------------------------------------------------
 
 export interface AgentRunResult {
   result: { ok: true; value: JsonSuccess } | AttemptFailure;
-  path: AttemptRecord[];
+  calls: ServiceCall[];
   usage: IRUsage;
 }
 
+/** A nested-agent call entry finalized (status/latency) once the terminal stream ends. */
+export interface PendingCall {
+  call: ServiceCall;
+  startedAt: number;
+}
+
+/**
+ * Plan for streaming the agent's terminal Model Service straight to the
+ * client. Everything executed so far is already logged in `calls`; the caller
+ * runs the terminal service as a stream and appends its call entry to
+ * `container` (the root array, or a nested Micro Agent's `calls` when the
+ * terminal stage streams through nested agents), then finalizes `pending`.
+ */
 export interface AgentStreamPlan {
   kind: "stream";
   stageIR: IRRequest;
@@ -477,7 +540,9 @@ export interface AgentStreamPlan {
   stageName: string;
   service?: string;
   request: string;
-  path: AttemptRecord[];
+  calls: ServiceCall[];
+  container: ServiceCall[];
+  pending: PendingCall[];
   usage: IRUsage;
 }
 
@@ -503,11 +568,14 @@ export async function runAgent(
   const byName = new Map(agent.stages.map((s, i) => [s.name, i]));
   const outputs: Record<string, string> = {};
   const values: Record<string, JsonSuccess> = {};
-  const path: AttemptRecord[] = [];
+  const calls: ServiceCall[] = [];
   let usage = ZERO_USAGE;
   let lastValue: JsonSuccess | null = null;
   let terminal = agent.stages[0]?.name ?? "";
   let returnStage: string | undefined = agent.output;
+
+  const fail = (result: AttemptFailure): AgentRunResult => ({ result, calls, usage });
+  const error = (message: string): AgentRunResult => fail({ ok: false, status: 0, kind: "error", message });
 
   try {
     let source = ir;
@@ -516,15 +584,11 @@ export async function runAgent(
       if (images.length > 0) {
         const ocr = agent.ocr;
         const steps = resolveOcrSteps(agent, ocr, resolve);
-        if (!steps.ok) return { result: { ok: false, status: 0, kind: "error", message: steps.message }, path, usage };
+        if (!steps.ok) return error(steps.message);
         const ocrIR = buildOcrRequestIR(ir, images, ocr);
-        const request = ocrRequestPayload(ocrIR, ocr);
-        const { result, path: ocrPath } = await runServiceJson(ocrIR, steps.steps);
-        const response = result.ok ? stageResponsePayload(result.value.ir) : undefined;
-        ocrPath.forEach((rec, k) =>
-          path.push({ ...rec, stage: "(ocr)", service: ocr.service, ...(k === 0 ? { request, response } : {}) }),
-        );
-        if (!result.ok) return { result, path, usage };
+        const { call, result } = await callModelService(ocrIR, steps.steps, { stage: "(ocr)", service: ocr.service });
+        calls.push(call);
+        if (!result.ok) return fail(result);
         usage = addUsage(usage, result.value.ir.usage);
         source = translateImagesInIR(ir, parseOcrResults(textOf(result.value.ir.content), images.length));
       }
@@ -535,51 +599,85 @@ export async function runAgent(
     while (idx >= 0 && idx < agent.stages.length) {
       const stage = agent.stages[idx];
       terminal = stage.name;
-
-      if (
-        opts.streamTerminal &&
+      // The terminal Model Service (nothing routes after it, and it is the
+      // agent's returned output) can stream straight to the client.
+      const streamable =
+        !!opts.streamTerminal &&
         !isRouter(stage) &&
         (!stage.transitions || stage.transitions.length === 0) &&
-        (!agent.output || agent.output === stage.name)
-      ) {
-        const exec = resolveStageExec(agent, stage, resolve);
-        if (exec.ok && exec.kind === "resilience") {
-          const stageIR = buildStageIR(source, stage, outputs, values, true);
-          const request = stageRequestPayload(stageIR, stage);
-          return { kind: "stream", stageIR, steps: exec.steps, stageName: stage.name, service: stage.service, request, path, usage };
-        }
-      }
+        (!agent.output || agent.output === stage.name);
 
       if (isRouter(stage)) {
         outputs[stage.name] = "";
-        path.push({ step: 1, attempt: 1, model: "(router)", provider: "-", status: 200, kind: "ok", latencyMs: 0, stage: stage.name });
+        calls.push({ stage: stage.name, service: "(router)", kind: "router", status: 200, latencyMs: 0, attempts: [] });
       } else {
         const exec = resolveStageExec(agent, stage, resolve);
-        if (!exec.ok) return { result: { ok: false, status: 0, kind: "error", message: exec.message }, path, usage };
-        const stageIR = buildStageIR(source, stage, outputs, values, false);
+        if (!exec.ok) return error(exec.message);
 
         if (exec.kind === "resilience") {
-          const request = stageRequestPayload(stageIR, stage);
-          const { result, path: stagePath } = await runServiceJson(stageIR, exec.steps);
-          const response = result.ok ? stageResponsePayload(result.value.ir) : undefined;
-          stagePath.forEach((rec, k) =>
-            path.push({ ...rec, stage: stage.name, service: stage.service, ...(k === 0 ? { request, response } : {}) }),
-          );
-          if (!result.ok) return { result, path, usage };
+          const stageIR = buildStageIR(source, stage, outputs, values, streamable);
+          if (streamable) {
+            return {
+              kind: "stream",
+              stageIR,
+              steps: exec.steps,
+              stageName: stage.name,
+              service: stage.service,
+              request: stageRequestPayload(stageIR),
+              calls,
+              container: calls,
+              pending: [],
+              usage,
+            };
+          }
+          const { call, result } = await callModelService(stageIR, exec.steps, { stage: stage.name, service: stage.service });
+          calls.push(call);
+          if (!result.ok) return fail(result);
           outputs[stage.name] = textOf(result.value.ir.content);
           values[stage.name] = result.value;
           lastValue = result.value;
           usage = addUsage(usage, result.value.ir.usage);
         } else {
-          if (stack.includes(exec.name)) {
-            return { result: { ok: false, status: 0, kind: "error", message: `micro-agent cycle detected: "${exec.name}" is already running` }, path, usage };
+          if (stack.includes(exec.name)) return error(`micro-agent cycle detected: "${exec.name}" is already running`);
+          if (stack.length >= MAX_AGENT_DEPTH) return error(`micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
+
+          const stageIR = buildStageIR(source, stage, outputs, values, streamable);
+          const startedAt = Date.now();
+          const wrapper: ServiceCall = {
+            stage: stage.name,
+            service: exec.name,
+            kind: "agent",
+            status: 0,
+            latencyMs: 0,
+            attempts: [],
+            request: stageRequestPayload(stageIR),
+            calls: [],
+          };
+          // A Micro Agent presents the same interface as a Model Service, so a
+          // terminal nested agent is invoked in stream mode too: its own
+          // terminal Model Service streams through all nesting levels.
+          const sub = streamable
+            ? await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name], { streamTerminal: true })
+            : await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name]);
+          wrapper.calls = sub.calls;
+          calls.push(wrapper);
+          if (isStreamPlan(sub)) {
+            return {
+              ...sub,
+              calls,
+              pending: [...sub.pending, { call: wrapper, startedAt }],
+              usage: addUsage(usage, sub.usage),
+            };
           }
-          if (stack.length >= MAX_AGENT_DEPTH) {
-            return { result: { ok: false, status: 0, kind: "error", message: `micro-agent nesting too deep (>${MAX_AGENT_DEPTH})` }, path, usage };
+          wrapper.latencyMs = Date.now() - startedAt;
+          if (!sub.result.ok) {
+            wrapper.status = sub.result.status;
+            wrapper.error = sub.result.message;
+            return fail(sub.result);
           }
-          const sub = await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name]);
-          sub.path.forEach((rec) => path.push({ ...rec, stage: `${stage.name} > ${rec.stage ?? "?"}` }));
-          if (!sub.result.ok) return { result: sub.result, path, usage };
+          wrapper.status = 200;
+          wrapper.usage = sub.result.value.ir.usage;
+          wrapper.response = stageResponsePayload(sub.result.value.ir);
           outputs[stage.name] = textOf(sub.result.value.ir.content);
           values[stage.name] = sub.result.value;
           lastValue = sub.result.value;
@@ -596,13 +694,11 @@ export async function runAgent(
     }
 
     const chosen = (returnStage && values[returnStage]) || values[terminal] || lastValue;
-    if (!chosen) {
-      return { result: { ok: false, status: 0, kind: "error", message: "agent produced no model output" }, path, usage };
-    }
+    if (!chosen) return error("agent produced no model output");
     const value: JsonSuccess = { ...chosen, ir: { ...chosen.ir, usage } };
-    return { result: { ok: true, value }, path, usage };
+    return { result: { ok: true, value }, calls, usage };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return { result: { ok: false, status: 0, kind: "error", message: `agent execution error: ${message}` }, path, usage };
+    return { result: { ok: false, status: 0, kind: "error", message: `agent execution error: ${message}` }, calls, usage };
   }
 }

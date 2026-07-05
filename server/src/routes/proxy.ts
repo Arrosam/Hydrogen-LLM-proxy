@@ -3,8 +3,8 @@ import { Readable } from "node:stream";
 import { textOf, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
-import { runServiceJson, runServiceStream } from "../core/proxy/run";
-import { isStreamPlan, runAgent, type AgentStreamPlan } from "../core/agents/engine";
+import { runServiceJson, runServiceStream, type JsonSuccess } from "../core/proxy/run";
+import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
 import {
   parseUpstreamStream,
@@ -20,7 +20,7 @@ import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptRecord } from "../core/services/engine";
+import type { AttemptResult } from "../core/services/engine";
 import type { ModelService, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
@@ -38,7 +38,8 @@ interface LogParams {
   usage?: IRUsage;
   latencyMs: number;
   attempts?: number;
-  attemptPath?: AttemptRecord[];
+  /** Flat AttemptRecord[] for a Model Service; ServiceCall[] for a Micro Agent. */
+  attemptPath?: unknown;
   requestBody?: unknown;
   responseBody?: unknown;
   error?: string | null;
@@ -134,9 +135,20 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     return handleStream(reply, ingress, ir, def, { token, service, serviceName, body, started });
   }
 
-  const { result, path } = isAgent(def)
-    ? await runAgent(ir, def, resolveAgentStage, [serviceName])
-    : await runServiceJson(ir, def);
+  let result: AttemptResult<JsonSuccess>;
+  let attemptPath: unknown;
+  let attempts: number;
+  if (isAgent(def)) {
+    const out = await runAgent(ir, def, resolveAgentStage, [serviceName]);
+    result = out.result;
+    attemptPath = out.calls;
+    attempts = countAttempts(out.calls);
+  } else {
+    const out = await runServiceJson(ir, def);
+    result = out.result;
+    attemptPath = out.path;
+    attempts = out.path.length;
+  }
   const latencyMs = Date.now() - started;
 
   if (!result.ok) {
@@ -144,7 +156,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
       token, service, serviceName, ingress, egress: null, streaming: false, httpStatus: status,
-      latencyMs, attempts: path.length, attemptPath: path, requestBody: body, error: message,
+      latencyMs, attempts, attemptPath, requestBody: body, error: message,
     });
     incrementUsage(token.id, 1, 0);
     return reply.code(status).send(buildErrorBody(ingress, status, message));
@@ -154,7 +166,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   const clientBody = adapter.irToResponse(respIR, { model: serviceName });
   recordLog({
     token, service, serviceName, ingress, egress: result.value.family, streaming: false, httpStatus: 200,
-    usage: respIR.usage, latencyMs, attempts: path.length, attemptPath: path,
+    usage: respIR.usage, latencyMs, attempts, attemptPath,
     requestBody: body, responseBody: clientBody,
   });
   incrementUsage(token.id, 1, respIR.usage.totalTokens);
@@ -229,10 +241,11 @@ async function handleStream(
   return sendSse(reply, streamAndLog());
 }
 /** Streaming for an agent: routing needs each stage's full output, so earlier
- * stages run buffered -- but the terminal stage (nothing routes after it) is
- * streamed directly so the client gets real token-by-token output instead of
- * waiting for the whole response. Falls back to a single-shot stream when the
- * terminal stage can't be streamed (e.g. it's a nested Micro Agent). */
+ * stages run buffered -- but the terminal Model Service (nothing routes after
+ * it) is streamed directly so the client gets real token-by-token output,
+ * through nested Micro Agents too. Only when the returned output is decided by
+ * a transition (or agent.output points at an earlier stage) does the agent
+ * finish buffered and emit the result as a fake stream. */
 async function handleAgentStream(
   reply: FastifyReply,
   ingress: Family,
@@ -243,15 +256,16 @@ async function handleAgentStream(
   const outcome = await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
   if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
 
-  const { result, path } = outcome;
+  const { result, calls } = outcome;
+  const attempts = countAttempts(calls);
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
     recordLog({
       token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
-      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: path.length,
-      attemptPath: path, requestBody: ctx.body, error: message,
+      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts,
+      attemptPath: calls, requestBody: ctx.body, error: message,
     });
     incrementUsage(ctx.token.id, 1, 0);
     return reply.code(status).send(buildErrorBody(ingress, status, message));
@@ -265,41 +279,62 @@ async function handleAgentStream(
   recordLog({
     token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: result.value.family,
     streaming: true, httpStatus: 200, usage: respIR.usage, latencyMs: Date.now() - ctx.started,
-    attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody,
+    attempts, attemptPath: calls, requestBody: ctx.body, responseBody,
   });
   incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
 
   return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.serviceName }));
 }
 
-/** Stream an agent's terminal stage directly, prepending OCR/earlier-stage path + usage. */
+/** Stream an agent's terminal Model Service directly to the client. The calls
+ * made so far are already logged in plan.calls; the terminal service's own
+ * call entry is appended to plan.container (nested inside any wrapping Micro
+ * Agent entries) and finalized when the stream ends. */
 async function streamTerminalStage(
   reply: FastifyReply,
   ingress: Family,
   plan: AgentStreamPlan,
   ctx: StreamCtx,
 ): Promise<unknown> {
-  const { result, path: streamPath } = await runServiceStream(plan.stageIR, plan.steps);
+  const startedTerminal = Date.now();
+  const { result, path } = await runServiceStream(plan.stageIR, plan.steps);
 
-  const stagePath = streamPath.map((rec, k) => ({
-    ...rec,
+  const terminalCall: ServiceCall = {
     stage: plan.stageName,
-    service: plan.service,
-    ...(k === 0 ? { request: plan.request } : {}),
-  }));
-  const fullPath = [...plan.path, ...stagePath];
+    service: plan.service ?? "(inline)",
+    kind: "service",
+    status: 0,
+    latencyMs: 0,
+    attempts: path,
+    request: plan.request,
+  };
+  plan.container.push(terminalCall);
+  const finalize = (status: number, error?: string): void => {
+    terminalCall.status = status;
+    terminalCall.latencyMs = Date.now() - startedTerminal;
+    if (error) terminalCall.error = error;
+    for (const p of plan.pending) {
+      p.call.status = status;
+      p.call.latencyMs = Date.now() - p.startedAt;
+      if (error) p.call.error = error;
+    }
+  };
 
   if (!result.ok) {
     const status = result.status >= 400 ? result.status : 502;
     const message = extractUpstreamMessage(result.errorBody) ?? result.message;
+    finalize(result.status, message);
     recordLog({
       token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
-      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: fullPath.length,
-      attemptPath: fullPath, requestBody: ctx.body, error: message,
+      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: countAttempts(plan.calls),
+      attemptPath: plan.calls, requestBody: ctx.body, error: message,
     });
     incrementUsage(ctx.token.id, 1, 0);
     return reply.code(status).send(buildErrorBody(ingress, status, message));
   }
+
+  terminalCall.streamed = true;
+  for (const p of plan.pending) p.call.streamed = true;
 
   const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
   const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
@@ -324,10 +359,13 @@ async function streamTerminalStage(
       };
       if (acc.reasoning) responseBody.reasoning = acc.reasoning;
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
+      terminalCall.usage = streamUsage;
+      terminalCall.response = serializeForLog(responseBody, getConfig().logPayloadMaxChars);
+      finalize(streamError ? 499 : 200, streamError ?? undefined);
       recordLog({
         token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress, streaming: true,
         httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
-        attempts: fullPath.length, attemptPath: fullPath, requestBody: ctx.body, responseBody, error: streamError,
+        attempts: countAttempts(plan.calls), attemptPath: plan.calls, requestBody: ctx.body, responseBody, error: streamError,
       });
       incrementUsage(ctx.token.id, 1, usage.totalTokens);
     }

@@ -16,19 +16,48 @@ interface AttemptRecord {
   kind: string;
   latencyMs: number;
   error?: string;
+  // Legacy Micro Agent logs (pre-0.4) tacked stage info onto flat records.
   stage?: string;
   service?: string;
   request?: string;
   response?: string;
 }
 
+/** One Model Service call made by a Micro Agent (each with its own attempt path). */
+interface ServiceCallEntry {
+  stage: string;
+  service: string;
+  kind: "service" | "agent" | "router";
+  status: number;
+  latencyMs: number;
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  attempts: AttemptRecord[];
+  request?: string;
+  response?: string;
+  error?: string;
+  calls?: ServiceCallEntry[];
+  streamed?: boolean;
+}
+
 interface LogDetail extends LogSummary {
-  attemptPath: AttemptRecord[] | null;
+  attemptPath: unknown;
   requestPayload: string | null;
   responsePayload: string | null;
 }
 
 type PayloadView = "formatted" | "json";
+
+/** Micro Agent logs store an array of Model Service calls; Model Service logs
+ * (and legacy agent logs) store a flat attempt list. */
+function isCallLog(path: unknown): path is ServiceCallEntry[] {
+  return (
+    Array.isArray(path) &&
+    path.length > 0 &&
+    typeof path[0] === "object" &&
+    path[0] !== null &&
+    Array.isArray((path[0] as { attempts?: unknown }).attempts)
+  );
+}
 
 function statusBadge(status: number) {
   if (status >= 200 && status < 300) return <span className="badge-green">{status}</span>;
@@ -203,7 +232,14 @@ export function Logs() {
         </div>
       )}
 
-      <Modal open={detail !== null} wide title={`Request #${detail?.id}`} icon="bi-journal-text" onClose={() => setDetail(null)}>
+      <Modal
+        open={detail !== null}
+        wide
+        title={`Request #${detail?.id}`}
+        icon="bi-journal-text"
+        onClose={() => setDetail(null)}
+        headerExtra={<PayloadViewToggle view={payloadView} onChange={setPayloadView} />}
+      >
         {detail && (
           <div className="space-y-4">
             {detail.error && <ErrorNote message={detail.error} />}
@@ -216,37 +252,30 @@ export function Logs() {
               <Meta label="Tokens" value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
             </div>
 
-            <div>
-              <h4 className="label">
-                Attempt path
-                {(detail.attemptPath ?? []).some((a) => a.request || a.response) && (
-                  <span className="ml-2 normal-case text-ink-500">(click a stage to see its request &amp; response)</span>
-                )}
-              </h4>
-              <AttemptPathTable
-                path={detail.attemptPath ?? []}
-                view={payloadView}
-                expanded={expandedRows}
-                onToggle={toggleRow}
-              />
-            </div>
-
-            <div className="flex items-center justify-between">
-              <h4 className="label mb-0">Payloads</h4>
-              <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
-                {(["formatted", "json"] as const).map((v) => (
-                  <button
-                    key={v}
-                    onClick={() => setPayloadView(v)}
-                    className={`rounded-md px-2.5 py-1 font-medium capitalize transition-colors ${
-                      payloadView === v ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
-                    }`}
-                  >
-                    {v}
-                  </button>
-                ))}
+            {isCallLog(detail.attemptPath) ? (
+              <div>
+                <h4 className="label">
+                  Model Service calls
+                  <span className="ml-2 normal-case text-ink-500">(every service this Micro Agent called, in order)</span>
+                </h4>
+                <CallList calls={detail.attemptPath} view={payloadView} />
               </div>
-            </div>
+            ) : (
+              <div>
+                <h4 className="label">
+                  Attempt path
+                  {legacyPath(detail.attemptPath).some((a) => a.request || a.response) && (
+                    <span className="ml-2 normal-case text-ink-500">(click a stage to see its request &amp; response)</span>
+                  )}
+                </h4>
+                <AttemptPathTable
+                  path={legacyPath(detail.attemptPath)}
+                  view={payloadView}
+                  expanded={expandedRows}
+                  onToggle={toggleRow}
+                />
+              </div>
+            )}
 
             <PayloadBlock title="Request payload" raw={detail.requestPayload} view={payloadView} />
             <PayloadBlock title="Response payload" raw={detail.responsePayload} view={payloadView} />
@@ -262,6 +291,132 @@ function Meta({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg bg-ink-950/50 px-3 py-2">
       <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
       <div className="mt-0.5 text-ink-200">{value}</div>
+    </div>
+  );
+}
+
+function PayloadViewToggle({ view, onChange }: { view: PayloadView; onChange: (v: PayloadView) => void }) {
+  return (
+    <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
+      {(["formatted", "json"] as const).map((v) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={`rounded-md px-2.5 py-1 font-medium capitalize transition-colors ${
+            view === v ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
+          }`}
+        >
+          {v}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function legacyPath(path: unknown): AttemptRecord[] {
+  return Array.isArray(path) ? (path as AttemptRecord[]) : [];
+}
+
+function callStatusBadge(call: ServiceCallEntry) {
+  if (call.kind === "router") return <span className="badge-gray">route</span>;
+  if (call.status >= 200 && call.status < 300) return <span className="badge-green">ok</span>;
+  if (call.status === 499) return <span className="badge-gray">499</span>;
+  return <span className="badge-red">{call.status || "error"}</span>;
+}
+
+function callKindIcon(kind: ServiceCallEntry["kind"]): string {
+  switch (kind) {
+    case "agent":
+      return "bi-robot";
+    case "router":
+      return "bi-signpost-split";
+    default:
+      return "bi-diagram-3";
+  }
+}
+
+function CallList({ calls, view }: { calls: ServiceCallEntry[]; view: PayloadView }) {
+  return (
+    <div className="space-y-2">
+      {calls.map((c, i) => (
+        <CallItem key={i} call={c} view={view} />
+      ))}
+    </div>
+  );
+}
+
+/** One Model Service call: a header row expandable into the service's own
+ * attempt path, request/response payloads and (for a nested Micro Agent) the
+ * calls it made in turn. */
+function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView }) {
+  const [open, setOpen] = useState(false);
+  const expandable =
+    call.attempts.length > 0 || Boolean(call.request) || Boolean(call.response) || (call.calls?.length ?? 0) > 0;
+  return (
+    <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
+      <div
+        className={`flex items-center gap-2 px-3 py-2 ${expandable ? "cursor-pointer hover:bg-ink-850/50" : ""}`}
+        onClick={() => expandable && setOpen(!open)}
+      >
+        <i
+          className={`bi ${expandable ? (open ? "bi-chevron-down" : "bi-chevron-right") : "bi-dot"} text-ink-500`}
+        />
+        <span className="font-mono text-xs text-brand-400">{call.stage}</span>
+        <span className="flex items-center gap-1.5 font-mono text-xs text-ink-300">
+          <i className={`bi ${callKindIcon(call.kind)} text-ink-500`} />
+          {call.kind === "router" ? "(no model call)" : call.service}
+        </span>
+        {call.streamed && <i className="bi bi-broadcast text-brand-400" title="streamed to the client" />}
+        <div className="flex-1" />
+        {call.usage && <span className="text-xs text-ink-400">{formatNumber(call.usage.totalTokens)} tok</span>}
+        {call.kind !== "router" && <span className="text-xs text-ink-400">{call.latencyMs} ms</span>}
+        {callStatusBadge(call)}
+      </div>
+      {open && expandable && (
+        <div className="space-y-3 border-t border-ink-800/70 bg-ink-950/40 p-3">
+          {call.error && <ErrorNote message={call.error} />}
+          {call.attempts.length > 0 && (
+            <div>
+              <h4 className="label">Attempt path</h4>
+              <AttemptsTable attempts={call.attempts} />
+            </div>
+          )}
+          <PayloadBlock title="Request" raw={call.request ?? null} view={view} />
+          <PayloadBlock title="Response" raw={call.response ?? null} view={view} />
+          {(call.calls?.length ?? 0) > 0 && (
+            <div>
+              <h4 className="label">Model Service calls (nested)</h4>
+              <CallList calls={call.calls!} view={view} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
+  return (
+    <div className="card overflow-hidden">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {attempts.map((a, i) => (
+            <tr key={i}>
+              <td>{a.step}</td>
+              <td>{a.attempt}</td>
+              <td className="font-mono text-xs">{a.model}</td>
+              <td className="font-mono text-xs">{a.provider}</td>
+              <td>{a.kind === "ok" ? <span className="badge-green">ok</span> : <span className="badge-red">{a.status || a.kind}</span>}</td>
+              <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

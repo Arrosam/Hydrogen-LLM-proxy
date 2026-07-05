@@ -184,22 +184,25 @@ describe("runAgent (decision tree)", () => {
       stage("draft", "D", { transitions: [t(always, "final")] }),
       stage("final", "F", { input: [{ kind: "stage_output", stage: "draft", role: "user" }] }),
     ]);
-    const { result, usage, path } = await runAgent(textOnly, agent, noResolver);
+    const { result, usage, calls } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(D(hi))");
     expect(usage.totalTokens).toBe(4);
-    expect(path.map((p) => p.stage)).toEqual(["draft", "final"]);
-    expect(path[0].request).toContain("messages");
-    expect(path[0].response).toContain("D(hi)");
-    expect(path[1].response).toContain("F(D(hi))");
+    expect(calls.map((c) => c.stage)).toEqual(["draft", "final"]);
+    expect(calls[0].kind).toBe("service");
+    expect(calls[0].status).toBe(200);
+    expect(calls[0].attempts).toHaveLength(1);
+    expect(calls[0].request).toContain("messages");
+    expect(calls[0].response).toContain("D(hi)");
+    expect(calls[1].response).toContain("F(D(hi))");
   });
 
   it("stops and returns when a stage has no matching transition (no auto-advance)", async () => {
     const agent = agentOf([stage("a", "A"), stage("b", "B")]);
-    const { result, path } = await runAgent(textOnly, agent, noResolver);
+    const { result, calls } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("A(hi)");
-    expect(path.map((p) => p.stage)).toEqual(["a"]);
+    expect(calls.map((c) => c.stage)).toEqual(["a"]);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
@@ -210,11 +213,13 @@ describe("runAgent (decision tree)", () => {
       stage("text", "TXT"),
     ]);
     const img = await runAgent(withImage, agent, noResolver);
-    expect(img.path.map((p) => p.stage)).toEqual(["route", "ocr"]);
+    expect(img.calls.map((c) => c.stage)).toEqual(["route", "ocr"]);
+    expect(img.calls[0].kind).toBe("router");
+    expect(img.calls[0].attempts).toHaveLength(0);
     if (img.result.ok) expect(textOf(img.result.value.ir.content)).toBe("OCR(hi)");
 
     const txt = await runAgent(textOnly, agent, noResolver);
-    expect(txt.path.map((p) => p.stage)).toEqual(["route", "text"]);
+    expect(txt.calls.map((c) => c.stage)).toEqual(["route", "text"]);
     if (txt.result.ok) expect(textOf(txt.result.value.ir.content)).toBe("TXT(hi)");
   });
 
@@ -228,20 +233,20 @@ describe("runAgent (decision tree)", () => {
         stage("pass", "PASSC"),
       ]);
     const p = await runAgent(textOnly, build("pass"), noResolver);
-    expect(p.path.map((x) => x.stage)).toEqual(["decide", "pass"]);
+    expect(p.calls.map((x) => x.stage)).toEqual(["decide", "pass"]);
     const f = await runAgent(textOnly, build("fail"), noResolver);
-    expect(f.path.map((x) => x.stage)).toEqual(["decide", "fail"]);
+    expect(f.calls.map((x) => x.stage)).toEqual(["decide", "fail"]);
   });
 
   it("resolves a stage's referenced service via the resolver", async () => {
     const resolver: StageResolver = (name) =>
       name === "resmub" ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p" }] } } : { ok: false, message: "unknown" };
     const agent = agentOf([{ name: "s", service: "resmub", input: [] }]);
-    const { result, path } = await runAgent(textOnly, agent, resolver);
+    const { result, calls } = await runAgent(textOnly, agent, resolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("R(hi)");
-    expect(path[0].stage).toBe("s");
-    expect(path[0].service).toBe("resmub");
+    expect(calls[0].stage).toBe("s");
+    expect(calls[0].service).toBe("resmub");
   });
 
   it("fails the agent when a referenced service can't be resolved", async () => {
@@ -264,9 +269,9 @@ describe("runAgent (decision tree)", () => {
       tools: [{ name: "get_weather", parameters: { type: "object" } }],
       toolChoice: { type: "auto" },
     };
-    const { path } = await runAgent(irWithTools, agentOf([stage("a", "A")]), noResolver);
-    expect(path[0].request).toContain("get_weather");
-    expect(path[0].request).toContain("tool_choice");
+    const { calls } = await runAgent(irWithTools, agentOf([stage("a", "A")]), noResolver);
+    expect(calls[0].request).toContain("get_weather");
+    expect(calls[0].request).toContain("tool_choice");
   });
 
   it("never throws -- a resolver error becomes a failure result (so it gets logged)", async () => {
@@ -289,10 +294,15 @@ describe("runAgent (nesting & return output)", () => {
     const resolver: StageResolver = (name) =>
       name === "agent" ? { ok: true, kind: "agent", agent: subAgent } : { ok: false, message: "unknown" };
     const parent = agentOf([{ name: "outer", service: "agent", input: [{ kind: "last_user" }] }]);
-    const { result, path } = await runAgent(textOnly, parent, resolver);
+    const { result, calls } = await runAgent(textOnly, parent, resolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("SUB(hi)");
-    expect(path.some((r) => r.stage === "outer > inner")).toBe(true);
+    const outer = calls.find((c) => c.stage === "outer");
+    expect(outer?.kind).toBe("agent");
+    expect(outer?.service).toBe("agent");
+    expect(outer?.status).toBe(200);
+    expect(outer?.calls?.map((c) => c.stage)).toEqual(["inner"]);
+    expect(outer?.calls?.[0].response).toContain("SUB(hi)");
   });
 
   it("sums usage across the outer and nested agents", async () => {
@@ -339,9 +349,9 @@ describe("runAgent (nesting & return output)", () => {
         transitions: [{ when: always, goto: "end", output: "first" }],
       }),
     ]);
-    const { result, path } = await runAgent(textOnly, agent, noResolver);
+    const { result, calls } = await runAgent(textOnly, agent, noResolver);
     expect(result.ok).toBe(true);
-    expect(path.map((p) => p.stage)).toEqual(["first", "second"]);
+    expect(calls.map((c) => c.stage)).toEqual(["first", "second"]);
     if (result.ok) expect(textOf(result.value.ir.content)).toBe("F(hi)");
   });
 });
@@ -358,6 +368,8 @@ describe("runAgent (streaming terminal)", () => {
       expect(plan.stageName).toBe("s");
       expect(plan.steps.steps[0].model).toBe("M");
       expect(plan.stageIR.stream).toBe(true);
+      expect(plan.container).toBe(plan.calls);
+      expect(plan.pending).toHaveLength(0);
     }
     expect(runJsonMock).not.toHaveBeenCalled();
   });
@@ -366,7 +378,10 @@ describe("runAgent (streaming terminal)", () => {
     const agent = agentOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")]);
     const plan = await runAgent(textOnly, agent, noResolver, [], { streamTerminal: true });
     expect(isStreamPlan(plan)).toBe(true);
-    if (isStreamPlan(plan)) expect(plan.stageName).toBe("b");
+    if (isStreamPlan(plan)) {
+      expect(plan.stageName).toBe("b");
+      expect(plan.calls.map((c) => c.stage)).toEqual(["a"]);
+    }
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
@@ -385,6 +400,40 @@ describe("runAgent (streaming terminal)", () => {
     const plan = await runAgent(textOnly, agent, noResolver, [], { streamTerminal: true });
     expect(isStreamPlan(plan)).toBe(false);
   });
+
+  it("streams through a nested Micro Agent at the terminal stage", async () => {
+    const subAgent = agentOf([stage("inner", "I")]);
+    const resolver: StageResolver = (name) =>
+      name === "sub" ? { ok: true, kind: "agent", agent: subAgent } : { ok: false, message: "unknown" };
+    const parent = agentOf([{ name: "outer", service: "sub", input: [] }]);
+    const plan = await runAgent(textOnly, parent, resolver, [], { streamTerminal: true });
+    expect(isStreamPlan(plan)).toBe(true);
+    if (isStreamPlan(plan)) {
+      expect(plan.stageName).toBe("inner");
+      expect(plan.steps.steps[0].model).toBe("I");
+      // The nested agent is one call entry; the terminal call lands inside it.
+      expect(plan.calls).toHaveLength(1);
+      expect(plan.calls[0].stage).toBe("outer");
+      expect(plan.calls[0].kind).toBe("agent");
+      expect(plan.container).toBe(plan.calls[0].calls);
+      expect(plan.pending.map((p) => p.call)).toContain(plan.calls[0]);
+    }
+    expect(runJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("buffers a terminal nested agent that returns an earlier stage's output", async () => {
+    const subAgent = agentOf([stage("a", "A", { transitions: [t(always, "b")] }), stage("b", "B")], "a");
+    const resolver: StageResolver = (name) =>
+      name === "sub" ? { ok: true, kind: "agent", agent: subAgent } : { ok: false, message: "unknown" };
+    const parent = agentOf([{ name: "outer", service: "sub", input: [] }]);
+    const outcome = await runAgent(textOnly, parent, resolver, [], { streamTerminal: true });
+    expect(isStreamPlan(outcome)).toBe(false);
+    if (!isStreamPlan(outcome)) {
+      expect(outcome.result.ok).toBe(true);
+      if (outcome.result.ok) expect(textOf(outcome.result.value.ir.content)).toBe("A(hi)");
+      expect(outcome.calls[0].calls?.map((c) => c.stage)).toEqual(["a", "b"]);
+    }
+  });
 });
 
 describe("runAgent (OCR pre-pass)", () => {
@@ -401,7 +450,7 @@ describe("runAgent (OCR pre-pass)", () => {
 
   it("transcribes images to text before the stages run", async () => {
     const agent = ocrAgent('OUT:[{"index":1,"image":"A red cat"}]');
-    const { result, path } = await runAgent(withImage, agent, noResolver);
+    const { result, calls } = await runAgent(withImage, agent, noResolver);
     expect(result.ok).toBe(true);
     if (result.ok) expect(textOf(result.value.ir.content)).toContain("A red cat");
 
@@ -413,20 +462,20 @@ describe("runAgent (OCR pre-pass)", () => {
     expect(stageIR.messages.every((m) => m.content.every((p: IRContentPart) => p.type !== "image"))).toBe(true);
     expect(textOf(stageIR.messages[0].content)).toContain("A red cat");
 
-    expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
+    expect(calls.some((c) => c.stage === "(ocr)")).toBe(true);
   });
 
   it("skips the OCR pre-pass when the request has no images", async () => {
-    const { result, path } = await runAgent(textOnly, ocrAgent("OCR"), noResolver);
+    const { result, calls } = await runAgent(textOnly, ocrAgent("OCR"), noResolver);
     expect(result.ok).toBe(true);
-    expect(path.some((r) => r.stage === "(ocr)")).toBe(false);
+    expect(calls.some((c) => c.stage === "(ocr)")).toBe(false);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
   it("aborts the agent (logged failure) when the OCR pass fails", async () => {
-    const { result, path } = await runAgent(withImage, ocrAgent("BOOM"), noResolver);
+    const { result, calls } = await runAgent(withImage, ocrAgent("BOOM"), noResolver);
     expect(result.ok).toBe(false);
-    expect(path.some((r) => r.stage === "(ocr)")).toBe(true);
+    expect(calls.some((c) => c.stage === "(ocr)")).toBe(true);
     expect(runJsonMock).toHaveBeenCalledTimes(1);
   });
 
@@ -463,10 +512,10 @@ describe("runAgent (OCR pre-pass)", () => {
       stages: [stage("s", "M", { input: [{ kind: "original_conversation" }] })],
       ocr: { service: "vision" },
     };
-    const { result, path } = await runAgent(withImage, agent, resolver);
+    const { result, calls } = await runAgent(withImage, agent, resolver);
     expect(result.ok).toBe(true);
-    const ocrRec = path.find((r) => r.stage === "(ocr)");
-    expect(ocrRec?.service).toBe("vision");
+    const ocrCall = calls.find((c) => c.stage === "(ocr)");
+    expect(ocrCall?.service).toBe("vision");
   });
 
   it("fails the agent when the OCR service can't be resolved", async () => {

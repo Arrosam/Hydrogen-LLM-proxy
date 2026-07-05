@@ -15,7 +15,11 @@ export interface AttemptFailure {
 }
 export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
 
-/** One recorded attempt, persisted to request_logs.attempt_path_json. */
+/**
+ * One recorded attempt, persisted to request_logs.attempt_path_json. For a
+ * Micro Agent request these live inside each ServiceCall's `attempts` (the
+ * agent's log is an array of Model Service calls, each with its own path).
+ */
 export interface AttemptRecord {
   step: number; // 1-based
   attempt: number; // 1-based within the step
@@ -25,14 +29,6 @@ export interface AttemptRecord {
   kind: FailureKind | "ok";
   latencyMs: number;
   error?: string;
-  /** Agent only: the stage this attempt belongs to. */
-  stage?: string;
-  /** Agent only: the Model Service the stage ran (omitted for inline steps / routers). */
-  service?: string;
-  /** Agent only: the request sent to this stage's model (on the stage's first record). */
-  request?: string;
-  /** Agent only: this stage's response (on the stage's first record). */
-  response?: string;
 }
 
 export interface RunOutput<T> {

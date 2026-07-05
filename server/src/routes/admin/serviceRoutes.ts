@@ -14,7 +14,8 @@ import {
   validateService,
 } from "../../services/services";
 import { isAgent, summarizeService, type ServiceDef } from "../../core/services/schema";
-import { runServiceJson } from "../../core/proxy/run";
+import { runServiceJson, type JsonSuccess } from "../../core/proxy/run";
+import type { AttemptResult } from "../../core/services/engine";
 import { runAgent } from "../../core/agents/engine";
 import { extractUpstreamMessage } from "../../core/proxy/errors";
 import { textOf, type IRRequest } from "../../core/ir";
@@ -141,9 +142,17 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
       stream: false,
     };
 
-    const { result, path } = isAgent(def)
-      ? await runAgent(ir, def, resolveAgentStage)
-      : await runServiceJson(ir, def);
+    let result: AttemptResult<JsonSuccess>;
+    let path: unknown;
+    if (isAgent(def)) {
+      const out = await runAgent(ir, def, resolveAgentStage);
+      result = out.result;
+      path = out.calls;
+    } else {
+      const out = await runServiceJson(ir, def);
+      result = out.result;
+      path = out.path;
+    }
     if (result.ok) {
       return {
         ok: true,

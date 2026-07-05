@@ -109,10 +109,8 @@ export function byModelProvider(q: StatsQuery): { models: GroupCount[]; provider
   const models = new Map<string, GroupCount>();
   const providers = new Map<string, GroupCount>();
   for (const row of rows) {
-    const path = Array.isArray(row.attemptPath) ? (row.attemptPath as AttemptLike[]) : [];
-    if (path.length === 0) continue;
     // The winning attempt is the last one when the request succeeded.
-    const winner = row.httpStatus < 400 ? path[path.length - 1] : null;
+    const winner = row.httpStatus < 400 ? lastAttempt(row.attemptPath) : null;
     if (!winner) continue;
     bump(models, winner.model, row.totalTokens);
     bump(providers, winner.provider, row.totalTokens);
@@ -126,6 +124,30 @@ export function byModelProvider(q: StatsQuery): { models: GroupCount[]; provider
 interface AttemptLike {
   model: string;
   provider: string;
+}
+
+/**
+ * Last real attempt in an attempt_path_json value. Handles both shapes: the
+ * flat AttemptRecord[] of a Model Service, and a Micro Agent's array of
+ * Model Service calls (each with its own `attempts`, nested `calls` for
+ * nested agents). Legacy agent logs stored flat records with a "(router)"
+ * pseudo-model, which is skipped.
+ */
+function lastAttempt(path: unknown): AttemptLike | null {
+  if (!Array.isArray(path)) return null;
+  for (let i = path.length - 1; i >= 0; i--) {
+    const el = path[i] as Record<string, unknown> | null;
+    if (!el || typeof el !== "object") continue;
+    if (Array.isArray(el.attempts) || Array.isArray(el.calls)) {
+      const nested = lastAttempt(el.calls) ?? lastAttempt(el.attempts);
+      if (nested) return nested;
+      continue;
+    }
+    if (typeof el.model === "string" && typeof el.provider === "string" && el.model !== "(router)") {
+      return el as unknown as AttemptLike;
+    }
+  }
+  return null;
 }
 
 function bump(map: Map<string, GroupCount>, key: string, tokens: number): void {
