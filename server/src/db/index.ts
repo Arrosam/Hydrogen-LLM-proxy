@@ -3,6 +3,7 @@ import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3"
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "node:path";
 import * as schema from "./schema";
+import { applyLegacyRenames } from "./legacy";
 import { ensureDir, resolveMigrationsDir } from "../util/paths";
 
 export type DB = BetterSQLite3Database<typeof schema>;
@@ -30,6 +31,7 @@ export function openDatabase(dataDir: string): DB {
     );
   }
   migrate(db, { migrationsFolder });
+  applyLegacyRenames(sqlite);
 
   _db = db;
   _sqlite = sqlite;
