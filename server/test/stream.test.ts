@@ -201,3 +201,44 @@ describe("usage reported only on message_stop", () => {
     expect(out).toContain('"total_tokens":212815');
   });
 });
+
+describe("incomplete (truncated) stream detection", () => {
+  async function finishOf(family: "openai" | "anthropic", input: string) {
+    const events = parseUpstreamStream(family, chunked(input));
+    let finish: { incomplete?: boolean; usage?: { totalTokens: number } } | null = null;
+    for await (const ev of events) if (ev.type === "finish") finish = ev;
+    return finish!;
+  }
+
+  it("flags an Anthropic stream cut off before message_stop as incomplete", async () => {
+    const truncated = [
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"m","model":"glm","usage":{"input_tokens":0}}}`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+      ``, // stream ends here: no message_delta usage, no message_stop
+    ].join("\n\n");
+    const finish = await finishOf("anthropic", truncated);
+    expect(finish.incomplete).toBe(true);
+    expect(finish.usage?.totalTokens).toBe(0);
+  });
+
+  it("does not flag a complete Anthropic stream (message_stop present)", async () => {
+    const finish = await finishOf("anthropic", ANTHROPIC_STREAM);
+    expect(finish.incomplete).toBeFalsy();
+  });
+
+  it("flags an OpenAI stream cut off before finish_reason/[DONE] as incomplete", async () => {
+    const truncated = [
+      `data: {"id":"c","model":"gpt","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+      `data: {"id":"c","model":"gpt","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+      ``, // no finish_reason chunk, no [DONE]
+    ].join("\n\n");
+    const finish = await finishOf("openai", truncated);
+    expect(finish.incomplete).toBe(true);
+  });
+
+  it("does not flag a complete OpenAI stream ([DONE] present)", async () => {
+    const finish = await finishOf("openai", OPENAI_STREAM);
+    expect(finish.incomplete).toBeFalsy();
+  });
+});

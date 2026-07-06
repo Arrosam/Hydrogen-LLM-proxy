@@ -100,9 +100,9 @@ export function parsePayload(json: string | null): PayloadMeta | null {
     meta.push({ label: "reasoning", value: JSON.stringify(obj.reasoning) });
   }
   if (obj.usage && typeof obj.usage === "object") {
-    const est = obj.usage_estimated ? " (estimated)" : "";
-    meta.push({ label: "usage", value: JSON.stringify(obj.usage) + est });
+    meta.push({ label: "usage", value: JSON.stringify(obj.usage) });
   }
+  if (obj.incomplete === true) meta.push({ label: "incomplete", value: "stream truncated upstream" });
 
   const tools: string[] = [];
   if (Array.isArray(obj.tools)) {

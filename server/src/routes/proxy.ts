@@ -5,7 +5,6 @@ import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
 import { runServiceDef } from "../core/proxy/invoke";
-import { usageWithFallback } from "../core/usage";
 import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
 import {
@@ -119,8 +118,6 @@ function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply
 }
 
 interface RelayOpts {
-  /** The IR sent upstream; used to estimate usage if the stream reports none. */
-  ir: IRRequest;
   /** Request payload to log; defaults to the client body. A Model Service passes
    * the actual upstream request (step overrides + translation applied). */
   requestBody?: unknown;
@@ -145,7 +142,7 @@ function relayStream(
   value: StreamSuccess,
   opts: RelayOpts,
 ): FastifyReply {
-  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
+  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "", incomplete: false };
   const events = tapStream(parseUpstreamStream(value.family, value.body), acc);
   const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
 
@@ -156,25 +153,31 @@ function relayStream(
     } catch (e) {
       streamError = e instanceof Error ? e.message : String(e);
     } finally {
-      // Fall back to an estimate when a completed stream produced output but
-      // the upstream never reported usage (see core/usage).
-      const outputText = acc.text + (acc.reasoning ? `\n${acc.reasoning}` : "");
-      const fb = usageWithFallback(acc.usage ?? ZERO_USAGE, opts.ir, outputText);
-      const streamUsage = fb.usage;
+      const streamUsage = acc.usage ?? ZERO_USAGE;
       const usage = addUsage(opts.baseUsage ?? ZERO_USAGE, streamUsage);
       const responseBody: Record<string, unknown> = {
         streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
       };
       if (acc.reasoning) responseBody.reasoning = acc.reasoning;
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
-      if (fb.estimated) responseBody.usage_estimated = true;
-      const status = streamError ? 499 : 200;
-      opts.onFinish?.({ status, streamUsage, responseBody, error: streamError });
+      // The stream committed to the client on 2xx headers, so a truncation
+      // can't be retried here (unlike buffered stage calls) -- but it is
+      // recorded as a 502 with the real (partial) usage, never a green 0-token
+      // "success", so truncating upstreams are visible.
+      let error = streamError;
+      let status = 200;
+      if (streamError) status = 499;
+      else if (acc.incomplete) {
+        status = 502;
+        error = "upstream stream ended before completion (truncated)";
+        responseBody.incomplete = true;
+      }
+      opts.onFinish?.({ status, streamUsage, responseBody, error });
       recordLog({
         token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: value.family,
         streaming: true, httpStatus: status, usage, latencyMs: Date.now() - ctx.started,
         attempts: opts.attempts, attemptPath: opts.attemptPath,
-        requestBody: opts.requestBody ?? ctx.body, responseBody, error: streamError,
+        requestBody: opts.requestBody ?? ctx.body, responseBody, error,
       });
       incrementUsage(ctx.token.id, 1, usage.totalTokens);
     }
@@ -270,7 +273,7 @@ async function handleStream(
     return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
   }
   return relayStream(reply, ingress, ctx, result.value, {
-    ir, requestBody: result.value.upstreamRequest, attempts: path.length, attemptPath: path,
+    requestBody: result.value.upstreamRequest, attempts: path.length, attemptPath: path,
   });
 }
 /** Streaming for an agent: routing needs each stage's full output, so earlier
@@ -358,7 +361,8 @@ async function streamTerminalStage(
   for (const p of plan.pending) p.call.streamed = true;
 
   return relayStream(reply, ingress, ctx, result.value, {
-    ir: plan.stageIR,
+    // Top-level request stays the client body; the terminal stage's own upstream
+    // request is recorded on its ServiceCall entry (terminalCall.request).
     baseUsage: plan.usage,
     attempts: countAttempts(plan.calls),
     attemptPath: plan.calls,

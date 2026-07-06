@@ -16,7 +16,9 @@ export type StreamEvent =
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
-  | { type: "finish"; stopReason: IRStopReason; usage?: IRUsage };
+  /** `incomplete` = the upstream stream ended without a proper terminal event
+   * (message_stop / [DONE] / response.completed), i.e. it was truncated. */
+  | { type: "finish"; stopReason: IRStopReason; usage?: IRUsage; incomplete?: boolean };
 
 export interface StreamContext {
   /** Model name echoed to the client (the service name). */
@@ -73,12 +75,16 @@ async function* parseOpenAIStream(
 ): AsyncGenerator<StreamEvent> {
   let started = false;
   let finished = false;
+  let terminated = false; // saw [DONE] or a finish_reason
   let stopReason: IRStopReason = null;
   let usage: IRUsage | undefined;
   const seenTools = new Set<number>();
 
   for await (const frame of parseSSE(readable)) {
-    if (frame.data === "[DONE]") break;
+    if (frame.data === "[DONE]") {
+      terminated = true;
+      break;
+    }
     const chunk = safeParse(frame.data);
     if (!chunk) continue;
 
@@ -127,7 +133,10 @@ async function* parseOpenAIStream(
       }
     }
 
-    if (choice.finish_reason) stopReason = finishReasonToIR(choice.finish_reason as string);
+    if (choice.finish_reason) {
+      stopReason = finishReasonToIR(choice.finish_reason as string);
+      terminated = true;
+    }
     if (chunk.usage && typeof chunk.usage === "object") {
       const u = chunk.usage as Record<string, unknown>;
       usage = {
@@ -140,7 +149,7 @@ async function* parseOpenAIStream(
 
   if (!finished) {
     finished = true;
-    yield { type: "finish", stopReason, usage };
+    yield { type: "finish", stopReason, usage, incomplete: started && !terminated };
   }
 }
 
@@ -237,6 +246,7 @@ async function* parseAnthropicStream(
         break;
     }
   }
+  // Reached only when the stream ended without a message_stop -- truncated.
   yield {
     type: "finish",
     stopReason,
@@ -245,6 +255,7 @@ async function* parseAnthropicStream(
       completionTokens: outputTokens,
       totalTokens: inputTokens + outputTokens,
     },
+    incomplete: true,
   };
 }
 
@@ -349,7 +360,8 @@ async function* parseResponsesStream(
     }
   }
   if (!started) yield { type: "start", id: genId("resp"), model: "", created: nowSeconds() };
-  yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage };
+  // Reached only when the stream ended without response.completed/failed -- truncated.
+  yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
 }
 
 export function parseUpstreamStream(
@@ -373,6 +385,8 @@ export interface StreamAccumulator {
   /** Tool calls seen: name + accumulated JSON argument string. */
   toolCalls: Array<{ name: string; args: string }>;
   upstreamModel: string;
+  /** True when the upstream stream ended without a proper terminal event. */
+  incomplete: boolean;
 }
 
 export async function* tapStream(
@@ -405,6 +419,7 @@ export async function* tapStream(
       case "finish":
         acc.usage = ev.usage;
         acc.stopReason = ev.stopReason;
+        acc.incomplete = ev.incomplete === true;
         break;
     }
     yield ev;
@@ -418,7 +433,9 @@ export async function* tapStream(
  * reasoning from providers that only emit it on streams, and avoids idle
  * non-streaming timeouts during long thinking).
  */
-export async function collectStream(events: AsyncGenerator<StreamEvent>): Promise<IRResponse> {
+export async function collectStream(
+  events: AsyncGenerator<StreamEvent>,
+): Promise<{ ir: IRResponse; incomplete: boolean }> {
   let id = genId("msg");
   let model = "";
   let created = nowSeconds();
@@ -426,6 +443,7 @@ export async function collectStream(events: AsyncGenerator<StreamEvent>): Promis
   let reasoning = "";
   let stopReason: IRStopReason = null;
   let usage: IRUsage | undefined;
+  let incomplete = false;
   const toolByIndex = new Map<number, { id: string; name: string; args: string }>();
   const toolOrder: number[] = [];
 
@@ -454,6 +472,7 @@ export async function collectStream(events: AsyncGenerator<StreamEvent>): Promis
       case "finish":
         stopReason = ev.stopReason;
         usage = ev.usage;
+        incomplete = ev.incomplete === true;
         break;
     }
   }
@@ -467,12 +486,15 @@ export async function collectStream(events: AsyncGenerator<StreamEvent>): Promis
   }
 
   return {
-    id,
-    model,
-    created,
-    content,
-    stopReason,
-    usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    ir: {
+      id,
+      model,
+      created,
+      content,
+      stopReason,
+      usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    },
+    incomplete,
   };
 }
 

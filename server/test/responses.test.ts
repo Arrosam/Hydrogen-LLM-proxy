@@ -214,7 +214,8 @@ describe("Responses API upstream stream parsing (egress)", () => {
 
   it("collectStream buffers an upstream Responses stream into IR", async () => {
     const { collectStream } = await import("../src/core/formats/stream");
-    const ir = await collectStream(parseUpstreamStream("openai_responses", chunked2(UPSTREAM_RESPONSES_STREAM)));
+    const { ir, incomplete } = await collectStream(parseUpstreamStream("openai_responses", chunked2(UPSTREAM_RESPONSES_STREAM)));
+    expect(incomplete).toBe(false);
     expect(ir.content).toEqual([
       { type: "reasoning", text: "hmm" },
       { type: "text", text: "Hi" },

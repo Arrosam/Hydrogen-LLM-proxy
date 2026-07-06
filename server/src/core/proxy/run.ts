@@ -2,7 +2,6 @@
 import type { Family, IRRequest, IRResponse } from "../ir";
 import { adapterFor } from "../formats";
 import { collectStream, parseUpstreamStream } from "../formats/stream";
-import { withUsageFallback } from "../usage";
 import { buildHeaders, chatUrl, postJson, postStream } from "../upstream";
 import { resolveMapping } from "../../services/catalog";
 import { runSteps, type AttemptResult, type RunOutput } from "../services/engine";
@@ -52,7 +51,7 @@ export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunO
       timeoutMs: steps.timeoutMs,
     });
     if (r.status >= 200 && r.status < 300 && r.json && typeof r.json === "object") {
-      const respIR = withUsageFallback(ir, adapterFor(m.family).responseToIR(r.json as Record<string, unknown>));
+      const respIR = adapterFor(m.family).responseToIR(r.json as Record<string, unknown>);
       return {
         ok: true,
         value: {
@@ -96,7 +95,17 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
     });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure by runSteps.
-      const respIR = withUsageFallback(ir, await collectStream(parseUpstreamStream(m.family, r.body)));
+      const { ir: respIR, incomplete } = await collectStream(parseUpstreamStream(m.family, r.body));
+      // A truncated stream (no terminal event) is retried like any other failure
+      // instead of being accepted as a partial, usage-less "success".
+      if (incomplete) {
+        return {
+          ok: false,
+          status: 502,
+          kind: "error",
+          message: "upstream stream ended before completion (truncated)",
+        };
+      }
       return {
         ok: true,
         value: {
