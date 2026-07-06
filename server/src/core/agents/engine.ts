@@ -501,7 +501,11 @@ async function callModelService(
     status: result.ok ? 200 : result.status,
     latencyMs: Date.now() - started,
     attempts: path,
-    request: stageRequestPayload(stageIR),
+    // Log the request actually sent upstream (step thinking overrides +
+    // translation applied), falling back to the pre-translation IR on failure.
+    request: result.ok
+      ? serializeForLog(result.value.upstreamRequest, getConfig().logPayloadMaxChars)
+      : stageRequestPayload(stageIR),
   };
   if (result.ok) {
     call.usage = result.value.ir.usage;

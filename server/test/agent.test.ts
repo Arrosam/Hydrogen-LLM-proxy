@@ -30,6 +30,13 @@ vi.mock("../src/core/proxy/run", () => {
         const value = {
           ir: { id: "x", model, created: 0, content, stopReason: model.startsWith("TOOL:") ? "tool_use" : "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
           family: "openai", upstreamModel: model, providerName: provider, modelName: model,
+          // Stand-in for the translated upstream body (what the engine now logs).
+          upstreamRequest: {
+            model,
+            messages: ir.messages,
+            ...(ir.tools ? { tools: ir.tools, tool_choice: ir.toolChoice } : {}),
+            ...(ir.thinking ? { thinking: ir.thinking } : {}),
+          },
         };
         return { result: { ok: true, value }, path: [rec] };
       },

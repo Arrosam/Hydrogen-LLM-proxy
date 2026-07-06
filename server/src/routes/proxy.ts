@@ -374,7 +374,9 @@ async function streamTerminalStage(
     status: 0,
     latencyMs: 0,
     attempts: path,
-    request: plan.request,
+    // The request actually sent upstream (thinking overrides + translation
+    // applied); plan.request is the pre-translation IR, used only on failure.
+    request: result.ok ? serializeForLog(result.value.upstreamRequest, getConfig().logPayloadMaxChars) : plan.request,
   };
   plan.container.push(terminalCall);
   const finalize = (status: number, error?: string): void => {
