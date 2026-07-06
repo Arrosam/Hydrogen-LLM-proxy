@@ -217,6 +217,11 @@ async function* parseAnthropicStream(
         break;
       }
       case "message_stop": {
+        // Some providers report the final usage on message_stop rather than
+        // message_delta; prefer any non-zero counts seen here.
+        const stopUsage = (data.usage ?? {}) as Record<string, unknown>;
+        if (num(stopUsage.output_tokens) > 0) outputTokens = num(stopUsage.output_tokens);
+        if (num(stopUsage.input_tokens) > 0) inputTokens = num(stopUsage.input_tokens);
         yield {
           type: "finish",
           stopReason,

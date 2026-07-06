@@ -5,6 +5,7 @@ import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
 import { runServiceDef } from "../core/proxy/invoke";
+import { usageWithFallback } from "../core/usage";
 import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
 import {
@@ -118,6 +119,8 @@ function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply
 }
 
 interface RelayOpts {
+  /** The IR sent upstream; used to estimate usage if the stream reports none. */
+  ir: IRRequest;
   /** Usage accumulated before this stream (a Micro Agent's buffered stages). */
   baseUsage?: IRUsage;
   attempts: number;
@@ -150,13 +153,18 @@ function relayStream(
     } catch (e) {
       streamError = e instanceof Error ? e.message : String(e);
     } finally {
-      const streamUsage = acc.usage ?? ZERO_USAGE;
+      // Fall back to an estimate when a completed stream produced output but
+      // the upstream never reported usage (see core/usage).
+      const outputText = acc.text + (acc.reasoning ? `\n${acc.reasoning}` : "");
+      const fb = usageWithFallback(acc.usage ?? ZERO_USAGE, opts.ir, outputText);
+      const streamUsage = fb.usage;
       const usage = addUsage(opts.baseUsage ?? ZERO_USAGE, streamUsage);
       const responseBody: Record<string, unknown> = {
         streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
       };
       if (acc.reasoning) responseBody.reasoning = acc.reasoning;
       if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
+      if (fb.estimated) responseBody.usage_estimated = true;
       const status = streamError ? 499 : 200;
       opts.onFinish?.({ status, streamUsage, responseBody, error: streamError });
       recordLog({
@@ -256,7 +264,7 @@ async function handleStream(
   if (!result.ok) {
     return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
   }
-  return relayStream(reply, ingress, ctx, result.value, { attempts: path.length, attemptPath: path });
+  return relayStream(reply, ingress, ctx, result.value, { ir, attempts: path.length, attemptPath: path });
 }
 /** Streaming for an agent: routing needs each stage's full output, so earlier
  * stages run buffered -- but the terminal Model Service (nothing routes after
@@ -343,6 +351,7 @@ async function streamTerminalStage(
   for (const p of plan.pending) p.call.streamed = true;
 
   return relayStream(reply, ingress, ctx, result.value, {
+    ir: plan.stageIR,
     baseUsage: plan.usage,
     attempts: countAttempts(plan.calls),
     attemptPath: plan.calls,

@@ -2,6 +2,7 @@
 import type { Family, IRRequest, IRResponse } from "../ir";
 import { adapterFor } from "../formats";
 import { collectStream, parseUpstreamStream } from "../formats/stream";
+import { withUsageFallback } from "../usage";
 import { buildHeaders, chatUrl, postJson, postStream } from "../upstream";
 import { resolveMapping } from "../../services/catalog";
 import { runSteps, type AttemptResult, type RunOutput } from "../services/engine";
@@ -43,7 +44,7 @@ export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunO
       timeoutMs: steps.timeoutMs,
     });
     if (r.status >= 200 && r.status < 300 && r.json && typeof r.json === "object") {
-      const respIR = adapterFor(m.family).responseToIR(r.json as Record<string, unknown>);
+      const respIR = withUsageFallback(ir, adapterFor(m.family).responseToIR(r.json as Record<string, unknown>));
       return {
         ok: true,
         value: {
@@ -86,7 +87,7 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
     });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure by runSteps.
-      const respIR = await collectStream(parseUpstreamStream(m.family, r.body));
+      const respIR = withUsageFallback(ir, await collectStream(parseUpstreamStream(m.family, r.body)));
       return {
         ok: true,
         value: {

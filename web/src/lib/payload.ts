@@ -95,7 +95,8 @@ export function parsePayload(json: string | null): PayloadMeta | null {
     if (obj[k] != null) meta.push({ label: k, value: String(obj[k]) });
   }
   if (obj.usage && typeof obj.usage === "object") {
-    meta.push({ label: "usage", value: JSON.stringify(obj.usage) });
+    const est = obj.usage_estimated ? " (estimated)" : "";
+    meta.push({ label: "usage", value: JSON.stringify(obj.usage) + est });
   }
 
   const tools: string[] = [];

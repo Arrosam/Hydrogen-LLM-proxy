@@ -182,3 +182,22 @@ describe("reasoning/thinking passthrough", () => {
     expect(anthOut).toContain('"text":"Done"');
   });
 });
+
+describe("usage reported only on message_stop", () => {
+  const STOP_USAGE_STREAM = [
+    `event: message_start\ndata: {"type":"message_start","message":{"id":"m4","model":"glm","usage":{"input_tokens":0}}}`,
+    `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`,
+    `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+    `event: message_stop\ndata: {"type":"message_stop","usage":{"input_tokens":211973,"output_tokens":842}}`,
+    ``,
+  ].join("\n\n");
+
+  it("captures prompt/completion tokens delivered on the message_stop frame", async () => {
+    const out = await translate("anthropic", "openai", STOP_USAGE_STREAM);
+    expect(out).toContain('"prompt_tokens":211973');
+    expect(out).toContain('"completion_tokens":842');
+    expect(out).toContain('"total_tokens":212815');
+  });
+});
