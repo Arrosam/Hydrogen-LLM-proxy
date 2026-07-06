@@ -1,5 +1,6 @@
 ﻿import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { getDb } from "../db";
+import { asMillis } from "../util/time";
 import { requestLogs, type RequestLog } from "../db/schema";
 
 export interface LogInsert {
@@ -55,8 +56,7 @@ export interface LogSummary {
 }
 
 function ms(v: Date | number | null): number {
-  if (v == null) return 0;
-  return v instanceof Date ? v.getTime() : Number(v);
+  return v == null ? 0 : asMillis(v);
 }
 
 function buildWhere(q: LogQuery): SQL | undefined {

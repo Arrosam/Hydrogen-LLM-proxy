@@ -12,6 +12,7 @@
   normalizeMessages,
 } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
+import { numOrUndef, pickExtra } from "./util";
 import type { ClientResponseCtx } from "./openai";
 
 /** Anthropic requires max_tokens; use this when the client didn't specify one. */
@@ -354,18 +355,6 @@ export function irToResponse(ir: IRResponse, ctx: ClientResponseCtx): Record<str
     stop_sequence: null,
     usage: { input_tokens: ir.usage.promptTokens, output_tokens: ir.usage.completionTokens },
   };
-}
-
-// --- small helpers -------------------------------------------------------
-
-function numOrUndef(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
-}
-
-function pickExtra(body: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
-  const out: Record<string, unknown> = {};
-  for (const k of keys) if (body[k] !== undefined) out[k] = body[k];
-  return Object.keys(out).length ? out : undefined;
 }
 
 export { stopReasonToIR, irToStopReason };

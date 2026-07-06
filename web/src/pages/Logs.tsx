@@ -1,7 +1,7 @@
 ﻿import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, Toggle } from "../components/common";
+import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle } from "../components/common";
 import { Modal } from "../components/Modal";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
@@ -59,10 +59,10 @@ function isCallLog(path: unknown): path is ServiceCallEntry[] {
   );
 }
 
-function statusBadge(status: number) {
-  if (status >= 200 && status < 300) return <span className="badge-green">{status}</span>;
-  if (status === 499) return <span className="badge-gray">{status}</span>;
-  return <span className="badge-red">{status}</span>;
+/** Result cell for one upstream attempt ("ok" or its failure status/kind). */
+function attemptBadge(a: AttemptRecord) {
+  if (a.kind === "ok") return <StatusBadge status={200} label="ok" />;
+  return <StatusBadge status={a.status} label={String(a.status || a.kind)} />;
 }
 
 function pretty(json: string | null): string {
@@ -208,7 +208,7 @@ export function Logs() {
                     <span className="text-ink-400">{r.egressFormat ?? "-"}</span>
                     {r.streaming && <i className="bi bi-broadcast ml-2 text-brand-400" title="streaming" />}
                   </td>
-                  <td>{statusBadge(r.httpStatus)}</td>
+                  <td><StatusBadge status={r.httpStatus} /></td>
                   <td className="text-xs text-ink-300">{formatNumber(r.totalTokens)}</td>
                   <td className="text-xs text-ink-400">{r.latencyMs} ms</td>
                   <td className="text-xs text-ink-400">{r.attempts}</td>
@@ -319,9 +319,8 @@ function legacyPath(path: unknown): AttemptRecord[] {
 
 function callStatusBadge(call: ServiceCallEntry) {
   if (call.kind === "router") return <span className="badge-gray">route</span>;
-  if (call.status >= 200 && call.status < 300) return <span className="badge-green">ok</span>;
-  if (call.status === 499) return <span className="badge-gray">499</span>;
-  return <span className="badge-red">{call.status || "error"}</span>;
+  const ok = call.status >= 200 && call.status < 300;
+  return <StatusBadge status={call.status} label={ok ? "ok" : undefined} />;
 }
 
 function callKindIcon(kind: ServiceCallEntry["kind"]): string {
@@ -411,7 +410,7 @@ function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
               <td>{a.attempt}</td>
               <td className="font-mono text-xs">{a.model}</td>
               <td className="font-mono text-xs">{a.provider}</td>
-              <td>{a.kind === "ok" ? <span className="badge-green">ok</span> : <span className="badge-red">{a.status || a.kind}</span>}</td>
+              <td>{attemptBadge(a)}</td>
               <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
             </tr>
           ))}
@@ -466,7 +465,7 @@ function AttemptPathTable({
                   <td>{a.attempt}</td>
                   <td className="font-mono text-xs">{a.model}</td>
                   <td className="font-mono text-xs">{a.provider}</td>
-                  <td>{a.kind === "ok" ? <span className="badge-green">ok</span> : <span className="badge-red">{a.status || a.kind}</span>}</td>
+                  <td>{attemptBadge(a)}</td>
                   <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
                 </tr>
                 {isOpen && canExpand && (

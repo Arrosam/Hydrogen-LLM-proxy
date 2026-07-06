@@ -1,4 +1,15 @@
 import type { Family } from "../ir";
+import type { AttemptFailure } from "../services/engine";
+
+/** HTTP status a failed run maps to: the upstream's 4xx/5xx, else 502. */
+export function failureStatus(f: AttemptFailure): number {
+  return f.status >= 400 ? f.status : 502;
+}
+
+/** Human-readable message for a failed run (upstream body over transport message). */
+export function failureMessage(f: AttemptFailure): string {
+  return extractUpstreamMessage(f.errorBody) ?? f.message;
+}
 
 /** Try to extract a human message from an upstream error body. */
 export function extractUpstreamMessage(body: unknown): string | null {

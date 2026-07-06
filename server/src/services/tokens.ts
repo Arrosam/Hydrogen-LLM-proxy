@@ -1,5 +1,6 @@
 ﻿import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
+import { asMillis, asMillisOrNull } from "../util/time";
 import { tokens, type Token } from "../db/schema";
 import { generateToken, hashToken } from "../security/tokens";
 
@@ -28,11 +29,6 @@ export interface PublicToken {
   createdAt: number;
 }
 
-function asMillis(v: Date | number | null): number | null {
-  if (v == null) return null;
-  return v instanceof Date ? v.getTime() : Number(v);
-}
-
 export function toPublicToken(t: Token): PublicToken {
   return {
     id: t.id,
@@ -44,9 +40,9 @@ export function toPublicToken(t: Token): PublicToken {
     maxTokens: t.maxTokens ?? null,
     usedRequests: t.usedRequests,
     usedTokens: t.usedTokens,
-    expiresAt: asMillis(t.expiresAt),
+    expiresAt: asMillisOrNull(t.expiresAt),
     enabled: t.enabled,
-    createdAt: asMillis(t.createdAt) ?? 0,
+    createdAt: asMillis(t.createdAt),
   };
 }
 

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { parse, toId } from "../../util/validate";
+import { idParam, parse } from "../../util/validate";
 import {
   createProvider,
   deleteProvider,
@@ -53,7 +53,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getProvider(id)) return reply.code(404).send({ error: "not found" });
     const parsed = parse(UpdateSchema, req.body);
@@ -63,7 +63,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getProvider(id)) return reply.code(404).send({ error: "not found" });
     deleteProvider(id);
@@ -71,7 +71,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/:id/test", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const provider = getProvider(id);
     if (!provider) return reply.code(404).send({ error: "not found" });

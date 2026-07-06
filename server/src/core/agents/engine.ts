@@ -1,6 +1,8 @@
 ﻿import {
+  addUsage,
   normalizeMessages,
   textOf,
+  ZERO_USAGE,
   type IRContentPart,
   type IRImagePart,
   type IRMessage,
@@ -18,16 +20,6 @@ import { serializeForLog } from "../../util/logPayload";
 import { runServiceJson, type JsonSuccess } from "../proxy/run";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "../services/engine";
 import type { AgentCondition, AgentDef, AgentOcr, AgentStage, ServiceSteps } from "../services/schema";
-
-const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-
-function addUsage(a: IRUsage, b: IRUsage): IRUsage {
-  return {
-    promptTokens: a.promptTokens + b.promptTokens,
-    completionTokens: a.completionTokens + b.completionTokens,
-    totalTokens: a.totalTokens + b.totalTokens,
-  };
-}
 
 /**
  * A stage's output as text, preserving any tool calls the model made. Tool calls
@@ -576,6 +568,13 @@ export async function runAgent(
 
   const fail = (result: AttemptFailure): AgentRunResult => ({ result, calls, usage });
   const error = (message: string): AgentRunResult => fail({ ok: false, status: 0, kind: "error", message });
+  /** Book-keep a stage's successful output (feeds later stages and the return value). */
+  const commit = (stageName: string, value: JsonSuccess): void => {
+    outputs[stageName] = textOf(value.ir.content);
+    values[stageName] = value;
+    lastValue = value;
+    usage = addUsage(usage, value.ir.usage);
+  };
 
   try {
     let source = ir;
@@ -633,10 +632,7 @@ export async function runAgent(
           const { call, result } = await callModelService(stageIR, exec.steps, { stage: stage.name, service: stage.service });
           calls.push(call);
           if (!result.ok) return fail(result);
-          outputs[stage.name] = textOf(result.value.ir.content);
-          values[stage.name] = result.value;
-          lastValue = result.value;
-          usage = addUsage(usage, result.value.ir.usage);
+          commit(stage.name, result.value);
         } else {
           if (stack.includes(exec.name)) return error(`micro-agent cycle detected: "${exec.name}" is already running`);
           if (stack.length >= MAX_AGENT_DEPTH) return error(`micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
@@ -678,10 +674,7 @@ export async function runAgent(
           wrapper.status = 200;
           wrapper.usage = sub.result.value.ir.usage;
           wrapper.response = stageResponsePayload(sub.result.value.ir);
-          outputs[stage.name] = textOf(sub.result.value.ir.content);
-          values[stage.name] = sub.result.value;
-          lastValue = sub.result.value;
-          usage = addUsage(usage, sub.result.value.ir.usage);
+          commit(stage.name, sub.result.value);
         }
       }
 

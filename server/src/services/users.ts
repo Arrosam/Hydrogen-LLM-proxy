@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "../db";
+import { asMillis } from "../util/time";
 import { users, type User } from "../db/schema";
 import { hashPassword, verifyPassword } from "../security/passwords";
 
@@ -21,7 +22,7 @@ export function toPublicUser(u: User): PublicUser {
     role: u.role,
     enabled: u.enabled,
     mustChangePassword: u.mustChangePassword,
-    createdAt: u.createdAt instanceof Date ? u.createdAt.getTime() : Number(u.createdAt),
+    createdAt: asMillis(u.createdAt),
   };
 }
 

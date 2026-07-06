@@ -1,9 +1,9 @@
 ﻿import { useEffect, useState } from "react";
-import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService, ThinkingLevel } from "../types";
+import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
 import { isAgentDef } from "../types";
 import { Toggle } from "./common";
-
-const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.currentTarget.select();
+import { ThinkingLevelInput } from "./ThinkingLevelInput";
+import { selectAll } from "../lib/input";
 
 const BLOCK_KINDS: { value: string; label: string }[] = [
   { value: "original_conversation", label: "Original full conversation" },
@@ -312,42 +312,7 @@ function StageBody({
                 <NumOverride label="Temperature" value={stage.temperature} onChange={(v) => onPatch({ temperature: v })} decimal />
                 <NumOverride label="Max tokens" value={stage.maxTokens} onChange={(v) => onPatch({ maxTokens: v })} />
                 <NumOverride label="Timeout (ms)" value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
-              <div>
-                <label className="label">Thinking level</label>
-                <select
-                  className="input"
-                  value={stage.thinking ? (typeof stage.thinking === "object" ? "budget" : stage.thinking) : ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (!v) onPatch({ thinking: undefined });
-                    else if (v === "budget") onPatch({ thinking: { budget: 8192 } });
-                    else onPatch({ thinking: v as Exclude<ThinkingLevel, { budget: number }> });
-                  }}
-                >
-                  <option value="">inherit (from request)</option>
-                  <option value="disabled">disabled</option>
-                  <option value="auto">auto</option>
-                  <option value="enabled">enabled</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                  <option value="max">max</option>
-                  <option value="budget">budget (tokens)</option>
-                </select>
-                {stage.thinking && typeof stage.thinking === "object" && (
-                  <input
-                    className="input mt-2"
-                    type="text"
-                    inputMode="numeric"
-                    value={stage.thinking.budget}
-                    onFocus={selectAll}
-                    onClick={selectAll}
-                    onChange={(e) => onPatch({ thinking: { budget: Math.max(1024, Number(e.target.value.replace(/\D/g, "")) || 8192) } })}
-                    placeholder="token budget (min 1024)"
-                  />
-                )}
-              </div>
+              <ThinkingLevelInput value={stage.thinking} onChange={(v) => onPatch({ thinking: v })} />
               </div>
             </div>
           )}

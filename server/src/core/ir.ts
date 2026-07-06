@@ -106,6 +106,16 @@ export interface IRUsage {
   totalTokens: number;
 }
 
+export const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+export function addUsage(a: IRUsage, b: IRUsage): IRUsage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
+}
+
 export type IRStopReason = "stop" | "length" | "tool_use" | "content_filter" | null;
 
 export interface IRResponse {

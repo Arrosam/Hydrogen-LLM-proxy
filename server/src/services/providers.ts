@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "../db";
+import { asMillis } from "../util/time";
 import { providers, type Provider } from "../db/schema";
 import { getConfig } from "../context";
 import { decryptProviderKey, encryptProviderKey } from "../security/providerKeys";
@@ -37,7 +38,7 @@ export function toPublicProvider(p: Provider): PublicProvider {
     hasKey: Boolean(p.keyCiphertext),
     extraHeaders: p.extraHeaders ?? null,
     enabled: p.enabled,
-    createdAt: p.createdAt instanceof Date ? p.createdAt.getTime() : Number(p.createdAt),
+    createdAt: asMillis(p.createdAt),
   };
 }
 

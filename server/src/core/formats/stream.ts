@@ -1,5 +1,6 @@
 ﻿import type { Family, IRResponse, IRStopReason, IRUsage } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
+import { num } from "./util";
 import { finishReasonToIR } from "./openai";
 import { irToStopReason } from "./anthropic";
 
@@ -569,8 +570,4 @@ export function streamFromIRResponse(
     yield { type: "finish", stopReason: ir.stopReason, usage: ir.usage };
   }
   return serializeClientStream(family, events(), ctx);
-}
-
-function num(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }

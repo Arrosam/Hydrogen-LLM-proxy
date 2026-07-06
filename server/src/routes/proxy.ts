@@ -1,9 +1,10 @@
 ﻿import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
-import { textOf, type Family, type IRRequest, type IRUsage } from "../core/ir";
+import { addUsage, textOf, ZERO_USAGE, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { adapterFor } from "../core/formats";
-import { buildErrorBody, extractUpstreamMessage } from "../core/proxy/errors";
-import { runServiceJson, runServiceStream, type JsonSuccess } from "../core/proxy/run";
+import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
+import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
+import { runServiceDef } from "../core/proxy/invoke";
 import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
 import {
@@ -20,12 +21,11 @@ import { insertLog } from "../services/logs";
 import { getConfig } from "../context";
 import { requireClientToken } from "../auth/tokenAuth";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptResult } from "../core/services/engine";
+import { asMillis } from "../util/time";
+import type { AttemptFailure } from "../core/services/engine";
 import type { ModelService, Token } from "../db/schema";
 import { buildHeaders, embeddingsUrl, postJson } from "../core/upstream";
 import { resolveMapping } from "../services/catalog";
-
-const ZERO_USAGE: IRUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
 interface LogParams {
   token: Token | null;
@@ -80,6 +80,95 @@ function tokenAllowsService(token: Token, serviceId: number): boolean {
   if (!Array.isArray(scope) || scope.length === 0) return true; // unscoped = all
   return scope.includes(serviceId);
 }
+
+/** Per-request context threaded through the run/stream/log helpers. */
+interface RequestCtx {
+  token: Token;
+  service: ModelService;
+  serviceName: string;
+  body: unknown;
+  started: number;
+}
+
+/** Log a failed run, count the request against the token, and answer in the client's format. */
+function replyFailure(
+  reply: FastifyReply,
+  ingress: Family,
+  ctx: RequestCtx,
+  failure: AttemptFailure,
+  o: { streaming: boolean; attemptPath?: unknown; attempts?: number },
+): FastifyReply {
+  const status = failureStatus(failure);
+  const message = failureMessage(failure);
+  recordLog({
+    token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null,
+    streaming: o.streaming, httpStatus: status, latencyMs: Date.now() - ctx.started,
+    attempts: o.attempts, attemptPath: o.attemptPath, requestBody: ctx.body, error: message,
+  });
+  incrementUsage(ctx.token.id, 1, 0);
+  return reply.code(status).send(buildErrorBody(ingress, status, message));
+}
+
+function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply {
+  reply.header("content-type", "text/event-stream; charset=utf-8");
+  reply.header("cache-control", "no-cache, no-transform");
+  reply.header("connection", "keep-alive");
+  reply.header("x-accel-buffering", "no");
+  return reply.send(Readable.from(gen));
+}
+
+interface RelayOpts {
+  /** Usage accumulated before this stream (a Micro Agent's buffered stages). */
+  baseUsage?: IRUsage;
+  attempts: number;
+  attemptPath: unknown;
+  /** Runs just before the log is written, with the stream's outcome. */
+  onFinish?: (o: {
+    status: number;
+    streamUsage: IRUsage;
+    responseBody: Record<string, unknown>;
+    error: string | null;
+  }) => void;
+}
+
+/** Relay an upstream SSE stream to the client, tapping it for the request log. */
+function relayStream(
+  reply: FastifyReply,
+  ingress: Family,
+  ctx: RequestCtx,
+  value: StreamSuccess,
+  opts: RelayOpts,
+): FastifyReply {
+  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
+  const events = tapStream(parseUpstreamStream(value.family, value.body), acc);
+  const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
+
+  async function* streamAndLog(): AsyncGenerator<string> {
+    let streamError: string | null = null;
+    try {
+      for await (const chunk of outGen) yield chunk;
+    } catch (e) {
+      streamError = e instanceof Error ? e.message : String(e);
+    } finally {
+      const streamUsage = acc.usage ?? ZERO_USAGE;
+      const usage = addUsage(opts.baseUsage ?? ZERO_USAGE, streamUsage);
+      const responseBody: Record<string, unknown> = {
+        streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
+      };
+      if (acc.reasoning) responseBody.reasoning = acc.reasoning;
+      if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
+      const status = streamError ? 499 : 200;
+      opts.onFinish?.({ status, streamUsage, responseBody, error: streamError });
+      recordLog({
+        token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: value.family,
+        streaming: true, httpStatus: status, usage, latencyMs: Date.now() - ctx.started,
+        attempts: opts.attempts, attemptPath: opts.attemptPath, requestBody: ctx.body, responseBody, error: streamError,
+      });
+      incrementUsage(ctx.token.id, 1, usage.totalTokens);
+    }
+  }
+  return sendSse(reply, streamAndLog());
+}
 /** Shared handler for /v1/chat/completions (openai) and /v1/messages (anthropic). */
 async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> {
   const token = req.clientToken!;
@@ -130,63 +219,29 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
     return replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
   }
 
+  const ctx: RequestCtx = { token, service, serviceName, body, started };
+
   if (ir.stream) {
-    if (isAgent(def)) return handleAgentStream(reply, ingress, ir, def, { token, service, serviceName, body, started });
-    return handleStream(reply, ingress, ir, def, { token, service, serviceName, body, started });
+    if (isAgent(def)) return handleAgentStream(reply, ingress, ir, def, ctx);
+    return handleStream(reply, ingress, ir, def, ctx);
   }
 
-  let result: AttemptResult<JsonSuccess>;
-  let attemptPath: unknown;
-  let attempts: number;
-  if (isAgent(def)) {
-    const out = await runAgent(ir, def, resolveAgentStage, [serviceName]);
-    result = out.result;
-    attemptPath = out.calls;
-    attempts = countAttempts(out.calls);
-  } else {
-    const out = await runServiceJson(ir, def);
-    result = out.result;
-    attemptPath = out.path;
-    attempts = out.path.length;
-  }
-  const latencyMs = Date.now() - started;
-
-  if (!result.ok) {
-    const status = result.status >= 400 ? result.status : 502;
-    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
-    recordLog({
-      token, service, serviceName, ingress, egress: null, streaming: false, httpStatus: status,
-      latencyMs, attempts, attemptPath, requestBody: body, error: message,
+  const run = await runServiceDef(def, ir, resolveAgentStage, [serviceName]);
+  if (!run.result.ok) {
+    return replyFailure(reply, ingress, ctx, run.result, {
+      streaming: false, attemptPath: run.attemptPath, attempts: run.attempts,
     });
-    incrementUsage(token.id, 1, 0);
-    return reply.code(status).send(buildErrorBody(ingress, status, message));
   }
 
-  const respIR = result.value.ir;
+  const respIR = run.result.value.ir;
   const clientBody = adapter.irToResponse(respIR, { model: serviceName });
   recordLog({
-    token, service, serviceName, ingress, egress: result.value.family, streaming: false, httpStatus: 200,
-    usage: respIR.usage, latencyMs, attempts, attemptPath,
+    token, service, serviceName, ingress, egress: run.result.value.family, streaming: false, httpStatus: 200,
+    usage: respIR.usage, latencyMs: Date.now() - started, attempts: run.attempts, attemptPath: run.attemptPath,
     requestBody: body, responseBody: clientBody,
   });
   incrementUsage(token.id, 1, respIR.usage.totalTokens);
   return reply.code(200).send(clientBody);
-}
-
-interface StreamCtx {
-  token: Token;
-  service: ModelService;
-  serviceName: string;
-  body: unknown;
-  started: number;
-}
-
-function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply {
-  reply.header("content-type", "text/event-stream; charset=utf-8");
-  reply.header("cache-control", "no-cache, no-transform");
-  reply.header("connection", "keep-alive");
-  reply.header("x-accel-buffering", "no");
-  return reply.send(Readable.from(gen));
 }
 
 /** Streaming for a Model Service: relay the upstream SSE, tapping it for the log. */
@@ -195,50 +250,13 @@ async function handleStream(
   ingress: Family,
   ir: IRRequest,
   def: ServiceSteps,
-  ctx: StreamCtx,
+  ctx: RequestCtx,
 ): Promise<unknown> {
   const { result, path } = await runServiceStream(ir, def);
-
   if (!result.ok) {
-    const status = result.status >= 400 ? result.status : 502;
-    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
-    recordLog({
-      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
-      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: path.length,
-      attemptPath: path, requestBody: ctx.body, error: message,
-    });
-    incrementUsage(ctx.token.id, 1, 0);
-    return reply.code(status).send(buildErrorBody(ingress, status, message));
+    return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
   }
-
-  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
-  const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
-  const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
-  const egress = result.value.family;
-
-  async function* streamAndLog(): AsyncGenerator<string> {
-    let streamError: string | null = null;
-    try {
-      for await (const chunk of outGen) yield chunk;
-    } catch (e) {
-      streamError = e instanceof Error ? e.message : String(e);
-    } finally {
-      const usage = acc.usage ?? ZERO_USAGE;
-      const responseBody: Record<string, unknown> = {
-        streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
-      };
-      if (acc.reasoning) responseBody.reasoning = acc.reasoning;
-      if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
-      recordLog({
-        token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress, streaming: true,
-        httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
-        attempts: path.length, attemptPath: path, requestBody: ctx.body, responseBody, error: streamError,
-      });
-      incrementUsage(ctx.token.id, 1, usage.totalTokens);
-    }
-  }
-
-  return sendSse(reply, streamAndLog());
+  return relayStream(reply, ingress, ctx, result.value, { attempts: path.length, attemptPath: path });
 }
 /** Streaming for an agent: routing needs each stage's full output, so earlier
  * stages run buffered -- but the terminal Model Service (nothing routes after
@@ -251,7 +269,7 @@ async function handleAgentStream(
   ingress: Family,
   ir: IRRequest,
   agent: AgentDef,
-  ctx: StreamCtx,
+  ctx: RequestCtx,
 ): Promise<unknown> {
   const outcome = await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
   if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
@@ -260,15 +278,7 @@ async function handleAgentStream(
   const attempts = countAttempts(calls);
 
   if (!result.ok) {
-    const status = result.status >= 400 ? result.status : 502;
-    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
-    recordLog({
-      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
-      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts,
-      attemptPath: calls, requestBody: ctx.body, error: message,
-    });
-    incrementUsage(ctx.token.id, 1, 0);
-    return reply.code(status).send(buildErrorBody(ingress, status, message));
+    return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: calls, attempts });
   }
 
   const respIR = result.value.ir;
@@ -294,7 +304,7 @@ async function streamTerminalStage(
   reply: FastifyReply,
   ingress: Family,
   plan: AgentStreamPlan,
-  ctx: StreamCtx,
+  ctx: RequestCtx,
 ): Promise<unknown> {
   const startedTerminal = Date.now();
   const { result, path } = await runServiceStream(plan.stageIR, plan.steps);
@@ -321,65 +331,32 @@ async function streamTerminalStage(
   };
 
   if (!result.ok) {
-    const status = result.status >= 400 ? result.status : 502;
-    const message = extractUpstreamMessage(result.errorBody) ?? result.message;
-    finalize(result.status, message);
-    recordLog({
-      token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: null, streaming: true,
-      httpStatus: status, latencyMs: Date.now() - ctx.started, attempts: countAttempts(plan.calls),
-      attemptPath: plan.calls, requestBody: ctx.body, error: message,
+    finalize(result.status, failureMessage(result));
+    return replyFailure(reply, ingress, ctx, result, {
+      streaming: true, attemptPath: plan.calls, attempts: countAttempts(plan.calls),
     });
-    incrementUsage(ctx.token.id, 1, 0);
-    return reply.code(status).send(buildErrorBody(ingress, status, message));
   }
 
   terminalCall.streamed = true;
   for (const p of plan.pending) p.call.streamed = true;
 
-  const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "" };
-  const events = tapStream(parseUpstreamStream(result.value.family, result.value.body), acc);
-  const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
-  const egress = result.value.family;
-
-  async function* streamAndLog(): AsyncGenerator<string> {
-    let streamError: string | null = null;
-    try {
-      for await (const chunk of outGen) yield chunk;
-    } catch (e) {
-      streamError = e instanceof Error ? e.message : String(e);
-    } finally {
-      const streamUsage = acc.usage ?? ZERO_USAGE;
-      const usage: IRUsage = {
-        promptTokens: plan.usage.promptTokens + streamUsage.promptTokens,
-        completionTokens: plan.usage.completionTokens + streamUsage.completionTokens,
-        totalTokens: plan.usage.totalTokens + streamUsage.totalTokens,
-      };
-      const responseBody: Record<string, unknown> = {
-        streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
-      };
-      if (acc.reasoning) responseBody.reasoning = acc.reasoning;
-      if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
+  return relayStream(reply, ingress, ctx, result.value, {
+    baseUsage: plan.usage,
+    attempts: countAttempts(plan.calls),
+    attemptPath: plan.calls,
+    onFinish: ({ status, streamUsage, responseBody, error }) => {
       terminalCall.usage = streamUsage;
       terminalCall.response = serializeForLog(responseBody, getConfig().logPayloadMaxChars);
-      finalize(streamError ? 499 : 200, streamError ?? undefined);
-      recordLog({
-        token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress, streaming: true,
-        httpStatus: streamError ? 499 : 200, usage, latencyMs: Date.now() - ctx.started,
-        attempts: countAttempts(plan.calls), attemptPath: plan.calls, requestBody: ctx.body, responseBody, error: streamError,
-      });
-      incrementUsage(ctx.token.id, 1, usage.totalTokens);
-    }
-  }
-
-  return sendSse(reply, streamAndLog());
+      finalize(status, error ?? undefined);
+    },
+  });
 }
 
 /** GET /v1/models - lists services as the available models. */
 function handleListModels(req: FastifyRequest): unknown {
   const isAnthropic = typeof req.headers["anthropic-version"] === "string";
   const services = listServices().filter((m) => m.enabled);
-  const created = (m: ModelService) =>
-    m.createdAt instanceof Date ? m.createdAt.getTime() : Number(m.createdAt);
+  const created = (m: ModelService) => asMillis(m.createdAt);
 
   if (isAnthropic) {
     return {

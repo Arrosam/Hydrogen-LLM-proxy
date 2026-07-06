@@ -1,5 +1,5 @@
 ﻿import type { FastifyInstance } from "fastify";
-import { toId } from "../../util/validate";
+import { idParam } from "../../util/validate";
 import { getLog, queryLogs, type LogQuery } from "../../services/logs";
 import { byModelProvider, byService, summary, timeSeries, type StatsQuery } from "../../services/stats";
 
@@ -32,7 +32,7 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/logs/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const log = getLog(id);
     if (!log) return reply.code(404).send({ error: "not found" });

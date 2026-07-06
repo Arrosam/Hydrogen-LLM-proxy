@@ -1,7 +1,7 @@
 ﻿import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { ZodError } from "zod";
-import { parse, toId } from "../../util/validate";
+import { idParam, parse } from "../../util/validate";
 import {
   createService,
   deleteService,
@@ -14,11 +14,10 @@ import {
   validateService,
 } from "../../services/services";
 import { isAgent, summarizeService, type ServiceDef } from "../../core/services/schema";
-import { runServiceJson, type JsonSuccess } from "../../core/proxy/run";
-import type { AttemptResult } from "../../core/services/engine";
-import { runAgent } from "../../core/agents/engine";
-import { extractUpstreamMessage } from "../../core/proxy/errors";
+import { runServiceDef } from "../../core/proxy/invoke";
+import { failureMessage } from "../../core/proxy/errors";
 import { textOf, type IRRequest } from "../../core/ir";
+import { asMillis } from "../../util/time";
 import type { ModelService } from "../../db/schema";
 
 const CreateSchema = z.object({
@@ -48,7 +47,7 @@ function present(m: ModelService): Record<string, unknown> {
     steps: m.steps,
     enabled: m.enabled,
     summary,
-    createdAt: m.createdAt instanceof Date ? m.createdAt.getTime() : Number(m.createdAt),
+    createdAt: asMillis(m.createdAt),
   };
 }
 
@@ -94,7 +93,7 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getService(id)) return reply.code(404).send({ error: "not found" });
     const parsed = parse(UpdateSchema, req.body);
@@ -110,7 +109,7 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getService(id)) return reply.code(404).send({ error: "not found" });
     deleteService(id);
@@ -142,21 +141,11 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
       stream: false,
     };
 
-    let result: AttemptResult<JsonSuccess>;
-    let path: unknown;
-    if (isAgent(def)) {
-      const out = await runAgent(ir, def, resolveAgentStage);
-      result = out.result;
-      path = out.calls;
-    } else {
-      const out = await runServiceJson(ir, def);
-      result = out.result;
-      path = out.path;
-    }
+    const { result, attemptPath } = await runServiceDef(def, ir, resolveAgentStage);
     if (result.ok) {
       return {
         ok: true,
-        attemptPath: path,
+        attemptPath,
         served: { model: result.value.modelName, provider: result.value.providerName },
         output: textOf(result.value.ir.content).slice(0, 500),
       };
@@ -164,8 +153,8 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
     return {
       ok: false,
       status: result.status,
-      message: extractUpstreamMessage(result.errorBody) ?? result.message,
-      attemptPath: path,
+      message: failureMessage(result),
+      attemptPath,
     };
   });
 }

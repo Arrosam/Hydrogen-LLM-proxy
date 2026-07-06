@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { parse, toId } from "../../util/validate";
+import { idParam, parse } from "../../util/validate";
 import {
   createUser,
   deleteUser,
@@ -51,7 +51,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const target = getUser(id);
     if (!target) return reply.code(404).send({ error: "not found" });
@@ -87,7 +87,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const target = getUser(id);
     if (!target) return reply.code(404).send({ error: "not found" });

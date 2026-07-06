@@ -31,6 +31,13 @@ export function EmptyState({
   );
 }
 
+/** HTTP-status badge: 2xx green, 499 (client abort) gray, everything else red. */
+export function StatusBadge({ status, label }: { status: number; label?: string }) {
+  const cls =
+    status >= 200 && status < 300 ? "badge-green" : status === 499 ? "badge-gray" : "badge-red";
+  return <span className={cls}>{label ?? (status || "error")}</span>;
+}
+
 export function ErrorNote({ message }: { message: string }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-300">

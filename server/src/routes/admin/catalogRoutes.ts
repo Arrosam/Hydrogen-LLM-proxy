@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { parse, toId } from "../../util/validate";
+import { idParam, parse } from "../../util/validate";
 import {
   createModel,
   deleteModel,
@@ -48,7 +48,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch("/models/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getModel(id)) return reply.code(404).send({ error: "not found" });
     const parsed = parse(ModelUpdate, req.body);
@@ -57,7 +57,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/models/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!getModel(id)) return reply.code(404).send({ error: "not found" });
     deleteModel(id);
@@ -79,7 +79,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch("/mappings/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const parsed = parse(MappingUpdate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
@@ -89,7 +89,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/mappings/:id", async (req, reply) => {
-    const id = toId((req.params as { id: string }).id);
+    const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     deleteMapping(id);
     return { ok: true };

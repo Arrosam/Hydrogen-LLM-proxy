@@ -12,6 +12,7 @@
   textOf,
 } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
+import { numOrUndef, pickExtra, safeJsonParse } from "./util";
 
 export interface ClientResponseCtx {
   /** Model name echoed back to the client (the service name). */
@@ -404,29 +405,10 @@ export function irToResponse(ir: IRResponse, ctx: ClientResponseCtx): Record<str
 
 // --- small helpers -------------------------------------------------------
 
-function safeJsonParse(v: unknown): unknown {
-  if (typeof v !== "string") return v ?? {};
-  try {
-    return JSON.parse(v);
-  } catch {
-    return v;
-  }
-}
-
-function numOrUndef(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
-}
-
 function parseStop(v: unknown): string[] | undefined {
   if (typeof v === "string") return [v];
   if (Array.isArray(v)) return v.map(String);
   return undefined;
-}
-
-function pickExtra(body: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
-  const out: Record<string, unknown> = {};
-  for (const k of keys) if (body[k] !== undefined) out[k] = body[k];
-  return Object.keys(out).length ? out : undefined;
 }
 
 export { irToFinishReason, finishReasonToIR };

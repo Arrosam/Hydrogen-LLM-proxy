@@ -4,6 +4,8 @@ import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
 import { OcrEditor, StageEditor } from "./StageEditor";
+import { ThinkingLevelInput } from "./ThinkingLevelInput";
+import { intInput, selectAll } from "../lib/input";
 import type {
   AdvanceTrigger,
   AgentDef,
@@ -16,7 +18,6 @@ import type {
   ServiceStep,
   ServiceSteps,
   Provider,
-  ThinkingLevel,
   Trigger,
 } from "../types";
 import { isAgentDef } from "../types";
@@ -60,9 +61,6 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [summary, setSummary] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-
-  // Select the whole value on focus/click so typing replaces it (no "05").
-  const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.currentTarget.select();
 
   const providerNameById = useMemo(() => new Map(providers.map((p) => [p.id, p.name])), [providers]);
   const modelIdByName = useMemo(() => new Map(models.map((m) => [m.name, m.id])), [models]);
@@ -291,7 +289,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           </div>
           <div>
             <label className="label">Per-attempt timeout (ms)</label>
-            <input className="input" type="text" inputMode="numeric" value={timeoutMs} onFocus={selectAll} onClick={selectAll} onChange={(e) => setTimeoutMs(Number(e.target.value.replace(/\D/g, "")) || 0)} />
+            <input className="input" type="text" inputMode="numeric" value={timeoutMs} onFocus={selectAll} onClick={selectAll} onChange={(e) => setTimeoutMs(intInput(e.target.value, 0))} />
           </div>
         </div>
         <div>
@@ -410,11 +408,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                       <div className="mt-3 grid grid-cols-2 gap-3">
                         <div>
                           <label className="label">Retry attempts</label>
-                          <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 1} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: Math.max(1, Number(e.target.value.replace(/\D/g, "")) || 1) })} />
+                          <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 1} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: intInput(e.target.value, 1, 1) })} />
                         </div>
                         <div>
                           <label className="label">Retry interval (ms)</label>
-                          <input className="input" type="text" inputMode="numeric" value={step.retry?.intervalMs ?? 0} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { intervalMs: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+                          <input className="input" type="text" inputMode="numeric" value={step.retry?.intervalMs ?? 0} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { intervalMs: intInput(e.target.value, 0) })} />
                         </div>
                       </div>
 
@@ -428,40 +426,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                       </div>
 
                       <div className="mt-3">
-                        <label className="label">Thinking level <span className="normal-case text-ink-500">(override for this step)</span></label>
-                        <select
-                          className="input"
-                          value={step.thinking ? (typeof step.thinking === "object" ? "budget" : step.thinking) : ""}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            if (!v) patchStep(i, { thinking: undefined });
-                            else if (v === "budget") patchStep(i, { thinking: { budget: 8192 } });
-                            else patchStep(i, { thinking: v as Exclude<ThinkingLevel, { budget: number }> });
-                          }}
-                        >
-                          <option value="">inherit (from request)</option>
-                          <option value="disabled">disabled</option>
-                          <option value="auto">auto</option>
-                          <option value="enabled">enabled</option>
-                          <option value="low">low</option>
-                          <option value="medium">medium</option>
-                          <option value="high">high</option>
-                          <option value="xhigh">xhigh</option>
-                          <option value="max">max</option>
-                          <option value="budget">budget (tokens)</option>
-                        </select>
-                        {step.thinking && typeof step.thinking === "object" && (
-                          <input
-                            className="input mt-2"
-                            type="text"
-                            inputMode="numeric"
-                            value={step.thinking.budget}
-                            onFocus={selectAll}
-                            onClick={selectAll}
-                            onChange={(e) => patchStep(i, { thinking: { budget: Math.max(1024, Number(e.target.value.replace(/\D/g, "")) || 8192) } })}
-                            placeholder="token budget (min 1024)"
-                          />
-                        )}
+                        <ThinkingLevelInput
+                          value={step.thinking}
+                          onChange={(v) => patchStep(i, { thinking: v })}
+                          hint="(override for this step)"
+                        />
                       </div>
 
                       {i < steps.length - 1 && (

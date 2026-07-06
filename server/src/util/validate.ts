@@ -20,3 +20,8 @@ export function toId(v: unknown): number | null {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
+/** Parse the `:id` route param of a request; null when missing/invalid. */
+export function idParam(req: { params: unknown }): number | null {
+  return toId((req.params as { id?: string }).id);
+}
