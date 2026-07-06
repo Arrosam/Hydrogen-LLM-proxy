@@ -125,8 +125,12 @@ export interface UpstreamStreamResult {
 
 /**
  * POST a JSON body and return the raw response stream (for SSE translation).
- * The timeout bounds time-to-response-headers only; the body may then stream for
- * as long as it needs (bodyTimeout disabled) so long completions aren't cut off.
+ * `headersTimeout` bounds time-to-first-headers. `bodyTimeout` is an IDLE
+ * timeout *between* body chunks -- undici resets it on every chunk (including
+ * SSE keep-alive comments), so a genuinely long completion that keeps streaming
+ * is never cut off, but an upstream that goes silent mid-stream aborts after
+ * `timeoutMs` instead of hanging forever (bodyTimeout: 0 disabled this, so a
+ * stalled stream had no timeout at all).
  */
 export async function postStream(
   url: string,
@@ -141,7 +145,7 @@ export async function postStream(
     body: JSON.stringify(body),
     signal: opts.signal,
     headersTimeout: opts.timeoutMs,
-    bodyTimeout: 0,
+    bodyTimeout: opts.timeoutMs,
   });
   return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
 }
