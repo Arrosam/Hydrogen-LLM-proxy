@@ -28,7 +28,7 @@ const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLab
   },
   chain: {
     title: "Micro Agents",
-    subtitle: "Composable pipelines -?routing, evaluation, image OCR, nested agents -?built on your Model Services.",
+    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your Model Services.",
     icon: "bi-robot",
     newLabel: "New Micro Agent",
     emptyTitle: "No Micro Agents yet",
@@ -75,7 +75,7 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
     if (!canCreate) {
       toast.error(
         kind === "chain"
-          ? "Create at least one Model Service first -?Micro Agent stages run them."
+          ? "Create at least one Model Service first — Micro Agent stages run them."
           : "Create at least one model and provider mapping first",
       );
       return;
