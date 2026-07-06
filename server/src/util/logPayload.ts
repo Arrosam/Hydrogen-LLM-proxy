@@ -83,9 +83,23 @@ export function serializeForLog(value: unknown, maxChars: number): string {
     const clamped = safeStringify(truncateStrings(redacted, perString));
     if (clamped.length <= maxChars) return clamped;
     // Size comes from many fields, not long strings — shrinking has plateaued,
-    // so stop wasting deep-copy passes and fall through to the envelope.
+    // so stop wasting deep-copy passes and fall through to the slim form.
     if (clamped.length >= prevLen) break;
     prevLen = clamped.length;
+  }
+
+  // Still too large: the bulk is the conversation itself. Keep every small
+  // config field (model, thinking, reasoning_effort, max_tokens, ...) visible
+  // and replace only the bulky arrays with a size note, so overrides can still
+  // be inspected in the log even for a huge request.
+  if (redacted && typeof redacted === "object" && !Array.isArray(redacted)) {
+    const BULKY = new Set(["messages", "input", "content", "choices", "tools"]);
+    const slim: Record<string, unknown> = { _truncated: true, _originalChars: full.length };
+    for (const [k, v] of Object.entries(redacted as Record<string, unknown>)) {
+      slim[k] = BULKY.has(k) && Array.isArray(v) ? `[${v.length} item(s) omitted; ${full.length} chars total]` : v;
+    }
+    const clamped = safeStringify(truncateStrings(slim, Math.max(400, Math.floor(maxChars / 8))));
+    if (clamped.length <= maxChars) return clamped;
   }
 
   const envelope = safeStringify({

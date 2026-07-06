@@ -40,6 +40,29 @@ describe("serializeForLog", () => {
     expect((parsed.messages as unknown[]).length).toBe(2);
   });
 
+  it("keeps config fields (thinking) visible when a huge conversation is truncated", () => {
+    // Many turns -> string-shortening can't get under budget -> slim fallback.
+    const messages = Array.from({ length: 300 }, (_, i) => ({
+      role: i % 2 ? "assistant" : "user",
+      content: [{ type: "text", text: "x".repeat(80) }],
+    }));
+    const payload = {
+      model: "glm5.2",
+      max_tokens: 8000,
+      thinking: { type: "enabled", budget_tokens: 32768 },
+      messages,
+    };
+    const out = serializeForLog(payload, 2000);
+    expect(out.length).toBeLessThanOrEqual(2000);
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    // The whole point: the thinking override stays inspectable.
+    expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
+    expect(parsed.model).toBe("glm5.2");
+    expect(parsed.max_tokens).toBe(8000);
+    // The bulky messages array is summarized, not dropped silently.
+    expect(String(parsed.messages)).toContain("omitted");
+  });
+
   it("marks truncated string fields", () => {
     const out = serializeForLog(bigAnthropicRequest(20000), 5000);
     expect(out).toContain("chars]");
