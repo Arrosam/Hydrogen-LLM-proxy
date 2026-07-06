@@ -365,69 +365,76 @@ function TransitionRow({
 }) {
   const c = transition.when;
   return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-ink-800 bg-ink-900/60 p-2 text-xs">
-      <span className="text-ink-500">when</span>
-      <select
-        className="input h-8 w-40 py-0 text-xs"
-        value={c.type}
-        onChange={(e) => onChange({ ...transition, when: newCondition(e.target.value as AgentCondition["type"]) })}
-      >
-        {CONDITION_TYPES.map((o) => (
-          <option key={o.type} value={o.type}>{o.label}</option>
-        ))}
-      </select>
-      {condIsOutput(c) && (
+    <div className="space-y-2 rounded-lg border border-ink-800 bg-ink-900/60 p-2 text-xs">
+      {/* Line 1: the condition. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-12 shrink-0 text-ink-500">when</span>
         <select
-          className="input h-8 w-32 py-0 text-xs"
-          value={(c as { stage?: string }).stage ?? ""}
-          onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as AgentCondition })}
+          className="input h-8 w-40 py-0 text-xs"
+          value={c.type}
+          onChange={(e) => onChange({ ...transition, when: newCondition(e.target.value as AgentCondition["type"]) })}
         >
-          <option value="">this stage</option>
-          {earlier.map((s) => (
-            <option key={s} value={s}>{s}</option>
+          {CONDITION_TYPES.map((o) => (
+            <option key={o.type} value={o.type}>{o.label}</option>
           ))}
         </select>
-      )}
-      {condHasValue(c) && (
-        <input
-          className="input h-8 flex-1 py-0 font-mono text-xs"
-          value={(c as { value: string }).value}
-          onChange={(e) => onChange({ ...transition, when: { ...c, value: e.target.value } as AgentCondition })}
-          placeholder={c.type.endsWith("matches") ? "regex" : "text to find"}
-        />
-      )}
-      <span className="text-ink-500">→ go to</span>
-      <select
-        className="input h-8 w-32 py-0 text-xs"
-        value={transition.goto}
-        onChange={(e) => {
-          const goto = e.target.value;
-          onChange({ ...transition, goto, output: goto === "end" ? transition.output : undefined });
-        }}
-      >
-        <option value="end">end (return)</option>
-        {later.map((s) => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </select>
-      {transition.goto === "end" && (
-        <>
-          <span className="text-ink-500">returning</span>
+        {condIsOutput(c) && (
           <select
             className="input h-8 w-32 py-0 text-xs"
-            value={transition.output ?? ""}
-            onChange={(e) => onChange({ ...transition, output: e.target.value || undefined })}
+            value={(c as { stage?: string }).stage ?? ""}
+            onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as AgentCondition })}
           >
-            <option value="">this stage's output</option>
-            {outputStages.map((s) => (
+            <option value="">this stage</option>
+            {earlier.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
-        </>
-      )}
-      <button className="btn-danger btn-xs" onClick={onRemove}>
-        <i className="bi bi-x-lg" />
-      </button>
+        )}
+        {condHasValue(c) && (
+          <input
+            className="input h-8 min-w-[8rem] flex-1 py-0 font-mono text-xs"
+            value={(c as { value: string }).value}
+            onChange={(e) => onChange({ ...transition, when: { ...c, value: e.target.value } as AgentCondition })}
+            placeholder={c.type.endsWith("matches") ? "regex" : "text to find"}
+          />
+        )}
+      </div>
+      {/* Line 2: the target (and, for "end", which stage's output to return). */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-12 shrink-0 text-ink-500">go to</span>
+        <select
+          className="input h-8 w-32 py-0 text-xs"
+          value={transition.goto}
+          onChange={(e) => {
+            const goto = e.target.value;
+            onChange({ ...transition, goto, output: goto === "end" ? transition.output : undefined });
+          }}
+        >
+          <option value="end">end (return)</option>
+          {later.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        {transition.goto === "end" && (
+          <>
+            <span className="text-ink-500">returning</span>
+            <select
+              className="input h-8 w-32 py-0 text-xs"
+              value={transition.output ?? ""}
+              onChange={(e) => onChange({ ...transition, output: e.target.value || undefined })}
+            >
+              <option value="">this stage's output</option>
+              {outputStages.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </>
+        )}
+        <div className="flex-1" />
+        <button className="btn-danger btn-xs shrink-0" onClick={onRemove} title="Remove transition">
+          <i className="bi bi-x-lg" />
+        </button>
+      </div>
     </div>
   );
 }

@@ -29,9 +29,14 @@ function EndpointsCard() {
   const origin = window.location.origin;
   const rows = [
     {
-      label: "OpenAI-compatible base URL",
+      label: "OpenAI base URL (Chat Completions)",
       value: `${origin}/v1`,
-      hint: "OpenAI SDK baseURL / OPENAI_BASE_URL — serves /chat/completions and /responses",
+      hint: "OpenAI SDK baseURL / OPENAI_BASE_URL — serves /chat/completions",
+    },
+    {
+      label: "OpenAI Responses endpoint",
+      value: `${origin}/v1/responses`,
+      hint: "Full URL for Responses API clients (Codex CLI, etc.)",
     },
     { label: "Anthropic base URL", value: origin, hint: "Anthropic SDK base_url / ANTHROPIC_BASE_URL" },
   ];

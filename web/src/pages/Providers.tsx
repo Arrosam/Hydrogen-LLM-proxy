@@ -9,10 +9,12 @@ import { useToast } from "../components/Toast";
 import type { Provider, ProviderType } from "../types";
 
 const TYPE_LABELS: Record<ProviderType, string> = {
-  openai: "OpenAI",
+  // "openai" and "openai_compatible" are the same wire format (Chat
+  // Completions); the legacy "openai" value reads the same as compatible.
+  openai: "OpenAI (Chat Completions)",
   anthropic: "Anthropic",
-  openai_compatible: "OpenAI-compatible",
-  openai_responses: "OpenAI Responses",
+  openai_compatible: "OpenAI (Chat Completions)",
+  openai_responses: "OpenAI (Responses API)",
 };
 
 interface FormState {
@@ -48,7 +50,8 @@ export function Providers() {
     setForm({
       id: p.id,
       name: p.name,
-      type: p.type,
+      // Legacy "openai" collapses into "openai_compatible" (identical format).
+      type: p.type === "openai" ? "openai_compatible" : p.type,
       baseUrl: p.baseUrl,
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
@@ -210,10 +213,9 @@ export function Providers() {
             <div>
               <label className="label">Type</label>
               <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
-                <option value="openai">OpenAI</option>
+                <option value="openai_compatible">OpenAI (Chat Completions)</option>
+                <option value="openai_responses">OpenAI (Responses API)</option>
                 <option value="anthropic">Anthropic</option>
-                <option value="openai_compatible">OpenAI-compatible</option>
-                <option value="openai_responses">OpenAI Responses (/v1/responses)</option>
               </select>
             </div>
             <div>
