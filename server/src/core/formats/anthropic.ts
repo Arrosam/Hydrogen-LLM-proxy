@@ -224,8 +224,10 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
   if (ir.topP != null) out.top_p = ir.topP;
   if (ir.stop && ir.stop.length) out.stop_sequences = ir.stop;
   if (ir.stream) out.stream = true;
-  // Apply thinking/reasoning level to the upstream request.
-  if (ir.thinking) applyAnthropicThinking(out, ir.thinking);
+  // Apply thinking/reasoning level to the upstream request. Pass the client's
+  // own max_tokens (undefined if they set none, distinct from the default just
+  // written to `out`) so the budget can fit under a real ceiling.
+  if (ir.thinking) applyAnthropicThinking(out, ir.thinking, ir.maxTokens);
   if (ir.extra) Object.assign(out, ir.extra);
   return out;
 }
@@ -239,8 +241,21 @@ const EFFORT_BUDGETS: Record<"low" | "medium" | "high" | "xhigh" | "max", number
   max: 128000,
 };
 
+/**
+ * Tokens reserved under max_tokens for the response text. Anthropic counts
+ * thinking + response against the single max_tokens budget, so the effective
+ * thinking budget must leave room beneath max_tokens for the actual answer.
+ */
+const THINKING_RESPONSE_ROOM = 4096;
+/** Anthropic's minimum accepted thinking budget. */
+const MIN_THINKING_BUDGET = 1024;
+
 /** Translate an IRThinkingLevel into the Anthropic thinking parameter. */
-function applyAnthropicThinking(out: Record<string, unknown>, thinking: IRThinkingLevel): void {
+function applyAnthropicThinking(
+  out: Record<string, unknown>,
+  thinking: IRThinkingLevel,
+  clientMax: number | undefined,
+): void {
   if (thinking === "disabled") {
     out.thinking = { type: "disabled" };
     return;
@@ -248,18 +263,34 @@ function applyAnthropicThinking(out: Record<string, unknown>, thinking: IRThinki
   // Anthropic requires a budget; derive one from the level.
   let budget: number;
   if (thinking === "enabled" || thinking === "auto") {
-    budget = out.max_tokens != null ? Math.min(out.max_tokens as number, 16000) : 16000;
+    budget = clientMax != null ? Math.min(clientMax, 16000) : 16000;
   } else if (typeof thinking === "object") {
     budget = thinking.budget;
   } else {
     budget = EFFORT_BUDGETS[thinking];
   }
-  out.thinking = { type: "enabled", budget_tokens: budget };
-  // Anthropic requires max_tokens >= budget_tokens + 1
-  const maxTokens = out.max_tokens as number | undefined;
-  if (maxTokens == null || maxTokens <= budget) {
-    out.max_tokens = budget + 4096;
+  budget = Math.max(MIN_THINKING_BUDGET, budget);
+
+  // max_tokens bounds thinking + response together. When the client asked for a
+  // specific max_tokens, treat it as the ceiling the upstream will accept and
+  // fit the thinking budget under it -- shrinking the budget if need be --
+  // rather than inflating max_tokens past what the client requested. Inflating
+  // it can exceed the provider's own max_tokens limit (e.g. a large budget puts
+  // budget+room over the cap), which gets the WHOLE request rejected, so the
+  // client gets no thinking at all. Only when the client left max_tokens unset
+  // do we size it to give the budget room.
+  if (clientMax == null) {
+    out.max_tokens = budget + THINKING_RESPONSE_ROOM;
+  } else if (clientMax < budget + THINKING_RESPONSE_ROOM) {
+    budget = Math.max(MIN_THINKING_BUDGET, clientMax - THINKING_RESPONSE_ROOM);
+    // Keep the client's ceiling, but guarantee Anthropic's hard rule
+    // (max_tokens > budget_tokens) even for a ceiling too small to hold the
+    // minimum budget plus response room.
+    out.max_tokens = clientMax <= budget ? budget + 1 : clientMax;
+  } else {
+    out.max_tokens = clientMax;
   }
+  out.thinking = { type: "enabled", budget_tokens: budget };
 }
 
 function partsToBlocks(parts: IRContentPart[]): unknown[] {

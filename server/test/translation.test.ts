@@ -200,6 +200,47 @@ describe("thinking levels", () => {
     const out = anthropic.irToRequest(ir("disabled"), "m");
     expect(out.thinking).toEqual({ type: "disabled" });
   });
+
+  // A client-supplied max_tokens is the ceiling the upstream accepts. The
+  // thinking budget must fit under it; max_tokens must never be inflated past
+  // it (that can exceed the provider's own cap and get the request rejected).
+  const irMax = (thinking: unknown, maxTokens: number) =>
+    ({
+      requestedModel: "svc",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      stream: false,
+      maxTokens,
+      thinking,
+    }) as Parameters<typeof anthropic.irToRequest>[0];
+
+  it("never inflates a client's max_tokens past what they asked (large budget)", () => {
+    // budget 128000 + a small client ceiling: keep the ceiling, shrink budget.
+    const out = anthropic.irToRequest(irMax("max", 3000), "m");
+    expect(out.max_tokens).toBe(3000);
+    const t = out.thinking as { budget_tokens: number };
+    expect(t.budget_tokens).toBeLessThan(3000);
+    expect(t.budget_tokens).toBeGreaterThanOrEqual(1024);
+  });
+
+  it("keeps the full budget when the client's max_tokens leaves room", () => {
+    const out = anthropic.irToRequest(irMax({ budget: 32768 }, 64000), "m");
+    expect(out.max_tokens).toBe(64000);
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
+  });
+
+  it("shrinks the budget to fit a tight client max_tokens, leaving response room", () => {
+    const out = anthropic.irToRequest(irMax({ budget: 32768 }, 20000), "m");
+    expect(out.max_tokens).toBe(20000);
+    const t = out.thinking as { budget_tokens: number };
+    expect(t.budget_tokens).toBe(20000 - 4096);
+    expect(out.max_tokens as number).toBeGreaterThan(t.budget_tokens);
+  });
+
+  it("guarantees max_tokens > budget even for a tiny client ceiling", () => {
+    const out = anthropic.irToRequest(irMax("max", 800), "m");
+    const t = out.thinking as { budget_tokens: number };
+    expect(out.max_tokens as number).toBeGreaterThan(t.budget_tokens);
+  });
 });
 
 describe("thinking budget on OpenAI-format upstreams (no budget field)", () => {
