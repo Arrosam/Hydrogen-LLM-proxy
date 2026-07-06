@@ -12,6 +12,7 @@ import {
   serializeClientStream,
   streamFromIRResponse,
   tapStream,
+  withoutReasoning,
   type StreamAccumulator,
 } from "../core/formats/stream";
 import { getServiceByName, getServiceDef, resolveAgentStage } from "../services/services";
@@ -143,7 +144,10 @@ function relayStream(
   opts: RelayOpts,
 ): FastifyReply {
   const acc: StreamAccumulator = { stopReason: null, text: "", reasoning: "", toolCalls: [], upstreamModel: "", incomplete: false };
-  const events = tapStream(parseUpstreamStream(value.family, value.body), acc);
+  const parsed = parseUpstreamStream(value.family, value.body);
+  // A "disabled" thinking override drops reasoning even if the upstream ignores
+  // it and streams a thinking block anyway.
+  const events = tapStream(value.dropReasoning ? withoutReasoning(parsed) : parsed, acc);
   const outGen = serializeClientStream(ingress, events, { model: ctx.serviceName });
 
   async function* streamAndLog(): AsyncGenerator<string> {

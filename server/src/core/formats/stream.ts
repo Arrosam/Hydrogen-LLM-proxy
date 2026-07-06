@@ -373,6 +373,16 @@ export function parseUpstreamStream(
   return parseOpenAIStream(readable);
 }
 
+/** Drop reasoning_delta events from a canonical stream. Enforces a "disabled"
+ * thinking level on a live relay even when the upstream emits reasoning anyway. */
+export async function* withoutReasoning(
+  events: AsyncGenerator<StreamEvent>,
+): AsyncGenerator<StreamEvent> {
+  for await (const ev of events) {
+    if (ev.type !== "reasoning_delta") yield ev;
+  }
+}
+
 // --- usage/text tap (for logging) ---------------------------------------
 
 export interface StreamAccumulator {

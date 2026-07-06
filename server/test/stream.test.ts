@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseUpstreamStream, serializeClientStream, streamFromIRResponse } from "../src/core/formats/stream";
+import { parseUpstreamStream, serializeClientStream, streamFromIRResponse, withoutReasoning } from "../src/core/formats/stream";
 import type { Family, IRResponse } from "../src/core/ir";
 
 /** Yield a string in small chunks to exercise cross-chunk SSE buffering. */
@@ -45,6 +45,34 @@ const ANTHROPIC_STREAM_LATE_USAGE = [
   `event: message_stop\ndata: {"type":"message_stop"}`,
   ``,
 ].join("\n\n");
+
+// GLM-style reasoning stream: reasoning_content then content.
+const OPENAI_STREAM_REASONING = [
+  `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+  `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"thinking hard"},"finish_reason":null}]}`,
+  `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}`,
+  `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+  `data: [DONE]`,
+  ``,
+].join("\n\n");
+
+describe("disabled thinking strips reasoning from a live relay", () => {
+  it("withoutReasoning drops the thinking block but keeps the text", async () => {
+    const events = withoutReasoning(parseUpstreamStream("openai", chunked(OPENAI_STREAM_REASONING)));
+    let out = "";
+    for await (const c of serializeClientStream("anthropic", events, { model: "svc" })) out += c;
+    expect(out).not.toContain('"type":"thinking"');
+    expect(out).not.toContain("thinking_delta");
+    expect(out).not.toContain("thinking hard");
+    expect(out).toContain('"text":"answer"');
+  });
+
+  it("control: without the filter the thinking block is present", async () => {
+    const out = await translate("openai", "anthropic", OPENAI_STREAM_REASONING);
+    expect(out).toContain('"type":"thinking"');
+    expect(out).toContain("thinking hard");
+  });
+});
 
 describe("streaming translation", () => {
   it("OpenAI upstream -> Anthropic client SSE", async () => {

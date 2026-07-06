@@ -22,6 +22,10 @@ export interface JsonSuccess extends AttemptTargetInfo {
 
 export interface StreamSuccess extends AttemptTargetInfo {
   body: Readable;
+  /** True when the effective thinking level is "disabled": the relay drops any
+   * reasoning the upstream emits anyway, so a disabled override is honored even
+   * when the provider ignores the request to stop thinking. */
+  dropReasoning?: boolean;
 }
 
 function resolveStepMapping(step: ServiceStep):
@@ -40,18 +44,28 @@ export function applyStepOverrides(ir: IRRequest, step: ServiceStep): IRRequest 
   return step.thinking ? { ...ir, thinking: step.thinking } : ir;
 }
 
+/** Drop reasoning parts from a response IR. Used to honor a "disabled" thinking
+ * level end-to-end: even if the upstream ignores the request to stop thinking
+ * and returns reasoning anyway, the client must not see a thinking block. */
+function stripReasoning(ir: IRResponse): IRResponse {
+  const content = ir.content.filter((p) => p.type !== "reasoning");
+  return content.length === ir.content.length ? ir : { ...ir, content };
+}
+
 /** Run a service's steps for a non-streaming request. */
 export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunOutput<JsonSuccess>> {
   const attempt = async (step: ServiceStep): Promise<AttemptResult<JsonSuccess>> => {
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: false }, m.upstreamModel);
+    const merged = applyStepOverrides(ir, step);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...merged, stream: false }, m.upstreamModel);
     const r = await postJson(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
     if (r.status >= 200 && r.status < 300 && r.json && typeof r.json === "object") {
-      const respIR = adapterFor(m.family).responseToIR(r.json as Record<string, unknown>);
+      let respIR = adapterFor(m.family).responseToIR(r.json as Record<string, unknown>);
+      if (merged.thinking === "disabled") respIR = stripReasoning(respIR);
       return {
         ok: true,
         value: {
@@ -89,18 +103,19 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: true }, m.upstreamModel);
+    const merged = applyStepOverrides(ir, step);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...merged, stream: true }, m.upstreamModel);
     const r = await postStream(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure by runSteps.
-      const { ir: respIR, incomplete } = await collectStream(parseUpstreamStream(m.family, r.body));
+      const collected = await collectStream(parseUpstreamStream(m.family, r.body));
       // A truncated stream (no terminal event) is retried like any other
       // failure instead of being accepted as a partial, usage-less "success".
       // Reported as an http 502 so a step's numeric 502 retry/advance trigger
       // matches it (the upstream delivered an incomplete response).
-      if (incomplete) {
+      if (collected.incomplete) {
         return {
           ok: false,
           status: 502,
@@ -108,6 +123,7 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
           message: "upstream stream ended before completion (truncated)",
         };
       }
+      const respIR = merged.thinking === "disabled" ? stripReasoning(collected.ir) : collected.ir;
       return {
         ok: true,
         value: {
@@ -150,7 +166,8 @@ export function runServiceStream(ir: IRRequest, steps: ServiceSteps): Promise<Ru
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: true }, m.upstreamModel);
+    const merged = applyStepOverrides(ir, step);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...merged, stream: true }, m.upstreamModel);
     const r = await postStream(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
@@ -164,6 +181,7 @@ export function runServiceStream(ir: IRRequest, steps: ServiceSteps): Promise<Ru
           providerName: m.providerName,
           modelName: m.modelName,
           upstreamRequest: upstreamBody,
+          dropReasoning: merged.thinking === "disabled",
         },
       };
     }
