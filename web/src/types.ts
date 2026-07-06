@@ -61,6 +61,7 @@ export interface ServiceStep {
 export interface ServiceSteps {
   timeoutMs: number;
   steps: ServiceStep[];
+  reliableStreaming?: boolean;
 }
 
 // --- Agent (compositional Micro Agent) ---
@@ -117,6 +118,7 @@ export interface AgentDef {
   stages: AgentStage[];
   output?: string;
   ocr?: AgentOcr; // optional image-to-text pre-pass run before the first stage
+  reliableStreaming?: boolean;
 }
 
 /** A service definition is either the resilience workflow or an agent. */

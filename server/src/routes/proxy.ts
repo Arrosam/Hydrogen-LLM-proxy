@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { addUsage, reasoningOf, textOf, ZERO_USAGE, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
-import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
+import { runServiceBuffered, runServiceStream, type JsonSuccess, type StreamSuccess } from "../core/proxy/run";
 import { runServiceDef } from "../core/proxy/invoke";
 import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
@@ -238,6 +238,7 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
 
   if (ir.stream) {
     if (isAgent(def)) return handleAgentStream(reply, ingress, ir, def, ctx);
+    if (def.reliableStreaming) return handleReliableStream(reply, ingress, ir, def, ctx);
     return handleStream(reply, ingress, ir, def, ctx);
   }
 
@@ -276,12 +277,60 @@ async function handleStream(
     requestBody: result.value.upstreamRequest, attempts: path.length, attemptPath: path,
   });
 }
+
+/** Log a fully-buffered result and replay it to the client as a fake stream.
+ * Shared by reliable-streaming Model Services and buffered agent runs. */
+function replayBuffered(
+  reply: FastifyReply,
+  ingress: Family,
+  ctx: RequestCtx,
+  value: JsonSuccess,
+  o: { attemptPath: unknown; attempts: number; requestBody: unknown },
+): FastifyReply {
+  const respIR = value.ir;
+  const reasoning = reasoningOf(respIR.content);
+  const responseBody: Record<string, unknown> = {
+    streamed: true, role: "assistant", content: textOf(respIR.content),
+    ...(reasoning ? { reasoning } : {}),
+    stop_reason: respIR.stopReason, usage: respIR.usage,
+  };
+  recordLog({
+    token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: value.family,
+    streaming: true, httpStatus: 200, usage: respIR.usage, latencyMs: Date.now() - ctx.started,
+    attempts: o.attempts, attemptPath: o.attemptPath, requestBody: o.requestBody, responseBody,
+  });
+  incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
+  return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.serviceName }));
+}
+
+/** Reliable streaming for a Model Service: buffer the upstream response (a
+ * truncated stream retries under the step's retry/advance rules), then replay
+ * the complete result. The client gets a complete response or a clean 502 --
+ * never a partial stream -- at the cost of first-token latency. */
+async function handleReliableStream(
+  reply: FastifyReply,
+  ingress: Family,
+  ir: IRRequest,
+  def: ServiceSteps,
+  ctx: RequestCtx,
+): Promise<unknown> {
+  const { result, path } = await runServiceBuffered(ir, def);
+  if (!result.ok) {
+    return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
+  }
+  return replayBuffered(reply, ingress, ctx, result.value, {
+    attemptPath: path, attempts: path.length, requestBody: result.value.upstreamRequest,
+  });
+}
 /** Streaming for an agent: routing needs each stage's full output, so earlier
  * stages run buffered -- but the terminal Model Service (nothing routes after
  * it) is streamed directly so the client gets real token-by-token output,
  * through nested Micro Agents too. Only when the returned output is decided by
  * a transition (or agent.output points at an earlier stage) does the agent
- * finish buffered and emit the result as a fake stream. */
+ * finish buffered and emit the result as a fake stream. With reliableStreaming
+ * on, the terminal stage is never streamed directly -- the whole agent runs
+ * buffered (every stage retries a truncated stream) and the complete result is
+ * replayed. */
 async function handleAgentStream(
   reply: FastifyReply,
   ingress: Family,
@@ -289,7 +338,9 @@ async function handleAgentStream(
   agent: AgentDef,
   ctx: RequestCtx,
 ): Promise<unknown> {
-  const outcome = await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
+  const outcome = agent.reliableStreaming
+    ? await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName])
+    : await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
   if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
 
   const { result, calls } = outcome;
@@ -299,21 +350,7 @@ async function handleAgentStream(
     return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: calls, attempts });
   }
 
-  const respIR = result.value.ir;
-  const reasoning = reasoningOf(respIR.content);
-  const responseBody: Record<string, unknown> = {
-    streamed: true, role: "assistant", content: textOf(respIR.content),
-    ...(reasoning ? { reasoning } : {}),
-    stop_reason: respIR.stopReason, usage: respIR.usage,
-  };
-  recordLog({
-    token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: result.value.family,
-    streaming: true, httpStatus: 200, usage: respIR.usage, latencyMs: Date.now() - ctx.started,
-    attempts, attemptPath: calls, requestBody: ctx.body, responseBody,
-  });
-  incrementUsage(ctx.token.id, 1, respIR.usage.totalTokens);
-
-  return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.serviceName }));
+  return replayBuffered(reply, ingress, ctx, result.value, { attemptPath: calls, attempts, requestBody: ctx.body });
 }
 
 /** Stream an agent's terminal Model Service directly to the client. The calls

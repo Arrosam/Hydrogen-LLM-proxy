@@ -56,6 +56,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [stages, setStages] = useState<AgentStage[]>([]);
   const [output, setOutput] = useState("");
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
+  const [reliableStreaming, setReliableStreaming] = useState(false);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -81,6 +82,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setDescription(service.description ?? "");
       setEnabled(service.enabled);
       setTimeoutMs(service.steps?.timeoutMs ?? 60000);
+      setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       if (isAgentDef(service.steps)) {
         setKind("chain");
         setStages(service.steps.stages ?? []);
@@ -106,6 +108,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setStages([]);
       setOutput("");
       setOcr(undefined);
+      setReliableStreaming(false);
     }
     setRaw(false);
     setSummary("");
@@ -114,8 +117,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
-      : ({ timeoutMs, steps } as ServiceSteps);
+      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}), ...(reliableStreaming ? { reliableStreaming: true } : {}) } as AgentDef)
+      : ({ timeoutMs, steps, ...(reliableStreaming ? { reliableStreaming: true } : {}) } as ServiceSteps);
 
   const patchStep = (i: number, patch: Partial<ServiceStep>) =>
     setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
@@ -159,6 +162,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     try {
       const parsed = JSON.parse(rawText) as ServiceDef;
       setTimeoutMs(parsed.timeoutMs ?? 60000);
+      setReliableStreaming(Boolean(parsed.reliableStreaming));
       if (isAgentDef(parsed)) {
         setKind("chain");
         setStages(parsed.stages ?? []);
@@ -296,7 +300,17 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           <label className="label">Description (optional)</label>
           <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
+          <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label="Reliable streaming" />
+        </div>
+        {reliableStreaming && (
+          <p className="-mt-2 text-xs text-ink-500">
+            Buffers the upstream response (retrying a truncated stream under your retry rules) and replays it, so a
+            streaming client never gets a partial/truncated stream — at the cost of first-token latency. Leave off to
+            stream straight through.
+          </p>
+        )}
 
         {!raw && (
           <p className="text-xs text-ink-500">

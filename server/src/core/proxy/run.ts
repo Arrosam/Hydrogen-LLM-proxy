@@ -96,13 +96,15 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure by runSteps.
       const { ir: respIR, incomplete } = await collectStream(parseUpstreamStream(m.family, r.body));
-      // A truncated stream (no terminal event) is retried like any other failure
-      // instead of being accepted as a partial, usage-less "success".
+      // A truncated stream (no terminal event) is retried like any other
+      // failure instead of being accepted as a partial, usage-less "success".
+      // Reported as an http 502 so a step's numeric 502 retry/advance trigger
+      // matches it (the upstream delivered an incomplete response).
       if (incomplete) {
         return {
           ok: false,
           status: 502,
-          kind: "error",
+          kind: "http",
           message: "upstream stream ended before completion (truncated)",
         };
       }

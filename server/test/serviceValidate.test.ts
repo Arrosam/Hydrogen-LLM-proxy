@@ -26,6 +26,21 @@ describe("validateService", () => {
     expect(summary).toBe("agent: a -> b");
   });
 
+  it("round-trips reliableStreaming on a Model Service and a Micro Agent", () => {
+    const svc = validateService({ timeoutMs: 60_000, reliableStreaming: true, steps: [step] });
+    expect((svc.def as { reliableStreaming?: boolean }).reliableStreaming).toBe(true);
+    expect(svc.summary).toContain("[reliable streaming]");
+
+    const agent = validateService({ ...agentOf([{ name: "a", steps: [step] }]), reliableStreaming: true });
+    expect((agent.def as { reliableStreaming?: boolean }).reliableStreaming).toBe(true);
+    expect(agent.summary).toContain("[reliable streaming]");
+
+    // Omitted stays omitted (off).
+    const off = validateService({ timeoutMs: 60_000, steps: [step] });
+    expect((off.def as { reliableStreaming?: boolean }).reliableStreaming).toBeUndefined();
+    expect(off.summary).not.toContain("reliable");
+  });
+
   it("rejects duplicate stage names", () => {
     expect(() =>
       validateService({ kind: "agent", timeoutMs: 60_000, stages: [{ name: "x", steps: [step] }, { name: "x", steps: [step] }] }),

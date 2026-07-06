@@ -57,6 +57,17 @@ export const StepSchema = z.object({
 export const ServiceStepsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
   steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
+  /**
+   * Reliable streaming: for a streaming client request, buffer the upstream
+   * response internally (with the step's retry/advance rules) before replaying
+   * it to the client. A truncated stream then retries like any other failure,
+   * so the client only ever gets a complete response -- or, once retries are
+   * exhausted, a clean 502 -- never a partial/truncated stream. Costs
+   * first-token latency (the client waits for the full response). Omitted =
+   * off: stream straight through (real token-by-token, but a truncation can't
+   * be retried once headers commit).
+   */
+  reliableStreaming: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -173,6 +184,16 @@ export const AgentSchema = z.object({
   output: z.string().optional(),
   /** Optional image-to-text OCR pre-pass run before the first stage. */
   ocr: AgentOcrSchema.optional(),
+  /**
+   * Reliable streaming for the agent as a whole (it is exposed to clients as a
+   * single Model Service). When on, a streaming request runs the agent fully
+   * buffered -- every stage, including the one that would otherwise stream to
+   * the client, retries a truncated upstream stream -- then replays the
+   * complete result, so the client never gets a partial/truncated stream.
+   * Costs first-token latency. Omitted = off (the terminal stage streams
+   * straight through). See ServiceStepsSchema.reliableStreaming.
+   */
+  reliableStreaming: z.boolean().optional(),
 });
 
 /** The existing resilience workflow, now with an optional explicit discriminant. */
@@ -214,12 +235,13 @@ export function parseServiceSteps(raw: unknown): ServiceSteps {
 
 /** Human-readable one-line summary of a service (for the dashboard). */
 export function summarizeService(def: ServiceDef): string {
+  const reliable = def.reliableStreaming ? " [reliable streaming]" : "";
   if (isAgent(def)) {
     const names = def.stages.map((s) => s.name);
     const branching = def.stages.some((s) => s.transitions && s.transitions.length > 0);
     const returns = def.output && def.output !== names[names.length - 1] ? ` (returns ${def.output})` : "";
     const ocr = def.ocr ? "OCR -> " : "";
-    return `agent: ${ocr}${names.join(" -> ")}${branching ? " (branching)" : ""}${returns}`;
+    return `agent: ${ocr}${names.join(" -> ")}${branching ? " (branching)" : ""}${returns}${reliable}`;
   }
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;
@@ -230,5 +252,5 @@ export function summarizeService(def: ServiceDef): string {
     }
     return label;
   });
-  return parts.length ? `try ${parts.join("; else ")}; else fail` : "(no steps)";
+  return `${parts.length ? `try ${parts.join("; else ")}; else fail` : "(no steps)"}${reliable}`;
 }
