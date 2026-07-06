@@ -257,6 +257,28 @@ describe("runAgent (decision tree)", () => {
     expect(calls[0].service).toBe("resmub");
   });
 
+  it("a stage's thinking overrides the referenced service's step thinking", async () => {
+    const resolver: StageResolver = (name) =>
+      name === "svc"
+        ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p", thinking: "max" }] } }
+        : { ok: false, message: "unknown" };
+    const agent = agentOf([{ name: "s", service: "svc", input: [], thinking: { budget: 7000 } }]);
+    await runAgent(textOnly, agent, resolver);
+    const stepsArg = runJsonMock.mock.calls[0][1] as { steps: { thinking?: unknown }[] };
+    expect(stepsArg.steps[0].thinking).toEqual({ budget: 7000 });
+  });
+
+  it("keeps the service's step thinking when the stage sets none", async () => {
+    const resolver: StageResolver = (name) =>
+      name === "svc"
+        ? { ok: true, kind: "resilience", steps: { timeoutMs: 60_000, steps: [{ model: "R", provider: "p", thinking: "high" }] } }
+        : { ok: false, message: "unknown" };
+    const agent = agentOf([{ name: "s", service: "svc", input: [] }]);
+    await runAgent(textOnly, agent, resolver);
+    const stepsArg = runJsonMock.mock.calls[0][1] as { steps: { thinking?: unknown }[] };
+    expect(stepsArg.steps[0].thinking).toBe("high");
+  });
+
   it("fails the agent when a referenced service can't be resolved", async () => {
     const agent = agentOf([{ name: "s", service: "missing", input: [] }]);
     const { result } = await runAgent(textOnly, agent, () => ({ ok: false, message: "unknown service" }));

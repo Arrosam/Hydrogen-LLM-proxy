@@ -631,12 +631,18 @@ export async function runAgent(
         if (!exec.ok) return error(exec.message);
 
         if (exec.kind === "resilience") {
+          // A stage's explicit thinking level is the outer, more-specific config:
+          // it overrides the referenced Model Service's own per-step thinking.
+          const steps: ServiceSteps =
+            stage.thinking != null
+              ? { ...exec.steps, steps: exec.steps.steps.map((s) => ({ ...s, thinking: stage.thinking })) }
+              : exec.steps;
           const stageIR = buildStageIR(source, stage, outputs, values, streamable);
           if (streamable) {
             return {
               kind: "stream",
               stageIR,
-              steps: exec.steps,
+              steps,
               stageName: stage.name,
               service: stage.service,
               request: stageRequestPayload(stageIR),
@@ -646,7 +652,7 @@ export async function runAgent(
               usage,
             };
           }
-          const { call, result } = await callModelService(stageIR, exec.steps, { stage: stage.name, service: stage.service }, opts.nonStreaming);
+          const { call, result } = await callModelService(stageIR, steps, { stage: stage.name, service: stage.service }, opts.nonStreaming);
           calls.push(call);
           if (!result.ok) return fail(result);
           commit(stage.name, result.value);
