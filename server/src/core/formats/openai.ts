@@ -12,7 +12,7 @@
   textOf,
 } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
-import { numOrUndef, pickExtra, safeJsonParse } from "./util";
+import { numOrUndef, parseDataUrl, pickExtra, safeJsonParse } from "./util";
 
 export interface ClientResponseCtx {
   /** Model name echoed back to the client (the service name). */
@@ -72,14 +72,6 @@ function coerceContentToParts(content: unknown): Array<IRTextPart | IRContentPar
     }
   }
   return parts;
-}
-
-function parseDataUrl(
-  url: string,
-): { kind: "base64"; mediaType: string; data: string } | { kind: "url"; url: string } {
-  const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
-  if (m) return { kind: "base64", mediaType: m[1], data: m[2] };
-  return { kind: "url", url };
 }
 
 function imagePartToOpenAI(source: (IRContentPart & { type: "image" })["source"]): unknown {

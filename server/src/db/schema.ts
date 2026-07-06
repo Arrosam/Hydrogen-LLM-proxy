@@ -147,7 +147,7 @@ export const requestLogs = sqliteTable(
     tokenId: integer("token_id").references(() => tokens.id, { onDelete: "set null" }),
     serviceId: integer("service_id").references(() => modelServices.id, { onDelete: "set null" }),
     serviceName: text("service_name"),
-    ingressFormat: text("ingress_format", { enum: ["openai", "anthropic"] }).notNull(),
+    ingressFormat: text("ingress_format", { enum: ["openai", "anthropic", "openai_responses"] }).notNull(),
     egressFormat: text("egress_format", { enum: ["openai", "anthropic"] }),
     streaming: integer("streaming", { mode: "boolean" }).notNull().default(false),
     httpStatus: integer("http_status").notNull(),

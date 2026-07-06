@@ -10,5 +10,7 @@ process.env.ADMIN_USERNAME ||= "admin";
 process.env.ADMIN_PASSWORD ||= "admin12345";
 process.env.NODE_ENV ||= "development";
 process.env.PORT ||= "8094";
+// Local preview only: allow localhost upstreams so mock providers work.
+process.env.ALLOW_PRIVATE_UPSTREAMS ||= "true";
 
 require("./server/dist/server.cjs");

@@ -1,5 +1,5 @@
 ﻿import type { Readable } from "node:stream";
-import type { Family, IRRequest, IRResponse } from "../ir";
+import type { EgressFamily, IRRequest, IRResponse } from "../ir";
 import { adapterFor } from "../formats";
 import { buildHeaders, chatUrl, postJson, postStream } from "../upstream";
 import { resolveMapping } from "../../services/catalog";
@@ -7,7 +7,7 @@ import { runSteps, type AttemptResult, type RunOutput } from "../services/engine
 import type { ServiceStep, ServiceSteps } from "../services/schema";
 
 export interface AttemptTargetInfo {
-  family: Family;
+  family: EgressFamily;
   upstreamModel: string;
   providerName: string;
   modelName: string;

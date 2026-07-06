@@ -99,6 +99,7 @@ Point any OpenAI SDK at `http://localhost:8080/v1` or any Anthropic SDK at `http
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (streaming + non-streaming) |
+| POST | `/v1/responses` | OpenAI Responses API (streaming + non-streaming) |
 | POST | `/v1/messages` | Anthropic Messages (streaming + non-streaming) |
 | POST | `/v1/embeddings` | Passthrough to the first step's OpenAI-compatible provider |
 | GET  | `/v1/models` | Lists your Model Services (Anthropic shape if `anthropic-version` header is sent) |

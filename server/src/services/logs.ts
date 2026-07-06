@@ -1,5 +1,6 @@
 ﻿import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { getDb } from "../db";
+import type { EgressFamily, Family } from "../core/ir";
 import { asMillis } from "../util/time";
 import { requestLogs, type RequestLog } from "../db/schema";
 
@@ -7,8 +8,8 @@ export interface LogInsert {
   tokenId: number | null;
   serviceId: number | null;
   serviceName: string | null;
-  ingressFormat: "openai" | "anthropic";
-  egressFormat: "openai" | "anthropic" | null;
+  ingressFormat: Family;
+  egressFormat: EgressFamily | null;
   streaming: boolean;
   httpStatus: number;
   promptTokens: number;

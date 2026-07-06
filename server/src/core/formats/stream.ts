@@ -1,4 +1,4 @@
-﻿import type { Family, IRResponse, IRStopReason, IRUsage } from "../ir";
+﻿import type { EgressFamily, Family, IRResponse, IRStopReason, IRUsage } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
 import { num } from "./util";
 import { finishReasonToIR } from "./openai";
@@ -257,7 +257,7 @@ function anthStopToIR(reason: string): IRStopReason {
 }
 
 export function parseUpstreamStream(
-  family: Family,
+  family: EgressFamily,
   readable: AsyncIterable<Buffer | string>,
 ): AsyncGenerator<StreamEvent> {
   return family === "anthropic" ? parseAnthropicStream(readable) : parseOpenAIStream(readable);
@@ -520,14 +520,174 @@ async function* serializeAnthropicStream(
   }
 }
 
+/** Serialize canonical events as OpenAI Responses API SSE (response.* events). */
+async function* serializeResponsesStream(
+  events: AsyncGenerator<StreamEvent>,
+  ctx: StreamContext,
+): AsyncGenerator<string> {
+  const id = genId("resp");
+  let created = nowSeconds();
+  const model = ctx.model;
+  let seq = 0;
+  const frame = (event: string, data: Record<string, unknown>): string =>
+    `event: ${event}\ndata: ${JSON.stringify({ type: event, sequence_number: seq++, ...data })}\n\n`;
+
+  const response = (status: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id, object: "response", created_at: created, status, error: null, incomplete_details: null,
+    model, output: [], ...extra,
+  });
+
+  // Completed output items, accumulated for the final response.completed frame.
+  const output: Record<string, unknown>[] = [];
+  let outputIndex = 0;
+
+  let msgId = "";
+  let msgText: string | null = null; // null = no message item open
+  let reasoningId = "";
+  let reasoningText: string | null = null;
+  const tools = new Map<number, { itemId: string; callId: string; name: string; args: string; index: number }>();
+
+  function* closeReasoning(): Generator<string> {
+    if (reasoningText == null) return;
+    const item = { id: reasoningId, type: "reasoning", summary: [{ type: "summary_text", text: reasoningText }] };
+    yield frame("response.reasoning_summary_text.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, text: reasoningText });
+    yield frame("response.reasoning_summary_part.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: reasoningText } });
+    yield frame("response.output_item.done", { output_index: outputIndex, item });
+    output.push(item);
+    outputIndex++;
+    reasoningText = null;
+  }
+
+  function* closeMessage(): Generator<string> {
+    if (msgText == null) return;
+    const part = { type: "output_text", text: msgText, annotations: [] };
+    const item = { id: msgId, type: "message", status: "completed", role: "assistant", content: [part] };
+    yield frame("response.output_text.done", { item_id: msgId, output_index: outputIndex, content_index: 0, text: msgText });
+    yield frame("response.content_part.done", { item_id: msgId, output_index: outputIndex, content_index: 0, part });
+    yield frame("response.output_item.done", { output_index: outputIndex, item });
+    output.push(item);
+    outputIndex++;
+    msgText = null;
+  }
+
+  for await (const ev of events) {
+    switch (ev.type) {
+      case "start":
+        created = ev.created || created;
+        yield frame("response.created", { response: response("in_progress") });
+        yield frame("response.in_progress", { response: response("in_progress") });
+        break;
+      case "reasoning_delta":
+        if (reasoningText == null) {
+          yield* closeMessage();
+          reasoningId = genId("rs");
+          reasoningText = "";
+          yield frame("response.output_item.added", {
+            output_index: outputIndex,
+            item: { id: reasoningId, type: "reasoning", summary: [] },
+          });
+          yield frame("response.reasoning_summary_part.added", {
+            item_id: reasoningId, output_index: outputIndex, summary_index: 0,
+            part: { type: "summary_text", text: "" },
+          });
+        }
+        reasoningText += ev.text;
+        yield frame("response.reasoning_summary_text.delta", {
+          item_id: reasoningId, output_index: outputIndex, summary_index: 0, delta: ev.text,
+        });
+        break;
+      case "text_delta":
+        if (msgText == null) {
+          yield* closeReasoning();
+          msgId = genId("msg");
+          msgText = "";
+          yield frame("response.output_item.added", {
+            output_index: outputIndex,
+            item: { id: msgId, type: "message", status: "in_progress", role: "assistant", content: [] },
+          });
+          yield frame("response.content_part.added", {
+            item_id: msgId, output_index: outputIndex, content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] },
+          });
+        }
+        msgText += ev.text;
+        yield frame("response.output_text.delta", {
+          item_id: msgId, output_index: outputIndex, content_index: 0, delta: ev.text,
+        });
+        break;
+      case "tool_start": {
+        yield* closeReasoning();
+        yield* closeMessage();
+        const tc = { itemId: genId("fc"), callId: ev.id, name: ev.name, args: "", index: outputIndex };
+        tools.set(ev.index, tc);
+        outputIndex++;
+        yield frame("response.output_item.added", {
+          output_index: tc.index,
+          item: { id: tc.itemId, type: "function_call", status: "in_progress", call_id: tc.callId, name: tc.name, arguments: "" },
+        });
+        break;
+      }
+      case "tool_args_delta": {
+        const tc = tools.get(ev.index);
+        if (tc) {
+          tc.args += ev.delta;
+          yield frame("response.function_call_arguments.delta", {
+            item_id: tc.itemId, output_index: tc.index, delta: ev.delta,
+          });
+        }
+        break;
+      }
+      case "tool_stop": {
+        const tc = tools.get(ev.index);
+        if (tc) {
+          tools.delete(ev.index);
+          const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
+          yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
+          yield frame("response.output_item.done", { output_index: tc.index, item });
+          output.push(item);
+        }
+        break;
+      }
+      case "finish": {
+        yield* closeReasoning();
+        yield* closeMessage();
+        // OpenAI upstreams emit no per-tool stop; close any open calls here.
+        for (const tc of tools.values()) {
+          const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
+          yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
+          yield frame("response.output_item.done", { output_index: tc.index, item });
+          output.push(item);
+        }
+        tools.clear();
+        const incomplete = ev.stopReason === "length";
+        const usage = ev.usage
+          ? {
+              input_tokens: ev.usage.promptTokens,
+              output_tokens: ev.usage.completionTokens,
+              total_tokens: ev.usage.totalTokens,
+            }
+          : undefined;
+        yield frame(incomplete ? "response.incomplete" : "response.completed", {
+          response: response(incomplete ? "incomplete" : "completed", {
+            output,
+            ...(incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+            ...(usage ? { usage } : {}),
+          }),
+        });
+        break;
+      }
+    }
+  }
+}
+
 export function serializeClientStream(
   family: Family,
   events: AsyncGenerator<StreamEvent>,
   ctx: StreamContext,
 ): AsyncGenerator<string> {
-  return family === "anthropic"
-    ? serializeAnthropicStream(events, ctx)
-    : serializeOpenAIStream(events, ctx);
+  if (family === "anthropic") return serializeAnthropicStream(events, ctx);
+  if (family === "openai_responses") return serializeResponsesStream(events, ctx);
+  return serializeOpenAIStream(events, ctx);
 }
 
 /** Cap for the fabricated stream below. Fast (most models do 20閳?00 tok/s), but

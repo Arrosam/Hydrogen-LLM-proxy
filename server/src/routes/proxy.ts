@@ -1,7 +1,7 @@
 ﻿import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
-import { addUsage, textOf, ZERO_USAGE, type Family, type IRRequest, type IRUsage } from "../core/ir";
-import { adapterFor } from "../core/formats";
+import { addUsage, textOf, ZERO_USAGE, type EgressFamily, type Family, type IRRequest, type IRUsage } from "../core/ir";
+import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
 import { runServiceDef } from "../core/proxy/invoke";
@@ -32,7 +32,7 @@ interface LogParams {
   service: ModelService | null;
   serviceName: string | null;
   ingress: Family;
-  egress: Family | null;
+  egress: EgressFamily | null;
   streaming: boolean;
   httpStatus: number;
   usage?: IRUsage;
@@ -173,7 +173,7 @@ function relayStream(
 async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> {
   const token = req.clientToken!;
   const body = (req.body ?? {}) as Record<string, unknown>;
-  const adapter = adapterFor(ingress);
+  const adapter = ingressAdapterFor(ingress);
 
   let ir: IRRequest;
   try {
@@ -438,6 +438,10 @@ export async function proxyRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/v1/messages", { preHandler: requireClientToken("anthropic") }, (req, reply) =>
     handleChat(req, reply, "anthropic"),
+  );
+
+  app.post("/v1/responses", { preHandler: requireClientToken("openai_responses") }, (req, reply) =>
+    handleChat(req, reply, "openai_responses"),
   );
 
   app.post("/v1/embeddings", { preHandler: requireClientToken("openai") }, (req, reply) =>

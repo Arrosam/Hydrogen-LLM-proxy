@@ -4,7 +4,11 @@
  * only implement each format once regardless of ingress/egress direction.
  */
 
-export type Family = "openai" | "anthropic";
+/** Wire formats upstream providers speak (egress). */
+export type EgressFamily = "openai" | "anthropic";
+/** Wire formats clients may speak (ingress). The OpenAI Responses API is
+ * client-facing only -- no upstream provider type maps to it. */
+export type Family = EgressFamily | "openai_responses";
 
 // --- content parts -------------------------------------------------------
 

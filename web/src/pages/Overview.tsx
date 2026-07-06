@@ -28,7 +28,11 @@ function EndpointsCard() {
   const toast = useToast();
   const origin = window.location.origin;
   const rows = [
-    { label: "OpenAI-compatible base URL", value: `${origin}/v1`, hint: "OpenAI SDK baseURL / OPENAI_BASE_URL" },
+    {
+      label: "OpenAI-compatible base URL",
+      value: `${origin}/v1`,
+      hint: "OpenAI SDK baseURL / OPENAI_BASE_URL — serves /chat/completions and /responses",
+    },
     { label: "Anthropic base URL", value: origin, hint: "Anthropic SDK base_url / ANTHROPIC_BASE_URL" },
   ];
   const copy = async (v: string) => {
