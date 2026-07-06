@@ -100,6 +100,13 @@ async function* parseOpenAIStream(
       yield { type: "text_delta", text: delta.content };
     }
 
+    // Reasoning deltas: OpenRouter-style "reasoning", DeepSeek/GLM/Grok-style
+    // "reasoning_content".
+    const reasoning = delta.reasoning ?? delta.reasoning_content;
+    if (typeof reasoning === "string" && reasoning) {
+      yield { type: "reasoning_delta", text: reasoning };
+    }
+
     const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
     for (const tc of toolCalls) {
       if (!tc || typeof tc !== "object") continue;
@@ -183,6 +190,8 @@ async function* parseAnthropicStream(
         const delta = (data.delta ?? {}) as Record<string, unknown>;
         if (delta.type === "text_delta" && typeof delta.text === "string") {
           yield { type: "text_delta", text: delta.text };
+        } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+          yield { type: "reasoning_delta", text: delta.thinking };
         } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
           yield { type: "tool_args_delta", index, delta: delta.partial_json };
         }
@@ -558,6 +567,12 @@ export function streamFromIRResponse(
         for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
           const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
           yield { type: "text_delta", text: piece };
+          await pace(piece.length);
+        }
+      } else if (p.type === "reasoning") {
+        for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
+          const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
+          yield { type: "reasoning_delta", text: piece };
           await pace(piece.length);
         }
       } else if (p.type === "tool_use") {

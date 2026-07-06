@@ -119,3 +119,66 @@ describe("streamFromIRResponse (paced fake stream)", () => {
     expect(elapsed).toBeLessThan(3000); // but fast
   });
 });
+
+describe("reasoning/thinking passthrough", () => {
+  const OPENAI_REASONING_STREAM = [
+    `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+    `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"Let me think"},"finish_reason":null}]}`,
+    `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{"content":"Answer"},"finish_reason":null}]}`,
+    `data: {"id":"c2","model":"glm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+    `data: [DONE]`,
+    ``,
+  ].join("\n\n");
+
+  const ANTHROPIC_THINKING_STREAM = [
+    `event: message_start\ndata: {"type":"message_start","message":{"id":"m3","model":"claude","usage":{"input_tokens":4}}}`,
+    `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}`,
+    `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}`,
+    `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer"}}`,
+    `event: content_block_stop\ndata: {"type":"content_block_stop","index":1}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+    ``,
+  ].join("\n\n");
+
+  it("OpenAI reasoning_content deltas reach an OpenAI client as reasoning", async () => {
+    const out = await translate("openai", "openai", OPENAI_REASONING_STREAM);
+    expect(out).toContain('"reasoning":"Let me think"');
+    expect(out).toContain('"content":"Answer"');
+  });
+
+  it("OpenAI reasoning_content deltas become Anthropic thinking blocks", async () => {
+    const out = await translate("openai", "anthropic", OPENAI_REASONING_STREAM);
+    expect(out).toContain('"type":"thinking"');
+    expect(out).toContain('"thinking":"Let me think"');
+    expect(out).toContain('"text":"Answer"');
+  });
+
+  it("Anthropic thinking deltas reach an OpenAI client as reasoning", async () => {
+    const out = await translate("anthropic", "openai", ANTHROPIC_THINKING_STREAM);
+    expect(out).toContain('"reasoning":"Let me think"');
+    expect(out).toContain('"content":"Answer"');
+  });
+
+  it("fake stream replays reasoning parts as thinking/reasoning deltas", async () => {
+    const ir: IRResponse = {
+      id: "x", model: "m", created: 0,
+      content: [
+        { type: "reasoning", text: "Pondering deeply" },
+        { type: "text", text: "Done" },
+      ],
+      stopReason: "stop", usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
+    };
+    let openaiOut = "";
+    for await (const c of streamFromIRResponse("openai", ir, { model: "mub" })) openaiOut += c;
+    expect(openaiOut).toContain('"reasoning":"Pondering deeply"');
+    expect(openaiOut).toContain('"content":"Done"');
+
+    let anthOut = "";
+    for await (const c of streamFromIRResponse("anthropic", ir, { model: "mub" })) anthOut += c;
+    expect(anthOut).toContain('"thinking":"Pondering deeply"');
+    expect(anthOut).toContain('"text":"Done"');
+  });
+});

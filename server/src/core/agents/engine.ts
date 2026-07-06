@@ -1,6 +1,7 @@
 ﻿import {
   addUsage,
   normalizeMessages,
+  reasoningOf,
   textOf,
   ZERO_USAGE,
   type IRContentPart,
@@ -427,10 +428,12 @@ function stageResponsePayload(ir: IRResponse): string {
       const t = p as { name: string; input: unknown };
       return { name: t.name, args: JSON.stringify(t.input ?? {}) };
     });
+  const reasoning = reasoningOf(ir.content);
   return serializeForLog(
     {
       role: "assistant",
       content: textOf(ir.content),
+      ...(reasoning ? { reasoning } : {}),
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       stop_reason: ir.stopReason,
       usage: ir.usage,

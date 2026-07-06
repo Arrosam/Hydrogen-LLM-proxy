@@ -79,6 +79,9 @@ body {
   .badge-blue {
     @apply badge bg-brand-700/30 text-brand-400 ring-1 ring-brand-700/50;
   }
+  .badge-purple {
+    @apply badge bg-purple-950/60 text-purple-300 ring-1 ring-purple-800/50;
+  }
 
   .table {
     @apply w-full text-left text-sm;

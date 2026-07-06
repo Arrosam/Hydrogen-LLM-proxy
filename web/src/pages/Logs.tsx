@@ -493,6 +493,8 @@ function roleBadge(role: string): string {
       return "badge-blue";
     case "assistant":
       return "badge-green";
+    case "thinking":
+      return "badge-purple";
     default:
       return "badge-gray";
   }
