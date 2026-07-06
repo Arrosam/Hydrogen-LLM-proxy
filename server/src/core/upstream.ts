@@ -40,9 +40,10 @@ function trimBase(base: string): string {
 
 export function chatUrl(p: UpstreamProvider): string {
   const base = trimBase(p.baseUrl);
-  return familyForProviderType(p.type) === "anthropic"
-    ? `${base}/v1/messages`
-    : `${base}/chat/completions`;
+  const family = familyForProviderType(p.type);
+  if (family === "anthropic") return `${base}/v1/messages`;
+  if (family === "openai_responses") return `${base}/responses`;
+  return `${base}/chat/completions`;
 }
 
 export function embeddingsUrl(p: UpstreamProvider): string {

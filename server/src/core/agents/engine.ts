@@ -18,7 +18,7 @@
 import { genId } from "../../util/ids";
 import { getConfig } from "../../context";
 import { serializeForLog } from "../../util/logPayload";
-import { runServiceJson, type JsonSuccess } from "../proxy/run";
+import { runServiceBuffered, type JsonSuccess } from "../proxy/run";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "../services/engine";
 import type { AgentCondition, AgentDef, AgentOcr, AgentStage, ServiceSteps } from "../services/schema";
 
@@ -482,14 +482,15 @@ export function countAttempts(calls: ServiceCall[]): number {
   return n;
 }
 
-/** Invoke a Model Service (its resilience steps) and record it as one call. */
+/** Invoke a Model Service (its resilience steps) and record it as one call.
+ * The upstream call streams and is buffered here -- see runServiceBuffered. */
 async function callModelService(
   stageIR: IRRequest,
   steps: ServiceSteps,
   meta: { stage: string; service?: string },
 ): Promise<{ call: ServiceCall; result: AttemptResult<JsonSuccess> }> {
   const started = Date.now();
-  const { result, path } = await runServiceJson(stageIR, steps);
+  const { result, path } = await runServiceBuffered(stageIR, steps);
   const call: ServiceCall = {
     stage: meta.stage,
     service: meta.service ?? "(inline)",

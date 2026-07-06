@@ -12,6 +12,7 @@ const TYPE_LABELS: Record<ProviderType, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   openai_compatible: "OpenAI-compatible",
+  openai_responses: "OpenAI Responses",
 };
 
 interface FormState {
@@ -212,13 +213,18 @@ export function Providers() {
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
                 <option value="openai_compatible">OpenAI-compatible</option>
+                <option value="openai_responses">OpenAI Responses (/v1/responses)</option>
               </select>
             </div>
             <div>
               <label className="label">Base URL</label>
               <input className="input font-mono text-xs" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder={form.type === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"} />
               <p className="mt-1 text-xs text-ink-500">
-                {form.type === "anthropic" ? "Host root; /v1/messages is appended." : "The /v1-style base; /chat/completions is appended."}
+                {form.type === "anthropic"
+                  ? "Host root; /v1/messages is appended."
+                  : form.type === "openai_responses"
+                    ? "The /v1-style base; /responses is appended."
+                    : "The /v1-style base; /chat/completions is appended."}
               </p>
             </div>
             <div>

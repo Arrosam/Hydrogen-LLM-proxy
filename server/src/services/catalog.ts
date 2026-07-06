@@ -3,7 +3,7 @@ import { getDb } from "../db";
 import { modelProviders, models, providers, type ModelProvider } from "../db/schema";
 import { toUpstreamProvider } from "./providers";
 import { familyForProviderType, type ProviderType } from "../core/formats";
-import type { EgressFamily } from "../core/ir";
+import type { Family } from "../core/ir";
 import type { UpstreamProvider } from "../core/upstream";
 
 export interface MappingInput {
@@ -58,7 +58,7 @@ export interface ResolvedMapping {
   modelName: string;
   providerName: string;
   providerType: ProviderType;
-  family: EgressFamily;
+  family: Family;
   upstreamModel: string;
   upstream: UpstreamProvider;
 }

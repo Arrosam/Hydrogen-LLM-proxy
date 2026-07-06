@@ -1,13 +1,14 @@
 ﻿import type { Readable } from "node:stream";
-import type { EgressFamily, IRRequest, IRResponse } from "../ir";
+import type { Family, IRRequest, IRResponse } from "../ir";
 import { adapterFor } from "../formats";
+import { collectStream, parseUpstreamStream } from "../formats/stream";
 import { buildHeaders, chatUrl, postJson, postStream } from "../upstream";
 import { resolveMapping } from "../../services/catalog";
 import { runSteps, type AttemptResult, type RunOutput } from "../services/engine";
 import type { ServiceStep, ServiceSteps } from "../services/schema";
 
 export interface AttemptTargetInfo {
-  family: EgressFamily;
+  family: Family;
   upstreamModel: string;
   providerName: string;
   modelName: string;
@@ -60,6 +61,61 @@ export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunO
       kind: r.status > 0 ? "http" : "error",
       message: `upstream returned ${r.status}`,
       errorBody: r.json ?? r.text,
+    };
+  };
+
+  return runSteps(steps, attempt);
+}
+
+/**
+ * Run a service's steps as an upstream STREAM consumed inside the proxy,
+ * returning the buffered result. Used for Micro Agent stage/OCR calls: routing
+ * needs the complete output, but streaming upstream still captures reasoning
+ * from providers that only emit it on streams and avoids idle non-streaming
+ * timeouts during long thinking. Mid-stream failures count as attempt
+ * failures, so the step's retry/advance rules apply.
+ */
+export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<RunOutput<JsonSuccess>> {
+  const attempt = async (step: ServiceStep): Promise<AttemptResult<JsonSuccess>> => {
+    const resolved = resolveStepMapping(step);
+    if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
+    const m = resolved.mapping;
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...ir, stream: true }, m.upstreamModel);
+    const r = await postStream(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
+      timeoutMs: steps.timeoutMs,
+    });
+    if (r.status >= 200 && r.status < 300) {
+      // A consumption error throws and is mapped to a retryable failure by runSteps.
+      const respIR = await collectStream(parseUpstreamStream(m.family, r.body));
+      return {
+        ok: true,
+        value: {
+          ir: respIR,
+          family: m.family,
+          upstreamModel: m.upstreamModel,
+          providerName: m.providerName,
+          modelName: m.modelName,
+        },
+      };
+    }
+    let errText = "";
+    try {
+      for await (const chunk of r.body) errText += chunk.toString();
+    } catch {
+      /* ignore */
+    }
+    let errBody: unknown = errText;
+    try {
+      errBody = errText ? JSON.parse(errText) : errText;
+    } catch {
+      /* keep text */
+    }
+    return {
+      ok: false,
+      status: r.status,
+      kind: "http",
+      message: `upstream returned ${r.status}`,
+      errorBody: errBody,
     };
   };
 

@@ -11,7 +11,7 @@ import {
   updateProvider,
 } from "../../services/providers";
 
-const TypeSchema = z.enum(["openai", "anthropic", "openai_compatible"]);
+const TypeSchema = z.enum(["openai", "anthropic", "openai_compatible", "openai_responses"]);
 const HeadersSchema = z.record(z.string()).nullable().optional();
 
 // Only http/https upstreams — reject file:, gopher:, etc. (The SSRF guard in

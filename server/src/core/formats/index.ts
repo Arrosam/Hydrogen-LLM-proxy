@@ -1,14 +1,17 @@
-import type { EgressFamily, Family, IRRequest, IRResponse } from "../ir";
+import type { Family, IRRequest, IRResponse } from "../ir";
 import type { ClientResponseCtx } from "./openai";
 import * as openai from "./openai";
 import * as anthropic from "./anthropic";
 import * as openaiResponses from "./openaiResponses";
 
-export type ProviderType = "openai" | "anthropic" | "openai_compatible";
+export type ProviderType = "openai" | "anthropic" | "openai_compatible" | "openai_responses";
 
-/** OpenAI and OpenAI-compatible upstreams share the OpenAI wire format. */
-export function familyForProviderType(t: ProviderType): EgressFamily {
-  return t === "anthropic" ? "anthropic" : "openai";
+/** OpenAI and OpenAI-compatible upstreams share the Chat Completions format;
+ * "openai_responses" providers speak the Responses API. */
+export function familyForProviderType(t: ProviderType): Family {
+  if (t === "anthropic") return "anthropic";
+  if (t === "openai_responses") return "openai_responses";
+  return "openai";
 }
 
 /** Client-facing translation: parse a request, render a response. */
@@ -23,22 +26,22 @@ export interface EgressAdapter {
   responseToIR(body: Record<string, unknown>): IRResponse;
 }
 
-const ingressRegistry: Record<Family, IngressAdapter> = {
+export interface FormatAdapter extends IngressAdapter, EgressAdapter {}
+
+const registry: Record<Family, FormatAdapter> = {
   openai,
   anthropic,
   openai_responses: openaiResponses,
 };
 
-const egressRegistry: Record<EgressFamily, EgressAdapter> = { openai, anthropic };
-
-/** Adapter for the format a client speaks (openai, anthropic, openai_responses). */
+/** Adapter for the format a client speaks. */
 export function ingressAdapterFor(family: Family): IngressAdapter {
-  return ingressRegistry[family];
+  return registry[family];
 }
 
-/** Adapter for the format an upstream provider speaks (openai, anthropic). */
-export function adapterFor(family: EgressFamily): EgressAdapter {
-  return egressRegistry[family];
+/** Adapter for the format an upstream provider speaks. */
+export function adapterFor(family: Family): EgressAdapter {
+  return registry[family];
 }
 
 export { openai, anthropic, openaiResponses };

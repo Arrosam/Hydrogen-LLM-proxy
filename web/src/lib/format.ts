@@ -31,7 +31,9 @@ export function formatNumber(n: number | null | undefined): string {
 export function formatCompact(n: number | null | undefined): string {
   if (n == null) return "0";
   if (Math.abs(n) >= 1000) {
-    return Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+    // Pin the locale: browser locales like zh-CN would compact to 万/亿
+    // instead of k/M/B.
+    return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
   }
   return String(n);
 }

@@ -1,6 +1,6 @@
 ﻿import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
-import { addUsage, textOf, ZERO_USAGE, type EgressFamily, type Family, type IRRequest, type IRUsage } from "../core/ir";
+import { addUsage, reasoningOf, textOf, ZERO_USAGE, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import { runServiceStream, type StreamSuccess } from "../core/proxy/run";
@@ -32,7 +32,7 @@ interface LogParams {
   service: ModelService | null;
   serviceName: string | null;
   ingress: Family;
-  egress: EgressFamily | null;
+  egress: Family | null;
   streaming: boolean;
   httpStatus: number;
   usage?: IRUsage;
@@ -282,8 +282,10 @@ async function handleAgentStream(
   }
 
   const respIR = result.value.ir;
+  const reasoning = reasoningOf(respIR.content);
   const responseBody: Record<string, unknown> = {
     streamed: true, role: "assistant", content: textOf(respIR.content),
+    ...(reasoning ? { reasoning } : {}),
     stop_reason: respIR.stopReason, usage: respIR.usage,
   };
   recordLog({
@@ -402,7 +404,7 @@ async function handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promi
   if (!res.ok || !res.mapping) {
     return replyError(reply, "openai", 502, `No usable upstream for '${serviceName}'.`);
   }
-  if (res.mapping.family !== "openai") {
+  if (res.mapping.family === "anthropic") {
     return replyError(reply, "openai", 400, "Embeddings are only supported on OpenAI-compatible providers.");
   }
 

@@ -3,7 +3,8 @@ import type { IRContentPart, IRRequest } from "../src/core/ir";
 import { textOf } from "../src/core/ir";
 import type { AgentCondition, AgentDef, AgentStage, AgentTransition } from "../src/core/services/schema";
 
-// Mock the per-stage runner. The fake echoes `${model}(${lastUserText})`, unless
+// Mock the per-stage runner (stages stream upstream and buffer internally).
+// The fake echoes `${model}(${lastUserText})`, unless
 // the model name is "OUT:<text>" (returns <text> verbatim, to drive output-based
 // routing) or "BOOM" (fails).
 vi.mock("../src/core/proxy/run", () => {
@@ -17,7 +18,7 @@ vi.mock("../src/core/proxy/run", () => {
     return "";
   };
   return {
-    runServiceJson: vi.fn(
+    runServiceBuffered: vi.fn(
       async (ir: IRRequest, steps: { timeoutMs: number; steps: { model: string; provider: string }[] }) => {
         const { model, provider } = steps.steps[0];
         const rec = { step: 1, attempt: 1, model, provider, status: model === "BOOM" ? 500 : 200, kind: model === "BOOM" ? "http" : "ok", latencyMs: 1 };
@@ -36,14 +37,14 @@ vi.mock("../src/core/proxy/run", () => {
   };
 });
 
-import { runServiceJson } from "../src/core/proxy/run";
+import { runServiceBuffered } from "../src/core/proxy/run";
 import { buildStageIR, isStreamPlan, runAgent, type StageResolver } from "../src/core/agents/engine";
 import { setConfig } from "../src/context";
 import type { AppConfig } from "../src/config";
 
 setConfig({ logPayloadMaxChars: 100000 } as unknown as AppConfig);
 
-const runJsonMock = vi.mocked(runServiceJson);
+const runJsonMock = vi.mocked(runServiceBuffered);
 const noResolver: StageResolver = () => ({ ok: false, message: "no resolver" });
 
 const t = (when: AgentCondition, goto: string): AgentTransition => ({ when, goto });

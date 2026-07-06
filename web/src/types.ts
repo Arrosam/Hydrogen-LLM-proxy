@@ -1,5 +1,5 @@
 ﻿export type Role = "admin" | "manager";
-export type ProviderType = "openai" | "anthropic" | "openai_compatible";
+export type ProviderType = "openai" | "anthropic" | "openai_compatible" | "openai_responses";
 
 export interface User {
   id: number;

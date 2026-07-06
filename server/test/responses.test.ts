@@ -115,3 +115,112 @@ describe("Responses API streaming", () => {
     ]);
   });
 });
+
+describe("IR -> Responses API upstream request (egress)", () => {
+  it("renders messages, tool history, tools and reasoning effort", () => {
+    const out = responses.irToRequest(
+      {
+        requestedModel: "svc",
+        system: "be terse",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "weather?" }] },
+          { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "NYC" } }] },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "call_1", content: [{ type: "text", text: "sunny" }] }] },
+        ],
+        tools: [{ name: "get_weather", parameters: { type: "object" } }],
+        toolChoice: { type: "auto" },
+        maxTokens: 128,
+        stream: true,
+        thinking: "xhigh",
+      },
+      "gpt-x",
+    ) as Record<string, unknown>;
+
+    expect(out.model).toBe("gpt-x");
+    expect(out.instructions).toBe("be terse");
+    expect(out.store).toBe(false);
+    expect(out.stream).toBe(true);
+    expect(out.max_output_tokens).toBe(128);
+    expect(out.reasoning).toEqual({ effort: "xhigh" });
+    const input = out.input as Array<Record<string, unknown>>;
+    expect(input[0]).toMatchObject({ role: "user" });
+    expect(input[1]).toMatchObject({ type: "function_call", call_id: "call_1", name: "get_weather" });
+    expect(input[2]).toMatchObject({ type: "function_call_output", call_id: "call_1", output: "sunny" });
+    expect((out.tools as Array<Record<string, unknown>>)[0]).toMatchObject({ type: "function", name: "get_weather" });
+  });
+});
+
+describe("Responses API upstream response -> IR (egress)", () => {
+  it("parses reasoning, text and function_call output items", () => {
+    const ir = responses.responseToIR({
+      id: "resp_1",
+      model: "gpt-x",
+      created_at: 42,
+      status: "completed",
+      output: [
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "hmm" }] },
+        { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "Hi" }] },
+        { type: "function_call", id: "fc_1", call_id: "call_7", name: "t", arguments: '{"a":1}' },
+      ],
+      usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10 },
+    });
+    expect(ir.content).toEqual([
+      { type: "reasoning", text: "hmm" },
+      { type: "text", text: "Hi" },
+      { type: "tool_use", id: "call_7", name: "t", input: { a: 1 } },
+    ]);
+    expect(ir.stopReason).toBe("tool_use");
+    expect(ir.usage).toEqual({ promptTokens: 4, completionTokens: 6, totalTokens: 10 });
+  });
+
+  it("maps incomplete (max_output_tokens) to a length stop", () => {
+    const ir = responses.responseToIR({
+      id: "r", model: "m", status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ type: "message", id: "m1", role: "assistant", content: [{ type: "output_text", text: "cut" }] }],
+    });
+    expect(ir.stopReason).toBe("length");
+  });
+});
+
+describe("Responses API upstream stream parsing (egress)", () => {
+  const UPSTREAM_RESPONSES_STREAM = [
+    `event: response.created\ndata: {"type":"response.created","response":{"id":"resp_9","model":"gpt-x","created_at":7,"status":"in_progress"}}`,
+    `event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]}}`,
+    `event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"delta":"hmm"}`,
+    `event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`,
+    `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"Hi"}`,
+    `event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_7","name":"t","arguments":""}}`,
+    `event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":2,"delta":"{\\"a\\":1}"}`,
+    `event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_7","name":"t","arguments":"{\\"a\\":1}"}}`,
+    `event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_9","status":"completed","usage":{"input_tokens":4,"output_tokens":6,"total_tokens":10}}}`,
+    ``,
+  ].join("\n\n");
+
+  async function* chunked2(s: string): AsyncGenerator<string> {
+    for (let i = 0; i < s.length; i += 7) yield s.slice(i, i + 7);
+  }
+
+  it("translates an upstream Responses stream to an OpenAI chat client", async () => {
+    const events = parseUpstreamStream("openai_responses", chunked2(UPSTREAM_RESPONSES_STREAM));
+    let out = "";
+    for await (const c of serializeClientStream("openai", events, { model: "svc" })) out += c;
+    expect(out).toContain('"reasoning":"hmm"');
+    expect(out).toContain('"content":"Hi"');
+    expect(out).toContain('"name":"t"');
+    expect(out).toContain('"finish_reason":"tool_calls"');
+    expect(out).toContain('"total_tokens":10');
+  });
+
+  it("collectStream buffers an upstream Responses stream into IR", async () => {
+    const { collectStream } = await import("../src/core/formats/stream");
+    const ir = await collectStream(parseUpstreamStream("openai_responses", chunked2(UPSTREAM_RESPONSES_STREAM)));
+    expect(ir.content).toEqual([
+      { type: "reasoning", text: "hmm" },
+      { type: "text", text: "Hi" },
+      { type: "tool_use", id: "call_7", name: "t", input: { a: 1 } },
+    ]);
+    expect(ir.stopReason).toBe("tool_use");
+    expect(ir.usage.totalTokens).toBe(10);
+  });
+});

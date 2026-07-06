@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseUpstreamStream, serializeClientStream, streamFromIRResponse } from "../src/core/formats/stream";
-import type { EgressFamily, Family, IRResponse } from "../src/core/ir";
+import type { Family, IRResponse } from "../src/core/ir";
 
 /** Yield a string in small chunks to exercise cross-chunk SSE buffering. */
 async function* chunked(s: string): AsyncGenerator<string> {
   for (let i = 0; i < s.length; i += 7) yield s.slice(i, i + 7);
 }
 
-async function translate(from: EgressFamily, to: Family, input: string): Promise<string> {
+async function translate(from: Family, to: Family, input: string): Promise<string> {
   const events = parseUpstreamStream(from, chunked(input));
   let out = "";
   for await (const c of serializeClientStream(to, events, { model: "mub" })) out += c;

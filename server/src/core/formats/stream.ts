@@ -1,6 +1,6 @@
-﻿import type { EgressFamily, Family, IRResponse, IRStopReason, IRUsage } from "../ir";
+﻿import type { Family, IRContentPart, IRResponse, IRStopReason, IRUsage } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
-import { num } from "./util";
+import { num, safeJsonParse } from "./util";
 import { finishReasonToIR } from "./openai";
 import { irToStopReason } from "./anthropic";
 
@@ -256,11 +256,104 @@ function anthStopToIR(reason: string): IRStopReason {
   }
 }
 
-export function parseUpstreamStream(
-  family: EgressFamily,
+/** Parse an upstream OpenAI Responses API SSE stream (response.* events). */
+async function* parseResponsesStream(
   readable: AsyncIterable<Buffer | string>,
 ): AsyncGenerator<StreamEvent> {
-  return family === "anthropic" ? parseAnthropicStream(readable) : parseOpenAIStream(readable);
+  let started = false;
+  let sawToolCall = false;
+  let usage: IRUsage | undefined;
+  const toolIndexByItem = new Map<string, number>();
+  let nextToolIndex = 0;
+
+  for await (const frame of parseSSE(readable)) {
+    const data = safeParse(frame.data);
+    if (!data) continue;
+    const type = frame.event ?? String(data.type ?? "");
+
+    switch (type) {
+      case "response.created": {
+        const r = (data.response ?? {}) as Record<string, unknown>;
+        started = true;
+        yield {
+          type: "start",
+          id: String(r.id ?? genId("resp")),
+          model: String(r.model ?? ""),
+          created: num(r.created_at) || nowSeconds(),
+        };
+        break;
+      }
+      case "response.output_text.delta":
+        if (typeof data.delta === "string" && data.delta) yield { type: "text_delta", text: data.delta };
+        break;
+      case "response.reasoning_summary_text.delta":
+      case "response.reasoning_text.delta":
+        if (typeof data.delta === "string" && data.delta) yield { type: "reasoning_delta", text: data.delta };
+        break;
+      case "response.output_item.added": {
+        const item = (data.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call") {
+          sawToolCall = true;
+          const index = nextToolIndex++;
+          toolIndexByItem.set(String(item.id ?? index), index);
+          yield {
+            type: "tool_start",
+            index,
+            id: String(item.call_id ?? item.id ?? genId("call")),
+            name: String(item.name ?? ""),
+          };
+        }
+        break;
+      }
+      case "response.function_call_arguments.delta": {
+        const index = toolIndexByItem.get(String(data.item_id ?? ""));
+        if (index != null && typeof data.delta === "string" && data.delta) {
+          yield { type: "tool_args_delta", index, delta: data.delta };
+        }
+        break;
+      }
+      case "response.output_item.done": {
+        const item = (data.item ?? {}) as Record<string, unknown>;
+        if (item.type === "function_call") {
+          const index = toolIndexByItem.get(String(item.id ?? ""));
+          if (index != null) yield { type: "tool_stop", index };
+        }
+        break;
+      }
+      case "response.completed":
+      case "response.incomplete":
+      case "response.failed": {
+        const r = (data.response ?? {}) as Record<string, unknown>;
+        const u = (r.usage ?? {}) as Record<string, unknown>;
+        if (u.input_tokens != null || u.output_tokens != null) {
+          usage = {
+            promptTokens: num(u.input_tokens),
+            completionTokens: num(u.output_tokens),
+            totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens),
+          };
+        }
+        yield {
+          type: "finish",
+          stopReason: type === "response.incomplete" ? "length" : sawToolCall ? "tool_use" : "stop",
+          usage,
+        };
+        return;
+      }
+      default:
+        break;
+    }
+  }
+  if (!started) yield { type: "start", id: genId("resp"), model: "", created: nowSeconds() };
+  yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage };
+}
+
+export function parseUpstreamStream(
+  family: Family,
+  readable: AsyncIterable<Buffer | string>,
+): AsyncGenerator<StreamEvent> {
+  if (family === "anthropic") return parseAnthropicStream(readable);
+  if (family === "openai_responses") return parseResponsesStream(readable);
+  return parseOpenAIStream(readable);
 }
 
 // --- usage/text tap (for logging) ---------------------------------------
@@ -311,6 +404,71 @@ export async function* tapStream(
     }
     yield ev;
   }
+}
+
+/**
+ * Drain a canonical event stream into a complete IRResponse. Used to run an
+ * upstream call as a stream but consume it inside the proxy (Micro Agent
+ * stages buffer their outputs for routing; streaming upstream still captures
+ * reasoning from providers that only emit it on streams, and avoids idle
+ * non-streaming timeouts during long thinking).
+ */
+export async function collectStream(events: AsyncGenerator<StreamEvent>): Promise<IRResponse> {
+  let id = genId("msg");
+  let model = "";
+  let created = nowSeconds();
+  let text = "";
+  let reasoning = "";
+  let stopReason: IRStopReason = null;
+  let usage: IRUsage | undefined;
+  const toolByIndex = new Map<number, { id: string; name: string; args: string }>();
+  const toolOrder: number[] = [];
+
+  for await (const ev of events) {
+    switch (ev.type) {
+      case "start":
+        id = ev.id || id;
+        model = ev.model || model;
+        created = ev.created || created;
+        break;
+      case "text_delta":
+        text += ev.text;
+        break;
+      case "reasoning_delta":
+        reasoning += ev.text;
+        break;
+      case "tool_start":
+        toolByIndex.set(ev.index, { id: ev.id, name: ev.name, args: "" });
+        toolOrder.push(ev.index);
+        break;
+      case "tool_args_delta": {
+        const tc = toolByIndex.get(ev.index);
+        if (tc) tc.args += ev.delta;
+        break;
+      }
+      case "finish":
+        stopReason = ev.stopReason;
+        usage = ev.usage;
+        break;
+    }
+  }
+
+  const content: IRContentPart[] = [];
+  if (reasoning) content.push({ type: "reasoning", text: reasoning });
+  if (text) content.push({ type: "text", text });
+  for (const index of toolOrder) {
+    const tc = toolByIndex.get(index)!;
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input: safeJsonParse(tc.args || "{}") });
+  }
+
+  return {
+    id,
+    model,
+    created,
+    content,
+    stopReason,
+    usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  };
 }
 
 // --- canonical -> client SSE --------------------------------------------

@@ -35,7 +35,7 @@ export const providers = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     name: text("name").notNull(),
-    type: text("type", { enum: ["openai", "anthropic", "openai_compatible"] }).notNull(),
+    type: text("type", { enum: ["openai", "anthropic", "openai_compatible", "openai_responses"] }).notNull(),
     baseUrl: text("base_url").notNull(),
     // AES-256-GCM encrypted API key (nullable for keyless local upstreams).
     keyCiphertext: text("key_ciphertext"),
@@ -148,7 +148,7 @@ export const requestLogs = sqliteTable(
     serviceId: integer("service_id").references(() => modelServices.id, { onDelete: "set null" }),
     serviceName: text("service_name"),
     ingressFormat: text("ingress_format", { enum: ["openai", "anthropic", "openai_responses"] }).notNull(),
-    egressFormat: text("egress_format", { enum: ["openai", "anthropic"] }),
+    egressFormat: text("egress_format", { enum: ["openai", "anthropic", "openai_responses"] }),
     streaming: integer("streaming", { mode: "boolean" }).notNull().default(false),
     httpStatus: integer("http_status").notNull(),
     promptTokens: integer("prompt_tokens").notNull().default(0),
