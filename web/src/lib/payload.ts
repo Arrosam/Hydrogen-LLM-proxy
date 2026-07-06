@@ -91,8 +91,13 @@ export function parsePayload(json: string | null): PayloadMeta | null {
   if (!obj || typeof obj !== "object") return null;
 
   const meta: { label: string; value: string }[] = [];
-  for (const k of ["model", "max_tokens", "stream", "temperature", "top_p", "stop_reason", "finish_reason", "streamed"]) {
+  for (const k of ["model", "max_tokens", "max_output_tokens", "stream", "temperature", "top_p", "stop_reason", "finish_reason", "streamed"]) {
     if (obj[k] != null) meta.push({ label: k, value: String(obj[k]) });
+  }
+  if (obj.thinking != null) meta.push({ label: "thinking", value: JSON.stringify(obj.thinking) });
+  if (obj.reasoning_effort != null) meta.push({ label: "reasoning_effort", value: String(obj.reasoning_effort) });
+  if (obj.reasoning != null && typeof obj.reasoning === "object") {
+    meta.push({ label: "reasoning", value: JSON.stringify(obj.reasoning) });
   }
   if (obj.usage && typeof obj.usage === "object") {
     const est = obj.usage_estimated ? " (estimated)" : "";

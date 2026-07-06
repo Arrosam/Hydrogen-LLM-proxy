@@ -121,6 +121,9 @@ function sendSse(reply: FastifyReply, gen: AsyncGenerator<string>): FastifyReply
 interface RelayOpts {
   /** The IR sent upstream; used to estimate usage if the stream reports none. */
   ir: IRRequest;
+  /** Request payload to log; defaults to the client body. A Model Service passes
+   * the actual upstream request (step overrides + translation applied). */
+  requestBody?: unknown;
   /** Usage accumulated before this stream (a Micro Agent's buffered stages). */
   baseUsage?: IRUsage;
   attempts: number;
@@ -170,7 +173,8 @@ function relayStream(
       recordLog({
         token: ctx.token, service: ctx.service, serviceName: ctx.serviceName, ingress, egress: value.family,
         streaming: true, httpStatus: status, usage, latencyMs: Date.now() - ctx.started,
-        attempts: opts.attempts, attemptPath: opts.attemptPath, requestBody: ctx.body, responseBody, error: streamError,
+        attempts: opts.attempts, attemptPath: opts.attemptPath,
+        requestBody: opts.requestBody ?? ctx.body, responseBody, error: streamError,
       });
       incrementUsage(ctx.token.id, 1, usage.totalTokens);
     }
@@ -246,7 +250,8 @@ async function handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Fam
   recordLog({
     token, service, serviceName, ingress, egress: run.result.value.family, streaming: false, httpStatus: 200,
     usage: respIR.usage, latencyMs: Date.now() - started, attempts: run.attempts, attemptPath: run.attemptPath,
-    requestBody: body, responseBody: clientBody,
+    // Log the request actually sent upstream (step overrides + translation applied).
+    requestBody: run.upstreamRequest ?? body, responseBody: clientBody,
   });
   incrementUsage(token.id, 1, respIR.usage.totalTokens);
   return reply.code(200).send(clientBody);
@@ -264,7 +269,9 @@ async function handleStream(
   if (!result.ok) {
     return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
   }
-  return relayStream(reply, ingress, ctx, result.value, { ir, attempts: path.length, attemptPath: path });
+  return relayStream(reply, ingress, ctx, result.value, {
+    ir, requestBody: result.value.upstreamRequest, attempts: path.length, attemptPath: path,
+  });
 }
 /** Streaming for an agent: routing needs each stage's full output, so earlier
  * stages run buffered -- but the terminal Model Service (nothing routes after

@@ -59,3 +59,20 @@ describe("withUsageFallback", () => {
     expect(withUsageFallback(ir("p"), r)).toBe(r);
   });
 });
+
+describe("applyStepOverrides", () => {
+  it("applies a step's thinking override over the client's, and passes through when absent", async () => {
+    const { applyStepOverrides } = await import("../src/core/proxy/run");
+    const base: IRRequest = { requestedModel: "svc", messages: [], stream: false, thinking: "low" };
+
+    // Step override wins.
+    expect(applyStepOverrides(base, { model: "m", provider: "p", thinking: "max" }).thinking).toBe("max");
+    // No step override → keep whatever the client asked for.
+    expect(applyStepOverrides(base, { model: "m", provider: "p" }).thinking).toBe("low");
+    // Applies even when the client sent nothing.
+    const noThink: IRRequest = { requestedModel: "svc", messages: [], stream: false };
+    expect(applyStepOverrides(noThink, { model: "m", provider: "p", thinking: "high" }).thinking).toBe("high");
+    // Does not mutate the input IR.
+    expect(base.thinking).toBe("low");
+  });
+});

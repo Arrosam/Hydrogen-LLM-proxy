@@ -13,6 +13,8 @@ export interface AttemptTargetInfo {
   upstreamModel: string;
   providerName: string;
   modelName: string;
+  /** The body actually sent upstream (after translation + step overrides). */
+  upstreamRequest: Record<string, unknown>;
 }
 
 export interface JsonSuccess extends AttemptTargetInfo {
@@ -33,13 +35,19 @@ function resolveStepMapping(step: ServiceStep):
   return { ok: true, mapping: res.mapping };
 }
 
+/** Apply a step's per-step overrides (currently the thinking level) to the IR.
+ * A step-level thinking override wins over whatever the client requested. */
+export function applyStepOverrides(ir: IRRequest, step: ServiceStep): IRRequest {
+  return step.thinking ? { ...ir, thinking: step.thinking } : ir;
+}
+
 /** Run a service's steps for a non-streaming request. */
 export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunOutput<JsonSuccess>> {
   const attempt = async (step: ServiceStep): Promise<AttemptResult<JsonSuccess>> => {
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...ir, stream: false }, m.upstreamModel);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: false }, m.upstreamModel);
     const r = await postJson(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
@@ -53,6 +61,7 @@ export function runServiceJson(ir: IRRequest, steps: ServiceSteps): Promise<RunO
           upstreamModel: m.upstreamModel,
           providerName: m.providerName,
           modelName: m.modelName,
+          upstreamRequest: upstreamBody,
         },
       };
     }
@@ -81,7 +90,7 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...ir, stream: true }, m.upstreamModel);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: true }, m.upstreamModel);
     const r = await postStream(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
@@ -96,6 +105,7 @@ export function runServiceBuffered(ir: IRRequest, steps: ServiceSteps): Promise<
           upstreamModel: m.upstreamModel,
           providerName: m.providerName,
           modelName: m.modelName,
+          upstreamRequest: upstreamBody,
         },
       };
     }
@@ -129,7 +139,7 @@ export function runServiceStream(ir: IRRequest, steps: ServiceSteps): Promise<Ru
     const resolved = resolveStepMapping(step);
     if (!resolved.ok) return { ok: false, status: 0, kind: "error", message: resolved.message };
     const m = resolved.mapping;
-    const upstreamBody = adapterFor(m.family).irToRequest({ ...ir, stream: true }, m.upstreamModel);
+    const upstreamBody = adapterFor(m.family).irToRequest({ ...applyStepOverrides(ir, step), stream: true }, m.upstreamModel);
     const r = await postStream(chatUrl(m.upstream), buildHeaders(m.upstream), upstreamBody, {
       timeoutMs: steps.timeoutMs,
     });
@@ -142,6 +152,7 @@ export function runServiceStream(ir: IRRequest, steps: ServiceSteps): Promise<Ru
           upstreamModel: m.upstreamModel,
           providerName: m.providerName,
           modelName: m.modelName,
+          upstreamRequest: upstreamBody,
         },
       };
     }

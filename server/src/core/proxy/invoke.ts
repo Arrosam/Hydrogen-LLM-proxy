@@ -14,6 +14,9 @@ export interface ServiceRun {
   /** AttemptRecord[] for a Model Service; ServiceCall[] for a Micro Agent. */
   attemptPath: unknown;
   attempts: number;
+  /** For a Model Service: the request actually sent upstream (overrides applied).
+   * Undefined for Micro Agents, which log each stage's upstream request instead. */
+  upstreamRequest?: Record<string, unknown>;
 }
 
 /** Run a Model Service or Micro Agent to completion (non-streaming). */
@@ -28,5 +31,10 @@ export async function runServiceDef(
     return { result, attemptPath: calls, attempts: countAttempts(calls) };
   }
   const { result, path } = await runServiceJson(ir, def);
-  return { result, attemptPath: path, attempts: path.length };
+  return {
+    result,
+    attemptPath: path,
+    attempts: path.length,
+    upstreamRequest: result.ok ? result.value.upstreamRequest : undefined,
+  };
 }
