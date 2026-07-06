@@ -279,6 +279,21 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
   return out;
 }
 
+/**
+ * OpenAI Chat Completions has no thinking-budget field -- only reasoning_effort
+ * (low/medium/high/...). Map an explicit token budget to the nearest named
+ * effort level (by the same thresholds Anthropic uses in reverse) so a small
+ * budget isn't sent as "high". Exact token budgets can only be conveyed to an
+ * Anthropic-format provider (thinking.budget_tokens).
+ */
+function budgetToEffort(budget: number): "low" | "medium" | "high" | "xhigh" | "max" {
+  if (budget <= 10_000) return "low"; // ~4k
+  if (budget <= 24_000) return "medium"; // ~16k
+  if (budget <= 48_000) return "high"; // ~32k
+  if (budget <= 96_000) return "xhigh"; // ~64k
+  return "max"; // ~128k
+}
+
 /** Translate an IRThinkingLevel into the OpenAI reasoning_effort field. */
 function applyOpenAIThinking(out: Record<string, unknown>, thinking: IRThinkingLevel): void {
   if (thinking === "disabled") {
@@ -286,7 +301,7 @@ function applyOpenAIThinking(out: Record<string, unknown>, thinking: IRThinkingL
   } else if (thinking === "enabled" || thinking === "auto") {
     out.reasoning_effort = "medium";
   } else if (typeof thinking === "object") {
-    out.reasoning_effort = "high";
+    out.reasoning_effort = budgetToEffort(thinking.budget);
     if (out.max_tokens == null) out.max_tokens = thinking.budget;
   } else {
     // A named effort level passes through verbatim.

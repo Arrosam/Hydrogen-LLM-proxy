@@ -201,3 +201,21 @@ describe("thinking levels", () => {
     expect(out.thinking).toEqual({ type: "disabled" });
   });
 });
+
+describe("thinking budget on OpenAI-format upstreams (no budget field)", () => {
+  const irBudget = (budget: number) =>
+    ({ requestedModel: "svc", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], stream: false, thinking: { budget } }) as Parameters<typeof openai.irToRequest>[0];
+
+  it("maps a token budget to the nearest reasoning_effort level", () => {
+    expect(openai.irToRequest(irBudget(4096), "m").reasoning_effort).toBe("low");
+    expect(openai.irToRequest(irBudget(16000), "m").reasoning_effort).toBe("medium");
+    expect(openai.irToRequest(irBudget(32768), "m").reasoning_effort).toBe("high");
+    expect(openai.irToRequest(irBudget(64000), "m").reasoning_effort).toBe("xhigh");
+    expect(openai.irToRequest(irBudget(128000), "m").reasoning_effort).toBe("max");
+  });
+
+  it("still conveys the exact budget to an Anthropic-format upstream", () => {
+    const out = anthropic.irToRequest(irBudget(32768), "m");
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
+  });
+});
