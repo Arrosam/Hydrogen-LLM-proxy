@@ -177,10 +177,13 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
 
 /** Parse the thinking/reasoning configuration from an OpenAI-style request body. */
 function parseOpenAIThinking(body: Record<string, unknown>): IRThinkingLevel | undefined {
-  // OpenAI reasoning models use "reasoning_effort": "low"|"medium"|"high" or a budget.
+  // OpenAI reasoning models use "reasoning_effort": "minimal"|"low"|...|"max".
   const effort = body.reasoning_effort;
   if (effort === "none" || effort === "disabled") return "disabled";
-  if (effort === "low" || effort === "medium" || effort === "high") return "enabled";
+  if (effort === "minimal") return "low";
+  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
+    return effort;
+  }
   if (typeof body.max_completion_tokens === "number" && body.reasoning_effort != null) {
     return { budget: body.max_completion_tokens as number };
   }
@@ -292,6 +295,9 @@ function applyOpenAIThinking(out: Record<string, unknown>, thinking: IRThinkingL
   } else if (typeof thinking === "object") {
     out.reasoning_effort = "high";
     if (out.max_tokens == null) out.max_tokens = thinking.budget;
+  } else {
+    // A named effort level passes through verbatim.
+    out.reasoning_effort = thinking;
   }
 }
 

@@ -23,15 +23,22 @@ export const RetrySchema = z.object({
 
 /**
  * Thinking/reasoning level for a step or stage.
- *   "disabled"  - turn extended thinking off
- *   "auto"      - let the model decide (default when the client requested it)
- *   "enabled"   - turn extended thinking on
- *   { budget }  - turn it on and enforce a token budget
+ *   "disabled"       - turn extended thinking off
+ *   "auto"           - let the model decide (default when the client requested it)
+ *   "enabled"        - turn extended thinking on
+ *   "low".."max"     - turn it on at a named effort level (OpenAI reasoning_effort;
+ *                      mapped to a token budget on Anthropic upstreams)
+ *   { budget }       - turn it on and enforce an explicit token budget
  */
 export const ThinkingLevelSchema = z.union([
   z.literal("disabled"),
   z.literal("auto"),
   z.literal("enabled"),
+  z.literal("low"),
+  z.literal("medium"),
+  z.literal("high"),
+  z.literal("xhigh"),
+  z.literal("max"),
   z.object({ budget: z.number().int().min(1024).max(128_000) }),
 ]);
 

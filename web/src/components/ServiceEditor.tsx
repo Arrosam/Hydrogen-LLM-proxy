@@ -16,6 +16,7 @@ import type {
   ServiceStep,
   ServiceSteps,
   Provider,
+  ThinkingLevel,
   Trigger,
 } from "../types";
 import { isAgentDef } from "../types";
@@ -435,13 +436,18 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                             const v = e.target.value;
                             if (!v) patchStep(i, { thinking: undefined });
                             else if (v === "budget") patchStep(i, { thinking: { budget: 8192 } });
-                            else patchStep(i, { thinking: v as "disabled" | "auto" | "enabled" });
+                            else patchStep(i, { thinking: v as Exclude<ThinkingLevel, { budget: number }> });
                           }}
                         >
                           <option value="">inherit (from request)</option>
                           <option value="disabled">disabled</option>
                           <option value="auto">auto</option>
                           <option value="enabled">enabled</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                          <option value="xhigh">xhigh</option>
+                          <option value="max">max</option>
                           <option value="budget">budget (tokens)</option>
                         </select>
                         {step.thinking && typeof step.thinking === "object" && (

@@ -47,7 +47,8 @@ export interface RetryPolicy {
   intervalMs: number;
 }
 
-export type ThinkingLevel = "disabled" | "auto" | "enabled" | { budget: number };
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevel = "disabled" | "auto" | "enabled" | ThinkingEffort | { budget: number };
 
 export interface ServiceStep {
   model: string;

@@ -64,15 +64,22 @@ export type IRToolChoice =
   | { type: "required" }
   | { type: "tool"; name: string };
 
+/** Named reasoning-effort levels (OpenAI-style reasoning_effort values). */
+export type IREffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
 /**
  * Thinking/reasoning configuration sent to the upstream. "disabled" = off;
- * "auto"/"enabled" = let the model decide; "budget" = enforce a token budget.
- * Omitted (undefined) = inherit whatever the client sent (or the upstream default).
+ * "auto"/"enabled" = on, let the model decide how much; an effort level
+ * ("low".."max") = on at that effort (passed as reasoning_effort to OpenAI
+ * upstreams, mapped to a token budget for Anthropic); "budget" = on with an
+ * explicit token budget. Omitted (undefined) = inherit whatever the client
+ * sent (or the upstream default).
  */
 export type IRThinkingLevel =
   | "disabled"
   | "auto"
   | "enabled"
+  | IREffortLevel
   | { budget: number };
 
 export interface IRRequest {

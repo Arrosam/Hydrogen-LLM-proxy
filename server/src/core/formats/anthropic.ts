@@ -229,25 +229,35 @@ export function irToRequest(ir: IRRequest, upstreamModel: string): Record<string
   return out;
 }
 
+/** Token budgets for the named effort levels (Anthropic has no effort field). */
+const EFFORT_BUDGETS: Record<"low" | "medium" | "high" | "xhigh" | "max", number> = {
+  low: 4096,
+  medium: 16000,
+  high: 32000,
+  xhigh: 64000,
+  max: 128000,
+};
+
 /** Translate an IRThinkingLevel into the Anthropic thinking parameter. */
 function applyAnthropicThinking(out: Record<string, unknown>, thinking: IRThinkingLevel): void {
   if (thinking === "disabled") {
     out.thinking = { type: "disabled" };
-  } else if (thinking === "enabled" || thinking === "auto") {
-    // Anthropic requires a budget; use a sensible default if none specified.
-    const budget = out.max_tokens != null ? Math.min(out.max_tokens as number, 16000) : 16000;
-    out.thinking = { type: "enabled", budget_tokens: budget };
-    // Anthropic requires max_tokens >= budget_tokens + 1
-    const maxTokens = out.max_tokens as number | undefined;
-    if (maxTokens == null || maxTokens <= budget) {
-      out.max_tokens = budget + 4096;
-    }
+    return;
+  }
+  // Anthropic requires a budget; derive one from the level.
+  let budget: number;
+  if (thinking === "enabled" || thinking === "auto") {
+    budget = out.max_tokens != null ? Math.min(out.max_tokens as number, 16000) : 16000;
   } else if (typeof thinking === "object") {
-    out.thinking = { type: "enabled", budget_tokens: thinking.budget };
-    const maxTokens = out.max_tokens as number | undefined;
-    if (maxTokens == null || maxTokens <= thinking.budget) {
-      out.max_tokens = thinking.budget + 4096;
-    }
+    budget = thinking.budget;
+  } else {
+    budget = EFFORT_BUDGETS[thinking];
+  }
+  out.thinking = { type: "enabled", budget_tokens: budget };
+  // Anthropic requires max_tokens >= budget_tokens + 1
+  const maxTokens = out.max_tokens as number | undefined;
+  if (maxTokens == null || maxTokens <= budget) {
+    out.max_tokens = budget + 4096;
   }
 }
 

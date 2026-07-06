@@ -156,3 +156,48 @@ describe("Response translation", () => {
     expect(ir.usage).toEqual({ promptTokens: 5, completionTokens: 6, totalTokens: 11 });
   });
 });
+
+describe("thinking levels", () => {
+  const ir = (thinking: unknown) =>
+    ({
+      requestedModel: "svc",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      stream: false,
+      thinking,
+    }) as Parameters<typeof openai.irToRequest>[0];
+
+  it("named effort levels pass through as OpenAI reasoning_effort", () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+      const out = openai.irToRequest(ir(level), "m");
+      expect(out.reasoning_effort).toBe(level);
+    }
+    expect(openai.irToRequest(ir("disabled"), "m").reasoning_effort).toBe("none");
+    expect(openai.irToRequest(ir("enabled"), "m").reasoning_effort).toBe("medium");
+  });
+
+  it("OpenAI reasoning_effort parses to the matching IR level", () => {
+    const parse = (reasoning_effort: string) =>
+      openai.requestToIR({ model: "m", messages: [{ role: "user", content: "hi" }], reasoning_effort }).thinking;
+    expect(parse("low")).toBe("low");
+    expect(parse("xhigh")).toBe("xhigh");
+    expect(parse("max")).toBe("max");
+    expect(parse("minimal")).toBe("low");
+    expect(parse("none")).toBe("disabled");
+  });
+
+  it("named effort levels map to Anthropic thinking budgets", () => {
+    const low = anthropic.irToRequest(ir("low"), "m");
+    expect(low.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+    const max = anthropic.irToRequest(ir("max"), "m");
+    expect(max.thinking).toEqual({ type: "enabled", budget_tokens: 128000 });
+    // max_tokens must exceed the budget.
+    expect(max.max_tokens as number).toBeGreaterThan(128000);
+    const explicit = anthropic.irToRequest(ir({ budget: 2048 }), "m");
+    expect(explicit.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it("disabled turns Anthropic thinking off", () => {
+    const out = anthropic.irToRequest(ir("disabled"), "m");
+    expect(out.thinking).toEqual({ type: "disabled" });
+  });
+});

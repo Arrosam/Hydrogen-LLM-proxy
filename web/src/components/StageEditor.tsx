@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
+import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService, ThinkingLevel } from "../types";
 import { isAgentDef } from "../types";
 import { Toggle } from "./common";
 
@@ -321,13 +321,18 @@ function StageBody({
                     const v = e.target.value;
                     if (!v) onPatch({ thinking: undefined });
                     else if (v === "budget") onPatch({ thinking: { budget: 8192 } });
-                    else onPatch({ thinking: v as "disabled" | "auto" | "enabled" });
+                    else onPatch({ thinking: v as Exclude<ThinkingLevel, { budget: number }> });
                   }}
                 >
                   <option value="">inherit (from request)</option>
                   <option value="disabled">disabled</option>
                   <option value="auto">auto</option>
                   <option value="enabled">enabled</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max">max</option>
                   <option value="budget">budget (tokens)</option>
                 </select>
                 {stage.thinking && typeof stage.thinking === "object" && (
