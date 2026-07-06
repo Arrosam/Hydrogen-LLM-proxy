@@ -293,9 +293,14 @@ function replayBuffered(
 ): FastifyReply {
   const respIR = value.ir;
   const reasoning = reasoningOf(respIR.content);
+  // A tool-only response has no text; without this the log looked empty.
+  const toolCalls = respIR.content
+    .filter((p): p is Extract<typeof p, { type: "tool_use" }> => p.type === "tool_use")
+    .map((p) => ({ name: p.name, args: JSON.stringify(p.input ?? {}) }));
   const responseBody: Record<string, unknown> = {
     streamed: true, role: "assistant", content: textOf(respIR.content),
     ...(reasoning ? { reasoning } : {}),
+    ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
     stop_reason: respIR.stopReason, usage: respIR.usage,
   };
   recordLog({

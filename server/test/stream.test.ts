@@ -74,6 +74,34 @@ describe("disabled thinking strips reasoning from a live relay", () => {
   });
 });
 
+// Reasoning then a tool call, NO text (the case that dropped the thinking block).
+const OPENAI_STREAM_REASONING_TOOL = [
+  `data: {"id":"c3","model":"glm","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+  `data: {"id":"c3","model":"glm","choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":null}]}`,
+  `data: {"id":"c3","model":"glm","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}`,
+  `data: {"id":"c3","model":"glm","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":null}]}`,
+  `data: {"id":"c3","model":"glm","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+  `data: [DONE]`,
+  ``,
+].join("\n\n");
+
+describe("thinking + tool-only response (no text)", () => {
+  it("keeps the thinking block and closes it before the tool block", async () => {
+    const out = await translate("openai", "anthropic", OPENAI_STREAM_REASONING_TOOL);
+    expect(out).toContain('"type":"thinking"');
+    expect(out).toContain("let me think");
+    expect(out).toContain('"type":"tool_use"');
+    const frames = out.split("\n\n").filter(Boolean);
+    const thinkStart = frames.findIndex((f) => f.includes('"content_block_start"') && f.includes('"thinking"'));
+    const toolStart = frames.findIndex((f) => f.includes('"content_block_start"') && f.includes('"tool_use"'));
+    // thinking block is index 0; its stop must precede the tool block start.
+    const thinkStop = frames.findIndex((f, i) => i > thinkStart && f.includes('"content_block_stop"') && f.includes('"index":0'));
+    expect(thinkStart).toBeGreaterThanOrEqual(0);
+    expect(thinkStop).toBeGreaterThan(thinkStart);
+    expect(thinkStop).toBeLessThan(toolStart);
+  });
+});
+
 describe("streaming translation", () => {
   it("OpenAI upstream -> Anthropic client SSE", async () => {
     const out = await translate("openai", "anthropic", OPENAI_STREAM);

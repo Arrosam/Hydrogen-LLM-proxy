@@ -631,6 +631,12 @@ async function* serializeAnthropicStream(
         break;
       case "text_delta":
         if (!textOpen) {
+          // Close an open thinking block first: Anthropic content blocks must
+          // not overlap, or a strict client drops the unclosed one.
+          if (reasoningOpen) {
+            yield frame("content_block_stop", { index: reasoningIndex });
+            reasoningOpen = false;
+          }
           textIndex = nextIndex++;
           textOpen = true;
           yield frame("content_block_start", {
@@ -658,6 +664,13 @@ async function* serializeAnthropicStream(
         });
         break;
       case "tool_start": {
+        // Close any open thinking/text block before the tool block; overlapping
+        // content blocks make a strict Anthropic client drop the unclosed one
+        // (e.g. the thinking block on a text-less, tool-only response).
+        if (reasoningOpen) {
+          yield frame("content_block_stop", { index: reasoningIndex });
+          reasoningOpen = false;
+        }
         if (textOpen) {
           yield frame("content_block_stop", { index: textIndex });
           textOpen = false;
