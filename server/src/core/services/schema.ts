@@ -58,14 +58,15 @@ export const ServiceStepsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
   steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
   /**
-   * Reliable streaming: for a streaming client request, buffer the upstream
-   * response internally (with the step's retry/advance rules) before replaying
-   * it to the client. A truncated stream then retries like any other failure,
-   * so the client only ever gets a complete response -- or, once retries are
-   * exhausted, a clean 502 -- never a partial/truncated stream. Costs
-   * first-token latency (the client waits for the full response). Omitted =
-   * off: stream straight through (real token-by-token, but a truncation can't
-   * be retried once headers commit).
+   * Reliable streaming: for a streaming client request, make a plain
+   * non-streaming upstream request (which is atomic -- a dropped body fails
+   * JSON parsing and retries under the step's rules, rather than being accepted
+   * as a partial stream), then replay the complete result as a fake stream. The
+   * client only ever gets a complete response -- or, once retries are exhausted,
+   * a clean 502 -- never a partial/truncated stream. Costs first-token latency
+   * (the client waits for the full response). Omitted = off: stream straight
+   * through (real token-by-token, but a mid-stream truncation can't be retried
+   * once headers commit).
    */
   reliableStreaming: z.boolean().optional(),
 });
@@ -186,12 +187,11 @@ export const AgentSchema = z.object({
   ocr: AgentOcrSchema.optional(),
   /**
    * Reliable streaming for the agent as a whole (it is exposed to clients as a
-   * single Model Service). When on, a streaming request runs the agent fully
-   * buffered -- every stage, including the one that would otherwise stream to
-   * the client, retries a truncated upstream stream -- then replays the
-   * complete result, so the client never gets a partial/truncated stream.
-   * Costs first-token latency. Omitted = off (the terminal stage streams
-   * straight through). See ServiceStepsSchema.reliableStreaming.
+   * single Model Service). When on, a streaming request runs every stage as a
+   * plain non-streaming upstream request (no stage streams to the client) and
+   * replays the complete result, so the client never gets a partial/truncated
+   * stream. Costs first-token latency. Omitted = off (the terminal stage
+   * streams straight through). See ServiceStepsSchema.reliableStreaming.
    */
   reliableStreaming: z.boolean().optional(),
 });

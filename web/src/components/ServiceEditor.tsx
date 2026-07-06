@@ -306,9 +306,9 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         </div>
         {reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
-            Buffers the upstream response (retrying a truncated stream under your retry rules) and replays it, so a
-            streaming client never gets a partial/truncated stream — at the cost of first-token latency. Leave off to
-            stream straight through.
+            Makes a plain non-streaming upstream request (which can't truncate mid-body) and replays the complete
+            result as a stream, so a streaming client never gets a partial/truncated stream — at the cost of
+            first-token latency. Leave off to stream straight through.
           </p>
         )}
 
