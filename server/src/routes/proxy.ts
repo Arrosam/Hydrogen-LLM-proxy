@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { addUsage, reasoningOf, textOf, ZERO_USAGE, type Family, type IRRequest, type IRUsage } from "../core/ir";
 import { ingressAdapterFor } from "../core/formats";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
-import { runServiceJson, runServiceStream, type JsonSuccess, type StreamSuccess } from "../core/proxy/run";
+import { runServiceBuffered, runServiceStream, type JsonSuccess, type StreamSuccess } from "../core/proxy/run";
 import { runServiceDef } from "../core/proxy/invoke";
 import { countAttempts, isStreamPlan, runAgent, type AgentStreamPlan, type ServiceCall } from "../core/agents/engine";
 import { isAgent, type AgentDef, type ServiceDef, type ServiceSteps } from "../core/services/schema";
@@ -303,11 +303,12 @@ function replayBuffered(
   return sendSse(reply, streamFromIRResponse(ingress, respIR, { model: ctx.serviceName }));
 }
 
-/** Reliable streaming for a Model Service: make a plain non-streaming upstream
- * request (atomic -- a dropped body fails JSON parsing and retries under the
- * step's rules, rather than being accepted as a partial stream), then replay
- * the complete result as a stream. The client gets a complete response or a
- * clean 502 -- never a partial stream -- at the cost of first-token latency. */
+/** Reliable streaming for a Model Service: stream the upstream response and
+ * buffer it (a truncated stream retries under the step's rules), then replay
+ * the complete result. Streaming the upstream (rather than a plain
+ * non-streaming request) is essential to capture reasoning from providers that
+ * only emit it on streams. The client gets a complete response or a clean 502 --
+ * never a partial stream -- at the cost of first-token latency. */
 async function handleReliableStream(
   reply: FastifyReply,
   ingress: Family,
@@ -315,7 +316,7 @@ async function handleReliableStream(
   def: ServiceSteps,
   ctx: RequestCtx,
 ): Promise<unknown> {
-  const { result, path } = await runServiceJson(ir, def);
+  const { result, path } = await runServiceBuffered(ir, def);
   if (!result.ok) {
     return replyFailure(reply, ingress, ctx, result, { streaming: true, attemptPath: path, attempts: path.length });
   }
@@ -329,9 +330,9 @@ async function handleReliableStream(
  * through nested Micro Agents too. Only when the returned output is decided by
  * a transition (or agent.output points at an earlier stage) does the agent
  * finish buffered and emit the result as a fake stream. With reliableStreaming
- * on, no stage streams: every stage makes a plain non-streaming upstream
- * request (which can't truncate mid-body) and the complete result is replayed
- * as a stream. */
+ * on, the terminal stage is never streamed directly -- the whole agent runs
+ * buffered (every stage streams its upstream and buffers, retrying a truncated
+ * stream) and the complete result is replayed. */
 async function handleAgentStream(
   reply: FastifyReply,
   ingress: Family,
@@ -340,7 +341,7 @@ async function handleAgentStream(
   ctx: RequestCtx,
 ): Promise<unknown> {
   const outcome = agent.reliableStreaming
-    ? await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { nonStreaming: true })
+    ? await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName])
     : await runAgent(ir, agent, resolveAgentStage, [ctx.serviceName], { streamTerminal: true });
   if (isStreamPlan(outcome)) return streamTerminalStage(reply, ingress, outcome, ctx);
 

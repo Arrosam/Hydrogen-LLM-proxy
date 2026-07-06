@@ -18,7 +18,7 @@
 import { genId } from "../../util/ids";
 import { getConfig } from "../../context";
 import { serializeForLog } from "../../util/logPayload";
-import { runServiceBuffered, runServiceJson, type JsonSuccess } from "../proxy/run";
+import { runServiceBuffered, type JsonSuccess } from "../proxy/run";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "../services/engine";
 import type { AgentCondition, AgentDef, AgentOcr, AgentStage, ServiceSteps } from "../services/schema";
 
@@ -483,17 +483,16 @@ export function countAttempts(calls: ServiceCall[]): number {
 }
 
 /** Invoke a Model Service (its resilience steps) and record it as one call.
- * The upstream call normally streams and is buffered here (runServiceBuffered)
- * to capture stream-only reasoning; in reliable mode it is a plain
- * non-streaming request (runServiceJson), which can't truncate mid-body. */
+ * The upstream call streams and is buffered here (runServiceBuffered) so
+ * reasoning from stream-only providers is captured and a truncated stream is
+ * retried. */
 async function callModelService(
   stageIR: IRRequest,
   steps: ServiceSteps,
   meta: { stage: string; service?: string },
-  nonStreaming = false,
 ): Promise<{ call: ServiceCall; result: AttemptResult<JsonSuccess> }> {
   const started = Date.now();
-  const { result, path } = await (nonStreaming ? runServiceJson : runServiceBuffered)(stageIR, steps);
+  const { result, path } = await runServiceBuffered(stageIR, steps);
   const call: ServiceCall = {
     stage: meta.stage,
     service: meta.service ?? "(inline)",
@@ -553,26 +552,20 @@ export function isStreamPlan(x: AgentRunResult | AgentStreamPlan): x is AgentStr
   return (x as AgentStreamPlan).kind === "stream";
 }
 
-export function runAgent(
-  ir: IRRequest,
-  agent: AgentDef,
-  resolve: StageResolver,
-  stack?: string[],
-  opts?: { nonStreaming?: boolean },
-): Promise<AgentRunResult>;
+export function runAgent(ir: IRRequest, agent: AgentDef, resolve: StageResolver, stack?: string[]): Promise<AgentRunResult>;
 export function runAgent(
   ir: IRRequest,
   agent: AgentDef,
   resolve: StageResolver,
   stack: string[],
-  opts: { streamTerminal: true; nonStreaming?: boolean },
+  opts: { streamTerminal: true },
 ): Promise<AgentRunResult | AgentStreamPlan>;
 export async function runAgent(
   ir: IRRequest,
   agent: AgentDef,
   resolve: StageResolver,
   stack: string[] = [],
-  opts: { streamTerminal?: boolean; nonStreaming?: boolean } = {},
+  opts: { streamTerminal?: boolean } = {},
 ): Promise<AgentRunResult | AgentStreamPlan> {
   const byName = new Map(agent.stages.map((s, i) => [s.name, i]));
   const outputs: Record<string, string> = {};
@@ -602,7 +595,7 @@ export async function runAgent(
         const steps = resolveOcrSteps(agent, ocr, resolve);
         if (!steps.ok) return error(steps.message);
         const ocrIR = buildOcrRequestIR(ir, images, ocr);
-        const { call, result } = await callModelService(ocrIR, steps.steps, { stage: "(ocr)", service: ocr.service }, opts.nonStreaming);
+        const { call, result } = await callModelService(ocrIR, steps.steps, { stage: "(ocr)", service: ocr.service });
         calls.push(call);
         if (!result.ok) return fail(result);
         usage = addUsage(usage, result.value.ir.usage);
@@ -652,7 +645,7 @@ export async function runAgent(
               usage,
             };
           }
-          const { call, result } = await callModelService(stageIR, steps, { stage: stage.name, service: stage.service }, opts.nonStreaming);
+          const { call, result } = await callModelService(stageIR, steps, { stage: stage.name, service: stage.service });
           calls.push(call);
           if (!result.ok) return fail(result);
           commit(stage.name, result.value);
@@ -677,7 +670,7 @@ export async function runAgent(
           // terminal Model Service streams through all nesting levels.
           const sub = streamable
             ? await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name], { streamTerminal: true })
-            : await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name], { nonStreaming: opts.nonStreaming });
+            : await runAgent(stageIR, exec.agent, resolve, [...stack, exec.name]);
           wrapper.calls = sub.calls;
           calls.push(wrapper);
           if (isStreamPlan(sub)) {
