@@ -347,5 +347,7 @@ export function nextStep(
       return j != null && j > idx ? { index: j } : { end: true };
     }
   }
-  return { end: true };
+  // No transition matched: fall through to the next stage (the loop ends
+  // naturally after the last one).
+  return { index: idx + 1 };
 }

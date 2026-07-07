@@ -9,12 +9,9 @@ import { useToast } from "../components/Toast";
 import type { Provider, ProviderType } from "../types";
 
 const TYPE_LABELS: Record<ProviderType, string> = {
-  // "openai" and "openai_compatible" are the same wire format (Chat
-  // Completions); the legacy "openai" value reads the same as compatible.
-  openai: "OpenAI (Chat Completions)",
-  anthropic: "Anthropic",
-  openai_compatible: "OpenAI (Chat Completions)",
+  openai_completion: "OpenAI (Chat Completions)",
   openai_responses: "OpenAI (Responses API)",
+  anthropic: "Anthropic",
 };
 
 interface FormState {
@@ -24,15 +21,17 @@ interface FormState {
   baseUrl: string;
   apiKey: string;
   extraHeaders: string;
+  maxOutputTokens: string;
   enabled: boolean;
 }
 
 const EMPTY: FormState = {
   name: "",
-  type: "openai_compatible",
+  type: "openai_completion",
   baseUrl: "",
   apiKey: "",
   extraHeaders: "",
+  maxOutputTokens: "",
   enabled: true,
 };
 
@@ -50,11 +49,11 @@ export function Providers() {
     setForm({
       id: p.id,
       name: p.name,
-      // Legacy "openai" collapses into "openai_compatible" (identical format).
-      type: p.type === "openai" ? "openai_compatible" : p.type,
+      type: p.type,
       baseUrl: p.baseUrl,
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
+      maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
       enabled: p.enabled,
     });
 
@@ -69,6 +68,11 @@ export function Providers() {
         return;
       }
     }
+    const motRaw = form.maxOutputTokens.trim();
+    if (motRaw && !/^[1-9]\d*$/.test(motRaw)) {
+      toast.error("Max output tokens must be a positive integer");
+      return;
+    }
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -76,6 +80,7 @@ export function Providers() {
         type: form.type,
         baseUrl: form.baseUrl,
         extraHeaders,
+        maxOutputTokens: motRaw ? Number(motRaw) : null,
         enabled: form.enabled,
       };
       if (form.apiKey) payload.apiKey = form.apiKey;
@@ -213,7 +218,7 @@ export function Providers() {
             <div>
               <label className="label">Type</label>
               <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
-                <option value="openai_compatible">OpenAI (Chat Completions)</option>
+                <option value="openai_completion">OpenAI (Chat Completions)</option>
                 <option value="openai_responses">OpenAI (Responses API)</option>
                 <option value="anthropic">Anthropic</option>
               </select>
@@ -236,6 +241,17 @@ export function Providers() {
             <div>
               <label className="label">Extra headers (JSON, optional)</label>
               <textarea className="input font-mono text-xs" rows={3} value={form.extraHeaders} onChange={(e) => setForm({ ...form, extraHeaders: e.target.value })} placeholder='{"x-custom": "value"}' />
+            </div>
+            <div>
+              <label className="label">Max output tokens <span className="normal-case text-ink-500">(optional cap)</span></label>
+              <input
+                className="input font-mono text-xs"
+                inputMode="numeric"
+                value={form.maxOutputTokens}
+                onChange={(e) => setForm({ ...form, maxOutputTokens: e.target.value })}
+                placeholder="e.g. 131072"
+              />
+              <p className="mt-1 text-xs text-ink-500">Hard cap this provider accepts; thinking budgets are fit under it so requests aren't rejected.</p>
             </div>
             <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Enabled" />
           </div>
