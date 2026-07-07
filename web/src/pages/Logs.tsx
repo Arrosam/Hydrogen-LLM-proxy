@@ -44,7 +44,17 @@ interface ServiceCallEntry {
 interface LogDetail extends LogSummary {
   attemptPath: unknown;
   requestPayload: string | null;
+  upstreamRequestPayload: string | null;
   responsePayload: string | null;
+  // Full HTTP request/response capture (API keys redacted by the backend).
+  requestMethod: string | null;
+  requestPath: string | null;
+  requestQuery: string | null;
+  requestHeaders: Record<string, string> | null;
+  responseHeaders: Record<string, string> | null;
+  traceId: string | null;
+  servedModel: string | null;
+  servedProvider: string | null;
 }
 
 type PayloadView = "formatted" | "json";
@@ -281,7 +291,23 @@ export function Logs() {
               <Meta label="Route" value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
               <Meta label="Streaming" value={detail.streaming ? "yes" : "no"} />
               <Meta label="Tokens" value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
+              <Meta label="Served model" value={detail.servedModel ?? "-"} />
+              <Meta label="Served provider" value={detail.servedProvider ?? "-"} />
+              <Meta label="Trace" value={detail.traceId ?? "-"} />
             </div>
+
+            <HttpInfoBlock
+              title="Client request (received)"
+              method={detail.requestMethod}
+              path={detail.requestPath}
+              query={detail.requestQuery}
+              headers={detail.requestHeaders}
+            />
+            <HttpInfoBlock
+              title="Upstream response (received)"
+              status={detail.httpStatus}
+              headers={detail.responseHeaders}
+            />
 
             {isCallLog(detail.attemptPath) ? (
               <div>
@@ -308,7 +334,8 @@ export function Logs() {
               </div>
             )}
 
-            <PayloadBlock title="Request payload" raw={detail.requestPayload} view={payloadView} />
+            <PayloadBlock title="Client request payload" raw={detail.requestPayload} view={payloadView} defaultCollapsed />
+            <PayloadBlock title="Upstream request payload (sent, with effective params)" raw={detail.upstreamRequestPayload} view={payloadView} defaultCollapsed />
             <PayloadBlock title="Response payload" raw={detail.responsePayload} view={payloadView} />
           </div>
         )}
@@ -412,7 +439,7 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
               <AttemptsTable attempts={call.attempts} />
             </div>
           )}
-          <PayloadBlock title="Request" raw={call.request ?? null} view={view} />
+          <PayloadBlock title="Request" raw={call.request ?? null} view={view} defaultCollapsed />
           <PayloadBlock title="Response" raw={call.response ?? null} view={view} />
           {(call.calls?.length ?? 0) > 0 && (
             <div>
@@ -504,7 +531,7 @@ function AttemptPathTable({
                   <tr>
                     <td colSpan={cols} className="bg-ink-950/40 p-3">
                       <div className="space-y-3">
-                        <PayloadBlock title={`Stage "${a.stage}" request`} raw={a.request ?? null} view={view} />
+                        <PayloadBlock title={`Stage "${a.stage}" request`} raw={a.request ?? null} view={view} defaultCollapsed />
                         <PayloadBlock title={`Stage "${a.stage}" response`} raw={a.response ?? null} view={view} />
                       </div>
                     </td>
@@ -572,18 +599,81 @@ function Transcript({ data }: { data: PayloadMeta }) {
   );
 }
 
-function PayloadBlock({ title, raw, view }: { title: string; raw: string | null; view: PayloadView }) {
-  const parsed = useMemo(() => parsePayload(raw), [raw]);
-  const showFormatted = view === "formatted" && parsed;
+function HttpInfoBlock({
+  title,
+  method,
+  path,
+  query,
+  status,
+  headers,
+}: {
+  title: string;
+  method?: string | null;
+  path?: string | null;
+  query?: string | null;
+  status?: number;
+  headers?: Record<string, string> | null;
+}) {
+  const hasAny = Boolean(method || path || query || status || (headers && Object.keys(headers).length > 0));
+  if (!hasAny) {
+    return (
+      <div>
+        <h4 className="label">{title}</h4>
+        <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">— not recorded —</div>
+      </div>
+    );
+  }
   return (
     <div>
       <h4 className="label">{title}</h4>
-      {raw == null ? (
-        <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">— not recorded —</div>
-      ) : showFormatted ? (
-        <Transcript data={parsed} />
-      ) : (
-        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs leading-relaxed text-ink-300">{pretty(raw)}</pre>
+      <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
+        {(method || path || status) && (
+          <div className="flex items-center gap-2 border-b border-ink-800/70 px-3 py-1.5 font-mono text-xs">
+            {status != null && <StatusBadge status={status} />}
+            {method && <span className="text-brand-400">{method}</span>}
+            {path && <span className="text-ink-200">{path}{query ? `?${query}` : ""}</span>}
+          </div>
+        )}
+        {headers && Object.keys(headers).length > 0 && (
+          <table className="w-full text-xs">
+            <tbody>
+              {Object.entries(headers).map(([k, v]) => (
+                <tr key={k} className="border-b border-ink-800/40 last:border-0">
+                  <td className="whitespace-nowrap px-3 py-1 align-top font-mono text-ink-400">{k}</td>
+                  <td className="break-all px-3 py-1 font-mono text-ink-300">{v}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PayloadBlock({ title, raw, view, defaultCollapsed = false }: { title: string; raw: string | null; view: PayloadView; defaultCollapsed?: boolean }) {
+  const parsed = useMemo(() => parsePayload(raw), [raw]);
+  const showFormatted = view === "formatted" && parsed;
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  return (
+    <div>
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 text-left"
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+      >
+        <i className={`bi ${collapsed ? "bi-chevron-right" : "bi-chevron-down"} text-ink-500`} />
+        <h4 className="label m-0 cursor-pointer select-none">{title}</h4>
+      </button>
+      {!collapsed && (
+        raw == null ? (
+          <div className="mt-2 rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">— not recorded —</div>
+        ) : showFormatted ? (
+          <div className="mt-2"><Transcript data={parsed} /></div>
+        ) : (
+          <pre className="mt-2 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs leading-relaxed text-ink-300">{pretty(raw)}</pre>
+        )
       )}
     </div>
   );

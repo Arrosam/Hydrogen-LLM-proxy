@@ -1,0 +1,1 @@
+ALTER TABLE `request_logs` ADD `upstream_request_body` text;

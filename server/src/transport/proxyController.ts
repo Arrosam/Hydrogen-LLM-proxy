@@ -146,6 +146,7 @@ export class ProxyController {
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: value.modelName, servedProvider: value.providerName,
       ingress, egress: value.family, streaming: false, httpStatus: 200, http,
+      upstreamRequest: value.upstreamRequest,
       responseBody: clientBody, usage: value.response.usage, latencyMs: Date.now() - started,
       attempts: outcome.attempts, attemptPath: outcome.attemptPath,
     });
@@ -202,6 +203,7 @@ export class ProxyController {
           traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
           servedModel: value.modelName, servedProvider: value.providerName,
           ingress: ctx.ingress, egress: value.family, streaming: true, httpStatus: status, http: ctx.http,
+          upstreamRequest: value.upstreamRequest,
           responseBody, usage, latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
         });
         self.deps.usage.record(ctx.token.id, usage.totalTokens);
@@ -280,6 +282,7 @@ export class ProxyController {
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: r.status < 400 ? res.target.modelName : null, servedProvider: r.status < 400 ? res.target.providerName : null,
       ingress: "openai_completion", egress: "openai_completion", streaming: false, httpStatus: r.status, http,
+      upstreamRequest: upstreamBody,
       responseBody: r.status < 400 ? { ok: true } : r.json, usage, latencyMs: Date.now() - started,
       attempts: 1, attemptPath: [{ step: 1, attempt: 1, model: first.model, provider: first.provider, status: r.status, kind: r.status < 400 ? "ok" : "http", latencyMs: Date.now() - started }],
       error: r.status >= 400 ? extractUpstreamMessage(r.json) ?? `upstream ${r.status}` : null,

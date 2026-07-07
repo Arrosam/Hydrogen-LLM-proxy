@@ -21,6 +21,8 @@ export interface LogInsert {
   requestQuery: string | null;
   requestHeaders: Record<string, string> | null;
   requestBody: string | null;
+  /** The exact wire body sent upstream (after service overrides/translation). */
+  upstreamRequestBody: string | null;
   responseHeaders: Record<string, string> | null;
   responseBody: string | null;
   promptTokens: number;
@@ -122,7 +124,7 @@ export class RequestLogRepo {
   }
 
   /** Full log row for the detail view, with the dashboard's field aliases. */
-  get(id: number): (RequestLog & { createdAtMs: number; serviceName: string | null; requestPayload: string | null; responsePayload: string | null }) | undefined {
+  get(id: number): (RequestLog & { createdAtMs: number; serviceName: string | null; requestPayload: string | null; upstreamRequestPayload: string | null; responsePayload: string | null }) | undefined {
     const row = this.db.select().from(requestLogs).where(eq(requestLogs.id, id)).get();
     if (!row) return undefined;
     return {
@@ -131,6 +133,7 @@ export class RequestLogRepo {
       // Aliases the existing dashboard detail view reads.
       serviceName: row.requestedService,
       requestPayload: row.requestBody,
+      upstreamRequestPayload: row.upstreamRequestBody,
       responsePayload: row.responseBody,
     };
   }

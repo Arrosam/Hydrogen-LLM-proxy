@@ -25,6 +25,10 @@ export interface LogParams {
   streaming: boolean;
   httpStatus: number;
   http: HttpRequestInfo;
+  /** The exact wire body sent upstream (after service overrides/translation),
+   * so the effective temperature/thinking/etc. is visible. Null when no upstream
+   * call was made (auth/resolve errors) or for embeddings passthrough. */
+  upstreamRequest?: Record<string, unknown> | null;
   responseHeaders?: Record<string, unknown> | null;
   responseBody?: unknown;
   usage?: Usage;
@@ -63,6 +67,7 @@ export class RequestLogger {
       requestQuery: p.http.query || null,
       requestHeaders: redactHeaders(p.http.headers),
       requestBody: serializeForLog(p.http.body, this.maxChars),
+      upstreamRequestBody: p.upstreamRequest != null ? serializeForLog(p.upstreamRequest, this.maxChars) : null,
       responseHeaders: p.responseHeaders ? redactHeaders(p.responseHeaders) : null,
       responseBody: p.responseBody != null ? serializeForLog(p.responseBody, this.maxChars) : null,
       promptTokens: usage.promptTokens,

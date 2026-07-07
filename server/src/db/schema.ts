@@ -157,6 +157,10 @@ export const requestLogs = sqliteTable(
     requestQuery: text("request_query"),
     requestHeaders: text("request_headers_json", { mode: "json" }).$type<Record<string, string>>(),
     requestBody: text("request_body"),
+    /** The exact wire body sent upstream (after service overrides/translation),
+     * for seeing the effective temperature/thinking/etc. Null when no upstream
+     * call was made (auth/resolve errors) or for embeddings passthrough. */
+    upstreamRequestBody: text("upstream_request_body"),
     responseHeaders: text("response_headers_json", { mode: "json" }).$type<Record<string, string>>(),
     responseBody: text("response_body"),
 
