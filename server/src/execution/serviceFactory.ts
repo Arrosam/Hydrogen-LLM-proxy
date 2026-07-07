@@ -1,6 +1,6 @@
 import type { ModelServiceRow } from "../db/schema";
 import type { ServiceRepo } from "../persistence/serviceRepo";
-import { isAgent, parseService } from "./definition";
+import { isAgent, parseService, type ServiceDef } from "./definition";
 import { ModelService, type ServiceDeps } from "./modelService";
 import { MicroAgent, type MicroAgentDeps, type ResolveResult, type ServiceResolver } from "./microAgent";
 
@@ -21,11 +21,16 @@ export class ServiceFactory implements ServiceResolver {
     return { ...this.deps, resolver: this, logMaxChars: this.logMaxChars };
   }
 
-  /** Build the top-level executor for a request. Throws ZodError on a bad definition. */
+  /** Build an executor from an already-parsed definition (e.g. an ad-hoc dry-run). */
+  buildDef(def: ServiceDef): { executor: ModelService; isAgent: boolean } {
+    return isAgent(def)
+      ? { executor: new MicroAgent(def, this.microDeps()), isAgent: true }
+      : { executor: new ModelService(def, this.deps), isAgent: false };
+  }
+
+  /** Build the top-level executor for a saved service. Throws ZodError on a bad definition. */
   forRow(row: ModelServiceRow): { executor: ModelService; isAgent: boolean } {
-    const def = parseService(row.definition);
-    const agent = isAgent(def);
-    return { executor: agent ? new MicroAgent(def, this.microDeps()) : new ModelService(def, this.deps), isAgent: agent };
+    return this.buildDef(parseService(row.definition));
   }
 
   resolve(name: string): ResolveResult {

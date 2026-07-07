@@ -5,5 +5,5 @@
     "noEmit": true
   },
   "include": ["src", "drizzle.config.ts"],
-  "exclude": ["src/auth", "legacy"]
+  "exclude": ["legacy"]
 }
