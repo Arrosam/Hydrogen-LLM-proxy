@@ -1,6 +1,6 @@
 {
   "name": "hydrogen-llm-proxy",
-  "version": "0.6.4",
+  "version": "1.0.0B",
   "private": true,
   "description": "Hydrogen - a lightweight, self-hosted personal LLM proxy",
   "license": "MIT",
