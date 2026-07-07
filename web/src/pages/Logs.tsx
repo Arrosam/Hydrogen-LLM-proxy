@@ -1,8 +1,10 @@
 ﻿import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle } from "../components/common";
+import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
+import { useToast } from "../components/Toast";
+import { useAuth } from "../auth";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
 import type { LogSummary, ModelService } from "../types";
@@ -88,6 +90,10 @@ export function Logs() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [payloadView, setPayloadView] = useState<PayloadView>("formatted");
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const [clearing, setClearing] = useState(false);
+  const toast = useToast();
+  const { user } = useAuth();
+  const { confirm, confirmEl } = useConfirm();
 
   const toggleRow = (i: number) =>
     setExpandedRows((prev) => {
@@ -141,6 +147,25 @@ export function Logs() {
 
   const serviceName = (id: number | null) => (id == null ? "-" : services.find((m) => m.id === id)?.name ?? `#${id}`);
 
+  const clearAll = async () => {
+    const ok = await confirm(
+      "Delete all logs",
+      `This permanently deletes all ${formatNumber(total)} request log entries and reclaims the disk space. This cannot be undone.`,
+    );
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const r = await api.del<{ deleted: number }>("/logs");
+      toast.success(`Deleted ${formatNumber(r.deleted)} log entries`);
+      setOffset(0);
+      load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to clear logs");
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div>
       <PageHeader title="Logs" subtitle="Every request, its resolved attempt path, and payloads." icon="bi-journal-text" />
@@ -176,6 +201,12 @@ export function Logs() {
         )}
         <div className="flex-1" />
         <span className="text-xs text-ink-500">{formatNumber(total)} total</span>
+        {user?.role === "admin" && (
+          <button className="btn-danger btn-xs" onClick={clearAll} disabled={clearing || total === 0} title="Delete all log entries">
+            <i className={`bi ${clearing ? "bi-arrow-repeat animate-spin" : "bi-trash3"}`} />
+            Clear all
+          </button>
+        )}
       </div>
 
       {loading && <Spinner />}
@@ -282,6 +313,7 @@ export function Logs() {
           </div>
         )}
       </Modal>
+      {confirmEl}
     </div>
   );
 }

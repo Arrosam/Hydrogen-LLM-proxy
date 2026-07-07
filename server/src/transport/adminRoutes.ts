@@ -492,6 +492,18 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
     return { log };
   });
 
+  // Clear the entire request log (and reclaim the file space).
+  app.delete("/logs", async (req, reply) => {
+    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can clear logs" });
+    const deleted = c.logs.deleteAll();
+    try {
+      c.sqlite.exec("VACUUM");
+    } catch {
+      /* best-effort space reclaim; the rows are already gone */
+    }
+    return { deleted };
+  });
+
   const range = (req: { query: unknown }): { from?: number; to?: number } => {
     const q = req.query as Record<string, string>;
     return { from: numParam(q.from), to: numParam(q.to) };

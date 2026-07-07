@@ -73,6 +73,11 @@ export class RequestLogRepo {
     this.db.insert(requestLogs).values(row).run();
   }
 
+  /** Delete every request log row. Returns the number deleted. */
+  deleteAll(): number {
+    return this.db.delete(requestLogs).run().changes ?? 0;
+  }
+
   private buildWhere(q: LogQuery): SQL | undefined {
     const conds: SQL[] = [];
     if (q.tokenId != null) conds.push(eq(requestLogs.tokenId, q.tokenId));
