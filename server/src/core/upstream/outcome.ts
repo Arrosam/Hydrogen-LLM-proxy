@@ -12,12 +12,16 @@ export interface SendFailure {
   message: string;
   /** The upstream error body (parsed JSON when possible), for logging. */
   body?: unknown;
+  /** The exact wire body that was sent upstream, for the request log. */
+  sentBody?: Record<string, unknown>;
 }
 
 /** A completed, buffered response. */
 export interface SendSuccess {
   ok: true;
   response: Response;
+  /** The exact wire body that was sent upstream (overrides + translation applied). */
+  sentBody: Record<string, unknown>;
 }
 
 export type SendResult = SendSuccess | SendFailure;
@@ -27,6 +31,8 @@ export interface RelaySuccess {
   ok: true;
   status: number;
   events: AsyncGenerator<StreamEvent>;
+  /** The exact wire body that was sent upstream. */
+  sentBody: Record<string, unknown>;
 }
 
 export type RelayResult = RelaySuccess | SendFailure;
