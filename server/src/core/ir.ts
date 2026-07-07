@@ -164,3 +164,33 @@ export function normalizeMessages(messages: IRMessage[]): IRMessage[] {
   }
   return out;
 }
+
+/**
+ * Drop reasoning/thinking blocks carried in from earlier turns of the request
+ * history. Resending them is what makes a continued conversation lose its
+ * thinking while a fresh one keeps it: an Anthropic upstream needs a valid
+ * signature on a resent thinking block (relayed/cross-provider ones don't have
+ * one), DeepSeek rejects reasoning_content sent back to it, and other providers
+ * just don't re-engage thinking when the history already "thought".
+ *
+ * Reasoning is kept only inside the CURRENT turn's tool-use loop -- the messages
+ * after the last user message that carries real input (text/image); a pure
+ * tool_result is a continuation, not a new turn -- because Anthropic *requires*
+ * the thinking block there when a tool_result is sent back. Everything before
+ * that is a completed turn whose reasoning is stale and dropped.
+ */
+export function stripStaleReasoning(messages: IRMessage[]): IRMessage[] {
+  let turnStart = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user" && m.content.some((p) => p.type === "text" || p.type === "image")) {
+      turnStart = i;
+      break;
+    }
+  }
+  if (turnStart <= 0) return messages; // no prior turn to strip
+  return messages.map((m, i) => {
+    if (i >= turnStart || m.role !== "assistant" || !m.content.some((p) => p.type === "reasoning")) return m;
+    return { ...m, content: m.content.filter((p) => p.type !== "reasoning") };
+  });
+}

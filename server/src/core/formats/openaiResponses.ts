@@ -1,5 +1,6 @@
 import {
   normalizeMessages,
+  stripStaleReasoning,
   reasoningOf,
   textOf,
   type IRContentPart,
@@ -148,7 +149,7 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
   return {
     requestedModel: String(body.model ?? ""),
     system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
-    messages: normalizeMessages(messages),
+    messages: stripStaleReasoning(normalizeMessages(messages)),
     tools: parseTools(body.tools),
     toolChoice: parseToolChoice(body.tool_choice),
     maxTokens: numOrUndef(body.max_output_tokens),

@@ -9,6 +9,7 @@
   type IRToolChoice,
   type IRTool,
   normalizeMessages,
+  stripStaleReasoning,
   textOf,
 } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
@@ -146,7 +147,7 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
   return {
     requestedModel: String(body.model ?? ""),
     system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
-    messages: normalizeMessages(messages),
+    messages: stripStaleReasoning(normalizeMessages(messages)),
     tools: parseTools(body.tools),
     toolChoice: parseToolChoice(body.tool_choice),
     maxTokens: numOrUndef(body.max_completion_tokens) ?? numOrUndef(body.max_tokens),

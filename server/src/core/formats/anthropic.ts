@@ -10,6 +10,7 @@
   type IRToolChoice,
   type IRTool,
   normalizeMessages,
+  stripStaleReasoning,
 } from "../ir";
 import { genId, nowSeconds } from "../../util/ids";
 import { numOrUndef, pickExtra } from "./util";
@@ -139,7 +140,7 @@ export function requestToIR(body: Record<string, unknown>): IRRequest {
   return {
     requestedModel: String(body.model ?? ""),
     system: systemToText(body.system),
-    messages: normalizeMessages(messages),
+    messages: stripStaleReasoning(normalizeMessages(messages)),
     tools: parseTools(body.tools),
     toolChoice: parseToolChoice(body.tool_choice),
     maxTokens: numOrUndef(body.max_tokens),
