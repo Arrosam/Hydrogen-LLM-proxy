@@ -1,6 +1,7 @@
 import { buildRequest } from "../core/format/registry";
 import type { RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
+import { fabricateStream } from "../core/ir/stream";
 import type { SendTarget, Transport } from "../core/upstream/transport";
 import type { Catalog } from "../catalog/catalog";
 import { runSteps } from "./steps";
@@ -16,6 +17,10 @@ export interface ServiceDeps {
 export interface InvokeOptions {
   /** Aborts the upstream call (client disconnect). */
   signal?: AbortSignal;
+  /** Override the step-chain timeout (an agent stage may set its own). */
+  timeoutMs?: number;
+  /** Names of the agents currently on the call stack (nested-agent cycle guard). */
+  stack?: string[];
 }
 
 /**
@@ -59,7 +64,7 @@ export class ModelService {
         url: t.url,
         headers: t.headers,
         providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs: this.def.timeoutMs,
+        timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,
       };
       const sent = await egress.send(this.deps.transport, target);
@@ -84,7 +89,37 @@ export class ModelService {
     return { result, attemptPath: path, attempts: path.length };
   }
 
+  /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by
+   * reliable-streaming Model Services and Micro Agents (which always buffer). */
+  protected fabricated(inv: Invocation): StreamInvocation {
+    if (!inv.result.ok) return { result: inv.result, attemptPath: inv.attemptPath, attempts: inv.attempts };
+    const v = inv.result.value;
+    return {
+      result: {
+        ok: true,
+        value: {
+          events: fabricateStream(v.response.data()),
+          family: v.family,
+          upstreamModel: v.upstreamModel,
+          providerName: v.providerName,
+          modelName: v.modelName,
+          upstreamRequest: v.upstreamRequest,
+          // Reasoning was already stripped in invoke() if the level was disabled.
+          dropReasoning: false,
+        },
+      },
+      attemptPath: inv.attemptPath,
+      attempts: inv.attempts,
+    };
+  }
+
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
+    // Reliable streaming: buffer the upstream (retrying a truncated stream) and
+    // replay the complete result as a paced stream -- the client never gets a
+    // partial/truncated stream, at the cost of first-token latency.
+    if (this.def.reliableStreaming) {
+      return this.fabricated(await this.invoke(request, overrides, opts));
+    }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step) => {
       const res = this.deps.catalog.resolve(step.model, step.provider);
       if (!res.ok) {
@@ -98,7 +133,7 @@ export class ModelService {
         url: t.url,
         headers: t.headers,
         providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs: this.def.timeoutMs,
+        timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,
       };
       const sent = await egress.relay(this.deps.transport, target);

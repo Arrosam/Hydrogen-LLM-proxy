@@ -91,3 +91,19 @@ export function mergeParams(base: GenerationParams, patch?: Partial<GenerationPa
   }
   return out;
 }
+
+/**
+ * Layer two override patches, with `patch` winning on any present key (undefined
+ * values do not clobber). Used to fold an outer agent's overrides over a stage's
+ * own config before handing them to the stage's Model Service.
+ */
+export function mergeOverrides(base?: RequestOverrides, patch?: RequestOverrides): RequestOverrides | undefined {
+  if (!base) return patch;
+  if (!patch) return base;
+  const out: RequestOverrides = { ...base };
+  for (const key of Object.keys(patch) as (keyof RequestOverrides)[]) {
+    const v = patch[key];
+    if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+  }
+  return out;
+}
