@@ -5,8 +5,12 @@
  * provider supports (carrying anything unmapped through `extra`).
  */
 
-/** The wire family a client speaks or an upstream provider expects. */
-export type Family = "openai" | "anthropic" | "openai_responses";
+/**
+ * The wire family a client speaks or an upstream provider expects. There are
+ * exactly three, and a provider's type is one of them 1:1 (no separate
+ * "openai_compatible": a compatible endpoint is just openai_completion).
+ */
+export type Family = "openai_completion" | "anthropic" | "openai_responses";
 
 /** Named reasoning-effort levels (OpenAI `reasoning_effort`; mapped to a token
  * budget on Anthropic upstreams). */

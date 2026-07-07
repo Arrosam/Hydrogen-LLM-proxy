@@ -32,7 +32,7 @@ export const providers = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     name: text("name").notNull(),
-    type: text("type", { enum: ["openai", "anthropic", "openai_compatible", "openai_responses"] }).notNull(),
+    type: text("type", { enum: ["openai_completion", "openai_responses", "anthropic"] }).notNull(),
     baseUrl: text("base_url").notNull(),
     keyCiphertext: text("key_ciphertext"),
     keyIv: text("key_iv"),
@@ -146,8 +146,8 @@ export const requestLogs = sqliteTable(
     /** The provider that actually served the request (winning attempt). */
     servedProvider: text("served_provider"),
 
-    ingressFormat: text("ingress_format", { enum: ["openai", "anthropic", "openai_responses"] }).notNull(),
-    egressFormat: text("egress_format", { enum: ["openai", "anthropic", "openai_responses"] }),
+    ingressFormat: text("ingress_format", { enum: ["openai_completion", "anthropic", "openai_responses"] }).notNull(),
+    egressFormat: text("egress_format", { enum: ["openai_completion", "anthropic", "openai_responses"] }),
     streaming: integer("streaming", { mode: "boolean" }).notNull().default(false),
     httpStatus: integer("http_status").notNull(),
 
