@@ -530,8 +530,29 @@ function isValidAllowlistEntry(raw: string): boolean {
 }
 
 const AllowlistPut = z.object({ entries: z.array(z.string()).max(200) });
+const RetentionPut = z.object({ days: z.number().int().min(0).max(3650) });
 
 async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  // Log retention: keep only the most recent N days of request logs (0 = keep forever).
+  app.get("/log-retention", async () => ({ days: Number(c.settings.get("log_retention_days") ?? 0) || 0 }));
+
+  app.put("/log-retention", async (req, reply) => {
+    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change log retention" });
+    const parsed = parse(RetentionPut, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    c.settings.set("log_retention_days", String(parsed.data.days));
+    // Apply immediately so turning it on prunes the existing backlog now.
+    let pruned = 0;
+    if (parsed.data.days > 0) {
+      try {
+        pruned = c.pruner.pruneOlderThan(parsed.data.days);
+      } catch {
+        /* the setting is saved; the daily tick will retry */
+      }
+    }
+    return { days: parsed.data.days, pruned };
+  });
+
   app.get("/upstream-allowlist", async () => ({ entries: c.settings.allowlist() }));
 
   app.put("/upstream-allowlist", async (req, reply) => {
