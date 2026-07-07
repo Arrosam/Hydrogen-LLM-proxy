@@ -1,5 +1,5 @@
-import type { Family } from "../ir";
-import type { AttemptFailure } from "../services/engine";
+import type { Family } from "../format/family";
+import type { AttemptFailure } from "../../execution/steps";
 
 /** HTTP status a failed run maps to: the upstream's 4xx/5xx, else 502. */
 export function failureStatus(f: AttemptFailure): number {
@@ -28,11 +28,7 @@ export function extractUpstreamMessage(body: unknown): string | null {
 }
 
 /** Build an error response body in the client's wire format. */
-export function buildErrorBody(
-  family: Family,
-  status: number,
-  message: string,
-): Record<string, unknown> {
+export function buildErrorBody(family: Family, status: number, message: string): Record<string, unknown> {
   if (family === "anthropic") {
     return { type: "error", error: { type: anthropicErrorType(status), message } };
   }

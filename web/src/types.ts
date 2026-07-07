@@ -1,5 +1,5 @@
 ﻿export type Role = "admin" | "manager";
-export type ProviderType = "openai" | "anthropic" | "openai_compatible" | "openai_responses";
+export type ProviderType = "openai_completion" | "openai_responses" | "anthropic";
 
 export interface User {
   id: number;
@@ -17,6 +17,8 @@ export interface Provider {
   baseUrl: string;
   hasKey: boolean;
   extraHeaders: Record<string, string> | null;
+  /** Optional hard cap on output tokens (thinking budgets fit under it). null = none. */
+  maxOutputTokens: number | null;
   enabled: boolean;
   createdAt: number;
 }

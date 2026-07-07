@@ -4,5 +4,6 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src", "drizzle.config.ts", "test"]
+  "include": ["src", "drizzle.config.ts"],
+  "exclude": ["legacy"]
 }

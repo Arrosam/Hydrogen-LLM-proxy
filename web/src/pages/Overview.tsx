@@ -22,6 +22,8 @@ interface OverviewData {
   services: GroupCount[];
   models: GroupCount[];
   providers: GroupCount[];
+  /** The model/provider breakdown covered only the most recent N requests. */
+  modelsCapped: boolean;
 }
 
 function EndpointsCard() {
@@ -118,9 +120,9 @@ export function Overview() {
       api.get<StatsSummary>("/stats/summary"),
       api.get<{ points: TimePoint[] }>("/stats/timeseries"),
       api.get<{ groups: GroupCount[] }>("/stats/by-service"),
-      api.get<{ models: GroupCount[]; providers: GroupCount[] }>("/stats/by-model-provider"),
+      api.get<{ models: GroupCount[]; providers: GroupCount[]; capped?: boolean }>("/stats/by-model-provider"),
     ]);
-    return { summary, points: ts.points, services: svc.groups, models: mp.models, providers: mp.providers };
+    return { summary, points: ts.points, services: svc.groups, models: mp.models, providers: mp.providers, modelsCapped: mp.capped ?? false };
   });
 
   return (
@@ -174,6 +176,12 @@ export function Overview() {
             <TopList title="Top models" icon="bi-box" groups={data.models} />
             <TopList title="Top providers" icon="bi-hdd-network" groups={data.providers} />
           </div>
+          {data.modelsCapped && (
+            <p className="flex items-center gap-1.5 text-xs text-ink-500">
+              <i className="bi bi-info-circle" />
+              Model &amp; provider breakdown covers the most recent 100,000 requests. Totals above count all requests.
+            </p>
+          )}
         </div>
       )}
     </div>

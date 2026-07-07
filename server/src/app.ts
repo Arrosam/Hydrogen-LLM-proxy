@@ -1,19 +1,19 @@
-import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { ZodError } from "zod";
 import path from "node:path";
 import fs from "node:fs";
-import { getConfig } from "./context";
 import { resolveWebDir } from "./util/paths";
-import { adminRoutes } from "./routes/admin";
-import { proxyRoutes } from "./routes/proxy";
+import type { Container } from "./composition/container";
+import { adminRoutes } from "./transport/adminRoutes";
+import { ProxyController } from "./transport/proxyController";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB (allow image payloads)
 
-export async function buildApp(): Promise<FastifyInstance> {
-  const cfg = getConfig();
+export async function buildApp(c: Container): Promise<FastifyInstance> {
+  const cfg = c.config;
   const app = Fastify({
     bodyLimit: MAX_BODY_BYTES,
     trustProxy: true,
@@ -23,8 +23,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(fastifyCookie, { secret: cfg.sessionSecret });
   await app.register(fastifyRateLimit, { global: false, max: 100, timeWindow: "1 minute" });
 
-  // Uniform error handling.
-  app.setErrorHandler((err: FastifyError, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyReply) => {
     if (err instanceof ZodError) {
       return reply.code(400).send({ error: err.issues.map((i) => i.message).join("; ") });
     }
@@ -42,8 +41,17 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
-  await app.register(proxyRoutes);
-  await app.register(adminRoutes, { prefix: "/admin/api" });
+  new ProxyController({
+    services: c.services,
+    factory: c.factory,
+    tokens: c.tokens,
+    catalog: c.catalog,
+    transport: c.transport,
+    logger: c.requestLogger,
+    usage: c.usageMeter,
+  }).register(app);
+
+  await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
 
   await registerWebDashboard(app);
 
@@ -61,7 +69,6 @@ async function registerWebDashboard(app: FastifyInstance): Promise<void> {
 
   const indexHtml = path.join(webDir, "index.html");
   app.setNotFoundHandler((req, reply) => {
-    // API routes should 404 as JSON; everything else falls back to the SPA.
     if (req.url.startsWith("/v1") || req.url.startsWith("/admin/api") || req.url.startsWith("/healthz")) {
       return reply.code(404).send({ error: "not found" });
     }

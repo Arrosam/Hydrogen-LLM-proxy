@@ -5,15 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1782918755733,
-      "tag": "0000_fuzzy_thunderbolt",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1782996119742,
-      "tag": "0001_first_calypso",
+      "when": 1783417706057,
+      "tag": "0000_smooth_thing",
       "breakpoints": true
     }
   ]

@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { Family } from "../core/ir";
+import type { Family } from "../core/format/family";
 import { buildErrorBody } from "../core/proxy/errors";
-import { authenticateToken } from "../services/tokens";
+import type { TokenRepo } from "../persistence/tokenRepo";
 
 /** Extract a presented API key from either OpenAI or Anthropic style headers. */
 export function extractPresentedToken(req: FastifyRequest): string | null {
@@ -16,17 +16,17 @@ export function extractPresentedToken(req: FastifyRequest): string | null {
 
 /**
  * preHandler factory: authenticate the client token and enforce enabled/expiry/
- * quota. Errors are returned in the client's wire format (openai vs anthropic).
+ * quota. Errors are returned in the client's wire format. The token repo is
+ * injected (no global DB access).
  */
-export function requireClientToken(family: Family) {
+export function requireClientToken(tokens: TokenRepo, family: Family) {
   return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    const fail = (status: number, message: string) =>
-      reply.code(status).send(buildErrorBody(family, status, message));
+    const fail = (status: number, message: string) => reply.code(status).send(buildErrorBody(family, status, message));
 
     const presented = extractPresentedToken(req);
     if (!presented) return void (await fail(401, "Missing API key."));
 
-    const token = authenticateToken(presented);
+    const token = tokens.authenticate(presented);
     if (!token || !token.enabled) return void (await fail(401, "Invalid API key."));
 
     const expiresAt = token.expiresAt instanceof Date ? token.expiresAt.getTime() : token.expiresAt;

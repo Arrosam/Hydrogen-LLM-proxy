@@ -1,1 +1,0 @@
-ALTER TABLE `users` ADD `must_change_password` integer DEFAULT false NOT NULL;

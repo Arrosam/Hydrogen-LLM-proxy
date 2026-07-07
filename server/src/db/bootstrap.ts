@@ -18,10 +18,7 @@ export interface SeedResult {
  * ADMIN_PASSWORD was provided, the static default "password" is used and the
  * account is flagged to force a password change at first login.
  */
-export async function seedAdminIfEmpty(
-  db: DB,
-  admin: { username: string; password: string },
-): Promise<SeedResult> {
+export async function seedAdminIfEmpty(db: DB, admin: { username: string; password: string }): Promise<SeedResult> {
   const existing = db.select({ id: users.id }).from(users).limit(1).all();
   if (existing.length > 0) return { created: false };
 
@@ -31,13 +28,7 @@ export async function seedAdminIfEmpty(
   const passwordHash = await hashPassword(password);
 
   db.insert(users)
-    .values({
-      username: admin.username,
-      passwordHash,
-      role: "admin",
-      enabled: true,
-      mustChangePassword: mustChange,
-    })
+    .values({ username: admin.username, passwordHash, role: "admin", enabled: true, mustChangePassword: mustChange })
     .run();
 
   return { created: true, username: admin.username, password, generated: !provided, mustChange };

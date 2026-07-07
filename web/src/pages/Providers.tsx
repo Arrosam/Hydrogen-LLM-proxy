@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { useAuth } from "../auth";
@@ -9,12 +9,9 @@ import { useToast } from "../components/Toast";
 import type { Provider, ProviderType } from "../types";
 
 const TYPE_LABELS: Record<ProviderType, string> = {
-  // "openai" and "openai_compatible" are the same wire format (Chat
-  // Completions); the legacy "openai" value reads the same as compatible.
-  openai: "OpenAI (Chat Completions)",
-  anthropic: "Anthropic",
-  openai_compatible: "OpenAI (Chat Completions)",
+  openai_completion: "OpenAI (Chat Completions)",
   openai_responses: "OpenAI (Responses API)",
+  anthropic: "Anthropic",
 };
 
 interface FormState {
@@ -24,15 +21,17 @@ interface FormState {
   baseUrl: string;
   apiKey: string;
   extraHeaders: string;
+  maxOutputTokens: string;
   enabled: boolean;
 }
 
 const EMPTY: FormState = {
   name: "",
-  type: "openai_compatible",
+  type: "openai_completion",
   baseUrl: "",
   apiKey: "",
   extraHeaders: "",
+  maxOutputTokens: "",
   enabled: true,
 };
 
@@ -50,11 +49,11 @@ export function Providers() {
     setForm({
       id: p.id,
       name: p.name,
-      // Legacy "openai" collapses into "openai_compatible" (identical format).
-      type: p.type === "openai" ? "openai_compatible" : p.type,
+      type: p.type,
       baseUrl: p.baseUrl,
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
+      maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
       enabled: p.enabled,
     });
 
@@ -69,6 +68,11 @@ export function Providers() {
         return;
       }
     }
+    const motRaw = form.maxOutputTokens.trim();
+    if (motRaw && !/^[1-9]\d*$/.test(motRaw)) {
+      toast.error("Max output tokens must be a positive integer");
+      return;
+    }
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -76,6 +80,7 @@ export function Providers() {
         type: form.type,
         baseUrl: form.baseUrl,
         extraHeaders,
+        maxOutputTokens: motRaw ? Number(motRaw) : null,
         enabled: form.enabled,
       };
       if (form.apiKey) payload.apiKey = form.apiKey;
@@ -187,7 +192,12 @@ export function Providers() {
         </div>
       )}
 
-      {user?.role === "admin" && <AllowlistCard />}
+      {user?.role === "admin" && (
+        <>
+          <RetentionCard />
+          <AllowlistCard />
+        </>
+      )}
 
       <Modal
         open={form !== null}
@@ -213,7 +223,7 @@ export function Providers() {
             <div>
               <label className="label">Type</label>
               <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
-                <option value="openai_compatible">OpenAI (Chat Completions)</option>
+                <option value="openai_completion">OpenAI (Chat Completions)</option>
                 <option value="openai_responses">OpenAI (Responses API)</option>
                 <option value="anthropic">Anthropic</option>
               </select>
@@ -237,11 +247,82 @@ export function Providers() {
               <label className="label">Extra headers (JSON, optional)</label>
               <textarea className="input font-mono text-xs" rows={3} value={form.extraHeaders} onChange={(e) => setForm({ ...form, extraHeaders: e.target.value })} placeholder='{"x-custom": "value"}' />
             </div>
+            <div>
+              <label className="label">Max output tokens <span className="normal-case text-ink-500">(optional cap)</span></label>
+              <input
+                className="input font-mono text-xs"
+                inputMode="numeric"
+                value={form.maxOutputTokens}
+                onChange={(e) => setForm({ ...form, maxOutputTokens: e.target.value })}
+                placeholder="e.g. 131072"
+              />
+              <p className="mt-1 text-xs text-ink-500">Hard cap this provider accepts; thinking budgets are fit under it so requests aren't rejected.</p>
+            </div>
             <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Enabled" />
           </div>
         )}
       </Modal>
       {confirmEl}
+    </div>
+  );
+}
+
+function RetentionCard() {
+  const toast = useToast();
+  const { data, reload } = useAsync(() => api.get<{ days: number }>("/settings/log-retention"));
+  const [days, setDays] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (data) setDays(String(data.days));
+  }, [data]);
+
+  const save = async () => {
+    const n = Number(days.trim() || "0");
+    if (!Number.isInteger(n) || n < 0 || n > 3650) {
+      toast.error("Days must be a whole number between 0 and 3650");
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await api.put<{ days: number; pruned: number }>("/settings/log-retention", { days: n });
+      toast.success(
+        n === 0
+          ? "Auto-prune disabled — logs are kept forever"
+          : `Keeping the last ${n} day${n === 1 ? "" : "s"}${r.pruned ? ` — removed ${r.pruned} old ${r.pruned === 1 ? "entry" : "entries"}` : ""}`,
+      );
+      reload();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card card-pad mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <i className="bi bi-clock-history text-brand-400" />
+        <h3 className="font-medium text-ink-100">Log retention</h3>
+      </div>
+      <p className="mb-3 text-xs text-ink-500">
+        Automatically delete request logs older than this many days (checked daily). Set to{" "}
+        <code className="text-ink-300">0</code> to keep logs forever.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          className="input w-32 font-mono text-xs"
+          inputMode="numeric"
+          value={days}
+          onChange={(e) => setDays(e.target.value)}
+          placeholder="0"
+        />
+        <span className="text-xs text-ink-500">days</span>
+        <button className="btn-ghost btn-xs whitespace-nowrap" onClick={save} disabled={saving}>
+          {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
+          Save
+        </button>
+      </div>
     </div>
   );
 }

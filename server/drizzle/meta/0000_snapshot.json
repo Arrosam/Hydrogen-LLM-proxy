@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c8631582-dae4-4c58-820a-9fc9513e8fbf",
+  "id": "f4564ad1-8469-498e-a949-7689d2e40b58",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "model_providers": {
@@ -102,8 +102,8 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "model_use_behaviors": {
-      "name": "model_use_behaviors",
+    "model_services": {
+      "name": "model_services",
       "columns": {
         "id": {
           "name": "id",
@@ -126,8 +126,16 @@
           "notNull": false,
           "autoincrement": false
         },
-        "steps_json": {
-          "name": "steps_json",
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'model_service'"
+        },
+        "definition_json": {
+          "name": "definition_json",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -151,8 +159,8 @@
         }
       },
       "indexes": {
-        "mub_name_idx": {
-          "name": "mub_name_idx",
+        "service_name_idx": {
+          "name": "service_name_idx",
           "columns": [
             "name"
           ],
@@ -278,6 +286,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "max_output_tokens": {
+          "name": "max_output_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "enabled": {
           "name": "enabled",
           "type": "integer",
@@ -319,6 +334,13 @@
           "notNull": true,
           "autoincrement": true
         },
+        "trace_id": {
+          "name": "trace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "token_id": {
           "name": "token_id",
           "type": "integer",
@@ -326,15 +348,29 @@
           "notNull": false,
           "autoincrement": false
         },
-        "mub_id": {
-          "name": "mub_id",
+        "service_id": {
+          "name": "service_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "mub_name": {
-          "name": "mub_name",
+        "requested_service": {
+          "name": "requested_service",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "served_model": {
+          "name": "served_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "served_provider": {
+          "name": "served_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -367,6 +403,55 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "request_method": {
+          "name": "request_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_path": {
+          "name": "request_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_query": {
+          "name": "request_query",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_headers_json": {
+          "name": "request_headers_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_body": {
+          "name": "request_body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "response_headers_json": {
+          "name": "response_headers_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "response_body": {
+          "name": "response_body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "prompt_tokens": {
@@ -416,20 +501,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "request_payload_json": {
-          "name": "request_payload_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "response_payload_json": {
-          "name": "response_payload_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "error": {
           "name": "error",
           "type": "text",
@@ -454,6 +525,13 @@
           ],
           "isUnique": false
         },
+        "request_logs_trace_idx": {
+          "name": "request_logs_trace_idx",
+          "columns": [
+            "trace_id"
+          ],
+          "isUnique": false
+        },
         "request_logs_token_idx": {
           "name": "request_logs_token_idx",
           "columns": [
@@ -461,10 +539,38 @@
           ],
           "isUnique": false
         },
-        "request_logs_mub_idx": {
-          "name": "request_logs_mub_idx",
+        "request_logs_service_idx": {
+          "name": "request_logs_service_idx",
           "columns": [
-            "mub_id"
+            "service_id"
+          ],
+          "isUnique": false
+        },
+        "request_logs_requested_idx": {
+          "name": "request_logs_requested_idx",
+          "columns": [
+            "requested_service"
+          ],
+          "isUnique": false
+        },
+        "request_logs_served_model_idx": {
+          "name": "request_logs_served_model_idx",
+          "columns": [
+            "served_model"
+          ],
+          "isUnique": false
+        },
+        "request_logs_served_provider_idx": {
+          "name": "request_logs_served_provider_idx",
+          "columns": [
+            "served_provider"
+          ],
+          "isUnique": false
+        },
+        "request_logs_status_idx": {
+          "name": "request_logs_status_idx",
+          "columns": [
+            "http_status"
           ],
           "isUnique": false
         }
@@ -483,12 +589,12 @@
           "onDelete": "set null",
           "onUpdate": "no action"
         },
-        "request_logs_mub_id_model_use_behaviors_id_fk": {
-          "name": "request_logs_mub_id_model_use_behaviors_id_fk",
+        "request_logs_service_id_model_services_id_fk": {
+          "name": "request_logs_service_id_model_services_id_fk",
           "tableFrom": "request_logs",
-          "tableTo": "model_use_behaviors",
+          "tableTo": "model_services",
           "columnsFrom": [
-            "mub_id"
+            "service_id"
           ],
           "columnsTo": [
             "id"
@@ -563,8 +669,8 @@
           "notNull": false,
           "autoincrement": false
         },
-        "scope_mubs_json": {
-          "name": "scope_mubs_json",
+        "scope_services_json": {
+          "name": "scope_services_json",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -691,6 +797,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": true
+        },
+        "must_change_password": {
+          "name": "must_change_password",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
         },
         "created_at": {
           "name": "created_at",
