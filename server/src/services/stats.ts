@@ -1,6 +1,17 @@
-﻿import { and, gte, lte, sql, type SQL } from "drizzle-orm";
+﻿import { and, desc, gte, lte, sql, type SQL } from "drizzle-orm";
 import { getDb } from "../db";
 import { requestLogs } from "../db/schema";
+
+/**
+ * Row cap for the model/provider breakdown. Unlike the other stats, the winning
+ * attempt lives inside each row's attempt_path_json, so it can't be aggregated
+ * in SQL -- every row must be pulled into memory and parsed. Without a bound, a
+ * very large log table exhausts memory (or the request times out) and the stats
+ * endpoint 500s. The breakdown therefore covers the most recent N requests in
+ * the range (the created_at index makes fetching just those cheap). The other
+ * stats remain exact over the whole range.
+ */
+const MODEL_PROVIDER_SCAN_LIMIT = 100_000;
 
 export interface StatsQuery {
   from?: number; // epoch ms
@@ -95,7 +106,13 @@ export function byService(q: StatsQuery): GroupCount[] {
  * (the last, successful attempt in attempt_path_json). Computed in JS because
  * the winning attempt lives inside a JSON array.
  */
-export function byModelProvider(q: StatsQuery): { models: GroupCount[]; providers: GroupCount[] } {
+export function byModelProvider(q: StatsQuery): {
+  models: GroupCount[];
+  providers: GroupCount[];
+  /** True when the range held more than the scan limit, so the breakdown covers
+   * only the most recent MODEL_PROVIDER_SCAN_LIMIT requests. */
+  capped: boolean;
+} {
   const where = buildWhere(q);
   const base = getDb()
     .select({
@@ -104,7 +121,11 @@ export function byModelProvider(q: StatsQuery): { models: GroupCount[]; provider
       httpStatus: requestLogs.httpStatus,
     })
     .from(requestLogs);
-  const rows = (where ? base.where(where) : base).all();
+  // Bounded to the most recent N rows so a huge log table can't OOM/time out.
+  const rows = (where ? base.where(where) : base)
+    .orderBy(desc(requestLogs.createdAt))
+    .limit(MODEL_PROVIDER_SCAN_LIMIT)
+    .all();
 
   const models = new Map<string, GroupCount>();
   const providers = new Map<string, GroupCount>();
@@ -118,6 +139,7 @@ export function byModelProvider(q: StatsQuery): { models: GroupCount[]; provider
   return {
     models: sortDesc([...models.values()]),
     providers: sortDesc([...providers.values()]),
+    capped: rows.length >= MODEL_PROVIDER_SCAN_LIMIT,
   };
 }
 
