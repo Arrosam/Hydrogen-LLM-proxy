@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mergeOverrides, type GenerationParams, type RequestOverrides } from "../core/ir/params";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -100,6 +101,8 @@ export const StepSchema = z.object({
   retry: RetrySchema.optional(),
   /** When to advance to the next step. Omit = advance on any failure. */
   advanceOn: z.array(AdvanceTriggerSchema).optional(),
+  /** Legacy flat thinking override (folded into `overrides` at consumption). */
+  thinking: ThinkingLevelSchema.optional(),
   /** Rich per-step parameter overrides. */
   overrides: OverridesSchema.optional(),
 });
@@ -170,6 +173,11 @@ export const AgentStageSchema = z.object({
    * Omitted/"inherit" passes tools + tool_choice through unchanged.
    */
   tools: z.enum(["inherit", "none"]).optional(),
+  /** Legacy flat overrides (folded into `overrides` at consumption). */
+  system: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  thinking: ThinkingLevelSchema.optional(),
   /** Rich per-stage parameter overrides (includes the system prompt). */
   overrides: OverridesSchema.optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
@@ -182,12 +190,16 @@ export const AgentOcrSchema = z.object({
   steps: z.array(StepSchema).min(1).optional(),
   /** System prompt for the OCR model; omitted = the built-in default. */
   prompt: z.string().optional(),
+  /** Legacy flat overrides (folded at consumption). */
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(1).max(1_000_000).optional(),
   overrides: OverridesSchema.optional(),
   timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
 });
 
 export const AgentSchema = z.object({
-  kind: z.literal("micro_agent"),
+  // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
+  kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
   timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
   stages: z.array(AgentStageSchema).min(1, "a Micro Agent needs at least one stage"),
   /** Name of the stage whose output is returned; omitted = the last stage. */
@@ -214,15 +226,44 @@ export type AgentDef = z.infer<typeof AgentSchema>;
 export type ServiceDef = AgentDef | ServiceSteps;
 
 export function isAgent(def: ServiceDef): def is AgentDef {
-  return (def as AgentDef).kind === "micro_agent";
+  const kind = (def as AgentDef).kind;
+  return kind === "micro_agent" || kind === "agent";
 }
 
 /** Parse & validate a raw definition (Model Service steps or a Micro Agent). Throws ZodError. */
 export function parseService(raw: unknown): ServiceDef {
-  if (raw && typeof raw === "object" && (raw as { kind?: unknown }).kind === "micro_agent") {
+  const kind = raw && typeof raw === "object" ? (raw as { kind?: unknown }).kind : undefined;
+  if (kind === "micro_agent" || kind === "agent") {
     return AgentSchema.parse(raw);
   }
   return ServiceStepsSchema.parse(raw);
+}
+
+// --- override folding (legacy flat fields -> rich overrides) ----------------
+
+/** Effective per-step overrides: the flat `thinking` folded under `overrides`. */
+export function stepOverrides(step: ServiceStep): RequestOverrides | undefined {
+  const flat = step.thinking !== undefined ? { thinking: step.thinking } : undefined;
+  return mergeOverrides(flat, step.overrides as RequestOverrides | undefined);
+}
+
+/** Effective per-stage overrides: flat system/temperature/maxTokens/thinking folded under `overrides`. */
+export function stageOverrides(stage: AgentStage): RequestOverrides | undefined {
+  const flat: RequestOverrides = {};
+  if (stage.system !== undefined) flat.system = stage.system;
+  if (stage.temperature !== undefined) flat.temperature = stage.temperature;
+  if (stage.maxTokens !== undefined) flat.maxTokens = stage.maxTokens;
+  if (stage.thinking !== undefined) flat.thinking = stage.thinking;
+  return mergeOverrides(Object.keys(flat).length ? flat : undefined, stage.overrides as RequestOverrides | undefined);
+}
+
+/** Effective OCR generation params (temperature defaults to 0), overrides winning over flat. */
+export function ocrParams(ocr: AgentOcr): GenerationParams {
+  const ov = (ocr.overrides ?? {}) as GenerationParams;
+  const params: GenerationParams = { temperature: ov.temperature ?? ocr.temperature ?? 0 };
+  const maxTokens = ov.maxTokens ?? ocr.maxTokens;
+  if (maxTokens != null) params.maxTokens = maxTokens;
+  return params;
 }
 
 /** Parse & validate a raw Model Service step chain. Throws ZodError on invalid. */

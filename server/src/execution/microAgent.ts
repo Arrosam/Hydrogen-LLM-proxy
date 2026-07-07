@@ -6,7 +6,7 @@ import { buildResponse } from "../core/format/registry";
 import { textOf } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { serializeForLog } from "../util/logPayload";
-import type { AgentDef } from "./definition";
+import { stageOverrides, type AgentDef } from "./definition";
 import {
   buildOcrRequest,
   buildStageRequest,
@@ -169,7 +169,7 @@ export class MicroAgent extends ModelService {
           calls.push({ stage: stage.name, service: "(router)", kind: "router", status: 200, latencyMs: 0, attempts: [] });
         } else {
           // Outer overrides fold over this stage's config, the outer winning.
-          const combined = mergeOverrides(stage.overrides as RequestOverrides | undefined, overrides);
+          const combined = mergeOverrides(stageOverrides(stage), overrides);
           const stageReq = buildStageRequest(source, stage, outputs, responses, false, combined?.system);
           const childOverrides = withoutSystem(combined);
 

@@ -11,7 +11,7 @@ import {
   type ToolUsePart,
 } from "../core/ir/content";
 import { genId } from "../util/ids";
-import type { AgentCondition, AgentOcr, AgentStage } from "./definition";
+import { ocrParams, type AgentCondition, type AgentOcr, type AgentStage } from "./definition";
 
 /**
  * Pure helpers for a Micro Agent's stage orchestration: assembling a stage's
@@ -232,7 +232,7 @@ export function buildOcrRequest(request: Request, images: ImagePart[], ocr: Agen
     requestedService: request.requestedService,
     system: ocr.prompt && ocr.prompt.trim() ? ocr.prompt : DEFAULT_OCR_PROMPT,
     messages: [{ role: "user", content }],
-    params: { temperature: 0, ...(ocr.overrides ?? {}) },
+    params: ocrParams(ocr),
     stream: false,
   };
   return buildRequest(request.family, data);

@@ -5,7 +5,7 @@ import { fabricateStream } from "../core/ir/stream";
 import type { SendTarget, Transport } from "../core/upstream/transport";
 import type { Catalog } from "../catalog/catalog";
 import { runSteps } from "./steps";
-import type { ServiceSteps } from "./definition";
+import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition";
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 
 /** Shared dependencies every executor needs. */
@@ -46,8 +46,8 @@ export class ModelService {
   }
 
   /** Layer the request with the step's config then the caller's override (override wins). */
-  private merge(request: Request, step: { overrides?: unknown }, overrides?: RequestOverrides): Request {
-    return request.withOverrides(step.overrides as RequestOverrides | undefined).withOverrides(overrides);
+  private merge(request: Request, step: ServiceStep, overrides?: RequestOverrides): Request {
+    return request.withOverrides(stepOverrides(step)).withOverrides(overrides);
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
