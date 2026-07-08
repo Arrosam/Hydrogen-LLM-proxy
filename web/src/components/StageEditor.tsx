@@ -1,8 +1,9 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
 import { isAgentDef } from "../types";
 import { Toggle } from "./common";
 import { ThinkingLevelInput } from "./ThinkingLevelInput";
+import { OverridesEditor } from "./OverridesEditor";
 import { selectAll } from "../lib/input";
 
 const BLOCK_KINDS: { value: string; label: string }[] = [
@@ -314,6 +315,11 @@ function StageBody({
                 <NumOverride label="Timeout (ms)" value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
               <ThinkingLevelInput value={stage.thinking} onChange={(v) => onPatch({ thinking: v })} />
               </div>
+              <OverridesEditor
+                overrides={stage.overrides}
+                onChange={(ov) => onPatch({ overrides: ov })}
+                showThinking={false}
+              />
             </div>
           )}
         </>
@@ -744,6 +750,11 @@ export function OcrEditor({
                 <NumOverride label="Max tokens" value={ocr.maxTokens} onChange={(v) => patch({ maxTokens: v })} />
                 <NumOverride label="Timeout (ms)" value={ocr.timeoutMs} onChange={(v) => patch({ timeoutMs: v })} />
               </div>
+              <OverridesEditor
+                overrides={ocr.overrides}
+                onChange={(ov) => patch({ overrides: ov })}
+                showThinking={false}
+              />
             </div>
           )}
         </div>

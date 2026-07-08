@@ -161,10 +161,17 @@ export class ProxyController {
   ): FastifyReply {
     const status = failureStatus(failure);
     const message = failureMessage(failure);
+    // When the failure was retried (e.g. 499), append the last retry context so
+    // the log + client-facing error carry the full diagnosis trail.
+    const lastAttempt = (o.attemptPath as Array<{ retry?: { reason: string; retryIndex: number; delayMs: number; suppressed: boolean } }>)?.slice(-1)[0];
+    const retrySuffix = lastAttempt?.retry
+      ? ` [retry#${lastAttempt.retry.retryIndex} delay=${lastAttempt.retry.delayMs}ms suppressed=${lastAttempt.retry.suppressed}: ${lastAttempt.retry.reason}]`
+      : "";
+    const detailedError = message + retrySuffix;
     this.deps.logger.record({
       traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
       ingress: ctx.ingress, streaming: o.streaming, httpStatus: status, http: ctx.http,
-      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error: message,
+      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error: detailedError,
     });
     this.deps.usage.record(ctx.token.id, 0);
     return reply.code(status).send(buildErrorBody(ctx.ingress, status, message));

@@ -25,10 +25,39 @@ export const TriggerSchema = z.union([
 
 export const AdvanceTriggerSchema = z.union([TriggerSchema, z.literal("exhausted")]);
 
+/**
+ * Exponential backoff with full jitter. When `backoff` is enabled the effective
+ * delay before attempt N (1-based, N>=2) is:
+ *   base = min(initialMs * 2^(N-2), maxMs)
+ *   delay = random(0, base)          // full jitter
+ * When omitted, a fixed `intervalMs` is used (legacy behavior).
+ *
+ * Defaults satisfy the 499-retry policy: initial 100ms, cap 1s, max 3 attempts.
+ */
+export const BackoffSchema = z.object({
+  /** Initial delay (attempt 2's upper bound before jitter). Default 100ms. */
+  initialMs: z.number().int().min(1).max(600_000).default(100),
+  /** Absolute ceiling on the un-jittered delay. Default 1000ms. */
+  maxMs: z.number().int().min(1).max(600_000).default(1_000),
+});
+
 export const RetrySchema = z.object({
-  on: z.array(TriggerSchema).default([]),
-  maxAttempts: z.number().int().min(1).max(20).default(1),
+  /** Failure triggers that retry within this step: 429 (rate limit), 503 (unavailable), 499 (client closed), timeout. */
+  on: z.array(TriggerSchema).default([429, 503, 499, "timeout"]),
+  maxAttempts: z.number().int().min(1).max(20).default(3),
+  /** Fixed delay between retries (legacy; ignored when `backoff` is set). */
   intervalMs: z.number().int().min(0).max(600_000).default(0),
+  /**
+   * Exponential backoff with full jitter. When present, overrides `intervalMs`
+   * and the engine computes a jittered delay per attempt.
+   */
+  backoff: BackoffSchema.optional(),
+  /**
+   * Idempotency guard. "read" (default for GET-style) always retries 499.
+   * "safe_write" retries 499 (the upstream never received/processed the body).
+   * "unsafe" NEVER retries 499 — a pre-check must confirm safety first.
+   */
+  idempotency: z.enum(["read", "safe_write", "unsafe"]).default("safe_write"),
 });
 
 // --- rich overridable params ----------------------------------------------
@@ -212,6 +241,7 @@ export const AgentSchema = z.object({
 
 export type Trigger = z.infer<typeof TriggerSchema>;
 export type AdvanceTrigger = z.infer<typeof AdvanceTriggerSchema>;
+export type BackoffConfig = z.infer<typeof BackoffSchema>;
 export type RetryConfig = z.infer<typeof RetrySchema>;
 export type ThinkingLevelConfig = z.infer<typeof ThinkingLevelSchema>;
 export type Overrides = z.infer<typeof OverridesSchema>;

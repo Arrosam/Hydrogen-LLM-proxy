@@ -118,7 +118,11 @@ export class ModelService {
     // replay the complete result as a paced stream -- the client never gets a
     // partial/truncated stream, at the cost of first-token latency.
     if (this.def.reliableStreaming) {
-      return this.fabricated(await this.invoke(request, overrides, opts));
+      // Force stream=false so the upstream gets a non-streaming JSON request
+      // (we buffer the full response and fabricate a paced stream for the
+      // client). Otherwise the upstream sees stream=true and returns SSE,
+      // which defeats the purpose of reliable streaming's clean retry.
+      return this.fabricated(await this.invoke(request.withStream(false), overrides, opts));
     }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step) => {
       const res = this.deps.catalog.resolve(step.model, step.provider);

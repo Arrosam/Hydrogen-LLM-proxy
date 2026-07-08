@@ -1,10 +1,11 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
 import { OcrEditor, StageEditor } from "./StageEditor";
 import { ThinkingLevelInput } from "./ThinkingLevelInput";
+import { OverridesEditor } from "./OverridesEditor";
 import { intInput, selectAll } from "../lib/input";
 import type {
   AdvanceTrigger,
@@ -82,19 +83,20 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setDescription(service.description ?? "");
       setEnabled(service.enabled);
       setTimeoutMs(service.steps?.timeoutMs ?? 60000);
-      setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       if (isAgentDef(service.steps)) {
         setKind("chain");
         setStages(service.steps.stages ?? []);
         setOutput(service.steps.output ?? "");
         setOcr(service.steps.ocr);
         setSteps([]);
+        setReliableStreaming(false);
       } else {
         setKind("resilience");
         setSteps((service.steps as ServiceSteps)?.steps ?? []);
         setStages([]);
         setOutput("");
         setOcr(undefined);
+        setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
     } else {
       const firstModel = models[0]?.name ?? "";
@@ -117,7 +119,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}), ...(reliableStreaming ? { reliableStreaming: true } : {}) } as AgentDef)
+      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
       : ({ timeoutMs, steps, ...(reliableStreaming ? { reliableStreaming: true } : {}) } as ServiceSteps);
 
   const patchStep = (i: number, patch: Partial<ServiceStep>) =>
@@ -162,15 +164,16 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     try {
       const parsed = JSON.parse(rawText) as ServiceDef;
       setTimeoutMs(parsed.timeoutMs ?? 60000);
-      setReliableStreaming(Boolean(parsed.reliableStreaming));
       if (isAgentDef(parsed)) {
         setKind("chain");
         setStages(parsed.stages ?? []);
         setOutput(parsed.output ?? "");
         setOcr(parsed.ocr);
+        setReliableStreaming(false);
       } else {
         setKind("resilience");
         setSteps((parsed as ServiceSteps).steps ?? []);
+        setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       return parsed;
     } catch {
@@ -302,9 +305,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         </div>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
           <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
-          <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label="Reliable streaming" />
+          {kind === "resilience" && (
+            <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label="Reliable streaming" />
+          )}
         </div>
-        {reliableStreaming && (
+        {kind === "resilience" && reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
             Streams the upstream response and buffers it (retrying a truncated stream under your retry rules), then
             replays the complete result — so a streaming client never gets a partial/truncated stream, and reasoning
@@ -448,6 +453,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         />
                       </div>
 
+                      <StepAdvanced step={step} onPatch={(p) => patchStep(i, p)} />
+
                       {i < steps.length - 1 && (
                         <div className="mt-3">
                           <label className="label">Advance to next step on <span className="normal-case text-ink-500">(empty = any failure)</span></label>
@@ -509,6 +516,29 @@ function TriggerChips({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Partial<ServiceStep>) => void }) {
+  const [open, setOpen] = useState(false);
+  const hasOverrides = !!step.overrides && Object.keys(step.overrides).length > 0;
+  return (
+    <div className="mt-3">
+      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" onClick={() => setOpen((a) => !a)}>
+        <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
+        Advanced (overrides: top_P, top_K, maxTokens, etc.)
+        {hasOverrides && <span className="ml-1 text-brand-400">●</span>}
+      </button>
+      {open && (
+        <div className="mt-2">
+          <OverridesEditor
+            overrides={step.overrides}
+            onChange={(ov) => onPatch({ overrides: ov })}
+            showThinking={false}
+          />
+        </div>
+      )}
     </div>
   );
 }

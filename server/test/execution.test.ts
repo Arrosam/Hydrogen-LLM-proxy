@@ -245,15 +245,17 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
     }
   });
 
-  it("ModelService reliableStreaming buffers upstream (stream=true) then fabricates a stream for the client", async () => {
+  it("ModelService reliableStreaming sends stream=false to upstream then fabricates a stream for the client", async () => {
     let sent: Record<string, unknown> = {};
     const transport = fakeTransport({ onBody: (b) => (sent = b) });
     const svc = new ModelService({ timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], reliableStreaming: true }, { catalog: fakeCatalog(), transport });
     const req = new OpenAICompletionRequest({ requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], params: {}, stream: true });
     const outcome = await svc.stream(req);
     expect(outcome.result.ok).toBe(true);
-    // Reliable streaming on ModelService still streams upstream (for truncation detection).
-    expect(sent.stream).toBe(true);
+    // Reliable streaming forces stream=false upstream: the request is sent
+    // non-streaming (stream is not true), the full JSON response is buffered,
+    // then fabricated into a paced stream for the client.
+    expect(sent.stream).not.toBe(true);
     // The fabricated stream replays the complete response.
     if (outcome.result.ok) {
       const acc = newAccumulator();
@@ -340,5 +342,86 @@ describe("Regression: sendBuffered honors stream flag (Issue 1)", () => {
     for (const b of sentBodies) {
       expect(b.stream).toBeUndefined();
     }
+  });
+});
+
+// --- Issue: 499 retry integration (ModelService end-to-end) -----------------
+
+describe("499 retry integration (ModelService end-to-end)", () => {
+  /**
+   * Fake transport that returns 499 N times then succeeds. Tracks call count
+   * so we can assert the retry actually happened at the transport layer.
+   */
+  function fake499Transport(failNTimes: number): { transport: Transport; calls: number } {
+    let calls = 0;
+    const transport: Transport = {
+      async postStream() { calls++; return { status: calls <= failNTimes ? 499 : 200, headers: {}, body: readableOf(OK_FRAMES) }; },
+      async postJson() { calls++; return { status: calls <= failNTimes ? 499 : 200, headers: {}, json: calls <= failNTimes ? { error: "client closed" } : OK_JSON, text: "" }; },
+    };
+    return { transport, calls: 0 };
+  };
+
+  it("retries 499 via the step chain and succeeds on the 2nd attempt (safe_write)", async () => {
+    const { transport, calls: _c } = fake499Transport(1);
+    // Access calls via the closure — we re-read from the transport object.
+    let actualCalls = 0;
+    const wrappedTransport: Transport = {
+      postJson: async (url, h, b, o) => { actualCalls++; return transport.postJson(url, h, b, o); },
+      postStream: async (url, h, b, o) => { actualCalls++; return transport.postStream(url, h, b, o); },
+    };
+    const svc = new ModelService(
+      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      { catalog: fakeCatalog(), transport: wrappedTransport },
+    );
+    const inv = await svc.invoke(baseReq());
+    expect(inv.result.ok).toBe(true);
+    expect(actualCalls).toBe(2); // 1 failed + 1 succeeded
+    expect(inv.attempts).toBe(2);
+    // The attempt path should have a retry block on the 2nd entry.
+    const path = inv.attemptPath as Array<{ retry?: { retryIndex: number; suppressed: boolean } }>;
+    expect(path[1].retry).toBeDefined();
+    expect(path[1].retry!.retryIndex).toBe(1);
+  });
+
+  it("fails after exhausting maxAttempts=3 on persistent 499 (safe_write)", async () => {
+    const { transport } = fake499Transport(99); // always 499
+    const svc = new ModelService(
+      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      { catalog: fakeCatalog(), transport },
+    );
+    const inv = await svc.invoke(baseReq());
+    expect(inv.result.ok).toBe(false);
+    if (!inv.result.ok) expect(inv.result.status).toBe(499);
+    expect(inv.attempts).toBe(3);
+    const path = inv.attemptPath as Array<{ retry?: { reason: string; suppressed: boolean } }>;
+    expect(path[2].retry).toBeDefined();
+    expect(path[2].retry!.reason).toContain("max attempts");
+  });
+
+  it("does NOT retry 499 when idempotency=unsafe (non-idempotent guard)", async () => {
+    const { transport } = fake499Transport(99); // always 499
+    const svc = new ModelService(
+      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, idempotency: "unsafe", backoff: { initialMs: 1, maxMs: 10 } } }]),
+      { catalog: fakeCatalog(), transport },
+    );
+    const inv = await svc.invoke(baseReq());
+    expect(inv.result.ok).toBe(false);
+    if (!inv.result.ok) expect(inv.result.status).toBe(499);
+    expect(inv.attempts).toBe(1); // no retry — single attempt
+    const path = inv.attemptPath as Array<{ retry?: { reason: string; suppressed: boolean } }>;
+    expect(path[0].retry).toBeDefined();
+    expect(path[0].retry!.suppressed).toBe(true);
+    expect(path[0].retry!.reason).toContain("unsafe");
+  });
+
+  it("retries 499 when idempotency=read (idempotent GET-style)", async () => {
+    const { transport } = fake499Transport(2); // fail twice, then succeed
+    const svc = new ModelService(
+      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, idempotency: "read", backoff: { initialMs: 1, maxMs: 10 } } }]),
+      { catalog: fakeCatalog(), transport },
+    );
+    const inv = await svc.invoke(baseReq());
+    expect(inv.result.ok).toBe(true);
+    expect(inv.attempts).toBe(3);
   });
 });

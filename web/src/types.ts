@@ -1,4 +1,4 @@
-﻿export type Role = "admin" | "manager";
+export type Role = "admin" | "manager";
 export type ProviderType = "openai_completion" | "openai_responses" | "anthropic";
 
 export interface User {
@@ -52,12 +52,47 @@ export interface RetryPolicy {
 export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingLevel = "disabled" | "auto" | "enabled" | ThinkingEffort | { budget: number };
 
+/**
+ * Rich per-step/stage parameter overrides. Mirrors the server's OverridesSchema.
+ * Every field is optional; omitted fields inherit from the client request.
+ */
+export interface Overrides {
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  minP?: number;
+  maxTokens?: number;
+  stop?: string[];
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  repetitionPenalty?: number;
+  seed?: number;
+  n?: number;
+  logprobs?: boolean;
+  topLogprobs?: number;
+  logitBias?: Record<string, number>;
+  responseFormat?:
+    | { type: "text" }
+    | { type: "json_object" }
+    | { type: "json_schema"; name?: string; schema: Record<string, unknown>; strict?: boolean };
+  parallelToolCalls?: boolean;
+  serviceTier?: string;
+  user?: string;
+  verbosity?: "low" | "medium" | "high";
+  thinking?: ThinkingLevel;
+  /** Provider-specific params with no canonical field, merged in verbatim. */
+  extra?: Record<string, unknown>;
+  /** Replace the system prompt for this step/stage. */
+  system?: string;
+}
+
 export interface ServiceStep {
   model: string;
   provider: string;
   retry?: RetryPolicy;
   advanceOn?: AdvanceTrigger[];
   thinking?: ThinkingLevel;
+  overrides?: Overrides;
 }
 
 export interface ServiceSteps {
@@ -101,6 +136,7 @@ export interface AgentStage {
   temperature?: number;
   maxTokens?: number;
   thinking?: ThinkingLevel;
+  overrides?: Overrides;
   timeoutMs?: number;
   transitions?: AgentTransition[];
 }
@@ -111,6 +147,7 @@ export interface AgentOcr {
   prompt?: string; // OCR system prompt; empty = built-in default
   temperature?: number;
   maxTokens?: number;
+  overrides?: Overrides;
   timeoutMs?: number;
 }
 
