@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { Readable } from "node:stream";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
@@ -171,17 +170,48 @@ export class ProxyController {
     return reply.code(status).send(buildErrorBody(ctx.ingress, status, message));
   }
 
-  /** Relay a canonical event stream to the client, tapping it for the request log. */
+  /** Relay a canonical event stream to the client, tapping it for the request log.
+   * Writes each SSE chunk directly to the raw response and flushes immediately,
+   * so the client receives every chunk the proxy emits (no internal Readable
+   * buffer can swallow data on disconnect). The log records exactly what the
+   * accumulator saw from the upstream, and a disconnect is detected via write
+   * errors so the log status reflects delivery failure. */
   private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown }): FastifyReply {
     const acc: StreamAccumulator = newAccumulator();
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
     const outGen = serializeStream(ctx.ingress, tapStream(events, acc), { model: ctx.serviceName });
 
-    const self = this;
-    async function* streamAndLog(): AsyncGenerator<string> {
+    reply.header("content-type", "text/event-stream; charset=utf-8");
+    reply.header("cache-control", "no-cache, no-transform");
+    reply.header("connection", "keep-alive");
+    reply.header("x-accel-buffering", "no");
+
+    const raw = reply.raw;
+    // Start an async writer that drains the generator into the raw response.
+    // Using raw.write + raw.flush (instead of Readable.from) avoids the
+    // internal Readable highWaterMark buffer that can hold unflushed chunks
+    // when the client disconnects mid-stream.
+    (async () => {
       let streamError: string | null = null;
+      let clientDisconnected = false;
       try {
-        for await (const chunk of outGen) yield chunk;
+        for await (const chunk of outGen) {
+          if (raw.destroyed || raw.writableEnded) { clientDisconnected = true; break; }
+          const ok = raw.write(chunk);
+          // Flush immediately so the chunk reaches the client (not buffered).
+          const flushable = raw as unknown as { flush?: () => void };
+          if (typeof flushable.flush === "function") flushable.flush();
+          // Apply backpressure: wait for 'drain' if the internal buffer is full.
+          if (!ok && !raw.destroyed) {
+            await new Promise<void>((resolve) => {
+              const onDrain = (): void => { raw.off("close", onClose); resolve(); };
+              const onClose = (): void => { raw.off("drain", onDrain); resolve(); };
+              raw.once("drain", onDrain);
+              raw.once("close", onClose);
+            });
+          }
+          if (raw.destroyed) { clientDisconnected = true; break; }
+        }
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
       } finally {
@@ -194,27 +224,31 @@ export class ProxyController {
         let error = streamError;
         let status = 200;
         if (streamError) status = 499;
+        else if (clientDisconnected) {
+          status = 499;
+          error = "client disconnected before stream completed";
+        }
         else if (acc.incomplete) {
           status = 502;
           error = "upstream stream ended before completion (truncated)";
           responseBody.incomplete = true;
         }
-        self.deps.logger.record({
+        this.deps.logger.record({
           traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
           servedModel: value.modelName, servedProvider: value.providerName,
           ingress: ctx.ingress, egress: value.family, streaming: true, httpStatus: status, http: ctx.http,
           upstreamRequest: value.upstreamRequest,
           responseBody, usage, latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
         });
-        self.deps.usage.record(ctx.token.id, usage.totalTokens);
+        this.deps.usage.record(ctx.token.id, usage.totalTokens);
+        // End the response cleanly if not already ended.
+        if (!raw.writableEnded) {
+          try { raw.end(); } catch { /* already closed */ }
+        }
       }
-    }
+    })();
 
-    reply.header("content-type", "text/event-stream; charset=utf-8");
-    reply.header("cache-control", "no-cache, no-transform");
-    reply.header("connection", "keep-alive");
-    reply.header("x-accel-buffering", "no");
-    return reply.send(Readable.from(streamAndLog()));
+    return reply;
   }
 
   private handleListModels(req: FastifyRequest): unknown {
