@@ -138,7 +138,8 @@ export class ProxyController {
         this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
         return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
       }
-      return this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath });
+      this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath });
+      return; // relay hijacks the reply and writes asynchronously
     }
 
     const outcome = await executor.invoke(request, undefined, { progress: prog });
@@ -188,22 +189,29 @@ export class ProxyController {
   }
 
   /** Relay a canonical event stream to the client, tapping it for the request log.
-   * Writes each SSE chunk directly to the raw response and flushes immediately,
-   * so the client receives every chunk the proxy emits (no internal Readable
-   * buffer can swallow data on disconnect). The log records exactly what the
-   * accumulator saw from the upstream, and a disconnect is detected via write
-   * errors so the log status reflects delivery failure. */
-  private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown }): FastifyReply {
+   * Hijacks the Fastify reply so lifecycle hooks do not race with the async
+   * writer, then writes each SSE chunk directly to the raw response and flushes
+   * immediately. The log records exactly what the accumulator saw from the
+   * upstream, and a disconnect is detected via write errors so the log status
+   * reflects delivery failure. */
+  private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown }): void {
     const acc: StreamAccumulator = newAccumulator();
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
     const outGen = serializeStream(ctx.ingress, tapStream(events, acc), { model: ctx.serviceName });
 
-    reply.header("content-type", "text/event-stream; charset=utf-8");
-    reply.header("cache-control", "no-cache, no-transform");
-    reply.header("connection", "keep-alive");
-    reply.header("x-accel-buffering", "no");
+    // Hijack the reply so Fastify does not interfere with our raw SSE writes.
+    // Without this, Fastify's lifecycle hooks (onSend, preSerialization, etc.)
+    // can race with the async writer below, causing truncated responses.
+    reply.hijack();
 
     const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no",
+    });
+
     // Start an async writer that drains the generator into the raw response.
     // Using raw.write + raw.flush (instead of Readable.from) avoids the
     // internal Readable highWaterMark buffer that can hold unflushed chunks
@@ -213,7 +221,10 @@ export class ProxyController {
       let clientDisconnected = false;
       try {
         for await (const chunk of outGen) {
-          if (raw.destroyed || raw.writableEnded) { clientDisconnected = true; break; }
+          if (raw.destroyed || raw.writableEnded) {
+            clientDisconnected = true;
+            break;
+          }
           const ok = raw.write(chunk);
           // Flush immediately so the chunk reaches the client (not buffered).
           const flushable = raw as unknown as { flush?: () => void };
@@ -227,7 +238,10 @@ export class ProxyController {
               raw.once("close", onClose);
             });
           }
-          if (raw.destroyed) { clientDisconnected = true; break; }
+          if (raw.destroyed) {
+            clientDisconnected = true;
+            break;
+          }
         }
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
@@ -266,8 +280,6 @@ export class ProxyController {
         }
       }
     })();
-
-    return reply;
   }
 
   private handleListModels(req: FastifyRequest): unknown {
