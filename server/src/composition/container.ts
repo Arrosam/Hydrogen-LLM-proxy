@@ -23,6 +23,7 @@ import { ServiceValidator } from "../execution/serviceValidator";
 import { ServiceFactory } from "../execution/serviceFactory";
 import { RequestLogger } from "../observability/requestLogger";
 import { UsageMeter } from "../observability/usageMeter";
+import { ActiveRequestRegistry } from "../observability/activeRequests";
 
 /**
  * The composition root: owns every long-lived instance and wires the dependency
@@ -51,6 +52,7 @@ export interface Container {
   factory: ServiceFactory;
   requestLogger: RequestLogger;
   usageMeter: UsageMeter;
+  activeRequests: ActiveRequestRegistry;
 }
 
 /** Load config, open + migrate the DB, verify the master key, seed the admin, wire everything. */
@@ -79,7 +81,8 @@ export async function boot(): Promise<Container> {
   const ssrf = new SsrfGuard({ allowPrivate: config.allowPrivateUpstreams, allowlist: () => settings.allowlist() });
   const transport = new UpstreamClient(ssrf);
   const validator = new ServiceValidator(catalog, services);
-  const factory = new ServiceFactory(services, { catalog, transport }, config.logPayloadMaxChars);
+  const activeRequests = new ActiveRequestRegistry();
+  const factory = new ServiceFactory(services, { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: config.simulatedStreamingTokenRate }, config.logPayloadMaxChars);
 
   const requestLogger = new RequestLogger(logs, config.logPayloadMaxChars);
   const usageMeter = new UsageMeter(tokens);
@@ -87,7 +90,7 @@ export async function boot(): Promise<Container> {
   return {
     config, sqlite, db,
     providers, models, mappings, services, tokens, users, logs, settings, stats, pruner,
-    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter,
+    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests,
   };
 }
 

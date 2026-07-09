@@ -1,4 +1,4 @@
-﻿import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { Login } from "./pages/Login";
@@ -10,6 +10,7 @@ import { ModelServices } from "./pages/ModelServices";
 import { Tokens } from "./pages/Tokens";
 import { Users } from "./pages/Users";
 import { Logs } from "./pages/Logs";
+import { ActiveRequests } from "./pages/ActiveRequests";
 
 function FullSpinner() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="tokens" element={<Tokens />} />
         <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />
+        <Route path="active-requests" element={<ActiveRequests />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

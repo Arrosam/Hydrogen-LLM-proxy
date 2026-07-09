@@ -49,6 +49,7 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     transport: c.transport,
     logger: c.requestLogger,
     usage: c.usageMeter,
+    activeRequests: c.activeRequests,
   }).register(app);
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });

@@ -18,6 +18,7 @@ import { genId } from "../util/ids";
 import { asMillis } from "../util/time";
 import type { ModelServiceRow, Token } from "../db/schema";
 import type { HttpRequestInfo } from "../observability/requestLogger";
+import { ProgressRecorder } from "../observability/progressRecorder";
 import type { ProxyDeps } from "./deps";
 
 interface RequestCtx {
@@ -125,22 +126,31 @@ export class ProxyController {
     }
 
     const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress };
+    // Register the request for real-time progress monitoring.
+    this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
+    const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
+    prog.record("init", "request.received", `request received: ${ingress} -> ${serviceName}`, { streaming: request.stream });
+    prog.record("init", "request.parsed", "request body parsed and service resolved");
 
     if (request.stream) {
-      const outcome = await executor.stream(request);
+      const outcome = await executor.stream(request, undefined, { progress: prog });
       if (!outcome.result.ok) {
+        this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
         return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
       }
       return this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath });
     }
 
-    const outcome = await executor.invoke(request);
+    const outcome = await executor.invoke(request, undefined, { progress: prog });
     if (!outcome.result.ok) {
+      this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
       return this.replyFailure(reply, ctx, outcome.result, { streaming: false, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
     }
 
     const value = outcome.result.value;
     const clientBody = value.response.render(ingress, serviceName);
+    prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: 200 });
+    this.deps.activeRequests.finish(traceId, 200);
     this.deps.logger.record({
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: value.modelName, servedProvider: value.providerName,
@@ -248,6 +258,8 @@ export class ProxyController {
           responseBody, usage, latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
         });
         this.deps.usage.record(ctx.token.id, usage.totalTokens);
+        // Mark the active request as finished (streaming relay end).
+        this.deps.activeRequests.finish(ctx.traceId, status, error ?? undefined);
         // End the response cleanly if not already ended.
         if (!raw.writableEnded) {
           try { raw.end(); } catch { /* already closed */ }

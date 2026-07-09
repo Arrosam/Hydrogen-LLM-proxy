@@ -245,17 +245,18 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
     }
   });
 
-  it("ModelService reliableStreaming sends stream=false to upstream then fabricates a stream for the client", async () => {
+  it("ModelService reliableStreaming preserves client stream=true, buffers upstream, then fabricates a paced stream", async () => {
     let sent: Record<string, unknown> = {};
     const transport = fakeTransport({ onBody: (b) => (sent = b) });
     const svc = new ModelService({ timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], reliableStreaming: true }, { catalog: fakeCatalog(), transport });
     const req = new OpenAICompletionRequest({ requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], params: {}, stream: true });
     const outcome = await svc.stream(req);
     expect(outcome.result.ok).toBe(true);
-    // Reliable streaming forces stream=false upstream: the request is sent
-    // non-streaming (stream is not true), the full JSON response is buffered,
-    // then fabricated into a paced stream for the client.
-    expect(sent.stream).not.toBe(true);
+    // Reliable streaming no longer overrides stream=false: the client's
+    // stream=true is preserved, so the upstream receives a streaming request.
+    // The proxy buffers the full upstream stream (via collectStream), then
+    // fabricates a paced simulated stream for the client.
+    expect(sent.stream).toBe(true);
     // The fabricated stream replays the complete response.
     if (outcome.result.ok) {
       const acc = newAccumulator();

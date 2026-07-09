@@ -7,11 +7,17 @@ import type { Catalog } from "../catalog/catalog";
 import { runSteps } from "./steps";
 import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition";
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
+import type { ProgressRecorder } from "../observability/progressRecorder";
+import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
 /** Shared dependencies every executor needs. */
 export interface ServiceDeps {
   catalog: Catalog;
   transport: Transport;
+  /** Optional active-request registry for real-time progress tracking. */
+  progress?: ActiveRequestRegistry | null;
+  /** Token rate (tokens/second) for simulated/fabricated streams. Default 2000. */
+  simulatedStreamingTokenRate?: number;
 }
 
 export interface InvokeOptions {
@@ -21,6 +27,8 @@ export interface InvokeOptions {
   timeoutMs?: number;
   /** Names of the agents currently on the call stack (nested-agent cycle guard). */
   stack?: string[];
+  /** Progress recorder for emitting real-time events (null = no tracking). */
+  progress?: ProgressRecorder | null;
 }
 
 /**
@@ -51,9 +59,12 @@ export class ModelService {
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
-    const { result, path } = await runSteps<InvokeValue>(this.def, async (step) => {
+    const prog = opts.progress ?? null;
+    const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
+      prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider);
       if (!res.ok) {
+        prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
       const t = res.target;
@@ -67,10 +78,15 @@ export class ModelService {
         timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,
       };
+      prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
+      prog?.record("llm", "llm.send", `request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
       const sent = await egress.send(this.deps.transport, target);
       if (!sent.ok) {
+        prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
         return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
       }
+      prog?.record("llm", "llm.receive", `response generated and received from ${t.upstreamModel}`, { status: 200 });
+      prog?.record("llm", "llm.result", `result parsed and ready for return`, { model: t.upstreamModel });
       // Honor a "disabled" thinking level end-to-end even if the upstream ignored it.
       let response = sent.response;
       if (merged.params.thinking === "disabled") response = response.withoutReasoning();
@@ -85,20 +101,22 @@ export class ModelService {
           upstreamRequest: sent.sentBody,
         },
       };
-    });
+    }, { progress: prog });
     return { result, attemptPath: path, attempts: path.length };
   }
 
   /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by
-   * reliable-streaming Model Services and Micro Agents (which always buffer). */
+   * reliable-streaming Model Services and Micro Agents (which always buffer).
+   * The pacing rate is configurable via ServiceDeps.simulatedStreamingTokenRate. */
   protected fabricated(inv: Invocation): StreamInvocation {
     if (!inv.result.ok) return { result: inv.result, attemptPath: inv.attemptPath, attempts: inv.attempts };
     const v = inv.result.value;
+    const tokenRate = this.deps.simulatedStreamingTokenRate ?? 2000;
     return {
       result: {
         ok: true,
         value: {
-          events: fabricateStream(v.response.data()),
+          events: fabricateStream(v.response.data(), tokenRate),
           family: v.family,
           upstreamModel: v.upstreamModel,
           providerName: v.providerName,
@@ -114,19 +132,26 @@ export class ModelService {
   }
 
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
+    const prog = opts.progress ?? null;
     // Reliable streaming: buffer the upstream (retrying a truncated stream) and
-    // replay the complete result as a paced stream -- the client never gets a
-    // partial/truncated stream, at the cost of first-token latency.
+    // replay the complete result as a paced simulated stream — the client never
+    // gets a partial/truncated stream, at the cost of first-token latency.
+    //
+    // We do NOT override stream=false on the request: the client's streaming
+    // preference is preserved. The invoke() path uses sendBuffered, which
+    // honors the request's own stream flag — when stream=true the upstream is
+    // streamed and collected (capturing reasoning from stream-only providers
+    // and enabling truncation detection); when stream=false a plain JSON
+    // request is sent. Either way the full response is buffered locally before
+    // fabrication, so the client always receives a complete, paced stream.
     if (this.def.reliableStreaming) {
-      // Force stream=false so the upstream gets a non-streaming JSON request
-      // (we buffer the full response and fabricate a paced stream for the
-      // client). Otherwise the upstream sees stream=true and returns SSE,
-      // which defeats the purpose of reliable streaming's clean retry.
-      return this.fabricated(await this.invoke(request.withStream(false), overrides, opts));
+      return this.fabricated(await this.invoke(request, overrides, opts));
     }
-    const { result, path } = await runSteps<StreamValue>(this.def, async (step) => {
+    const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
+      prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider);
       if (!res.ok) {
+        prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
       const t = res.target;
@@ -140,10 +165,15 @@ export class ModelService {
         timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,
       };
+      prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });
+      prog?.record("llm", "llm.send", `stream request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
       const sent = await egress.relay(this.deps.transport, target);
       if (!sent.ok) {
+        prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
         return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
       }
+      prog?.record("llm", "llm.receive", `stream committed from ${t.upstreamModel} (headers received)`, { status: sent.status });
+      prog?.record("llm", "llm.result", `stream events ready for relay`, { model: t.upstreamModel });
       return {
         ok: true,
         value: {
@@ -156,7 +186,7 @@ export class ModelService {
           dropReasoning: merged.params.thinking === "disabled",
         },
       };
-    });
+    }, { progress: prog });
     return { result, attemptPath: path, attempts: path.length };
   }
 }

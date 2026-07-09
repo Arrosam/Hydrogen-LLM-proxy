@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
 import { api, ApiError } from "../api";
@@ -21,6 +21,7 @@ const NAV: NavItem[] = [
   { to: "/providers", label: "Providers", icon: "bi-hdd-network" },
   { to: "/tokens", label: "Tokens", icon: "bi-key" },
   { to: "/logs", label: "Logs", icon: "bi-journal-text" },
+  { to: "/active-requests", label: "Active Requests", icon: "bi-activity" },
   { to: "/users", label: "Users", icon: "bi-people" },
 ];
 

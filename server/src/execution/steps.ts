@@ -1,4 +1,5 @@
 import type { AdvanceTrigger, BackoffConfig, RetryConfig, ServiceStep, ServiceSteps, Trigger } from "./definition";
+import type { ProgressRecorder } from "../observability/progressRecorder";
 
 export type FailureKind = "http" | "timeout" | "error";
 
@@ -138,9 +139,10 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
 export async function runSteps<T>(
   steps: ServiceSteps,
   attempt: (step: ServiceStep, stepIndex: number) => Promise<AttemptResult<T>>,
-  opts: { sleep?: (ms: number) => Promise<void> } = {},
+  opts: { sleep?: (ms: number) => Promise<void>; progress?: ProgressRecorder | null } = {},
 ): Promise<RunOutput<T>> {
   const sleep = opts.sleep ?? defaultSleep;
+  const prog = opts.progress ?? null;
   const path: AttemptRecord[] = [];
   let lastFailure: AttemptFailure | null = null;
 
@@ -157,7 +159,10 @@ export async function runSteps<T>(
       // The delay that was applied BEFORE this attempt (0 for attempt 1).
       // Computed once so the log and the actual sleep agree.
       const preDelayMs = a > 1 ? computeRetryDelay(a, retry) : 0;
-      if (preDelayMs > 0) await sleep(preDelayMs);
+      if (preDelayMs > 0) {
+        prog?.record("retry", "retry.delay", `retry #${a - 1}: sleeping ${preDelayMs}ms before attempt`, { retryIndex: a - 1, delayMs: preDelayMs });
+        await sleep(preDelayMs);
+      }
 
       const start = Date.now();
       let res: AttemptResult<T>;
@@ -189,6 +194,13 @@ export async function runSteps<T>(
       const is499 = res.status === 499;
       const four99Allowed = !is499 || is499Retryable(idempotency);
       const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
+
+      // Emit real-time retry trigger / suppression progress events.
+      if (canRetryFlag) {
+        prog?.record("retry", "retry.trigger", `attempt ${a} failed (${res.status || res.kind}); retrying`, { retryIndex: a, status: res.status, reason: res.message });
+      } else if (a > 1 || triggerMatched) {
+        prog?.record("retry", "retry.exhausted", `retries exhausted after ${a} attempt(s)`, { attempts: a, status: res.status });
+      }
 
       // Build the retry context for logging. We log the retry decision on
       // every attempt that either (a) is itself a retry (a > 1), or (b) COULD

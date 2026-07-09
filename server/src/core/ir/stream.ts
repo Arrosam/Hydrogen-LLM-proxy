@@ -221,10 +221,8 @@ export async function collectStream(
 
 // --- fabrication (complete response -> paced stream) --------------------
 
-/** Cap for the fabricated stream. Fast (most models do 20-100 tok/s), but paced
- * so a buffered chain response still arrives as smooth progressive output
- * instead of one lump. */
-const FAKE_STREAM_TOKENS_PER_SEC = 5000;
+/** Default token rate for fabricated streams when none is specified. */
+const DEFAULT_FABRICATE_TOKENS_PER_SEC = 2000;
 const FAKE_STREAM_CHUNK_CHARS = 24; // chars per delta (~6 tokens); smoothness, not rate
 
 /**
@@ -233,18 +231,33 @@ const FAKE_STREAM_CHUNK_CHARS = 24; // chars per delta (~6 tokens); smoothness, 
  * result as a stream so streaming clients still get SSE. The text is split into
  * small deltas and paced so the client sees it stream in quickly rather than as
  * a single chunk. The caller serializes these events into the client's format.
+ *
+ * @param tokensPerSec The simulated streaming rate in tokens/second. The pacer
+ *   is self-correcting: it tracks elapsed wall time vs. emitted tokens so the
+ *   average rate holds even with setTimeout jitter. If a delay is already
+ *   overdue (e.g. after a GC pause), the pacer skips the sleep and emits
+ *   immediately — this prevents the "buffer exhaustion stall" where accumulated
+ *   delays cause the client to hang even though all data is already in memory.
  */
-export async function* fabricateStream(data: ResponseData): AsyncGenerator<StreamEvent> {
+export async function* fabricateStream(
+  data: ResponseData,
+  tokensPerSec: number = DEFAULT_FABRICATE_TOKENS_PER_SEC,
+): AsyncGenerator<StreamEvent> {
   yield { type: "start", id: data.id, model: data.model, created: data.created, inputTokens: data.usage.promptTokens };
 
   const startedAt = Date.now();
   let emittedTokens = 0;
   // ~4 chars/token. Self-correcting against setTimeout jitter so the average
-  // rate holds at the cap.
+  // rate holds at the configured value. If we've fallen behind (the wait would
+  // be negative), we skip the sleep entirely — the data is already buffered, so
+  // there is no reason to artificially stall the client.
   const pace = async (chars: number): Promise<void> => {
     emittedTokens += Math.max(1, Math.round(chars / 4));
-    const wait = (emittedTokens * 1000) / FAKE_STREAM_TOKENS_PER_SEC - (Date.now() - startedAt);
+    const expectedElapsedMs = (emittedTokens * 1000) / tokensPerSec;
+    const actualElapsedMs = Date.now() - startedAt;
+    const wait = expectedElapsedMs - actualElapsedMs;
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    // If wait <= 0, we're ahead of schedule or caught up after jitter — emit now.
   };
 
   let toolIndex = 0;

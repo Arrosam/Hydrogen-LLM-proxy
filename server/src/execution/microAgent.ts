@@ -18,6 +18,7 @@ import {
 } from "./agentContext";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "./steps";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
+import type { ProgressRecorder } from "../observability/progressRecorder";
 
 /** How deep nested Micro Agents may reference one another before we stop. */
 const MAX_AGENT_DEPTH = 8;
@@ -109,6 +110,8 @@ export class MicroAgent extends ModelService {
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const agent = this.agent;
     const stack = opts.stack ?? [];
+    const prog = opts.progress ?? null;
+    prog?.record("agent", "agent.init", `micro agent initialized: ${agent.stages.length} stage(s)`, { stages: agent.stages.map((s) => s.name) });
     const byName = new Map(agent.stages.map((s, i) => [s.name, i]));
     const outputs = new Map<string, string>();
     const values = new Map<string, InvokeValue>();
@@ -136,6 +139,7 @@ export class MicroAgent extends ModelService {
       if (agent.ocr) {
         const images = collectImages(request);
         if (images.length > 0) {
+          prog?.record("agent", "agent.ocr.start", `OCR pre-pass: ${images.length} image(s) detected`, { images: images.length });
           const ocr = agent.ocr;
           let ocrService: ModelService;
           if (ocr.service) {
@@ -149,11 +153,15 @@ export class MicroAgent extends ModelService {
             return errorInv("image translation (OCR) is enabled but has no model configured");
           }
           const ocrReq = buildOcrRequest(request, images, ocr);
-          const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs);
+          const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog);
           calls.push(call);
-          if (!result.ok) return fail(result);
+          if (!result.ok) {
+            prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
+            return fail(result);
+          }
           usage = addUsage(usage, result.value.response.usage);
           source = translateImagesInRequest(request, parseOcrResults(result.value.response.text(), images.length));
+          prog?.record("agent", "agent.ocr.done", "OCR pre-pass complete, images translated to text");
         }
       }
 
@@ -163,8 +171,10 @@ export class MicroAgent extends ModelService {
       while (idx >= 0 && idx < agent.stages.length) {
         const stage = agent.stages[idx];
         terminal = stage.name;
+        prog?.record("agent", "agent.stage.start", `stage "${stage.name}" starting (index ${idx})`, { stage: stage.name, index: idx });
 
         if (isRouter(stage)) {
+          prog?.record("agent", "agent.stage.router", `stage "${stage.name}" is a router (no model call)`, { stage: stage.name });
           outputs.set(stage.name, "");
           calls.push({ stage: stage.name, service: "(router)", kind: "router", status: 200, latencyMs: 0, attempts: [] });
         } else {
@@ -175,39 +185,62 @@ export class MicroAgent extends ModelService {
 
           if (stage.service) {
             const r = this.resolver.resolve(stage.service);
-            if (!r.ok) return errorInv(r.message);
+            if (!r.ok) {
+              prog?.record("error", "agent.stage.resolve", `stage "${stage.name}": ${r.message}`);
+              return errorInv(r.message);
+            }
 
             if (r.isAgent) {
-              if (stack.includes(stage.service)) return errorInv(`micro-agent cycle detected: "${stage.service}" is already running`);
-              if (stack.length >= MAX_AGENT_DEPTH) return errorInv(`micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
+              if (stack.includes(stage.service)) {
+                prog?.record("error", "agent.stage.cycle", `micro-agent cycle detected: "${stage.service}"`);
+                return errorInv(`micro-agent cycle detected: "${stage.service}" is already running`);
+              }
+              if (stack.length >= MAX_AGENT_DEPTH) {
+                prog?.record("error", "agent.stage.depth", `micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
+                return errorInv(`micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
+              }
+              prog?.record("agent", "agent.stage.nested", `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
               const started = Date.now();
               const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: this.stageRequestPayload(stageReq), calls: [] };
-              const sub = await r.executor.invoke(stageReq, childOverrides, { stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs });
+              const sub = await r.executor.invoke(stageReq, childOverrides, { stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog });
               wrapper.calls = sub.attemptPath as ServiceCall[];
               wrapper.latencyMs = Date.now() - started;
               calls.push(wrapper);
               if (!sub.result.ok) {
                 wrapper.status = sub.result.status;
                 wrapper.error = sub.result.message;
+                prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (nested agent) failed: ${sub.result.message}`, { stage: stage.name, status: sub.result.status });
                 return fail(sub.result);
               }
               wrapper.status = 200;
               wrapper.usage = sub.result.value.response.usage;
               wrapper.response = this.stageResponsePayload(sub.result.value.response);
               commit(stage.name, sub.result.value);
+              prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs);
+              prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog);
               calls.push(call);
-              if (!result.ok) return fail(result);
+              if (!result.ok) {
+                prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
+                return fail(result);
+              }
               commit(stage.name, result.value);
+              prog?.record("agent", "agent.stage.done", `stage "${stage.name}" completed`, { stage: stage.name, latencyMs: call.latencyMs });
             }
           } else if (stage.steps && stage.steps.length) {
+            prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog);
             calls.push(call);
-            if (!result.ok) return fail(result);
+            if (!result.ok) {
+              prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
+              return fail(result);
+            }
             commit(stage.name, result.value);
+            prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (inline) completed`, { stage: stage.name, latencyMs: call.latencyMs });
           } else {
+            prog?.record("error", "agent.stage.empty", `stage "${stage.name}" has no Model Service or steps`);
             return errorInv(`stage "${stage.name}" has no Model Service or steps`);
           }
         }
@@ -215,19 +248,25 @@ export class MicroAgent extends ModelService {
         const step = nextStep(stage, idx, byName, input, outputs);
         if ("end" in step) {
           if (step.output) returnStage = step.output;
+          prog?.record("agent", "agent.stage.end", `agent ending at stage "${stage.name}"${step.output ? `, returning output of "${step.output}"` : ""}`, { terminal: stage.name, output: step.output });
           break;
         }
         idx = step.index;
       }
 
       const chosen = (returnStage ? values.get(returnStage) : undefined) ?? values.get(terminal) ?? lastValue;
-      if (!chosen) return errorInv("agent produced no model output");
+      if (!chosen) {
+        prog?.record("error", "agent.nooutput", "agent produced no model output");
+        return errorInv("agent produced no model output");
+      }
       // Report the agent's total usage across all stages on the returned response.
       const response = buildResponse(chosen.family, { ...chosen.response.data(), usage });
       const value: InvokeValue = { ...chosen, response };
+      prog?.record("agent", "agent.complete", `micro agent completed: ${calls.length} call(s), ${usage.totalTokens} tokens`, { calls: calls.length, totalTokens: usage.totalTokens });
       return { result: { ok: true, value }, attemptPath: calls, attempts: countAttempts(calls) };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      prog?.record("error", "agent.exception", `agent execution error: ${message}`);
       return errorInv(`agent execution error: ${message}`);
     }
   }
@@ -240,9 +279,10 @@ export class MicroAgent extends ModelService {
     meta: { stage: string; service?: string },
     signal: AbortSignal | undefined,
     timeoutMs: number | undefined,
+    prog: ProgressRecorder | null = null,
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
     const started = Date.now();
-    const inv = await service.invoke(stageReq, overrides, { signal, timeoutMs });
+    const inv = await service.invoke(stageReq, overrides, { signal, timeoutMs, progress: prog });
     const path = inv.attemptPath as AttemptRecord[];
     const call: ServiceCall = {
       stage: meta.stage,

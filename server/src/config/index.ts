@@ -51,6 +51,10 @@ const EnvSchema = z.object({
     .optional()
     .default("false")
     .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
+  // Simulated streaming token rate (tokens/second) used when Reliable Streaming
+  // is enabled. The proxy buffers the complete upstream response, then replays
+  // it as a paced SSE stream at this rate. Default 2000 tok/s.
+  SIMULATED_STREAMING_TOKEN_RATE: z.coerce.number().int().positive().default(2000),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -68,6 +72,7 @@ export interface AppConfig {
   logPayloadMaxChars: number;
   cookieSecure: "auto" | "true" | "false";
   allowPrivateUpstreams: boolean;
+  simulatedStreamingTokenRate: number;
 }
 
 /**
@@ -99,6 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     logPayloadMaxChars: e.LOG_PAYLOAD_MAX_CHARS,
     cookieSecure: e.COOKIE_SECURE,
     allowPrivateUpstreams: e.ALLOW_PRIVATE_UPSTREAMS,
+    simulatedStreamingTokenRate: e.SIMULATED_STREAMING_TOKEN_RATE,
   };
 }
 

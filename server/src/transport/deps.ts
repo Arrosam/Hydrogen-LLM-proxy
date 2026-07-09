@@ -5,6 +5,7 @@ import type { ServiceRepo } from "../persistence/serviceRepo";
 import type { TokenRepo } from "../persistence/tokenRepo";
 import type { RequestLogger } from "../observability/requestLogger";
 import type { UsageMeter } from "../observability/usageMeter";
+import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
 /** Everything the client-facing proxy needs, injected by the composition root. */
 export interface ProxyDeps {
@@ -15,4 +16,5 @@ export interface ProxyDeps {
   transport: UpstreamClient;
   logger: RequestLogger;
   usage: UsageMeter;
+  activeRequests: ActiveRequestRegistry;
 }

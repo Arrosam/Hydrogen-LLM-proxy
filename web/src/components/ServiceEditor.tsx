@@ -23,7 +23,7 @@ import type {
 } from "../types";
 import { isAgentDef } from "../types";
 
-const CODE_PRESETS: Trigger[] = [429, 500, 502, 503, 529];
+const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
 
 interface Props {
   open: boolean;
@@ -442,6 +442,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                           options={[...CODE_PRESETS, "timeout", "error"]}
                           selected={step.retry?.on ?? []}
                           onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
+                          allowCustomCodes
                         />
                       </div>
 
@@ -462,6 +463,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                             options={[...CODE_PRESETS, "timeout", "error", "exhausted"]}
                             selected={step.advanceOn ?? []}
                             onToggle={(v) => patchStep(i, { advanceOn: toggle(step.advanceOn, v as AdvanceTrigger) })}
+                            allowCustomCodes
                           />
                         </div>
                       )}
@@ -490,32 +492,119 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   );
 }
 
+/**
+ * Trigger chip editor with custom error code input. Renders quick-select preset
+ * chips (click to toggle) plus a free-form input where the user types any HTTP
+ * status code and presses Enter to add it to the selected list. Selected items
+ * appear as removable chips above the input.
+ *
+ * Used for both `retry.on` (Trigger[]) and `advanceOn` (AdvanceTrigger[], which
+ * also includes "exhausted").
+ */
 function TriggerChips({
   options,
   selected,
   onToggle,
+  allowCustomCodes = false,
 }: {
   options: (Trigger | "exhausted")[];
   selected: (Trigger | "exhausted")[];
   onToggle: (v: Trigger | "exhausted") => void;
+  /** When true, shows a text input for adding arbitrary HTTP status codes. */
+  allowCustomCodes?: boolean;
 }) {
+  const [input, setInput] = useState("");
+
+  const addCustomCode = () => {
+    const raw = input.trim();
+    if (!raw) return;
+    // Parse as integer HTTP status code (100-599)
+    const code = Number(raw);
+    if (Number.isInteger(code) && code >= 100 && code <= 599) {
+      if (!selected.includes(code)) {
+        onToggle(code);
+      }
+      setInput("");
+    } else if (raw === "timeout" || raw === "error" || raw === "exhausted") {
+      // Also allow symbolic triggers via the input
+      if (!selected.includes(raw)) {
+        onToggle(raw);
+      }
+      setInput("");
+    }
+  };
+
+  // Determine which selected values are NOT in the preset options (custom adds)
+  const customSelected = selected.filter((s) => !options.includes(s));
+
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {options.map((o) => {
-        const active = selected.includes(o);
-        return (
+    <div className="space-y-2">
+      {/* Quick-select preset chips */}
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((o) => {
+          const active = selected.includes(o);
+          return (
+            <button
+              key={String(o)}
+              type="button"
+              onClick={() => onToggle(o)}
+              className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+                active ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"
+              }`}
+            >
+              {o}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Custom error code input */}
+      {allowCustomCodes && (
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            inputMode="numeric"
+            className="input w-32 text-xs"
+            placeholder="HTTP code..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addCustomCode();
+              }
+            }}
+          />
           <button
-            key={String(o)}
             type="button"
-            onClick={() => onToggle(o)}
-            className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
-              active ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"
-            }`}
+            className="btn-ghost btn-xs"
+            onClick={addCustomCode}
+            disabled={!input.trim()}
           >
-            {o}
+            <i className="bi bi-plus-lg" />
+            Add
           </button>
-        );
-      })}
+          <span className="text-[11px] text-ink-500">Type any HTTP code (100-599), press Enter to add</span>
+        </div>
+      )}
+
+      {/* Custom-added triggers shown as removable chips */}
+      {customSelected.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {customSelected.map((c) => (
+            <button
+              key={String(c)}
+              type="button"
+              onClick={() => onToggle(c)}
+              className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-2 py-0.5 text-xs font-medium text-white transition-colors hover:bg-brand-500"
+              title="Click to remove"
+            >
+              {c}
+              <i className="bi bi-x-lg text-[10px]" />
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
