@@ -55,6 +55,15 @@ const EnvSchema = z.object({
   // is enabled. The proxy buffers the complete upstream response, then replays
   // it as a paced SSE stream at this rate. Default 2000 tok/s.
   SIMULATED_STREAMING_TOKEN_RATE: z.coerce.number().int().positive().default(2000),
+  // Dead-air guard for streaming requests. A buffering executor (Micro Agent,
+  // Reliable Streaming) or a slow upstream first token can be silent for
+  // minutes, and intermediaries kill silent connections long before that. If a
+  // streaming request produces no outcome within the grace window, the proxy
+  // commits the SSE response and emits keep-alive pings until it has one; a
+  // failure after that point is delivered as the protocol's in-stream error
+  // event. Failures faster than the grace window keep their real HTTP status.
+  STREAM_COMMIT_GRACE_MS: z.coerce.number().int().positive().default(2_500),
+  STREAM_PING_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -73,6 +82,8 @@ export interface AppConfig {
   cookieSecure: "auto" | "true" | "false";
   allowPrivateUpstreams: boolean;
   simulatedStreamingTokenRate: number;
+  streamCommitGraceMs: number;
+  streamPingIntervalMs: number;
 }
 
 /**
@@ -105,6 +116,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cookieSecure: e.COOKIE_SECURE,
     allowPrivateUpstreams: e.ALLOW_PRIVATE_UPSTREAMS,
     simulatedStreamingTokenRate: e.SIMULATED_STREAMING_TOKEN_RATE,
+    streamCommitGraceMs: e.STREAM_COMMIT_GRACE_MS,
+    streamPingIntervalMs: e.STREAM_PING_INTERVAL_MS,
   };
 }
 

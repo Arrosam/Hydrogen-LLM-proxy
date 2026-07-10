@@ -35,6 +35,31 @@ export function buildErrorBody(family: Family, status: number, message: string):
   return { error: { message, type: openaiErrorType(status), code: null, param: null } };
 }
 
+/**
+ * The same error as an in-stream SSE frame, for a response whose 200 has
+ * already been committed (the keep-alive path). Anthropic documents mid-stream
+ * `error` events and its SDKs raise on them; OpenAI SDK stream parsers raise on
+ * a chunk carrying an `error` key. The frame is the terminal signal — no
+ * [DONE] / message_stop follows it, so a failed run can never be mistaken for
+ * a completed answer.
+ */
+export function buildErrorFrame(family: Family, status: number, message: string): string {
+  const body = JSON.stringify(buildErrorBody(family, status, message));
+  if (family === "anthropic" || family === "openai_responses") return `event: error\ndata: ${body}\n\n`;
+  return `data: ${body}\n\n`;
+}
+
+/**
+ * A keep-alive frame that conforming clients ignore. Anthropic's wire protocol
+ * has a first-class ping event (its API emits them routinely); the OpenAI
+ * protocols have none, so those get an SSE comment line, which the spec
+ * requires parsers to skip.
+ */
+export function pingFrame(family: Family): string {
+  if (family === "anthropic") return `event: ping\ndata: {"type":"ping"}\n\n`;
+  return `: ping\n\n`;
+}
+
 function openaiErrorType(status: number): string {
   if (status === 401 || status === 403) return "authentication_error";
   if (status === 429) return "rate_limit_error";

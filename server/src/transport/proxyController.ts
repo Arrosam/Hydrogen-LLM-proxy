@@ -3,7 +3,7 @@ import type { ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
-import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
+import { buildErrorBody, buildErrorFrame, extractUpstreamMessage, failureMessage, failureStatus, pingFrame } from "../core/proxy/errors";
 import {
   newAccumulator,
   tapStream,
@@ -79,6 +79,70 @@ function responseFlushed(raw: ServerResponse, guardMs = 5_000): Promise<boolean>
     raw.once("close", onClose);
     raw.once("error", onError);
   });
+}
+
+// Do NOT set `connection` here. Node only frames the body itself when the user
+// has not supplied a Connection header: forcing "keep-alive" made it skip that
+// logic, and an HTTP/1.0 peer (nginx's default proxy_http_version) then
+// received a body with no Transfer-Encoding, no Content-Length, and a claim
+// that the connection persists — a message whose end cannot be found.
+const SSE_HEADERS = {
+  "content-type": "text/event-stream; charset=utf-8",
+  "cache-control": "no-cache, no-transform",
+  "x-accel-buffering": "no",
+} as const;
+
+/**
+ * Dead-air guard for a streaming request. A buffering executor (Micro Agent,
+ * Reliable Streaming) — or a slow upstream first token — can be silent for
+ * minutes, and every intermediary and client kills a silent connection long
+ * before that: the answer then arrives at a connection nobody is listening to,
+ * and the log records a 200 the client never saw. After a short grace window
+ * this commits the SSE response and emits protocol keep-alive frames until the
+ * outcome arrives, so bytes are always flowing. The cost: a failure slower than
+ * the grace window must be delivered as an in-stream error event instead of an
+ * HTTP status (a fast failure still gets its real status).
+ */
+class SseKeepalive {
+  committed = false;
+  private readonly graceTimer: NodeJS.Timeout;
+  private pingTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly reply: FastifyReply,
+    private readonly family: Family,
+    graceMs: number,
+    private readonly intervalMs: number,
+  ) {
+    this.graceTimer = setTimeout(() => this.commit(), graceMs);
+    this.graceTimer.unref?.();
+  }
+
+  private commit(): void {
+    const raw = this.reply.raw;
+    if (this.committed || raw.destroyed || raw.headersSent) return;
+    this.reply.hijack();
+    raw.writeHead(200, SSE_HEADERS);
+    this.committed = true;
+    raw.write(pingFrame(this.family));
+    this.pingTimer = setInterval(() => {
+      if (raw.destroyed || raw.writableEnded) {
+        this.stop();
+        return;
+      }
+      raw.write(pingFrame(this.family));
+    }, this.intervalMs);
+    this.pingTimer.unref?.();
+  }
+
+  /** The outcome has arrived: stop the grace/ping timers. */
+  stop(): void {
+    clearTimeout(this.graceTimer);
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
 }
 
 /**
@@ -216,13 +280,25 @@ export class ProxyController {
     });
 
     if (request.stream) {
+      // Keep bytes flowing while the executor works: commit the SSE response
+      // after the grace window and ping until the outcome arrives.
+      const keepalive = new SseKeepalive(
+        reply, ingress,
+        this.deps.streamCommitGraceMs ?? 2_500,
+        this.deps.streamPingIntervalMs ?? 10_000,
+      );
       const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal });
+      keepalive.stop();
       if (!outcome.result.ok) {
         if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
+        if (keepalive.committed) {
+          // The 200 is already on the wire; the failure travels in-stream.
+          return this.replyFailureInStream(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
+        }
         this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
         return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
       }
-      this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath });
+      this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath, committed: keepalive.committed });
       return; // relay hijacks the reply and writes asynchronously
     }
 
@@ -286,6 +362,48 @@ export class ProxyController {
     return undefined;
   }
 
+  /** The last attempt's retry context, appended to the logged error so the
+   * log carries the full diagnosis trail. */
+  private retrySuffix(attemptPath: unknown): string {
+    const lastAttempt = (attemptPath as Array<{ retry?: { reason: string; retryIndex: number; delayMs: number; suppressed: boolean } }>)?.slice(-1)[0];
+    return lastAttempt?.retry
+      ? ` [retry#${lastAttempt.retry.retryIndex} delay=${lastAttempt.retry.delayMs}ms suppressed=${lastAttempt.retry.suppressed}: ${lastAttempt.retry.reason}]`
+      : "";
+  }
+
+  /**
+   * A failure on a streaming request whose 200 was already committed by the
+   * keep-alive: the error is delivered as the protocol's in-stream error event
+   * (Anthropic-style `error` event / OpenAI error chunk) with no terminator
+   * after it, so it cannot read as a completed answer. The log row keeps the
+   * SEMANTIC status (503, 502, ...) so failures stay countable and filterable
+   * even though the wire status was 200.
+   */
+  private replyFailureInStream(
+    reply: FastifyReply,
+    ctx: RequestCtx,
+    failure: AttemptFailure,
+    o: { attemptPath: unknown; attempts: number },
+  ): void {
+    const status = failureStatus(failure);
+    const message = failureMessage(failure);
+    const raw = reply.raw;
+    try {
+      if (!raw.destroyed && !raw.writableEnded) {
+        raw.write(buildErrorFrame(ctx.ingress, status, message));
+        raw.end();
+      }
+    } catch { /* the connection died first; the log below still tells the truth */ }
+    this.deps.logger.record({
+      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
+      ingress: ctx.ingress, streaming: true, httpStatus: status, http: ctx.http,
+      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath,
+      error: `${message}${this.retrySuffix(o.attemptPath)} (delivered as in-stream error event)`,
+    });
+    this.deps.usage.record(ctx.token.id, 0);
+    this.deps.activeRequests.finish(ctx.traceId, status, message);
+  }
+
   private replyFailure(
     reply: FastifyReply,
     ctx: RequestCtx,
@@ -296,11 +414,7 @@ export class ProxyController {
     const message = failureMessage(failure);
     // When the failure was retried (e.g. 499), append the last retry context so
     // the log + client-facing error carry the full diagnosis trail.
-    const lastAttempt = (o.attemptPath as Array<{ retry?: { reason: string; retryIndex: number; delayMs: number; suppressed: boolean } }>)?.slice(-1)[0];
-    const retrySuffix = lastAttempt?.retry
-      ? ` [retry#${lastAttempt.retry.retryIndex} delay=${lastAttempt.retry.delayMs}ms suppressed=${lastAttempt.retry.suppressed}: ${lastAttempt.retry.reason}]`
-      : "";
-    const detailedError = message + retrySuffix;
+    const detailedError = message + this.retrySuffix(o.attemptPath);
     this.deps.logger.record({
       traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
       ingress: ctx.ingress, streaming: o.streaming, httpStatus: status, http: ctx.http,
@@ -316,27 +430,20 @@ export class ProxyController {
    * immediately. The log records exactly what the accumulator saw from the
    * upstream, and a disconnect is detected via write errors so the log status
    * reflects delivery failure. */
-  private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown }): void {
+  private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown; committed?: boolean }): void {
     const acc: StreamAccumulator = newAccumulator();
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
     const outGen = serializeStream(ctx.ingress, tapStream(events, acc), { model: ctx.serviceName });
 
-    // Hijack the reply so Fastify does not interfere with our raw SSE writes.
-    // Without this, Fastify's lifecycle hooks (onSend, preSerialization, etc.)
-    // can race with the async writer below, causing truncated responses.
-    reply.hijack();
-
     const raw = reply.raw;
-    // Do NOT set `connection` here. Node only frames the body itself when the
-    // user has not supplied a Connection header: forcing "keep-alive" made it
-    // skip that logic, and an HTTP/1.0 peer (nginx's default proxy_http_version)
-    // then received a body with no Transfer-Encoding, no Content-Length, and a
-    // claim that the connection persists — a message whose end cannot be found.
-    raw.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    });
+    if (!o.committed) {
+      // Hijack the reply so Fastify does not interfere with our raw SSE writes.
+      // Without this, Fastify's lifecycle hooks (onSend, preSerialization, etc.)
+      // can race with the async writer below, causing truncated responses.
+      // (When the keep-alive already committed the response, both happened.)
+      reply.hijack();
+      raw.writeHead(200, SSE_HEADERS);
+    }
 
     // Start an async writer that drains the generator into the raw response.
     // Using raw.write + raw.flush (instead of Readable.from) avoids the

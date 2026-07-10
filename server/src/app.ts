@@ -53,6 +53,8 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     logger: c.requestLogger,
     usage: c.usageMeter,
     activeRequests: c.activeRequests,
+    streamCommitGraceMs: cfg.streamCommitGraceMs,
+    streamPingIntervalMs: cfg.streamPingIntervalMs,
   }).register(app);
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });

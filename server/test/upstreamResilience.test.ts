@@ -77,7 +77,11 @@ async function boot(definition: unknown, script: UpstreamBehavior[], timeoutMs =
   process.env.LOG_PAYLOAD_MAX_CHARS = "0";
   process.env.ADMIN_PASSWORD = "resilience-test-password";
   process.env.SESSION_SECRET = "resilience-test-session-secret";
-  process.env.SIMULATED_STREAMING_TOKEN_RATE = "2000000"; // pacing is not what we test here
+  process.env.SIMULATED_STREAMING_TOKEN_RATE = "2000000";
+  // These suites assert the REAL HTTP status of slow failures, so keep the
+  // dead-air keep-alive from committing a 200 first (sseKeepalive.test.ts
+  // covers the committed path).
+  process.env.STREAM_COMMIT_GRACE_MS = "600000"; // pacing is not what we test here
   void timeoutMs;
 
   const upstream = await startFakeUpstream({ text: ANSWER, chunkChars: 200, script, seed: 3 });

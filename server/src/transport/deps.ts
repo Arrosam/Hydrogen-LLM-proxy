@@ -17,4 +17,9 @@ export interface ProxyDeps {
   logger: RequestLogger;
   usage: UsageMeter;
   activeRequests: ActiveRequestRegistry;
+  /** Silence allowed on a streaming request before the SSE response is
+   * committed and keep-alive pings start. Default 2500ms. */
+  streamCommitGraceMs?: number;
+  /** Interval between keep-alive pings once committed. Default 10000ms. */
+  streamPingIntervalMs?: number;
 }

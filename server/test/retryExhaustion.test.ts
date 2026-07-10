@@ -59,6 +59,10 @@ async function boot(definition: unknown, script: UpstreamBehavior[]): Promise<Ha
   process.env.ADMIN_PASSWORD = "exhaustion-test-password";
   process.env.SESSION_SECRET = "exhaustion-test-session-secret";
   process.env.SIMULATED_STREAMING_TOKEN_RATE = "2000000";
+  // These suites assert the REAL HTTP status of slow failures, so keep the
+  // dead-air keep-alive from committing a 200 first (sseKeepalive.test.ts
+  // covers the committed path).
+  process.env.STREAM_COMMIT_GRACE_MS = "600000";
 
   // ttfbMs makes every attempt — success or failure — cost real time.
   const upstream = await startFakeUpstream({ text: "ANSWER", chunkChars: 200, script, ttfbMs: ATTEMPT_COST_MS });
