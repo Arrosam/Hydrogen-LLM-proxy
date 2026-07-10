@@ -132,8 +132,9 @@ export function ActiveRequests() {
     }
   };
 
-  const rows = viewCompleted ? data?.completed ?? [] : data?.active ?? [];
-  const blockedCount = data?.active.filter((r) => r.blocked).length ?? 0;
+  const activeRows = data?.active ?? [];
+  const completedRows = data?.completed ?? [];
+  const blockedCount = activeRows.filter((r) => r.blocked).length;
 
   return (
     <div>
@@ -177,72 +178,38 @@ export function ActiveRequests() {
         </label>
         <div className="flex-1" />
         <span className="text-xs text-ink-500">
-          {data ? `${data.active.length} active, ${data.completed.length} completed` : "loading..."}
+          {data ? `${activeRows.length} active, ${completedRows.length} completed` : "loading..."}
         </span>
       </div>
 
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
-      {!loading && rows.length === 0 && (
+      {!loading && activeRows.length === 0 && (
         <EmptyState
           icon="bi-activity"
-          title={viewCompleted ? "No recently completed requests" : "No active requests"}
-          hint={viewCompleted ? "Completed requests appear here briefly before expiring." : "In-flight requests will appear here in real-time."}
+          title="No active requests"
+          hint="In-flight requests will appear here in real-time."
         />
       )}
 
-      {rows.length > 0 && (
-        <div className="card overflow-hidden">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Trace ID</th>
-                <th>Service</th>
-                <th>Phase</th>
-                <th>Last Node</th>
-                <th>Elapsed</th>
-                <th>Events</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr
-                  key={r.traceId}
-                  className={`cursor-pointer ${r.blocked ? "border-l-4 border-l-red-500 bg-red-950/20" : ""} hover:bg-ink-850/50`}
-                  onClick={() => openDetail(r.traceId)}
-                >
-                  <td className="font-mono text-xs text-ink-200" title={r.traceId}>
-                    {shortTrace(r.traceId)}
-                  </td>
-                  <td className="font-mono text-xs text-ink-300">{r.serviceName ?? "-"}</td>
-                  <td>
-                    {r.lastPhase && <span className={phaseBadge(r.lastPhase)}>{r.lastPhase}</span>}
-                  </td>
-                  <td className="font-mono text-xs text-ink-400">{r.lastNode ?? "-"}</td>
-                  <td className={`text-xs font-medium ${r.blocked ? "text-red-400" : "text-ink-300"}`}>
-                    {formatElapsed(r.elapsedMs)}
-                    {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title="Blocked > 30s" />}
-                  </td>
-                  <td className="text-xs text-ink-400">{r.eventCount}</td>
-                  <td>
-                    {r.done ? (
-                      <StatusBadge status={r.httpStatus ?? 0} />
-                    ) : r.blocked ? (
-                      <span className="badge-red">blocked</span>
-                    ) : (
-                      <span className="badge-green">serving</span>
-                    )}
-                  </td>
-                  <td className="text-right">
-                    <i className="bi bi-chevron-right text-ink-600" />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {activeRows.length > 0 && <RequestTable rows={activeRows} onRowClick={openDetail} />}
+
+      {viewCompleted && (
+        <>
+          <h3 className="mb-2 mt-6 text-sm font-medium text-ink-400">
+            Recently completed
+            <span className="ml-2 text-xs text-ink-600">{completedRows.length}</span>
+          </h3>
+          {!loading && completedRows.length === 0 ? (
+            <EmptyState
+              icon="bi-check2-circle"
+              title="No recently completed requests"
+              hint="Completed requests appear here briefly before expiring."
+            />
+          ) : (
+            <RequestTable rows={completedRows} onRowClick={openDetail} />
+          )}
+        </>
       )}
 
       {/* Progress event stream detail modal */}
@@ -318,6 +285,68 @@ function Meta({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg bg-ink-950/50 px-3 py-2">
       <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
       <div className="mt-0.5 text-ink-200">{value}</div>
+    </div>
+  );
+}
+
+function RequestTable({
+  rows,
+  onRowClick,
+}: {
+  rows: ActiveRequestView[];
+  onRowClick: (traceId: string) => void;
+}) {
+  return (
+    <div className="card overflow-hidden">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Trace ID</th>
+            <th>Service</th>
+            <th>Phase</th>
+            <th>Last Node</th>
+            <th>Elapsed</th>
+            <th>Events</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr
+              key={r.traceId}
+              className={`cursor-pointer ${r.blocked ? "border-l-4 border-l-red-500 bg-red-950/20" : ""} hover:bg-ink-850/50`}
+              onClick={() => onRowClick(r.traceId)}
+            >
+              <td className="font-mono text-xs text-ink-200" title={r.traceId}>
+                {shortTrace(r.traceId)}
+              </td>
+              <td className="font-mono text-xs text-ink-300">{r.serviceName ?? "-"}</td>
+              <td>
+                {r.lastPhase && <span className={phaseBadge(r.lastPhase)}>{r.lastPhase}</span>}
+              </td>
+              <td className="font-mono text-xs text-ink-400">{r.lastNode ?? "-"}</td>
+              <td className={`text-xs font-medium ${r.blocked ? "text-red-400" : "text-ink-300"}`}>
+                {formatElapsed(r.elapsedMs)}
+                {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title="Blocked > 30s" />}
+              </td>
+              <td className="text-xs text-ink-400">{r.eventCount}</td>
+              <td>
+                {r.done ? (
+                  <StatusBadge status={r.httpStatus ?? 0} />
+                ) : r.blocked ? (
+                  <span className="badge-red">blocked</span>
+                ) : (
+                  <span className="badge-green">serving</span>
+                )}
+              </td>
+              <td className="text-right">
+                <i className="bi bi-chevron-right text-ink-600" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
