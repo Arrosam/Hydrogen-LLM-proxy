@@ -58,4 +58,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           cache-to: type=gha,mode=max

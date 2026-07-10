@@ -49,6 +49,11 @@ export class RequestLogger {
     private readonly maxChars: number,
   ) {}
 
+  /** Demote a logged 200 to 499 after late evidence that delivery failed. */
+  amendDeliveryFailure(traceId: string, error: string): boolean {
+    return this.repo.markDeliveryFailed(traceId, error);
+  }
+
   record(p: LogParams): void {
     const usage = p.usage ?? ZERO_USAGE;
     this.repo.insert({

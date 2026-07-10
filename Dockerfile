@@ -42,6 +42,9 @@ COPY --from=build /app/server/drizzle ./drizzle
 COPY --from=build /app/web/dist /app/web/dist
 
 WORKDIR /app
+# Bake the commit into the image so /healthz can report which build is running.
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
 ENV PORT=8080
 ENV DATA_DIR=/data
 VOLUME ["/data"]

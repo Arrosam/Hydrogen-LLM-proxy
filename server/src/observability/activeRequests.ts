@@ -132,6 +132,16 @@ export class ActiveRequestRegistry {
     }
   }
 
+  /** Amend a completed request when late evidence changes its outcome
+   * (e.g. the client socket reset right after the 200 row was written). */
+  amendCompleted(traceId: string, httpStatus: number, error: string): void {
+    const entry = this.completed.find((r) => r.traceId === traceId);
+    if (!entry) return;
+    entry.httpStatus = httpStatus;
+    entry.error = error;
+    entry.updatedAt = Date.now();
+  }
+
   /** All currently in-flight requests (snapshot copy). */
   listActive(): ActiveRequest[] {
     return Array.from(this.active.values());

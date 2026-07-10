@@ -101,7 +101,7 @@ export class ModelService {
           upstreamRequest: sent.sentBody,
         },
       };
-    }, { progress: prog });
+    }, { progress: prog, signal: opts.signal });
     return { result, attemptPath: path, attempts: path.length };
   }
 
@@ -189,7 +189,7 @@ export class ModelService {
           dropReasoning: merged.params.thinking === "disabled",
         },
       };
-    }, { progress: prog });
+    }, { progress: prog, signal: opts.signal });
     return { result, attemptPath: path, attempts: path.length };
   }
 }

@@ -75,6 +75,23 @@ export class RequestLogRepo {
     this.db.insert(requestLogs).values(row).run();
   }
 
+  /**
+   * Demote an already-logged 200 to 499 when the connection dies right after
+   * the response was handed to the network. Node's 'finish' only means the
+   * bytes reached the kernel's send buffer; when the peer resets the socket
+   * moments later those bytes were never delivered, and the evidence arrives
+   * after the row was written. Only a 200 row is amended — a failure status
+   * already tells the truth.
+   */
+  markDeliveryFailed(traceId: string, error: string): boolean {
+    const res = this.db
+      .update(requestLogs)
+      .set({ httpStatus: 499, error })
+      .where(and(eq(requestLogs.traceId, traceId), eq(requestLogs.httpStatus, 200)))
+      .run();
+    return (res.changes ?? 0) > 0;
+  }
+
   /** Delete every request log row. Returns the number deleted. */
   deleteAll(): number {
     return this.db.delete(requestLogs).run().changes ?? 0;

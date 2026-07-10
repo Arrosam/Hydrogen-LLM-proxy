@@ -152,7 +152,7 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
 export async function runSteps<T>(
   steps: ServiceSteps,
   attempt: (step: ServiceStep, stepIndex: number) => Promise<AttemptResult<T>>,
-  opts: { sleep?: (ms: number) => Promise<void>; progress?: ProgressRecorder | null } = {},
+  opts: { sleep?: (ms: number) => Promise<void>; progress?: ProgressRecorder | null; signal?: AbortSignal } = {},
 ): Promise<RunOutput<T>> {
   const sleep = opts.sleep ?? defaultSleep;
   const prog = opts.progress ?? null;
@@ -170,12 +170,17 @@ export async function runSteps<T>(
     let stepFailure: AttemptFailure | null = null;
 
     for (let a = 1; a <= maxAttempts; a++) {
+      // The caller's signal aborting means the client is gone: nobody will
+      // receive the answer, so another attempt only burns quota. Checked again
+      // after the sleep, which is where a long backoff would otherwise hide it.
+      if (opts.signal?.aborted) break;
       // The delay that was applied BEFORE this attempt (0 for attempt 1).
       // Computed once so the log and the actual sleep agree.
       const preDelayMs = a > 1 ? computeRetryDelay(a, retry) : 0;
       if (preDelayMs > 0) {
         prog?.record("retry", "retry.delay", `retry #${a - 1}: sleeping ${preDelayMs}ms before attempt`, { retryIndex: a - 1, delayMs: preDelayMs });
         await sleep(preDelayMs);
+        if (opts.signal?.aborted) break;
       }
 
       const start = Date.now();

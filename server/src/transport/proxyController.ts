@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
@@ -78,6 +79,42 @@ function responseFlushed(raw: ServerResponse, guardMs = 5_000): Promise<boolean>
     raw.once("close", onClose);
     raw.once("error", onError);
   });
+}
+
+/**
+ * Watch a client socket AFTER its response finished writing, and report whether
+ * the peer disproves delivery.
+ *
+ * 'finish' means every byte reached the kernel's send buffer — for a response
+ * small enough to fit there (a few hundred KB to a few MB), it fires instantly
+ * even when the peer has stopped reading, and the log records a 200 the client
+ * never received. The disproof arrives moments later on the socket itself:
+ *   - 'error' / 'close' with hadError: the peer reset while unacknowledged data
+ *     was still in flight — delivery failed.
+ *   - inbound 'data': the peer sent its next request, which means it consumed
+ *     our response — delivery confirmed.
+ *   - clean 'close': a peer that closes with unread data in its receive queue
+ *     resets instead of FIN-ing, so a graceful close implies it read everything.
+ *   - window expiry: no evidence either way; assume delivered, as before.
+ */
+function watchDelivery(socket: Socket, onFailed: (reason: string) => void, windowMs = 15_000): void {
+  if (socket.destroyed) return;
+  const done = (failed: string | null): void => {
+    clearTimeout(timer);
+    socket.off("error", onError);
+    socket.off("close", onClose);
+    socket.off("data", onData);
+    if (failed) onFailed(failed);
+  };
+  const onError = (e: Error): void => done(`connection reset after the response was written (${e.message}); delivery not confirmed`);
+  const onClose = (hadError: boolean): void =>
+    done(hadError ? "connection reset after the response was written; delivery not confirmed" : null);
+  const onData = (): void => done(null);
+  const timer = setTimeout(() => done(null), windowMs);
+  timer.unref?.();
+  socket.on("error", onError);
+  socket.on("close", onClose);
+  socket.on("data", onData);
 }
 
 /** The client-facing proxy: parse -> resolve service -> invoke/stream -> log. */
@@ -170,9 +207,18 @@ export class ProxyController {
     prog.record("init", "request.received", `request received: ${ingress} -> ${serviceName}`, { streaming: request.stream });
     prog.record("init", "request.parsed", "request body parsed and service resolved");
 
+    // A client that abandons the connection aborts the upstream work: nobody
+    // will receive the answer, so every further retry only burns quota — and
+    // the log row must end up saying 499, not 200.
+    const clientGone = new AbortController();
+    reply.raw.once("close", () => {
+      if (!reply.raw.writableFinished) clientGone.abort();
+    });
+
     if (request.stream) {
-      const outcome = await executor.stream(request, undefined, { progress: prog });
+      const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal });
       if (!outcome.result.ok) {
+        if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
         this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
         return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
       }
@@ -180,26 +226,64 @@ export class ProxyController {
       return; // relay hijacks the reply and writes asynchronously
     }
 
-    const outcome = await executor.invoke(request, undefined, { progress: prog });
+    const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal });
     if (!outcome.result.ok) {
+      if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, false, outcome);
       this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
       return this.replyFailure(reply, ctx, outcome.result, { streaming: false, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
     }
 
     const value = outcome.result.value;
     const clientBody = value.response.render(ingress, serviceName);
-    prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: 200 });
-    this.deps.activeRequests.finish(traceId, 200);
+    // Deliver first, then log what actually happened: writing the 200 row
+    // before send() is how a response nobody received was recorded as success.
+    const socket = reply.raw.socket;
+    const settled = responseFlushed(reply.raw);
+    reply.code(200).send(clientBody);
+    const flushed = await settled;
+    const status = flushed ? 200 : 499;
+    const error = flushed ? null : "connection closed before the response was fully sent";
+    prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
+    this.deps.activeRequests.finish(traceId, status, error ?? undefined);
     this.deps.logger.record({
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: value.modelName, servedProvider: value.providerName,
-      ingress, egress: value.family, streaming: false, httpStatus: 200, http,
+      ingress, egress: value.family, streaming: false, httpStatus: status, http,
       upstreamRequest: value.upstreamRequest,
       responseBody: clientBody, usage: value.response.usage, latencyMs: Date.now() - started,
-      attempts: outcome.attempts, attemptPath: outcome.attemptPath,
+      attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
     });
+    // The upstream consumed these tokens whether or not the delivery landed.
     this.deps.usage.record(token.id, value.response.usage.totalTokens);
-    return reply.code(200).send(clientBody);
+    if (status === 200 && socket) {
+      watchDelivery(socket, (reason) => {
+        this.deps.logger.amendDeliveryFailure(traceId, reason);
+        this.deps.activeRequests.amendCompleted(traceId, 499, reason);
+      });
+    }
+    return reply;
+  }
+
+  /** The client hung up while the upstream work was still running; the work was
+   * aborted and there is no one left to answer. Log 499 and release the reply. */
+  private replyClientGone(
+    reply: FastifyReply,
+    ctx: RequestCtx,
+    streaming: boolean,
+    o: { attemptPath: unknown; attempts: number },
+  ): undefined {
+    const error = "client disconnected before the response could be sent; upstream work aborted";
+    this.deps.activeRequests.finish(ctx.traceId, 499, error);
+    this.deps.logger.record({
+      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
+      ingress: ctx.ingress, streaming, httpStatus: 499, http: ctx.http,
+      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
+    });
+    this.deps.usage.record(ctx.token.id, 0);
+    // The connection is already dead — detach Fastify and close it out.
+    reply.hijack();
+    try { reply.raw.destroy(); } catch { /* already closed */ }
+    return undefined;
   }
 
   private replyFailure(
@@ -288,6 +372,9 @@ export class ProxyController {
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
       } finally {
+        // Capture the socket now: Node detaches it from the response on finish,
+        // and the delivery watch below needs it after that point.
+        const socket = raw.socket;
         // Terminate the response before anything else: the client must not wait
         // on database I/O, and a throwing logger must not leave the stream open.
         const settled = responseFlushed(raw);
@@ -339,6 +426,16 @@ export class ProxyController {
         this.deps.usage.record(ctx.token.id, usage.totalTokens);
         // Mark the active request as finished (streaming relay end).
         this.deps.activeRequests.finish(ctx.traceId, status, error ?? undefined);
+        // A 200 at this point still only means "handed to the kernel". Keep
+        // watching the socket: if the peer resets it before sending anything
+        // else, the tail of the response never arrived — demote the row to 499
+        // so the log stops claiming a delivery that did not happen.
+        if (status === 200 && socket) {
+          watchDelivery(socket, (reason) => {
+            this.deps.logger.amendDeliveryFailure(ctx.traceId, reason);
+            this.deps.activeRequests.amendCompleted(ctx.traceId, 499, reason);
+          });
+        }
       }
     })();
   }

@@ -354,6 +354,60 @@ describe("EP: classifyError partitions", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Client-abort: once the caller's signal fires, no further attempt is made.
+// ---------------------------------------------------------------------------
+
+describe("abort signal stops the retry loop", () => {
+  it("no retry happens after the signal aborts, whatever the trigger says", async () => {
+    const controller = new AbortController();
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 5, on: [503], intervalMs: 0 } }]);
+
+    let attempts = 0;
+    const { result, path } = await runSteps<string>(def, async () => {
+      attempts += 1;
+      controller.abort(); // the client leaves while attempt 1 is in flight
+      return httpFail(503); // a failure that WOULD be retried
+    }, { sleep: async () => {}, signal: controller.signal });
+
+    expect(attempts).toBe(1); // attempts 2..5 never ran
+    expect(path).toHaveLength(1);
+    expect(result.ok).toBe(false);
+  });
+
+  it("an already-aborted signal prevents even the first attempt", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 3, on: [503], intervalMs: 0 } }]);
+
+    let attempts = 0;
+    const { result } = await runSteps<string>(def, async () => {
+      attempts += 1;
+      return success();
+    }, { sleep: async () => {}, signal: controller.signal });
+
+    expect(attempts).toBe(0);
+    expect(result.ok).toBe(false);
+  });
+
+  it("the abort also cuts a multi-step chain short", async () => {
+    const controller = new AbortController();
+    const def = chain([
+      { model: "a", provider: "p", retry: { maxAttempts: 1, on: [], intervalMs: 0 } },
+      { model: "b", provider: "p", retry: { maxAttempts: 1, on: [], intervalMs: 0 } },
+    ]);
+
+    const visited: string[] = [];
+    await runSteps<string>(def, async (step) => {
+      visited.push(step.model);
+      controller.abort();
+      return httpFail(500);
+    }, { sleep: async () => {}, signal: controller.signal });
+
+    expect(visited).toEqual(["a"]); // step b never attempted
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The retry context written to attempt_path_json. A failed request's first
 // question is "why did this not retry?", so every failed attempt must answer it.
 // ---------------------------------------------------------------------------

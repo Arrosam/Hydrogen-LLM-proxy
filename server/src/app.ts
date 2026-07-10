@@ -39,7 +39,10 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     return reply.code(status).send({ error: status >= 500 ? "internal server error" : msg });
   });
 
-  app.get("/healthz", async () => ({ status: "ok" }));
+  // `build` is the git SHA baked in at image build time (GIT_SHA build arg),
+  // so a deployment can be checked against the repo: without it there is no
+  // way to tell whether a fix is actually running.
+  app.get("/healthz", async () => ({ status: "ok", build: process.env.GIT_SHA || "dev" }));
 
   new ProxyController({
     services: c.services,
