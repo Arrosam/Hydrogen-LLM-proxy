@@ -158,7 +158,7 @@ export const StepSchema = z.object({
 
 export const ServiceStepsSchema = z.object({
   kind: z.literal("model_service").optional(),
-  timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
+  timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
   steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
   /**
    * Reliable streaming: for a streaming client request, stream the upstream
@@ -229,7 +229,7 @@ export const AgentStageSchema = z.object({
   thinking: ThinkingLevelSchema.optional(),
   /** Rich per-stage parameter overrides (includes the system prompt). */
   overrides: OverridesSchema.optional(),
-  timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
   /** Forward-only conditional edges. Absent/no-match = fall through to the next stage. */
   transitions: z.array(AgentTransitionSchema).optional(),
 });
@@ -243,13 +243,13 @@ export const AgentOcrSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
   overrides: OverridesSchema.optional(),
-  timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
 });
 
 export const AgentSchema = z.object({
   // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
   kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
-  timeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
+  timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
   stages: z.array(AgentStageSchema).min(1, "a Micro Agent needs at least one stage"),
   /** Name of the stage whose output is returned; omitted = the last stage. */
   output: z.string().optional(),

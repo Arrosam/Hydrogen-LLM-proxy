@@ -32,6 +32,12 @@ export class UpstreamClient implements Transport {
       headers,
       body: JSON.stringify(body),
       signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      // undici defaults BOTH of these to 5 minutes when omitted. A non-streaming
+      // upstream (a local model especially) sends its headers only after the
+      // whole completion is computed, which can take far longer — the service's
+      // timeoutMs must be the only cap, so pass it through explicitly.
+      headersTimeout: opts.timeoutMs,
+      bodyTimeout: opts.timeoutMs,
     });
     const text = await res.body.text();
     let json: unknown = undefined;
@@ -76,6 +82,9 @@ export class UpstreamClient implements Transport {
       method: "GET",
       headers,
       signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      // Same as postJson: keep undici's silent 5-minute defaults out of the way.
+      headersTimeout: opts.timeoutMs,
+      bodyTimeout: opts.timeoutMs,
     });
     const text = await res.body.text();
     let json: unknown = undefined;

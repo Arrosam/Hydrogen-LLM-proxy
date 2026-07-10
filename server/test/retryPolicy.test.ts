@@ -20,7 +20,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 
 import { classifyError, computeRetryDelay, is499Retryable, runSteps, type AttemptFailure, type AttemptResult } from "../src/execution/steps";
-import { DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_ON, parseServiceSteps, summarizeService, type ServiceStep } from "../src/execution/definition";
+import { DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_ON, parseService, parseServiceSteps, summarizeService, type ServiceStep } from "../src/execution/definition";
 import { failureStatus } from "../src/core/proxy/errors";
 
 // ---------------------------------------------------------------------------
@@ -350,6 +350,36 @@ describe("EP: classifyError partitions", () => {
 
   it("a non-Error throw still classifies", () => {
     expect(classifyError("boom").kind).toBe("network");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BVA — timeoutMs bounds. A local model can legitimately take tens of minutes;
+// the old ceiling (600_000 = 10min) made such a service impossible to define.
+// ---------------------------------------------------------------------------
+
+describe("BVA: timeoutMs bounds", () => {
+  it("accepts a 30-minute timeout (a slow local model)", () => {
+    const def = chain([{ model: "m", provider: "p" }], 1_800_000);
+    expect(def.timeoutMs).toBe(1_800_000);
+  });
+
+  it("accepts the 2-hour ceiling and rejects just above it", () => {
+    expect(chain([{ model: "m", provider: "p" }], 7_200_000).timeoutMs).toBe(7_200_000);
+    expect(() => chain([{ model: "m", provider: "p" }], 7_200_001)).toThrow();
+  });
+
+  it("still rejects sub-second timeouts", () => {
+    expect(() => chain([{ model: "m", provider: "p" }], 999)).toThrow();
+  });
+
+  it("an agent stage may carry a long timeout of its own", () => {
+    const def = parseService({
+      kind: "micro_agent",
+      timeoutMs: 7_200_000,
+      stages: [{ name: "s", steps: [{ model: "m", provider: "p" }], input: [], timeoutMs: 1_800_000 }],
+    });
+    expect((def as { stages: Array<{ timeoutMs?: number }> }).stages[0].timeoutMs).toBe(1_800_000);
   });
 });
 
