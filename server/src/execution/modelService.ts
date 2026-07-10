@@ -107,8 +107,10 @@ export class ModelService {
 
   /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by
    * reliable-streaming Model Services and Micro Agents (which always buffer).
-   * The pacing rate is configurable via ServiceDeps.simulatedStreamingTokenRate. */
-  protected fabricated(inv: Invocation): StreamInvocation {
+   * The pacing rate is configurable via ServiceDeps.simulatedStreamingTokenRate.
+   * `startedAt` is when the run began, so the upstream time (retries included)
+   * counts against the pacing budget instead of being added to it. */
+  protected fabricated(inv: Invocation, startedAt?: number): StreamInvocation {
     if (!inv.result.ok) return { result: inv.result, attemptPath: inv.attemptPath, attempts: inv.attempts };
     const v = inv.result.value;
     const tokenRate = this.deps.simulatedStreamingTokenRate ?? 2000;
@@ -116,7 +118,7 @@ export class ModelService {
       result: {
         ok: true,
         value: {
-          events: fabricateStream(v.response.data(), tokenRate),
+          events: fabricateStream(v.response.data(), tokenRate, startedAt),
           family: v.family,
           upstreamModel: v.upstreamModel,
           providerName: v.providerName,
@@ -133,6 +135,7 @@ export class ModelService {
 
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
     const prog = opts.progress ?? null;
+    const startedAt = Date.now();
     // Reliable streaming: buffer the upstream (retrying a truncated stream) and
     // replay the complete result as a paced simulated stream — the client never
     // gets a partial/truncated stream, at the cost of first-token latency.
@@ -145,7 +148,7 @@ export class ModelService {
     // request is sent. Either way the full response is buffered locally before
     // fabrication, so the client always receives a complete, paced stream.
     if (this.def.reliableStreaming) {
-      return this.fabricated(await this.invoke(request, overrides, opts));
+      return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
     }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);

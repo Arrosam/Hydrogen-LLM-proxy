@@ -375,6 +375,68 @@ describe("3. Configurable token rate", () => {
 // 4. Buffer-exhaustion stall fix
 // ===========================================================================
 
+// ===========================================================================
+// 3b. Pacing budget starts when the request starts, not when the replay does
+// ===========================================================================
+
+describe("3b. Pacing budget spans the whole request", () => {
+  /** ~10s of notional streaming at 2000 tok/s: 80_000 chars ≈ 20_000 tokens. */
+  const bigData: ResponseData = {
+    id: "r", model: "m", created: 1,
+    content: [{ type: "text", text: "A".repeat(80_000) }],
+    stopReason: "stop",
+    usage: { promptTokens: 0, completionTokens: 20_000, totalTokens: 20_000 },
+  };
+
+  it("3b.1 time already spent upstream counts against the pacing budget", async () => {
+    // The run began 30s ago (slow upstream + retries). The response is already
+    // buffered in full, so it must be handed over immediately — not dribbled out
+    // for another 10s, which would push a client with a request deadline past it.
+    const startedAt = Date.now() - 30_000;
+
+    const t0 = performance.now();
+    let chars = 0;
+    for await (const ev of fabricateStream(bigData, 2000, startedAt)) {
+      if (ev.type === "text_delta") chars += ev.text.length;
+    }
+    const elapsed = performance.now() - t0;
+
+    expect(chars).toBe(80_000);
+    expect(elapsed).toBeLessThan(1_000); // no artificial delay left to pay
+  });
+
+  it("3b.2 a fast request is still paced at the configured rate", async () => {
+    // Nothing has been spent yet, so the full pacing budget applies.
+    const t0 = performance.now();
+    for await (const _ of fabricateStream(bigData, 20_000, Date.now())) { /* drain */ }
+    const elapsed = performance.now() - t0;
+
+    // 20_000 tokens / 20_000 tok/s = ~1s. Assert it is paced, not instant.
+    expect(elapsed).toBeGreaterThan(300);
+  });
+
+  it("3b.3 ModelService charges slow upstream time to the pacing budget", async () => {
+    // The upstream takes ~250ms; the notional replay at 20 tok/s would take many
+    // seconds. The replay must absorb the upstream time rather than add to it.
+    const transport = makeTransport({ streamFrames: OK_FRAMES, slowDelayMs: 50 }); // 5 frames x 50ms
+    const svc = new ModelService(
+      { timeoutMs: 30000, steps: [{ model: "m", provider: "p" }], reliableStreaming: true },
+      makeDeps(transport, 20), // 20 tok/s: "hello world this is a test" (~6 tokens) => ~300ms notionally
+    );
+
+    const t0 = performance.now();
+    const inv = await svc.stream(baseReq(true));
+    expect(inv.result.ok).toBe(true);
+    if (!inv.result.ok) return;
+    for await (const _ of inv.result.value.events) { /* drain */ }
+    const total = performance.now() - t0;
+
+    // Upstream alone was ~250ms and already covers the ~300ms pacing budget,
+    // so the total must stay close to the upstream time, not upstream + 300ms.
+    expect(total).toBeLessThan(500);
+  });
+});
+
 describe("4. Buffer-exhaustion stall fix", () => {
   it("4.1 fabricateStream never permanently stalls — all data is in memory", async () => {
     // The fabricated stream reads from a complete ResponseData (all in memory).

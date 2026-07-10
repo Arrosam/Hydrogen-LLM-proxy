@@ -102,9 +102,12 @@ export class MicroAgent extends ModelService {
     this.logMaxChars = deps.logMaxChars;
   }
 
-  /** A Micro Agent always buffers, then replays the complete result as a stream. */
+  /** A Micro Agent always buffers, then replays the complete result as a stream.
+   * The pacing budget starts here, so the (often long) multi-stage run counts
+   * against it rather than being added to it. */
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
-    return this.fabricated(await this.invoke(request, overrides, opts));
+    const startedAt = Date.now();
+    return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {

@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import type { Request } from "../ir/request";
 import { buildResponse, parseResponse, parseStream } from "../format/registry";
 import { collectStream } from "../ir/stream";
@@ -20,9 +21,13 @@ import type { RelayResult, SendResult } from "./outcome";
  */
 
 async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown> {
+  // Decode across chunk boundaries: a per-chunk toString() mangles any multi-byte
+  // character split between two chunks.
+  const decoder = new StringDecoder("utf8");
   let text = "";
   try {
-    for await (const chunk of body) text += chunk.toString();
+    for await (const chunk of body) text += typeof chunk === "string" ? chunk : decoder.write(chunk);
+    text += decoder.end();
   } catch {
     /* ignore */
   }

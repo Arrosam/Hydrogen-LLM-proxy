@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import type { ContentPart, StopReason } from "./content";
 import type { Usage } from "./usage";
 import { genId, nowSeconds } from "../../util/ids";
@@ -36,9 +37,14 @@ export interface SSEFrame {
 
 export async function* parseSSE(readable: AsyncIterable<Buffer | string>): AsyncGenerator<SSEFrame> {
   const sep = /\r?\n\r?\n/;
+  // Chunk boundaries fall wherever TCP/undici put them, which is routinely in
+  // the middle of a multi-byte character. `chunk.toString("utf8")` decodes each
+  // chunk in isolation and replaces the split character with U+FFFD; the
+  // StringDecoder carries the incomplete tail bytes into the next chunk instead.
+  const decoder = new StringDecoder("utf8");
   let buffer = "";
   for await (const chunk of readable) {
-    buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
     let m: RegExpExecArray | null;
     while ((m = sep.exec(buffer))) {
       const raw = buffer.slice(0, m.index);
@@ -46,6 +52,7 @@ export async function* parseSSE(readable: AsyncIterable<Buffer | string>): Async
       if (raw.trim()) yield parseFrame(raw);
     }
   }
+  buffer += decoder.end();
   if (buffer.trim()) yield parseFrame(buffer);
 }
 
@@ -238,14 +245,21 @@ const FAKE_STREAM_CHUNK_CHARS = 24; // chars per delta (~6 tokens); smoothness, 
  *   overdue (e.g. after a GC pause), the pacer skips the sleep and emits
  *   immediately — this prevents the "buffer exhaustion stall" where accumulated
  *   delays cause the client to hang even though all data is already in memory.
+ * @param budgetStartedAt When the client's request began (epoch ms). The pacing
+ *   budget is measured from here, NOT from the moment replay starts, so time
+ *   already spent upstream — including retries — counts against it. Without
+ *   this, a request that took 40s upstream and would notionally stream for 50s
+ *   takes 90s in total, and any client with a request deadline aborts partway
+ *   through a response the proxy already holds in full. Omitted = pace from now.
  */
 export async function* fabricateStream(
   data: ResponseData,
   tokensPerSec: number = DEFAULT_FABRICATE_TOKENS_PER_SEC,
+  budgetStartedAt?: number,
 ): AsyncGenerator<StreamEvent> {
   yield { type: "start", id: data.id, model: data.model, created: data.created, inputTokens: data.usage.promptTokens };
 
-  const startedAt = Date.now();
+  const startedAt = budgetStartedAt ?? Date.now();
   let emittedTokens = 0;
   // ~4 chars/token. Self-correcting against setTimeout jitter so the average
   // rate holds at the configured value. If we've fallen behind (the wait would
