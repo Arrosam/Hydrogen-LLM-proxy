@@ -14,6 +14,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -164,4 +165,75 @@ describe("streaming relay — real sockets, byte-exact", () => {
     expect(got.sawDone).toBe(true);
     expect(got.text).toBe(text);
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// wire framing: the SSE response must always tell the peer where the body ends
+// ---------------------------------------------------------------------------
+
+/** Speak raw HTTP at a chosen version and return the response head plus body. */
+function rawRequest(port: number, secret: string, httpVersion: "1.0" | "1.1"): Promise<{ head: string; body: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify({ model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    const head =
+      `POST /v1/chat/completions HTTP/${httpVersion}\r\n` +
+      `Host: 127.0.0.1:${port}\r\nAuthorization: Bearer ${secret}\r\n` +
+      `Content-Type: application/json\r\nContent-Length: ${payload.length}\r\n\r\n`;
+
+    const sock = net.connect(port, "127.0.0.1", () => { sock.write(head); sock.write(payload); });
+    let raw = "";
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      const i = raw.indexOf("\r\n\r\n");
+      resolve(i === -1 ? { head: raw, body: "" } : { head: raw.slice(0, i), body: raw.slice(i + 4) });
+    };
+    sock.setEncoding("latin1");
+    sock.on("data", (s: string) => {
+      raw += s;
+      // HTTP/1.1 terminates with the zero chunk; HTTP/1.0 with connection close.
+      if (httpVersion === "1.1" && raw.includes("\r\n0\r\n\r\n")) done();
+    });
+    sock.on("close", done);
+    sock.on("error", reject);
+    setTimeout(done, 15_000).unref();
+  });
+}
+
+describe("streaming relay — message framing", () => {
+  /**
+   * Regression: relay() used to hardcode `connection: keep-alive` on writeHead.
+   * Node only frames the body itself when no Connection header was supplied, so
+   * an HTTP/1.0 peer — which is what nginx sends by default — received a body
+   * with no Transfer-Encoding, no Content-Length, and a claim that the
+   * connection persists. Nothing downstream can find the end of that message.
+   */
+  it("frames the body for an HTTP/1.1 peer with chunked transfer encoding", async () => {
+    const h = await boot("hello streaming world", {});
+    const { head, body } = await rawRequest(h.port, h.secret, "1.1");
+    const lower = head.toLowerCase();
+
+    expect(lower).toContain("transfer-encoding: chunked");
+    expect(body).toContain("[DONE]");
+  }, 30_000);
+
+  it("tells an HTTP/1.0 peer to read to close, never claiming keep-alive without a length", async () => {
+    const h = await boot("hello streaming world", {});
+    const { head, body } = await rawRequest(h.port, h.secret, "1.0");
+    const lower = head.toLowerCase();
+
+    const chunked = lower.includes("transfer-encoding: chunked");
+    const hasLength = lower.includes("content-length:");
+    expect(chunked).toBe(false); // HTTP/1.0 has no chunked encoding
+    expect(hasLength).toBe(false); // a stream has no length up front
+
+    // With neither, the body is delimited by the close — so the peer must be
+    // told the connection closes. Advertising keep-alive here is unframeable.
+    expect(lower).toContain("connection: close");
+    expect(lower).not.toContain("connection: keep-alive");
+
+    expect(body).toContain("[DONE]");
+  }, 30_000);
 });

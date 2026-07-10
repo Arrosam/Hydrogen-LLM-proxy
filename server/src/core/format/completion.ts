@@ -489,7 +489,11 @@ export class OpenAICompletionResponse extends Response {
       }
     }
 
-    yield { type: "finish", stopReason, usage, incomplete: started && !terminated };
+    // No terminal event (no [DONE], no finish_reason) means the upstream stream
+    // was cut short. That includes a stream that never produced a single usable
+    // chunk: a 200 carrying an unparsable or empty body is a failed attempt to
+    // retry, not a successful empty answer.
+    yield { type: "finish", stopReason, usage, incomplete: !terminated };
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
@@ -526,6 +530,11 @@ export class OpenAICompletionResponse extends Response {
         case "tool_stop":
           break;
         case "finish":
+          // A truncated upstream must not be dressed up as a finished answer.
+          // Emitting finish_reason + [DONE] here would leave the client unable
+          // to tell a complete response from a cut-off one; relay() aborts the
+          // connection instead, which every HTTP client surfaces as an error.
+          if (ev.incomplete) return;
           yield chunk({ choices: [{ index: 0, delta: {}, finish_reason: stopToFinishReason(ev.stopReason) }] });
           if (ev.usage) {
             yield chunk({

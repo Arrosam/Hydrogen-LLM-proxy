@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { ServerResponse } from "node:http";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
@@ -40,6 +41,43 @@ function tokenAllowsService(token: Token, serviceId: number): boolean {
   const scope = token.scopeServices;
   if (!Array.isArray(scope) || scope.length === 0) return true; // unscoped = all
   return scope.includes(serviceId);
+}
+
+/**
+ * Resolve once the response has actually finished writing, or false if the
+ * connection died first.
+ *
+ * `res.write()` returning true only means the bytes reached the kernel, so a
+ * relay loop can run to completion — and report success — over a connection the
+ * peer has already abandoned. Waiting for 'finish' is what distinguishes a
+ * delivered response from one that evaporated in the socket buffer.
+ *
+ * A peer that stops reading without closing would otherwise hold the log row
+ * hostage, so the wait is bounded; on expiry we assume what the old code always
+ * assumed, that the write succeeded.
+ *
+ * Arm this BEFORE calling end(): 'finish' can be emitted synchronously from it.
+ */
+function responseFlushed(raw: ServerResponse, guardMs = 5_000): Promise<boolean> {
+  if (raw.writableFinished) return Promise.resolve(true);
+  if (raw.destroyed) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const settle = (delivered: boolean): void => {
+      clearTimeout(timer);
+      raw.off("finish", onFinish);
+      raw.off("close", onClose);
+      raw.off("error", onError);
+      resolve(delivered);
+    };
+    const onFinish = (): void => settle(true);
+    const onClose = (): void => settle(raw.writableFinished === true);
+    const onError = (): void => settle(false);
+    const timer = setTimeout(() => settle(true), guardMs);
+    timer.unref?.();
+    raw.once("finish", onFinish);
+    raw.once("close", onClose);
+    raw.once("error", onError);
+  });
 }
 
 /** The client-facing proxy: parse -> resolve service -> invoke/stream -> log. */
@@ -205,10 +243,14 @@ export class ProxyController {
     reply.hijack();
 
     const raw = reply.raw;
+    // Do NOT set `connection` here. Node only frames the body itself when the
+    // user has not supplied a Connection header: forcing "keep-alive" made it
+    // skip that logic, and an HTTP/1.0 peer (nginx's default proxy_http_version)
+    // then received a body with no Transfer-Encoding, no Content-Length, and a
+    // claim that the connection persists — a message whose end cannot be found.
     raw.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
-      "connection": "keep-alive",
       "x-accel-buffering": "no",
     });
 
@@ -246,6 +288,23 @@ export class ProxyController {
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
       } finally {
+        // Terminate the response before anything else: the client must not wait
+        // on database I/O, and a throwing logger must not leave the stream open.
+        const settled = responseFlushed(raw);
+        if (!raw.writableEnded && !raw.destroyed) {
+          // The upstream died after we committed 200, so the answer we relayed
+          // is short. Ending cleanly here would hand the client a well-formed
+          // HTTP message it would read as complete. Abort instead: an unfinished
+          // chunked body is an error in every HTTP client.
+          const answerIsShort = streamError !== null || acc.incomplete;
+          try {
+            if (answerIsShort) raw.destroy();
+            else raw.end();
+          } catch { /* already closed */ }
+        }
+        // Only now can we tell whether the client actually got the response.
+        const flushed = await settled;
+
         const usage: Usage = acc.usage ?? ZERO_USAGE;
         const responseBody: Record<string, unknown> = {
           streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
@@ -264,6 +323,12 @@ export class ProxyController {
           error = "upstream stream ended before completion (truncated)";
           responseBody.incomplete = true;
         }
+        else if (!flushed) {
+          // Every byte was written, but the connection died before they left
+          // the machine. Reporting 200 here is what hid this failure.
+          status = 499;
+          error = "connection closed before the response was fully sent";
+        }
         this.deps.logger.record({
           traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
           servedModel: value.modelName, servedProvider: value.providerName,
@@ -274,10 +339,6 @@ export class ProxyController {
         this.deps.usage.record(ctx.token.id, usage.totalTokens);
         // Mark the active request as finished (streaming relay end).
         this.deps.activeRequests.finish(ctx.traceId, status, error ?? undefined);
-        // End the response cleanly if not already ended.
-        if (!raw.writableEnded) {
-          try { raw.end(); } catch { /* already closed */ }
-        }
       }
     })();
   }

@@ -1,7 +1,14 @@
+import { DEFAULT_IDEMPOTENCY, DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_ON } from "./definition";
 import type { AdvanceTrigger, BackoffConfig, RetryConfig, ServiceStep, ServiceSteps, Trigger } from "./definition";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 
-export type FailureKind = "http" | "timeout" | "error";
+/**
+ * "network" is a transport failure: the connection never completed, so there is
+ * no HTTP status. It is kept separate from "error" (a configuration fault such
+ * as an unresolvable mapping or a rejected upstream URL) because one is worth
+ * retrying and the other can only fail the same way again.
+ */
+export type FailureKind = "http" | "timeout" | "network" | "error";
 
 export interface AttemptSuccess<T> {
   ok: true;
@@ -97,6 +104,7 @@ function triggerMatches(set: Trigger[], f: AttemptFailure): boolean {
   for (const t of set) {
     if (t === "error") return true;
     if (t === "timeout" && f.kind === "timeout") return true;
+    if (t === "network" && f.kind === "network") return true;
     if (typeof t === "number" && f.kind === "http" && t === f.status) return true;
   }
   return false;
@@ -114,7 +122,11 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
   if (name === "TimeoutError" || name === "AbortError" || /timed out|timeout/i.test(message)) {
     return { kind: "timeout", message };
   }
-  return { kind: "error", message };
+  // A rejected upstream URL is a configuration fault; retrying repeats it.
+  if (name === "UpstreamUrlError") return { kind: "error", message };
+  // Anything else thrown out of a send is the connection dying: undici socket
+  // errors, resets, a stream that stopped mid-body. Those are worth retrying.
+  return { kind: "network", message };
 }
 
 /**
@@ -132,9 +144,10 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
  *    jitter (initial 100ms, cap 1s). Otherwise a fixed `intervalMs` is used.
  *  - Maximum 3 retry attempts (configurable via `retry.maxAttempts`, capped 20).
  *
- * Each retried attempt records a `retry` block on its `AttemptRecord` with the
- * retry index, applied delay, suppression flag, and reason — so logs carry the
- * full retry context for diagnosis.
+ * Every failed attempt records a `retry` block on its `AttemptRecord` with the
+ * retry index, applied delay, suppression flag, and reason — including attempts
+ * that were never eligible for a retry, so the log always says why it stopped.
+ * A successful attempt carries one only when it was itself a retry.
  */
 export async function runSteps<T>(
   steps: ServiceSteps,
@@ -149,9 +162,10 @@ export async function runSteps<T>(
   for (let i = 0; i < steps.steps.length; i++) {
     const step: ServiceStep = steps.steps[i];
     const retry: RetryConfig | undefined = step.retry;
-    const maxAttempts = retry?.maxAttempts ?? 3;
-    const retryOn = retry?.on ?? [429, 503, 499, "timeout"];
-    const idempotency = retry?.idempotency ?? "safe_write";
+    // A step may omit `retry` altogether, so RetrySchema's defaults never ran.
+    const maxAttempts = retry?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    const retryOn = retry?.on ?? DEFAULT_RETRY_ON;
+    const idempotency = retry?.idempotency ?? DEFAULT_IDEMPOTENCY;
 
     let stepFailure: AttemptFailure | null = null;
 
@@ -202,28 +216,25 @@ export async function runSteps<T>(
         prog?.record("retry", "retry.exhausted", `retries exhausted after ${a} attempt(s)`, { attempts: a, status: res.status });
       }
 
-      // Build the retry context for logging. We log the retry decision on
-      // every attempt that either (a) is itself a retry (a > 1), or (b) COULD
-      // have been retried (canRetryFlag), or (c) was suppressed specifically
-      // because of a 499 idempotency guard. This ensures the log always
-      // explains the retry/suppression decision.
+      // Every failed attempt carries the retry decision, including the ones that
+      // were never eligible: "why did this not retry?" is the first question a
+      // failed request raises, and the answer belongs in the log.
       const is499Suppressed = is499 && !four99Allowed;
-      let retryCtx: AttemptRecord["retry"] | undefined;
-      if (a > 1 || canRetryFlag || is499Suppressed) {
-        const retryIndex = a - 1; // 0-based
-        retryCtx = {
-          retryIndex,
-          delayMs: preDelayMs,
-          suppressed: !canRetryFlag,
-          reason: !triggerMatched
-            ? `trigger not in retry.on [${retryOn.join(", ")}]`
-            : is499 && !four99Allowed
-              ? `499 suppressed: idempotency="${idempotency}" (non-idempotent; pre-check required)`
-              : canRetryFlag
+      const trigger = res.kind === "http" ? String(res.status) : res.kind;
+      const retryCtx: AttemptRecord["retry"] = {
+        retryIndex: a - 1, // 0-based: how many retries preceded this attempt
+        delayMs: preDelayMs,
+        suppressed: !canRetryFlag,
+        reason: !triggerMatched
+          ? `trigger not in retry.on [${retryOn.join(", ")}]`
+          : is499Suppressed
+            ? `499 suppressed: idempotency="${idempotency}" (non-idempotent; pre-check required)`
+            : !canRetryFlag
+              ? `max attempts (${maxAttempts}) reached`
+              : is499
                 ? `499 retried (idempotency="${idempotency}")`
-                : `max attempts (${maxAttempts}) reached`,
-        };
-      }
+                : `retrying on ${trigger}`,
+      };
 
       path.push({
         step: i + 1,

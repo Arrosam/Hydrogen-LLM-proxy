@@ -40,7 +40,7 @@ export interface Mapping {
   enabled: boolean;
 }
 
-export type Trigger = number | "timeout" | "error";
+export type Trigger = number | "timeout" | "network" | "error";
 export type AdvanceTrigger = Trigger | "exhausted";
 
 export interface RetryPolicy {

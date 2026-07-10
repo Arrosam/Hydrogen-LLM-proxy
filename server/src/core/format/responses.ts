@@ -527,6 +527,9 @@ export class OpenAIResponsesResponse extends Response {
           break;
         }
         case "finish": {
+          // A truncated upstream must not be dressed up as a finished answer:
+          // no response.completed. relay() aborts the connection instead.
+          if (ev.incomplete) return;
           yield* closeReasoning();
           yield* closeMessage();
           for (const tc of tools.values()) {

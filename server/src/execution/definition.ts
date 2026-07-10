@@ -14,16 +14,30 @@ import { mergeOverrides, type GenerationParams, type RequestOverrides } from "..
 /**
  * A trigger is an HTTP status code, or a symbolic class:
  *   "timeout" - the upstream call timed out
+ *   "network" - the connection failed or died before a complete response
+ *               arrived, so there is no HTTP status to match on. Distinct from
+ *               "error": a bad model/provider mapping or a rejected upstream URL
+ *               is a configuration fault that retrying can only repeat.
  *   "error"   - any failure (network error or any non-2xx status)
  *   "exhausted" (advanceOn only) - advance once this step's retries are used up
  */
 export const TriggerSchema = z.union([
   z.number().int().min(100).max(599),
   z.literal("timeout"),
+  z.literal("network"),
   z.literal("error"),
 ]);
 
 export const AdvanceTriggerSchema = z.union([TriggerSchema, z.literal("exhausted")]);
+
+/**
+ * Retry defaults, in one place. A step may omit `retry` entirely, in which case
+ * zod never runs RetrySchema's defaults and `runSteps` falls back to these — so
+ * they must be the same values or the two disagree.
+ */
+export const DEFAULT_RETRY_ON: z.infer<typeof TriggerSchema>[] = [429, 499, 502, 503, "timeout", "network"];
+export const DEFAULT_MAX_ATTEMPTS = 3;
+export const DEFAULT_IDEMPOTENCY = "safe_write" as const;
 
 /**
  * Exponential backoff with full jitter. When `backoff` is enabled the effective
@@ -42,9 +56,15 @@ export const BackoffSchema = z.object({
 });
 
 export const RetrySchema = z.object({
-  /** Failure triggers that retry within this step: 429 (rate limit), 503 (unavailable), 499 (client closed), timeout. */
-  on: z.array(TriggerSchema).default([429, 503, 499, "timeout"]),
-  maxAttempts: z.number().int().min(1).max(20).default(3),
+  /**
+   * Failure triggers that retry within this step. The defaults cover every way
+   * an upstream can fail to deliver a whole answer without it being the
+   * caller's fault: 429 (rate limit), 499 (client closed), 502 (the proxy's own
+   * code for an upstream stream that ended early or returned an unusable body),
+   * 503 (unavailable), a timeout, and a connection that died mid-response.
+   */
+  on: z.array(TriggerSchema).default(DEFAULT_RETRY_ON),
+  maxAttempts: z.number().int().min(1).max(20).default(DEFAULT_MAX_ATTEMPTS),
   /** Fixed delay between retries (legacy; ignored when `backoff` is set). */
   intervalMs: z.number().int().min(0).max(600_000).default(0),
   /**
@@ -57,7 +77,7 @@ export const RetrySchema = z.object({
    * "safe_write" retries 499 (the upstream never received/processed the body).
    * "unsafe" NEVER retries 499 — a pre-check must confirm safety first.
    */
-  idempotency: z.enum(["read", "safe_write", "unsafe"]).default("safe_write"),
+  idempotency: z.enum(["read", "safe_write", "unsafe"]).default(DEFAULT_IDEMPOTENCY),
 });
 
 // --- rich overridable params ----------------------------------------------
@@ -313,7 +333,9 @@ export function summarizeService(def: ServiceDef): string {
   }
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;
-    const attempts = s.retry?.maxAttempts ?? 1;
+    // A step with no `retry` block is not a step without retries: runSteps
+    // applies the same defaults, so the summary must say so.
+    const attempts = s.retry?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     if (attempts > 1) {
       const interval = s.retry?.intervalMs ?? 0;
       label += ` (retry ${attempts}x${interval ? ` ${interval}ms` : ""})`;

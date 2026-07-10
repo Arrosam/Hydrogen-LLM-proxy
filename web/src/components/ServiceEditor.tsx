@@ -439,7 +439,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                       <div className="mt-3">
                         <label className="label">Retry on</label>
                         <TriggerChips
-                          options={[...CODE_PRESETS, "timeout", "error"]}
+                          options={[...CODE_PRESETS, "timeout", "network", "error"]}
                           selected={step.retry?.on ?? []}
                           onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
                           allowCustomCodes
@@ -460,7 +460,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         <div className="mt-3">
                           <label className="label">Advance to next step on <span className="normal-case text-ink-500">(empty = any failure)</span></label>
                           <TriggerChips
-                            options={[...CODE_PRESETS, "timeout", "error", "exhausted"]}
+                            options={[...CODE_PRESETS, "timeout", "network", "error", "exhausted"]}
                             selected={step.advanceOn ?? []}
                             onToggle={(v) => patchStep(i, { advanceOn: toggle(step.advanceOn, v as AdvanceTrigger) })}
                             allowCustomCodes
@@ -525,7 +525,7 @@ function TriggerChips({
         onToggle(code);
       }
       setInput("");
-    } else if (raw === "timeout" || raw === "error" || raw === "exhausted") {
+    } else if (raw === "timeout" || raw === "network" || raw === "error" || raw === "exhausted") {
       // Also allow symbolic triggers via the input
       if (!selected.includes(raw)) {
         onToggle(raw);

@@ -1,8 +1,8 @@
 import type { Response } from "../ir/response";
 import type { StreamEvent } from "../ir/stream";
 
-/** How an upstream attempt failed: an HTTP status, a timeout, or a transport error. */
-export type FailureKind = "http" | "timeout" | "error";
+/** How an upstream attempt failed: an HTTP status, a timeout, a dead connection, or a config fault. */
+export type FailureKind = "http" | "timeout" | "network" | "error";
 
 export interface SendFailure {
   ok: false;

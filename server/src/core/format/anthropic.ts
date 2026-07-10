@@ -465,6 +465,9 @@ export class AnthropicResponse extends Response {
           break;
         }
         case "finish":
+          // A truncated upstream must not be dressed up as a finished answer:
+          // no message_delta, no message_stop. relay() aborts the connection.
+          if (ev.incomplete) return;
           if (reasoningOpen) {
             yield frame("content_block_stop", { index: reasoningIndex });
             reasoningOpen = false;
