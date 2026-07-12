@@ -83,9 +83,12 @@ function isRouter(stage: AgentDef["stages"][number]): boolean {
  * A Micro Agent: a coordinator that runs multiple Model Service rounds (stages)
  * and presents itself AS a Model Service (extends {@link ModelService}), so it
  * is substitutable wherever a Model Service is expected and can be nested inside
- * another Micro Agent. All of its internal calls are buffered (stream=false), so
- * routing conditions can see each stage's full output. For a streaming client it
- * buffers the whole run and replays the result as a paced stream.
+ * another Micro Agent. All of its internal calls are buffered — routing
+ * conditions need each stage's full output — but the WIRE MODE of each call
+ * inherits the client's streaming preference: a streaming client gets streaming
+ * upstream calls, collected locally (with truncation detection); a
+ * non-streaming client gets plain JSON calls. For a streaming client the whole
+ * run is buffered, then replayed as a paced stream.
  */
 export class MicroAgent extends ModelService {
   private readonly resolver: ServiceResolver;
@@ -183,7 +186,12 @@ export class MicroAgent extends ModelService {
         } else {
           // Outer overrides fold over this stage's config, the outer winning.
           const combined = mergeOverrides(stageOverrides(stage), overrides);
-          const stageReq = buildStageRequest(source, stage, outputs, responses, false, combined?.system);
+          // Stages inherit the client's streaming preference: a streaming client
+          // gets streaming upstream calls (collected locally — the stage still
+          // consumes one complete output, and a truncated stream is a retryable
+          // 502). Long generations then hold their upstream connections open
+          // token by token instead of sitting silent behind one JSON response.
+          const stageReq = buildStageRequest(source, stage, outputs, responses, source.stream, combined?.system);
           const childOverrides = withoutSystem(combined);
 
           if (stage.service) {

@@ -233,7 +233,9 @@ export function buildOcrRequest(request: Request, images: ImagePart[], ocr: Agen
     system: ocr.prompt && ocr.prompt.trim() ? ocr.prompt : DEFAULT_OCR_PROMPT,
     messages: [{ role: "user", content }],
     params: ocrParams(ocr),
-    stream: false,
+    // Inherit the client's streaming preference, exactly like a stage: the OCR
+    // output is still collected in full before any stage runs.
+    stream: request.stream,
   };
   return buildRequest(request.family, data);
 }

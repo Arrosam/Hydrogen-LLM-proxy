@@ -176,8 +176,11 @@ export async function startFakeUpstream(opts: FakeUpstreamOptions): Promise<Fake
           res.writeHead(200, { "content-type": "text/event-stream" }).end("data: {not json}\n\n");
           return;
         }
+        // truncate/reset mean "die MID-answer": clamp strictly below the full
+        // length, or an afterChars past the answer would emit the terminator
+        // and turn the intended failure into a clean success.
         const upTo = behavior.kind === "truncate" || behavior.kind === "reset"
-          ? Math.min(behavior.afterChars, answer.length)
+          ? Math.min(behavior.afterChars, Math.max(0, answer.length - 1))
           : answer.length;
         const bytes = sseBody(answer, chunkChars, upTo);
 

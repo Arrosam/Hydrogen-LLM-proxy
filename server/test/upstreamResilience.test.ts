@@ -264,6 +264,93 @@ describe("Micro Agent (multi-turn) — the user always gets the whole answer", (
   }, 60_000);
 });
 
+// ---------------------------------------------------------------------------
+// Wire mode: the upstream call inherits the client's streaming preference.
+// A streaming client means streaming upstream calls — received into a local
+// buffer, fabricated downstream only once the full stream arrived — including
+// every Micro Agent stage and the OCR pre-pass. A non-streaming client means
+// plain JSON upstream calls. (Reliable Streaming buffers either way; only the
+// wire mode follows the client.)
+// ---------------------------------------------------------------------------
+
+describe("upstream wire mode follows the client's streaming preference", () => {
+  /** Like stream(), but non-streaming: one JSON response. */
+  function once(port: number, secret: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const payload = Buffer.from(JSON.stringify({ model: "svc", stream: false, messages: [{ role: "user", content: "hi" }] }));
+      const req = http.request(
+        { host: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions",
+          headers: { "content-type": "application/json", authorization: `Bearer ${secret}`, "content-length": String(payload.length) } },
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (c: string) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+          res.on("error", reject);
+        });
+      req.on("error", reject);
+      req.end(payload);
+    });
+  }
+
+  // The renderers OMIT the flag for a non-streaming request, so normalize:
+  // "did this upstream call ask for a stream?"
+  const sentStreamFlags = (h: Harness): boolean[] => h.upstream.bodies.map((b) => (b as { stream?: unknown }).stream === true);
+
+  it("Reliable Streaming + streaming client -> the upstream request streams", async () => {
+    const h = await boot(msReliable, []);
+    const got = await stream(h.port, h.secret);
+
+    expect(got.text).toBe(ANSWER);
+    expect(sentStreamFlags(h)).toEqual([true]);
+  }, 60_000);
+
+  it("Reliable Streaming + non-streaming client -> the upstream request does not stream", async () => {
+    const h = await boot(msReliable, []);
+    const got = await once(h.port, h.secret);
+
+    expect(got.status).toBe(200);
+    expect(got.body).toContain("abcdefghij"); // the answer, as one JSON body
+    expect(sentStreamFlags(h)).toEqual([false]);
+  }, 60_000);
+
+  it("Micro Agent + streaming client -> EVERY stage streams upstream, buffered locally", async () => {
+    const h = await boot(agentMultiTurn, []);
+    const got = await stream(h.port, h.secret);
+
+    expect(got.sawDone).toBe(true);
+    expect(got.text).toBe(ANSWER); // fabricated only after the full stream arrived
+    expect(sentStreamFlags(h)).toEqual([true, true]); // both stages
+  }, 60_000);
+
+  it("Micro Agent + non-streaming client -> stages stay plain JSON", async () => {
+    const h = await boot(agentMultiTurn, []);
+    const got = await once(h.port, h.secret);
+
+    expect(got.status).toBe(200);
+    expect(sentStreamFlags(h)).toEqual([false, false]);
+  }, 60_000);
+
+  it("the OCR pre-pass inherits the streaming preference too", async () => {
+    const h = await boot(agentWithOcr, []);
+    const got = await stream(h.port, h.secret, true);
+
+    expect(got.text).toBe(ANSWER);
+    expect(h.upstream.ocrRequests).toBe(1);
+    expect(sentStreamFlags(h)).toEqual([true, true]); // OCR call + answer stage
+  }, 60_000);
+
+  it("a stage's stream truncating mid-answer is retried, and the client still gets everything", async () => {
+    // With streaming stages, a truncated SSE stream must be a retryable 502,
+    // not a partial stage output silently fed to the next stage.
+    const h = await boot(agentMultiTurn, [{ kind: "truncate", afterChars: 20_000 }]);
+    const got = await stream(h.port, h.secret);
+
+    expect(got.text).toBe(ANSWER);
+    expect(h.upstream.requests).toBe(3); // stage1 truncated, stage1 retried, stage2
+  }, 60_000);
+});
+
 describe("Micro Agent with OCR — the user always gets the whole answer", () => {
   it("passes an image through the OCR pre-pass and answers completely", async () => {
     const h = await boot(agentWithOcr, []);

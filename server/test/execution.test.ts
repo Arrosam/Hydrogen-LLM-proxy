@@ -201,7 +201,7 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
     expect(sent.stream_options).toEqual({ include_usage: true });
   });
 
-  it("MicroAgent internal calls disable upstream streaming (stream not in body)", async () => {
+  it("MicroAgent internal calls inherit a NON-streaming client's wire mode", async () => {
     const sentBodies: Record<string, unknown>[] = [];
     const transport = fakeTransport({ onBody: (b) => sentBodies.push(b as Record<string, unknown>) });
     const def = agentDef({
@@ -210,9 +210,8 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
       stages: [{ name: "a", input: [], steps: [{ model: "m", provider: "p" }] }],
     });
     const agent = new MicroAgent(def, deps(transport));
-    // Even a streaming client request should have stream=false upstream for internal calls.
-    const req = new OpenAICompletionRequest({ requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], params: {}, stream: true });
-    await agent.invoke(req);
+    // A non-streaming client -> plain JSON upstream calls.
+    await agent.invoke(baseReq());
     expect(sentBodies.length).toBeGreaterThanOrEqual(1);
     for (const b of sentBodies) {
       expect(b.stream).toBeUndefined();
@@ -220,7 +219,7 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
     }
   });
 
-  it("MicroAgent.stream() buffers then replays; upstream call has stream disabled", async () => {
+  it("MicroAgent.stream() streams upstream, buffers locally, then replays complete", async () => {
     const sentBodies: Record<string, unknown>[] = [];
     const transport = fakeTransport({ onBody: (b) => sentBodies.push(b as Record<string, unknown>) });
     const def = agentDef({
@@ -234,10 +233,12 @@ describe("Reliable Streaming / upstream stream config (Issue 1)", () => {
     const outcome = await agent.stream(req);
     expect(outcome.result.ok).toBe(true);
     expect(sentBodies.length).toBeGreaterThanOrEqual(1);
+    // A streaming client -> the stage requests a stream upstream; the stage
+    // output is still collected in full before anything reaches the client.
     for (const b of sentBodies) {
-      expect(b.stream).toBeUndefined();
+      expect(b.stream).toBe(true);
     }
-    // The fabricated stream should produce the complete text.
+    // The fabricated stream replays the complete text, only after full receipt.
     if (outcome.result.ok) {
       const acc = newAccumulator();
       for await (const _ev of tapStream(outcome.result.value.events, acc)) { void _ev; }
@@ -315,7 +316,7 @@ describe("Regression: sendBuffered honors stream flag (Issue 1)", () => {
     expect(sent.stream).toBe(true);
   });
 
-  it("MicroAgent with reliableStreaming=true sends non-streaming upstream for all stages", async () => {
+  it("MicroAgent stages follow the client's wire mode: streaming client -> streaming stages", async () => {
     const sentBodies: Record<string, unknown>[] = [];
     let jsonCallCount = 0;
     let streamCallCount = 0;
@@ -334,15 +335,21 @@ describe("Regression: sendBuffered honors stream flag (Issue 1)", () => {
     }) as AgentDef;
     const resolver: ServiceResolver = { resolve: () => ({ ok: false, message: "not used" }) };
     const agent = new MicroAgent(def, { catalog: fakeCatalog(), transport, resolver, logMaxChars: 2000 });
+
+    // Streaming client: every stage streams upstream (collected locally).
     const req = new OpenAICompletionRequest({ requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], params: {}, stream: true });
     await agent.stream(req);
-    // All internal calls should be non-streaming (postJson).
+    expect(streamCallCount).toBe(2);
+    expect(jsonCallCount).toBe(0);
+    for (const b of sentBodies) expect(b.stream).toBe(true);
+
+    // Non-streaming client: every stage stays plain JSON.
+    sentBodies.length = 0;
+    streamCallCount = 0;
+    await agent.invoke(baseReq());
     expect(jsonCallCount).toBe(2);
     expect(streamCallCount).toBe(0);
-    // No sent body should contain stream=true.
-    for (const b of sentBodies) {
-      expect(b.stream).toBeUndefined();
-    }
+    for (const b of sentBodies) expect(b.stream).toBeUndefined();
   });
 });
 
