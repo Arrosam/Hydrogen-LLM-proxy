@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Modal } from "./Modal";
+import { useI18n } from "../lib/i18n";
 
 export function Spinner({ label }: { label?: string }) {
   return (
@@ -33,9 +34,10 @@ export function EmptyState({
 
 /** HTTP-status badge: 2xx green, 499 (client abort) gray, everything else red. */
 export function StatusBadge({ status, label }: { status: number; label?: string }) {
+  const { t } = useI18n();
   const cls =
     status >= 200 && status < 300 ? "badge-green" : status === 499 ? "badge-gray" : "badge-red";
-  return <span className={cls}>{label ?? (status || "error")}</span>;
+  return <span className={cls}>{label ?? (status || t("common.statusError"))}</span>;
 }
 
 export function ErrorNote({ message }: { message: string }) {
@@ -89,6 +91,7 @@ export function useConfirm(): {
   confirm: (title: string, message: string) => Promise<boolean>;
   confirmEl: ReactNode;
 } {
+  const { t } = useI18n();
   const [state, setState] = useState<ConfirmState>({ open: false, title: "", message: "" });
 
   const confirm = (title: string, message: string) =>
@@ -108,11 +111,11 @@ export function useConfirm(): {
       footer={
         <>
           <button className="btn-ghost" onClick={() => close(false)}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button className="btn-danger" onClick={() => close(true)}>
             <i className="bi bi-trash3" />
-            Confirm
+            {t("common.confirm")}
           </button>
         </>
       }

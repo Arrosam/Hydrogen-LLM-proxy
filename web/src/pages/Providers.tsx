@@ -1,18 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
-import { useAuth } from "../auth";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
+import { useI18n } from "../lib/i18n";
 import type { Provider, ProviderType } from "../types";
-
-const TYPE_LABELS: Record<ProviderType, string> = {
-  openai_completion: "OpenAI (Chat Completions)",
-  openai_responses: "OpenAI (Responses API)",
-  anthropic: "Anthropic",
-};
 
 interface FormState {
   id?: number;
@@ -36,8 +30,13 @@ const EMPTY: FormState = {
 };
 
 export function Providers() {
+  const { t } = useI18n();
+  const TYPE_LABELS: Record<ProviderType, string> = {
+    openai_completion: t("providers.type.openai_completion"),
+    openai_responses: t("providers.type.openai_responses"),
+    anthropic: t("providers.type.anthropic"),
+  };
   const { data, loading, error, reload } = useAsync(() => api.get<{ providers: Provider[] }>("/providers"));
-  const { user } = useAuth();
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
   const [form, setForm] = useState<FormState | null>(null);
@@ -64,13 +63,13 @@ export function Providers() {
       try {
         extraHeaders = JSON.parse(form.extraHeaders);
       } catch {
-        toast.error("Extra headers must be valid JSON");
+        toast.error(t("providers.toast.extraHeadersInvalidJson"));
         return;
       }
     }
     const motRaw = form.maxOutputTokens.trim();
     if (motRaw && !/^[1-9]\d*$/.test(motRaw)) {
-      toast.error("Max output tokens must be a positive integer");
+      toast.error(t("providers.toast.maxOutputTokensNotPositive"));
       return;
     }
     setSaving(true);
@@ -90,11 +89,11 @@ export function Providers() {
       } else {
         await api.post("/providers", payload);
       }
-      toast.success(form.id ? "Provider updated" : "Provider created");
+      toast.success(form.id ? t("providers.toast.updated") : t("providers.toast.created"));
       setForm(null);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -127,32 +126,32 @@ export function Providers() {
   return (
     <div>
       <PageHeader
-        title="Providers"
-        subtitle="Upstream API endpoints. Keys are encrypted at rest."
+        title={t("providers.title")}
+        subtitle={t("providers.subtitle")}
         icon="bi-hdd-network"
         action={
           <button className="btn-primary" onClick={openNew}>
             <i className="bi bi-plus-lg" />
-            New provider
+            {t("providers.action.new")}
           </button>
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
       {data && data.providers.length === 0 && (
-        <EmptyState icon="bi-hdd-network" title="No providers yet" hint="Add an upstream like OpenAI or Anthropic to start routing." action={<button className="btn-primary" onClick={openNew}><i className="bi bi-plus-lg" />New provider</button>} />
+        <EmptyState icon="bi-hdd-network" title={t("providers.empty.title")} hint={t("providers.empty.hint")} action={<button className="btn-primary" onClick={openNew}><i className="bi bi-plus-lg" />{t("providers.action.new")}</button>} />
       )}
       {data && data.providers.length > 0 && (
         <div className="card overflow-hidden">
           <table className="table">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Base URL</th>
-                <th>Key</th>
-                <th>Status</th>
-                <th className="text-right">Actions</th>
+                <th>{t("providers.table.name")}</th>
+                <th>{t("providers.table.type")}</th>
+                <th>{t("providers.table.baseUrl")}</th>
+                <th>{t("providers.table.key")}</th>
+                <th>{t("providers.table.status")}</th>
+                <th className="text-right">{t("providers.table.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -163,19 +162,19 @@ export function Providers() {
                   <td className="font-mono text-xs text-ink-400">{p.baseUrl}</td>
                   <td>
                     {p.hasKey ? (
-                      <span className="badge-green"><i className="bi bi-key-fill" />set</span>
+                      <span className="badge-green"><i className="bi bi-key-fill" />{t("common.set")}</span>
                     ) : (
-                      <span className="badge-gray"><i className="bi bi-dash" />none</span>
+                      <span className="badge-gray"><i className="bi bi-dash" />{t("common.none")}</span>
                     )}
                   </td>
                   <td>
-                    {p.enabled ? <span className="badge-green">enabled</span> : <span className="badge-red">disabled</span>}
+                    {p.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
                   </td>
                   <td>
                     <div className="flex justify-end gap-1.5">
                       <button className="btn-ghost btn-xs" onClick={() => test(p)} disabled={testing === p.id}>
                         <i className={`bi ${testing === p.id ? "bi-arrow-repeat animate-spin" : "bi-plug"}`} />
-                        Test
+                        {t("providers.action.test")}
                       </button>
                       <button className="btn-ghost btn-xs" onClick={() => openEdit(p)}>
                         <i className="bi bi-pencil" />
@@ -192,24 +191,17 @@ export function Providers() {
         </div>
       )}
 
-      {user?.role === "admin" && (
-        <>
-          <RetentionCard />
-          <AllowlistCard />
-        </>
-      )}
-
       <Modal
         open={form !== null}
-        title={form?.id ? "Edit provider" : "New provider"}
+        title={form?.id ? t("providers.modal.edit.title") : t("providers.modal.new.title")}
         icon="bi-hdd-network"
         onClose={() => setForm(null)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setForm(null)}>{t("common.cancel")}</button>
             <button className="btn-primary" onClick={save} disabled={saving}>
               {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
-              Save
+              {t("common.save")}
             </button>
           </>
         }
@@ -217,180 +209,52 @@ export function Providers() {
         {form && (
           <div className="space-y-4">
             <div>
-              <label className="label">Name</label>
-              <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. openai-official" />
+              <label className="label">{t("providers.field.name.label")}</label>
+              <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t("providers.field.name.placeholder")} />
             </div>
             <div>
-              <label className="label">Type</label>
+              <label className="label">{t("providers.field.type.label")}</label>
               <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
-                <option value="openai_completion">OpenAI (Chat Completions)</option>
-                <option value="openai_responses">OpenAI (Responses API)</option>
-                <option value="anthropic">Anthropic</option>
+                <option value="openai_completion">{t("providers.type.openai_completion")}</option>
+                <option value="openai_responses">{t("providers.type.openai_responses")}</option>
+                <option value="anthropic">{t("providers.type.anthropic")}</option>
               </select>
             </div>
             <div>
-              <label className="label">Base URL</label>
-              <input className="input font-mono text-xs" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder={form.type === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"} />
+              <label className="label">{t("providers.field.baseUrl.label")}</label>
+              <input className="input font-mono text-xs" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder={form.type === "anthropic" ? t("providers.field.baseUrl.placeholder.anthropic") : t("providers.field.baseUrl.placeholder.openai")} />
               <p className="mt-1 text-xs text-ink-500">
                 {form.type === "anthropic"
-                  ? "Host root; /v1/messages is appended."
+                  ? t("providers.field.baseUrl.hint.anthropic")
                   : form.type === "openai_responses"
-                    ? "The /v1-style base; /responses is appended."
-                    : "The /v1-style base; /chat/completions is appended."}
+                    ? t("providers.field.baseUrl.hint.openai_responses")
+                    : t("providers.field.baseUrl.hint.openai_completion")}
               </p>
             </div>
             <div>
-              <label className="label">API key {form.id && <span className="normal-case text-ink-500">(leave blank to keep current)</span>}</label>
-              <input className="input font-mono text-xs" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." />
+              <label className="label">{t("providers.field.apiKey.label")} {form.id && <span className="normal-case text-ink-500">{t("providers.field.apiKey.keepCurrentHint")}</span>}</label>
+              <input className="input font-mono text-xs" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder={t("providers.field.apiKey.placeholder")} />
             </div>
             <div>
-              <label className="label">Extra headers (JSON, optional)</label>
+              <label className="label">{t("providers.field.extraHeaders.label")}</label>
               <textarea className="input font-mono text-xs" rows={3} value={form.extraHeaders} onChange={(e) => setForm({ ...form, extraHeaders: e.target.value })} placeholder='{"x-custom": "value"}' />
             </div>
             <div>
-              <label className="label">Max output tokens <span className="normal-case text-ink-500">(optional cap)</span></label>
+              <label className="label">{t("providers.field.maxOutputTokens.label")} <span className="normal-case text-ink-500">{t("providers.field.maxOutputTokens.optionalCap")}</span></label>
               <input
                 className="input font-mono text-xs"
                 inputMode="numeric"
                 value={form.maxOutputTokens}
                 onChange={(e) => setForm({ ...form, maxOutputTokens: e.target.value })}
-                placeholder="e.g. 131072"
+                placeholder={t("providers.field.maxOutputTokens.placeholder")}
               />
-              <p className="mt-1 text-xs text-ink-500">Hard cap this provider accepts; thinking budgets are fit under it so requests aren't rejected.</p>
+              <p className="mt-1 text-xs text-ink-500">{t("providers.field.maxOutputTokens.hint")}</p>
             </div>
-            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Enabled" />
+            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label={t("providers.field.enabled.label")} />
           </div>
         )}
       </Modal>
       {confirmEl}
-    </div>
-  );
-}
-
-function RetentionCard() {
-  const toast = useToast();
-  const { data, reload } = useAsync(() => api.get<{ days: number }>("/settings/log-retention"));
-  const [days, setDays] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (data) setDays(String(data.days));
-  }, [data]);
-
-  const save = async () => {
-    const n = Number(days.trim() || "0");
-    if (!Number.isInteger(n) || n < 0 || n > 3650) {
-      toast.error("Days must be a whole number between 0 and 3650");
-      return;
-    }
-    setSaving(true);
-    try {
-      const r = await api.put<{ days: number; pruned: number }>("/settings/log-retention", { days: n });
-      toast.success(
-        n === 0
-          ? "Auto-prune disabled — logs are kept forever"
-          : `Keeping the last ${n} day${n === 1 ? "" : "s"}${r.pruned ? ` — removed ${r.pruned} old ${r.pruned === 1 ? "entry" : "entries"}` : ""}`,
-      );
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="card card-pad mt-6">
-      <div className="mb-1 flex items-center gap-2">
-        <i className="bi bi-clock-history text-brand-400" />
-        <h3 className="font-medium text-ink-100">Log retention</h3>
-      </div>
-      <p className="mb-3 text-xs text-ink-500">
-        Automatically delete request logs older than this many days (checked daily). Set to{" "}
-        <code className="text-ink-300">0</code> to keep logs forever.
-      </p>
-      <div className="flex items-center gap-2">
-        <input
-          className="input w-32 font-mono text-xs"
-          inputMode="numeric"
-          value={days}
-          onChange={(e) => setDays(e.target.value)}
-          placeholder="0"
-        />
-        <span className="text-xs text-ink-500">days</span>
-        <button className="btn-ghost btn-xs whitespace-nowrap" onClick={save} disabled={saving}>
-          {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
-          Save
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AllowlistCard() {
-  const toast = useToast();
-  const { data, reload } = useAsync(() => api.get<{ entries: string[] }>("/settings/upstream-allowlist"));
-  const [entry, setEntry] = useState("");
-  const [saving, setSaving] = useState(false);
-  const entries = data?.entries ?? [];
-
-  const put = async (next: string[]) => {
-    setSaving(true);
-    try {
-      await api.put("/settings/upstream-allowlist", { entries: next });
-      reload();
-      toast.success("Allowlist updated");
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const add = () => {
-    const v = entry.trim();
-    if (!v || entries.includes(v)) {
-      setEntry("");
-      return;
-    }
-    void put([...entries, v]).then(() => setEntry(""));
-  };
-
-  return (
-    <div className="card card-pad mt-6">
-      <div className="mb-1 flex items-center gap-2">
-        <i className="bi bi-shield-lock text-brand-400" />
-        <h3 className="font-medium text-ink-100">Trusted private upstreams</h3>
-      </div>
-      <p className="mb-3 text-xs text-ink-500">
-        Provider URLs resolving to private/loopback/LAN addresses are blocked by default. Add a trusted IP, CIDR, or
-        hostname to permit it — e.g. <code className="text-ink-300">10.0.0.5</code>,{" "}
-        <code className="text-ink-300">192.168.0.0/16</code>, <code className="text-ink-300">models.lan</code>.
-      </p>
-      <div className="mb-3 flex flex-wrap gap-2">
-        {entries.length === 0 && <span className="text-xs text-ink-600">No entries — all private hosts blocked.</span>}
-        {entries.map((e) => (
-          <span key={e} className="inline-flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 font-mono text-xs text-ink-200">
-            {e}
-            <button className="text-ink-500 hover:text-red-400" title="Remove" disabled={saving} onClick={() => void put(entries.filter((x) => x !== e))}>
-              <i className="bi bi-x-lg" />
-            </button>
-          </span>
-        ))}
-      </div>
-      <div className="flex gap-2">
-        <input
-          className="input font-mono text-xs"
-          value={entry}
-          onChange={(e) => setEntry(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && add()}
-          placeholder="IP, CIDR, or hostname"
-        />
-        <button className="btn-ghost btn-xs whitespace-nowrap" onClick={add} disabled={saving}>
-          <i className="bi bi-plus-lg" />
-          Add
-        </button>
-      </div>
     </div>
   );
 }

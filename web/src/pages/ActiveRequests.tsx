@@ -3,6 +3,7 @@ import { api } from "../api";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle } from "../components/common";
 import { Modal } from "../components/Modal";
+import { useI18n } from "../lib/i18n";
 
 /** One progress event in a request's lifecycle. */
 interface ProgressEvent {
@@ -84,6 +85,7 @@ export function ActiveRequests() {
   const [filterTraceId, setFilterTraceId] = useState("");
   const [viewCompleted, setViewCompleted] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const { t } = useI18n();
 
   const load = useCallback(
     (silent = false) => {
@@ -128,7 +130,7 @@ export function ActiveRequests() {
       const r = await api.get<ActiveRequestDetail>(`/active-requests/${traceId}`);
       setDetail(r.request);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load detail");
+      setError(e instanceof Error ? e.message : t("activeRequests.error.loadDetailFailed"));
     }
   };
 
@@ -139,22 +141,22 @@ export function ActiveRequests() {
   return (
     <div>
       <PageHeader
-        title="Active Requests"
-        subtitle="Real-time monitoring of in-flight requests. Blocked requests (>30s) are highlighted."
+        title={t("activeRequests.title")}
+        subtitle={t("activeRequests.subtitle")}
         icon="bi-activity"
         action={
           <div className="flex items-center gap-3">
             {blockedCount > 0 && (
               <span className="badge-red animate-pulse">
                 <i className="bi bi-exclamation-triangle" />
-                {blockedCount} blocked
+                {t("activeRequests.blockedCount", { count: blockedCount })}
               </span>
             )}
-            <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={`Auto-refresh (${REFRESH_MS}ms)`} />
+            <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("activeRequests.autoRefreshLabel", { ms: REFRESH_MS })} />
             {autoRefresh && (
               <span className="badge-green">
                 <i className="bi bi-broadcast" />
-                live
+                {t("activeRequests.liveBadge")}
               </span>
             )}
           </div>
@@ -164,31 +166,31 @@ export function ActiveRequests() {
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <input
           className="input w-auto font-mono text-xs"
-          placeholder="Filter by trace ID..."
+          placeholder={t("activeRequests.filterPlaceholder")}
           value={filterTraceId}
           onChange={(e) => setFilterTraceId(e.target.value)}
         />
         <button className="btn-ghost btn-xs" onClick={() => load()}>
           <i className="bi bi-arrow-clockwise" />
-          Refresh
+          {t("activeRequests.action.refresh")}
         </button>
         <label className="flex items-center gap-2 text-sm text-ink-300">
           <input type="checkbox" checked={viewCompleted} onChange={(e) => setViewCompleted(e.target.checked)} />
-          Show recently completed
+          {t("activeRequests.showCompleted")}
         </label>
         <div className="flex-1" />
         <span className="text-xs text-ink-500">
-          {data ? `${activeRows.length} active, ${completedRows.length} completed` : "loading..."}
+          {data ? t("activeRequests.countStatus", { active: activeRows.length, completed: completedRows.length }) : t("activeRequests.loadingStatus")}
         </span>
       </div>
 
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
-      {!loading && activeRows.length === 0 && (
+      {!loading && activeRows.length === 0 && !viewCompleted && (
         <EmptyState
           icon="bi-activity"
-          title="No active requests"
-          hint="In-flight requests will appear here in real-time."
+          title={t("activeRequests.empty.activeTitle")}
+          hint={t("activeRequests.empty.activeHint")}
         />
       )}
 
@@ -197,14 +199,14 @@ export function ActiveRequests() {
       {viewCompleted && (
         <>
           <h3 className="mb-2 mt-6 text-sm font-medium text-ink-400">
-            Recently completed
+            {t("activeRequests.recentlyCompleted")}
             <span className="ml-2 text-xs text-ink-600">{completedRows.length}</span>
           </h3>
           {!loading && completedRows.length === 0 ? (
             <EmptyState
               icon="bi-check2-circle"
-              title="No recently completed requests"
-              hint="Completed requests appear here briefly before expiring."
+              title={t("activeRequests.empty.completedTitle")}
+              hint={t("activeRequests.empty.completedHint")}
             />
           ) : (
             <RequestTable rows={completedRows} onRowClick={openDetail} />
@@ -216,7 +218,7 @@ export function ActiveRequests() {
       <Modal
         open={detail !== null}
         wide
-        title={detail ? `Trace ${shortTrace(detail.traceId)}` : ""}
+        title={detail ? t("activeRequests.modal.detailTitle", { traceId: shortTrace(detail.traceId) }) : ""}
         icon="bi-activity"
         onClose={() => setDetail(null)}
       >
@@ -226,29 +228,29 @@ export function ActiveRequests() {
               <div className="rounded-lg border border-red-800 bg-red-950/30 px-4 py-3">
                 <div className="flex items-center gap-2 text-red-400">
                   <i className="bi bi-exclamation-triangle-fill" />
-                  <span className="font-semibold">BLOCKED — this request has been in-flight for {formatElapsed(detail.elapsedMs)} (exceeds 30s threshold)</span>
+                  <span className="font-semibold">{t("activeRequests.blockedWarning", { elapsed: formatElapsed(detail.elapsedMs) })}</span>
                 </div>
                 <div className="mt-1 text-xs text-red-300">
-                  Last progress: {detail.lastPhase}/{detail.lastNode} — {detail.lastMessage}
+                  {t("activeRequests.lastProgress", { phase: detail.lastPhase ?? "", node: detail.lastNode ?? "", message: detail.lastMessage ?? "" })}
                 </div>
               </div>
             )}
             {detail.error && <ErrorNote message={detail.error} />}
 
             <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label="Service" value={detail.serviceName ?? "-"} />
-              <Meta label="Ingress" value={detail.ingress} />
-              <Meta label="Streaming" value={detail.streaming ? "yes" : "no"} />
-              <Meta label="Elapsed" value={formatElapsed(detail.elapsedMs)} />
-              <Meta label="Events" value={String(detail.eventCount)} />
-              <Meta label="Status" value={detail.done ? String(detail.httpStatus) : "in-flight"} />
+              <Meta label={t("activeRequests.meta.service")} value={detail.serviceName ?? "-"} />
+              <Meta label={t("activeRequests.meta.ingress")} value={detail.ingress} />
+              <Meta label={t("activeRequests.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
+              <Meta label={t("activeRequests.meta.elapsed")} value={formatElapsed(detail.elapsedMs)} />
+              <Meta label={t("activeRequests.meta.events")} value={String(detail.eventCount)} />
+              <Meta label={t("activeRequests.meta.status")} value={detail.done ? String(detail.httpStatus) : t("activeRequests.value.inFlight")} />
             </div>
 
             <div>
-              <h4 className="label">Progress timeline ({detail.events.length} events)</h4>
+              <h4 className="label">{t("activeRequests.timelineTitle", { count: detail.events.length })}</h4>
               <div className="max-h-[50vh] space-y-1 overflow-y-auto">
                 {detail.events.length === 0 && (
-                  <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">No events recorded</div>
+                  <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("activeRequests.noEvents")}</div>
                 )}
                 {detail.events.map((ev, i) => (
                   <div
@@ -296,18 +298,19 @@ function RequestTable({
   rows: ActiveRequestView[];
   onRowClick: (traceId: string) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="card overflow-hidden">
       <table className="table">
         <thead>
           <tr>
-            <th>Trace ID</th>
-            <th>Service</th>
-            <th>Phase</th>
-            <th>Last Node</th>
-            <th>Elapsed</th>
-            <th>Events</th>
-            <th>Status</th>
+            <th>{t("activeRequests.table.traceId")}</th>
+            <th>{t("activeRequests.table.service")}</th>
+            <th>{t("activeRequests.table.phase")}</th>
+            <th>{t("activeRequests.table.lastNode")}</th>
+            <th>{t("activeRequests.table.elapsed")}</th>
+            <th>{t("activeRequests.table.events")}</th>
+            <th>{t("activeRequests.table.status")}</th>
             <th></th>
           </tr>
         </thead>
@@ -328,16 +331,16 @@ function RequestTable({
               <td className="font-mono text-xs text-ink-400">{r.lastNode ?? "-"}</td>
               <td className={`text-xs font-medium ${r.blocked ? "text-red-400" : "text-ink-300"}`}>
                 {formatElapsed(r.elapsedMs)}
-                {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title="Blocked > 30s" />}
+                {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title={t("activeRequests.blockedTitle")} />}
               </td>
               <td className="text-xs text-ink-400">{r.eventCount}</td>
               <td>
                 {r.done ? (
                   <StatusBadge status={r.httpStatus ?? 0} />
                 ) : r.blocked ? (
-                  <span className="badge-red">blocked</span>
+                  <span className="badge-red">{t("activeRequests.status.blocked")}</span>
                 ) : (
-                  <span className="badge-green">serving</span>
+                  <span className="badge-green">{t("activeRequests.status.serving")}</span>
                 )}
               </td>
               <td className="text-right">

@@ -14,7 +14,7 @@ export class ServiceFactory implements ServiceResolver {
   constructor(
     private readonly services: ServiceRepo,
     private readonly deps: ServiceDeps,
-    private readonly logMaxChars: number,
+    private readonly logMaxChars: number | (() => number),
   ) {}
 
   private microDeps(): MicroAgentDeps {

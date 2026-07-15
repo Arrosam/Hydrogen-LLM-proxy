@@ -1,4 +1,4 @@
-﻿import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle, useConfirm } from "../components/common";
@@ -7,6 +7,7 @@ import { useToast } from "../components/Toast";
 import { useAuth } from "../auth";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
+import { useI18n } from "../lib/i18n";
 import type { LogSummary, ModelService } from "../types";
 
 interface AttemptRecord {
@@ -73,7 +74,8 @@ function isCallLog(path: unknown): path is ServiceCallEntry[] {
 
 /** Result cell for one upstream attempt ("ok" or its failure status/kind). */
 function attemptBadge(a: AttemptRecord) {
-  if (a.kind === "ok") return <StatusBadge status={200} label="ok" />;
+  const { t } = useI18n();
+  if (a.kind === "ok") return <StatusBadge status={200} label={t("logs.badge.ok")} />;
   return <StatusBadge status={a.status} label={String(a.status || a.kind)} />;
 }
 
@@ -97,13 +99,14 @@ export function Logs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<LogDetail | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [payloadView, setPayloadView] = useState<PayloadView>("formatted");
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [clearing, setClearing] = useState(false);
   const toast = useToast();
   const { user } = useAuth();
   const { confirm, confirmEl } = useConfirm();
+  const { t } = useI18n();
 
   const toggleRow = (i: number) =>
     setExpandedRows((prev) => {
@@ -159,18 +162,18 @@ export function Logs() {
 
   const clearAll = async () => {
     const ok = await confirm(
-      "Delete all logs",
-      `This permanently deletes all ${formatNumber(total)} request log entries and reclaims the disk space. This cannot be undone.`,
+      t("logs.confirm.clearAllTitle"),
+      t("logs.confirm.clearAllBody", { total: formatNumber(total) }),
     );
     if (!ok) return;
     setClearing(true);
     try {
       const r = await api.del<{ deleted: number }>("/logs");
-      toast.success(`Deleted ${formatNumber(r.deleted)} log entries`);
+      toast.success(t("logs.toast.deleted", { count: formatNumber(r.deleted) }));
       setOffset(0);
       load();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to clear logs");
+      toast.error(e instanceof Error ? e.message : t("logs.toast.clearFailed"));
     } finally {
       setClearing(false);
     }
@@ -178,7 +181,7 @@ export function Logs() {
 
   return (
     <div>
-      <PageHeader title="Logs" subtitle="Every request, its resolved attempt path, and payloads." icon="bi-journal-text" />
+      <PageHeader title={t("logs.title")} subtitle={t("logs.subtitle")} icon="bi-journal-text" />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
@@ -189,52 +192,52 @@ export function Logs() {
             setServiceId(e.target.value === "" ? "" : Number(e.target.value));
           }}
         >
-          <option value="">All Model Services</option>
+          <option value="">{t("logs.filter.allServices")}</option>
           {services.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
         <label className="flex items-center gap-2 text-sm text-ink-300">
           <input type="checkbox" checked={errorsOnly} onChange={(e) => { setOffset(0); setErrorsOnly(e.target.checked); }} />
-          Errors only
+          {t("logs.filter.errorsOnly")}
         </label>
         <button className="btn-ghost btn-xs" onClick={() => load()}>
           <i className="bi bi-arrow-clockwise" />
-          Refresh
+          {t("logs.action.refresh")}
         </button>
-        <Toggle checked={autoRefresh} onChange={setAutoRefresh} label="Auto-refresh (5s)" />
+        <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("logs.autoRefreshLabel")} />
         {autoRefresh && (
           <span className="badge-green">
             <i className="bi bi-broadcast" />
-            live
+            {t("logs.liveBadge")}
           </span>
         )}
         <div className="flex-1" />
-        <span className="text-xs text-ink-500">{formatNumber(total)} total</span>
+        <span className="text-xs text-ink-500">{formatNumber(total)} {t("logs.totalCount")}</span>
         {user?.role === "admin" && (
-          <button className="btn-danger btn-xs" onClick={clearAll} disabled={clearing || total === 0} title="Delete all log entries">
+          <button className="btn-danger btn-xs" onClick={clearAll} disabled={clearing || total === 0} title={t("logs.action.clearAllTitle")}>
             <i className={`bi ${clearing ? "bi-arrow-repeat animate-spin" : "bi-trash3"}`} />
-            Clear all
+            {t("logs.action.clearAll")}
           </button>
         )}
       </div>
 
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
-      {!loading && rows.length === 0 && <EmptyState icon="bi-journal-text" title="No log entries" hint="Requests through your Model Service endpoints appear here." />}
+      {!loading && rows.length === 0 && <EmptyState icon="bi-journal-text" title={t("logs.empty.title")} hint={t("logs.empty.hint")} />}
 
       {rows.length > 0 && (
         <div className="card overflow-hidden">
           <table className="table">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Model Service</th>
-                <th>Route</th>
-                <th>Status</th>
-                <th>Tokens</th>
-                <th>Latency</th>
-                <th>Tries</th>
+                <th>{t("logs.table.time")}</th>
+                <th>{t("logs.table.service")}</th>
+                <th>{t("logs.table.route")}</th>
+                <th>{t("logs.table.status")}</th>
+                <th>{t("logs.table.tokens")}</th>
+                <th>{t("logs.table.latency")}</th>
+                <th>{t("logs.table.tries")}</th>
                 <th></th>
               </tr>
             </thead>
@@ -247,11 +250,11 @@ export function Logs() {
                     <span className="text-ink-300">{r.ingressFormat}</span>
                     <i className="bi bi-arrow-right mx-1 text-ink-600" />
                     <span className="text-ink-400">{r.egressFormat ?? "-"}</span>
-                    {r.streaming && <i className="bi bi-broadcast ml-2 text-brand-400" title="streaming" />}
+                    {r.streaming && <i className="bi bi-broadcast ml-2 text-brand-400" title={t("logs.streamingTitle")} />}
                   </td>
                   <td><StatusBadge status={r.httpStatus} /></td>
                   <td className="text-xs text-ink-300">{formatNumber(r.totalTokens)}</td>
-                  <td className="text-xs text-ink-400">{r.latencyMs} ms</td>
+                  <td className="text-xs text-ink-400">{r.latencyMs} {t("common.ms")}</td>
                   <td className="text-xs text-ink-400">{r.attempts}</td>
                   <td className="text-right"><i className="bi bi-chevron-right text-ink-600" /></td>
                 </tr>
@@ -264,11 +267,11 @@ export function Logs() {
       {total > PAGE && (
         <div className="mt-4 flex items-center justify-between text-sm text-ink-400">
           <button className="btn-ghost btn-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
-            <i className="bi bi-chevron-left" />Prev
+            <i className="bi bi-chevron-left" />{t("logs.pagination.prev")}
           </button>
-          <span>{offset + 1}-{Math.min(offset + PAGE, total)} of {formatNumber(total)}</span>
+          <span>{t("logs.pagination.summary", { start: offset + 1, end: Math.min(offset + PAGE, total), total: formatNumber(total) })}</span>
           <button className="btn-ghost btn-xs" disabled={offset + PAGE >= total} onClick={() => setOffset(offset + PAGE)}>
-            Next<i className="bi bi-chevron-right" />
+            {t("logs.pagination.next")}<i className="bi bi-chevron-right" />
           </button>
         </div>
       )}
@@ -276,7 +279,7 @@ export function Logs() {
       <Modal
         open={detail !== null}
         wide
-        title={`Request #${detail?.id}`}
+        title={t("logs.modal.detailTitle", { id: detail?.id ?? "" })}
         icon="bi-journal-text"
         onClose={() => setDetail(null)}
         headerExtra={<PayloadViewToggle view={payloadView} onChange={setPayloadView} />}
@@ -285,26 +288,26 @@ export function Logs() {
           <div className="space-y-4">
             {detail.error && <ErrorNote message={detail.error} />}
             <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label="Model Service" value={detail.serviceName ?? "-"} />
-              <Meta label="Status" value={String(detail.httpStatus)} />
-              <Meta label="Latency" value={`${detail.latencyMs} ms`} />
-              <Meta label="Route" value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
-              <Meta label="Streaming" value={detail.streaming ? "yes" : "no"} />
-              <Meta label="Tokens" value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
-              <Meta label="Served model" value={detail.servedModel ?? "-"} />
-              <Meta label="Served provider" value={detail.servedProvider ?? "-"} />
-              <Meta label="Trace" value={detail.traceId ?? "-"} />
+              <Meta label={t("logs.meta.service")} value={detail.serviceName ?? "-"} />
+              <Meta label={t("logs.meta.status")} value={String(detail.httpStatus)} />
+              <Meta label={t("logs.meta.latency")} value={`${detail.latencyMs} ${t("common.ms")}`} />
+              <Meta label={t("logs.meta.route")} value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
+              <Meta label={t("logs.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
+              <Meta label={t("logs.meta.tokens")} value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
+              <Meta label={t("logs.meta.servedModel")} value={detail.servedModel ?? "-"} />
+              <Meta label={t("logs.meta.servedProvider")} value={detail.servedProvider ?? "-"} />
+              <Meta label={t("logs.meta.trace")} value={detail.traceId ?? "-"} />
             </div>
 
             <HttpInfoBlock
-              title="Client request (received)"
+              title={t("logs.http.clientRequest")}
               method={detail.requestMethod}
               path={detail.requestPath}
               query={detail.requestQuery}
               headers={detail.requestHeaders}
             />
             <HttpInfoBlock
-              title="Upstream response (received)"
+              title={t("logs.http.upstreamResponse")}
               status={detail.httpStatus}
               headers={detail.responseHeaders}
             />
@@ -312,17 +315,17 @@ export function Logs() {
             {isCallLog(detail.attemptPath) ? (
               <div>
                 <h4 className="label">
-                  Model Service calls
-                  <span className="ml-2 normal-case text-ink-500">(every service this Micro Agent called, in order)</span>
+                  {t("logs.section.serviceCalls")}
+                  <span className="ml-2 normal-case text-ink-500">{t("logs.section.serviceCallsHint")}</span>
                 </h4>
                 <CallList calls={detail.attemptPath} view={payloadView} />
               </div>
             ) : (
               <div>
                 <h4 className="label">
-                  Attempt path
+                  {t("logs.section.attemptPath")}
                   {legacyPath(detail.attemptPath).some((a) => a.request || a.response) && (
-                    <span className="ml-2 normal-case text-ink-500">(click a stage to see its request &amp; response)</span>
+                    <span className="ml-2 normal-case text-ink-500">{t("logs.section.attemptPathHint")}</span>
                   )}
                 </h4>
                 <AttemptPathTable
@@ -334,9 +337,9 @@ export function Logs() {
               </div>
             )}
 
-            <PayloadBlock title="Client request payload" raw={detail.requestPayload} view={payloadView} defaultCollapsed />
-            <PayloadBlock title="Upstream request payload (sent, with effective params)" raw={detail.upstreamRequestPayload} view={payloadView} defaultCollapsed />
-            <PayloadBlock title="Response payload" raw={detail.responsePayload} view={payloadView} />
+            <PayloadBlock title={t("logs.payload.clientRequest")} raw={detail.requestPayload} view={payloadView} defaultCollapsed />
+            <PayloadBlock title={t("logs.payload.upstreamRequest")} raw={detail.upstreamRequestPayload} view={payloadView} defaultCollapsed />
+            <PayloadBlock title={t("logs.payload.response")} raw={detail.responsePayload} view={payloadView} />
           </div>
         )}
       </Modal>
@@ -355,6 +358,11 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 function PayloadViewToggle({ view, onChange }: { view: PayloadView; onChange: (v: PayloadView) => void }) {
+  const { t } = useI18n();
+  const labels: Record<PayloadView, string> = {
+    formatted: t("logs.payloadView.formatted"),
+    json: t("logs.payloadView.json"),
+  };
   return (
     <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
       {(["formatted", "json"] as const).map((v) => (
@@ -365,7 +373,7 @@ function PayloadViewToggle({ view, onChange }: { view: PayloadView; onChange: (v
             view === v ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
           }`}
         >
-          {v}
+          {labels[v]}
         </button>
       ))}
     </div>
@@ -377,9 +385,10 @@ function legacyPath(path: unknown): AttemptRecord[] {
 }
 
 function callStatusBadge(call: ServiceCallEntry) {
-  if (call.kind === "router") return <span className="badge-gray">route</span>;
+  const { t } = useI18n();
+  if (call.kind === "router") return <span className="badge-gray">{t("logs.badge.route")}</span>;
   const ok = call.status >= 200 && call.status < 300;
-  return <StatusBadge status={call.status} label={ok ? "ok" : undefined} />;
+  return <StatusBadge status={call.status} label={ok ? t("logs.badge.ok") : undefined} />;
 }
 
 function callKindIcon(kind: ServiceCallEntry["kind"]): string {
@@ -407,6 +416,7 @@ function CallList({ calls, view }: { calls: ServiceCallEntry[]; view: PayloadVie
  * attempt path, request/response payloads and (for a nested Micro Agent) the
  * calls it made in turn. */
 function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const expandable =
     call.attempts.length > 0 || Boolean(call.request) || Boolean(call.response) || (call.calls?.length ?? 0) > 0;
@@ -422,12 +432,12 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
         <span className="font-mono text-xs text-brand-400">{call.stage}</span>
         <span className="flex items-center gap-1.5 font-mono text-xs text-ink-300">
           <i className={`bi ${callKindIcon(call.kind)} text-ink-500`} />
-          {call.kind === "router" ? "(no model call)" : call.service}
+          {call.kind === "router" ? t("logs.router.noModelCall") : call.service}
         </span>
-        {call.streamed && <i className="bi bi-broadcast text-brand-400" title="streamed to the client" />}
+        {call.streamed && <i className="bi bi-broadcast text-brand-400" title={t("logs.streamedTitle")} />}
         <div className="flex-1" />
-        {call.usage && <span className="text-xs text-ink-400">{formatNumber(call.usage.totalTokens)} tok</span>}
-        {call.kind !== "router" && <span className="text-xs text-ink-400">{call.latencyMs} ms</span>}
+        {call.usage && <span className="text-xs text-ink-400">{formatNumber(call.usage.totalTokens)} {t("common.tok")}</span>}
+        {call.kind !== "router" && <span className="text-xs text-ink-400">{call.latencyMs} {t("common.ms")}</span>}
         {callStatusBadge(call)}
       </div>
       {open && expandable && (
@@ -435,15 +445,15 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
           {call.error && <ErrorNote message={call.error} />}
           {call.attempts.length > 0 && (
             <div>
-              <h4 className="label">Attempt path</h4>
+              <h4 className="label">{t("logs.section.attemptPath")}</h4>
               <AttemptsTable attempts={call.attempts} />
             </div>
           )}
-          <PayloadBlock title="Request" raw={call.request ?? null} view={view} defaultCollapsed />
-          <PayloadBlock title="Response" raw={call.response ?? null} view={view} />
+          <PayloadBlock title={t("logs.payload.request")} raw={call.request ?? null} view={view} defaultCollapsed />
+          <PayloadBlock title={t("logs.payload.responseShort")} raw={call.response ?? null} view={view} />
           {(call.calls?.length ?? 0) > 0 && (
             <div>
-              <h4 className="label">Model Service calls (nested)</h4>
+              <h4 className="label">{t("logs.section.serviceCallsNested")}</h4>
               <CallList calls={call.calls!} view={view} />
             </div>
           )}
@@ -454,12 +464,13 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
 }
 
 function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
+  const { t } = useI18n();
   return (
     <div className="card overflow-hidden">
       <table className="table">
         <thead>
           <tr>
-            <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
+            <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
           </tr>
         </thead>
         <tbody>
@@ -470,7 +481,7 @@ function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
               <td className="font-mono text-xs">{a.model}</td>
               <td className="font-mono text-xs">{a.provider}</td>
               <td>{attemptBadge(a)}</td>
-              <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
+              <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
             </tr>
           ))}
         </tbody>
@@ -493,14 +504,15 @@ function AttemptPathTable({
   const hasStage = path.some((a) => a.stage);
   const hasService = path.some((a) => a.service);
   const cols = 6 + (hasStage ? 1 : 0) + (hasService ? 1 : 0);
+  const { t } = useI18n();
   return (
     <div className="card overflow-hidden">
       <table className="table">
         <thead>
           <tr>
-            {hasStage && <th>Stage</th>}
-            {hasService && <th>Model Service</th>}
-            <th>Step</th><th>Try</th><th>Model</th><th>Provider</th><th>Result</th><th>Latency</th>
+            {hasStage && <th>{t("logs.pathTable.stage")}</th>}
+            {hasService && <th>{t("logs.pathTable.service")}</th>}
+            <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
           </tr>
         </thead>
         <tbody>
@@ -525,14 +537,14 @@ function AttemptPathTable({
                   <td className="font-mono text-xs">{a.model}</td>
                   <td className="font-mono text-xs">{a.provider}</td>
                   <td>{attemptBadge(a)}</td>
-                  <td className="text-xs text-ink-400">{a.latencyMs} ms</td>
+                  <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
                 </tr>
                 {isOpen && canExpand && (
                   <tr>
                     <td colSpan={cols} className="bg-ink-950/40 p-3">
                       <div className="space-y-3">
-                        <PayloadBlock title={`Stage "${a.stage}" request`} raw={a.request ?? null} view={view} defaultCollapsed />
-                        <PayloadBlock title={`Stage "${a.stage}" response`} raw={a.response ?? null} view={view} />
+                        <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} defaultCollapsed />
+                        <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
                       </div>
                     </td>
                   </tr>
@@ -560,6 +572,7 @@ function roleBadge(role: string): string {
 }
 
 function Transcript({ data }: { data: PayloadMeta }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-3">
       {data.meta.length > 0 && (
@@ -575,7 +588,7 @@ function Transcript({ data }: { data: PayloadMeta }) {
         <details className="rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2">
           <summary className="cursor-pointer text-xs font-medium text-ink-300">
             <i className="bi bi-tools mr-1 text-ink-500" />
-            {data.tools.length} tool{data.tools.length === 1 ? "" : "s"}
+            {data.tools.length} {data.tools.length === 1 ? t("logs.transcript.tools") : t("logs.transcript.toolsPlural")}
           </summary>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {data.tools.map((t) => (
@@ -585,13 +598,13 @@ function Transcript({ data }: { data: PayloadMeta }) {
         </details>
       )}
       <div className="space-y-2">
-        {data.turns.map((t, i) => (
+        {data.turns.map((turn, i) => (
           <div key={i} className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
             <div className="flex items-center gap-2 border-b border-ink-800/70 px-3 py-1.5">
-              <span className={roleBadge(t.role)}>{t.role}</span>
-              <span className="text-[11px] text-ink-600">{t.text.length.toLocaleString()} chars</span>
+              <span className={roleBadge(turn.role)}>{turn.role}</span>
+              <span className="text-[11px] text-ink-600">{turn.text.length.toLocaleString()} {t("common.chars")}</span>
             </div>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs leading-relaxed text-ink-200">{t.text || "(empty)"}</pre>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs leading-relaxed text-ink-200">{turn.text || t("logs.transcript.empty")}</pre>
           </div>
         ))}
       </div>
@@ -614,12 +627,13 @@ function HttpInfoBlock({
   status?: number;
   headers?: Record<string, string> | null;
 }) {
+  const { t } = useI18n();
   const hasAny = Boolean(method || path || query || status || (headers && Object.keys(headers).length > 0));
   if (!hasAny) {
     return (
       <div>
         <h4 className="label">{title}</h4>
-        <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">— not recorded —</div>
+        <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("logs.notRecorded")}</div>
       </div>
     );
   }
@@ -652,6 +666,7 @@ function HttpInfoBlock({
 }
 
 function PayloadBlock({ title, raw, view, defaultCollapsed = false }: { title: string; raw: string | null; view: PayloadView; defaultCollapsed?: boolean }) {
+  const { t } = useI18n();
   const parsed = useMemo(() => parsePayload(raw), [raw]);
   const showFormatted = view === "formatted" && parsed;
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
@@ -668,7 +683,7 @@ function PayloadBlock({ title, raw, view, defaultCollapsed = false }: { title: s
       </button>
       {!collapsed && (
         raw == null ? (
-          <div className="mt-2 rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">— not recorded —</div>
+          <div className="mt-2 rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("logs.notRecorded")}</div>
         ) : showFormatted ? (
           <div className="mt-2"><Transcript data={parsed} /></div>
         ) : (

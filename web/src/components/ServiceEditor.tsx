@@ -4,8 +4,8 @@ import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
 import { OcrEditor, StageEditor } from "./StageEditor";
-import { ThinkingLevelInput } from "./ThinkingLevelInput";
 import { OverridesEditor } from "./OverridesEditor";
+import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
 import type {
   AdvanceTrigger,
@@ -48,6 +48,7 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
 
 export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
   const toast = useToast();
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -85,14 +86,22 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setTimeoutMs(service.steps?.timeoutMs ?? 60000);
       if (isAgentDef(service.steps)) {
         setKind("chain");
-        setStages(service.steps.stages ?? []);
+        setStages((service.steps.stages ?? []).map((s) => {
+          if (s.thinking === undefined) return s;
+          const { thinking, ...rest } = s;
+          return { ...rest, overrides: { ...(rest.overrides ?? {}), thinking } };
+        }));
         setOutput(service.steps.output ?? "");
         setOcr(service.steps.ocr);
         setSteps([]);
         setReliableStreaming(false);
       } else {
         setKind("resilience");
-        setSteps((service.steps as ServiceSteps)?.steps ?? []);
+        setSteps((service.steps as ServiceSteps)?.steps.map((s) => {
+          if (s.thinking === undefined) return s;
+          const { thinking, ...rest } = s;
+          return { ...rest, overrides: { ...(rest.overrides ?? {}), thinking } };
+        }) ?? []);
         setStages([]);
         setOutput("");
         setOcr(undefined);
@@ -177,7 +186,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       }
       return parsed;
     } catch {
-      toast.error("Steps JSON is invalid");
+      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
       return null;
     }
   };
@@ -189,16 +198,16 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     try {
       s = currentDef();
     } catch {
-      toast.error("Steps JSON is invalid");
+      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
       return;
     }
     const r = await api.post<{ valid: boolean; summary?: string; error?: string }>("/services/validate", { steps: s });
     if (r.valid) {
       setSummary(r.summary ?? "");
-      toast.success("Workflow is valid");
+      toast.success(t("serviceEditor.toast.workflowValid"));
     } else {
       setSummary("");
-      toast.error(r.error ?? "Invalid workflow");
+      toast.error(r.error ?? t("serviceEditor.toast.workflowInvalid"));
     }
   };
 
@@ -207,7 +216,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     try {
       s = currentDef();
     } catch {
-      toast.error("Steps JSON is invalid");
+      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
       return;
     }
     setBusy(true);
@@ -216,10 +225,10 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         "/services/test",
         { steps: s, prompt: "ping" },
       );
-      if (r.ok) toast.success(`Served by ${r.served?.model}@${r.served?.provider}: "${r.output}"`);
-      else toast.error(`Dry-run failed: ${r.message}`);
+      if (r.ok) toast.success(t("serviceEditor.toast.servedBy", { model: r.served?.model ?? "", provider: r.served?.provider ?? "", output: r.output ?? "" }));
+      else toast.error(t("serviceEditor.toast.dryRunFailedWithMessage", { message: r.message ?? "" }));
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Dry-run failed");
+      toast.error(e instanceof ApiError ? e.message : t("serviceEditor.toast.dryRunFailed"));
     } finally {
       setBusy(false);
     }
@@ -230,11 +239,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     try {
       s = currentDef();
     } catch {
-      toast.error("Steps JSON is invalid");
+      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
       return;
     }
     if (!name.trim()) {
-      toast.error("Name is required");
+      toast.error(t("serviceEditor.toast.nameRequired"));
       return;
     }
     setBusy(true);
@@ -242,11 +251,13 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       const payload = { name, description: description || null, steps: s, enabled };
       if (service) await api.patch(`/services/${service.id}`, payload);
       else await api.post("/services", payload);
-      toast.success(`${kind === "chain" ? "Micro Agent" : "Model Service"} ${service ? "updated" : "created"}`);
+      const kindLabel = kind === "chain" ? t("common.microAgent") : t("common.modelService");
+      const action = service ? t("common.updated") : t("common.created");
+      toast.success(t("serviceEditor.toast.serviceSaved", { kindLabel, action }));
       onSaved();
       onClose();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("serviceEditor.toast.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -262,28 +273,28 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     <Modal
       open={open}
       wide
-      title={service ? `Edit "${service.name}"` : kind === "chain" ? "New Micro Agent" : "New Model Service"}
+      title={service ? t("serviceEditor.editTitle", { name: service.name }) : kind === "chain" ? t("serviceEditor.newMicroAgentTitle") : t("serviceEditor.newModelServiceTitle")}
       icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
       onClose={onClose}
       footer={
         <>
           <button className="btn-ghost" onClick={toggleRaw}>
             <i className="bi bi-code-slash" />
-            {raw ? "Visual editor" : "Raw JSON"}
+            {raw ? t("serviceEditor.visualEditor") : t("serviceEditor.rawJson")}
           </button>
           <button className="btn-ghost" onClick={validate}>
             <i className="bi bi-check2-circle" />
-            Validate
+            {t("serviceEditor.validate")}
           </button>
           <button className="btn-ghost" onClick={dryRun} disabled={busy}>
             <i className="bi bi-play-circle" />
-            Dry-run
+            {t("serviceEditor.dryRun")}
           </button>
           <div className="flex-1" />
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-ghost" onClick={onClose}>{t("common.cancel")}</button>
           <button className="btn-primary" onClick={save} disabled={busy}>
             <i className="bi bi-check-lg" />
-            Save
+            {t("common.save")}
           </button>
         </>
       }
@@ -291,38 +302,35 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       <div className="space-y-5">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="label">Name (exposed model name)</label>
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. sonnet-any" />
+            <label className="label">{t("serviceEditor.nameLabel")}</label>
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("serviceEditor.namePlaceholder")} />
           </div>
           <div>
-            <label className="label">Per-attempt timeout (ms)</label>
+            <label className="label">{t("serviceEditor.timeoutLabel")}</label>
             <input className="input" type="text" inputMode="numeric" value={timeoutMs} onFocus={selectAll} onClick={selectAll} onChange={(e) => setTimeoutMs(intInput(e.target.value, 0))} />
           </div>
         </div>
         <div>
-          <label className="label">Description (optional)</label>
+          <label className="label">{t("serviceEditor.descriptionLabel")}</label>
           <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
+          <Toggle checked={enabled} onChange={setEnabled} label={t("serviceEditor.enabled")} />
           {kind === "resilience" && (
-            <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label="Reliable streaming" />
+            <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label={t("serviceEditor.reliableStreaming")} />
           )}
         </div>
         {kind === "resilience" && reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
-            Streams the upstream response and buffers it (retrying a truncated stream under your retry rules), then
-            replays the complete result — so a streaming client never gets a partial/truncated stream, and reasoning
-            from stream-only providers is still captured. Costs first-token latency. Leave off to stream straight
-            through.
+            {t("serviceEditor.reliableStreamingDescription")}
           </p>
         )}
 
         {!raw && (
           <p className="text-xs text-ink-500">
             {kind === "resilience"
-              ? "Model Service: try each (model, provider) in turn until one succeeds."
-              : "Micro Agent: a decision tree of stages, each running a Model Service or another Micro Agent. Add a transition to continue to another stage; a stage with no matching transition ends and returns its output."}
+              ? t("serviceEditor.modelServiceDescription")
+              : t("serviceEditor.microAgentDescription")}
           </p>
         )}
 
@@ -335,7 +343,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
         {raw ? (
           <div>
-            <label className="label">{kind === "chain" ? "Chain JSON" : "Steps JSON"}</label>
+            <label className="label">{kind === "chain" ? t("serviceEditor.chainJsonLabel") : t("serviceEditor.stepsJsonLabel")}</label>
             <textarea className="input min-h-[320px] font-mono text-xs" value={rawText} onChange={(e) => setRawText(e.target.value)} />
           </div>
         ) : kind === "chain" ? (
@@ -354,16 +362,16 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         ) : (
           <div>
             <div className="mb-2 flex items-center justify-between">
-              <span className="label mb-0">Failure chain (drag to reorder)</span>
+              <span className="label mb-0">{t("serviceEditor.failureChain")}</span>
               <button className="btn-ghost btn-xs" onClick={addStep}>
                 <i className="bi bi-plus-lg" />
-                Add step
+                {t("serviceEditor.addStep")}
               </button>
             </div>
 
             {steps.length === 0 && (
               <p className="rounded-lg border border-dashed border-ink-700 px-4 py-6 text-center text-xs text-ink-500">
-                No steps. Add at least one (model, provider) attempt.
+                {t("serviceEditor.noStepsHint")}
               </p>
             )}
 
@@ -382,14 +390,14 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                           draggable
                           onDragStart={() => setDragIndex(i)}
                           onDragEnd={() => setDragIndex(null)}
-                          title="Drag to reorder"
+                          title={t("serviceEditor.dragToReorder")}
                           className="cursor-grab text-ink-600 hover:text-ink-300"
                         >
                           <i className="bi bi-grip-vertical" />
                         </span>
-                        <span className="badge-blue">Step {i + 1}</span>
+                        <span className="badge-blue">{t("serviceEditor.stepNumber", { n: i + 1 })}</span>
                         <div className="flex-1" />
-                        <button className="btn-ghost btn-xs" title="Duplicate with a different provider" onClick={() => duplicateStep(i)}>
+                        <button className="btn-ghost btn-xs" title={t("serviceEditor.duplicateStepTitle")} onClick={() => duplicateStep(i)}>
                           <i className="bi bi-files" />
                         </button>
                         <button className="btn-danger btn-xs" onClick={() => removeStep(i)}>
@@ -399,7 +407,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <label className="label">Model</label>
+                          <label className="label">{t("serviceEditor.model")}</label>
                           <select
                             className="input"
                             value={step.model}
@@ -415,9 +423,9 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                           </select>
                         </div>
                         <div>
-                          <label className="label">Provider</label>
+                          <label className="label">{t("serviceEditor.provider")}</label>
                           <select className="input" value={step.provider} onChange={(e) => patchStep(i, { provider: e.target.value })}>
-                            {provOptions.length === 0 && <option value="">(no providers mapped)</option>}
+                            {provOptions.length === 0 && <option value="">{t("serviceEditor.noProvidersMapped")}</option>}
                             {provOptions.map((p) => (
                               <option key={p} value={p}>{p}</option>
                             ))}
@@ -427,30 +435,22 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
                       <div className="mt-3 grid grid-cols-2 gap-3">
                         <div>
-                          <label className="label">Retry attempts</label>
+                          <label className="label">{t("serviceEditor.retryAttempts")}</label>
                           <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 1} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: intInput(e.target.value, 1, 1) })} />
                         </div>
                         <div>
-                          <label className="label">Retry interval (ms)</label>
+                          <label className="label">{t("serviceEditor.retryInterval")}</label>
                           <input className="input" type="text" inputMode="numeric" value={step.retry?.intervalMs ?? 0} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { intervalMs: intInput(e.target.value, 0) })} />
                         </div>
                       </div>
 
                       <div className="mt-3">
-                        <label className="label">Retry on</label>
+                        <label className="label">{t("serviceEditor.retryOn")}</label>
                         <TriggerChips
-                          options={[...CODE_PRESETS, "timeout", "network", "error"]}
+                          options={[...CODE_PRESETS, t("trigger.timeout") as Trigger, t("trigger.network") as Trigger, t("trigger.error") as Trigger]}
                           selected={step.retry?.on ?? []}
                           onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
                           allowCustomCodes
-                        />
-                      </div>
-
-                      <div className="mt-3">
-                        <ThinkingLevelInput
-                          value={step.thinking}
-                          onChange={(v) => patchStep(i, { thinking: v })}
-                          hint="(override for this step)"
                         />
                       </div>
 
@@ -458,9 +458,9 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
                       {i < steps.length - 1 && (
                         <div className="mt-3">
-                          <label className="label">Advance to next step on <span className="normal-case text-ink-500">(empty = any failure)</span></label>
+                          <label className="label">{t("serviceEditor.advanceOnLabel")} <span className="normal-case text-ink-500">{t("serviceEditor.advanceOnHint")}</span></label>
                           <TriggerChips
-                            options={[...CODE_PRESETS, "timeout", "network", "error", "exhausted"]}
+                            options={[...CODE_PRESETS, t("trigger.timeout") as AdvanceTrigger, t("trigger.network") as AdvanceTrigger, t("trigger.error") as AdvanceTrigger, t("trigger.exhausted") as AdvanceTrigger]}
                             selected={step.advanceOn ?? []}
                             onToggle={(v) => patchStep(i, { advanceOn: toggle(step.advanceOn, v as AdvanceTrigger) })}
                             allowCustomCodes
@@ -472,7 +472,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                     {i < steps.length - 1 && (
                       <div className="flex items-center gap-2 py-1 pl-4 text-xs text-ink-500">
                         <i className="bi bi-arrow-down" />
-                        on failure
+                        {t("serviceEditor.onFailure")}
                       </div>
                     )}
                   </div>
@@ -482,7 +482,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
             {steps.length > 0 && (
               <div className="flex items-center gap-2 pl-4 pt-1 text-xs text-ink-500">
                 <i className="bi bi-x-octagon" />
-                if the last step still fails, the upstream error is returned to the client
+                {t("serviceEditor.lastStepFailsHint")}
               </div>
             )}
           </div>
@@ -513,6 +513,7 @@ function TriggerChips({
   /** When true, shows a text input for adding arbitrary HTTP status codes. */
   allowCustomCodes?: boolean;
 }) {
+  const { t } = useI18n();
   const [input, setInput] = useState("");
 
   const addCustomCode = () => {
@@ -565,7 +566,7 @@ function TriggerChips({
             type="text"
             inputMode="numeric"
             className="input w-32 text-xs"
-            placeholder="HTTP code..."
+            placeholder={t("serviceEditor.httpCodePlaceholder")}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -582,9 +583,9 @@ function TriggerChips({
             disabled={!input.trim()}
           >
             <i className="bi bi-plus-lg" />
-            Add
+            {t("serviceEditor.add")}
           </button>
-          <span className="text-[11px] text-ink-500">Type any HTTP code (100-599), press Enter to add</span>
+          <span className="text-[11px] text-ink-500">{t("serviceEditor.httpCodeHint")}</span>
         </div>
       )}
 
@@ -597,7 +598,7 @@ function TriggerChips({
               type="button"
               onClick={() => onToggle(c)}
               className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-2 py-0.5 text-xs font-medium text-white transition-colors hover:bg-brand-500"
-              title="Click to remove"
+              title={t("serviceEditor.clickToRemove")}
             >
               {c}
               <i className="bi bi-x-lg text-[10px]" />
@@ -610,13 +611,14 @@ function TriggerChips({
 }
 
 function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Partial<ServiceStep>) => void }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const hasOverrides = !!step.overrides && Object.keys(step.overrides).length > 0;
   return (
     <div className="mt-3">
       <button type="button" className="text-xs text-ink-500 hover:text-ink-300" onClick={() => setOpen((a) => !a)}>
         <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
-        Advanced (overrides: top_P, top_K, maxTokens, etc.)
+        {t("serviceEditor.advancedOverrides")}
         {hasOverrides && <span className="ml-1 text-brand-400">●</span>}
       </button>
       {open && (
@@ -624,7 +626,6 @@ function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Parti
           <OverridesEditor
             overrides={step.overrides}
             onChange={(ov) => onPatch({ overrides: ov })}
-            showThinking={false}
           />
         </div>
       )}

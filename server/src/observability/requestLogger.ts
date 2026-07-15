@@ -46,8 +46,14 @@ export interface LogParams {
 export class RequestLogger {
   constructor(
     private readonly repo: RequestLogRepo,
-    private readonly maxChars: number,
+    private readonly maxChars: number | (() => number),
   ) {}
+
+  /** Resolve the (possibly live) max-chars to a concrete number. */
+  private limit(): number {
+    const v = this.maxChars;
+    return typeof v === "function" ? v() : v;
+  }
 
   /** Demote a logged 200 to 499 after late evidence that delivery failed. */
   amendDeliveryFailure(traceId: string, error: string): boolean {
@@ -56,6 +62,7 @@ export class RequestLogger {
 
   record(p: LogParams): void {
     const usage = p.usage ?? ZERO_USAGE;
+    const maxChars = this.limit();
     this.repo.insert({
       traceId: p.traceId,
       tokenId: p.tokenId,
@@ -71,10 +78,10 @@ export class RequestLogger {
       requestPath: p.http.path,
       requestQuery: p.http.query || null,
       requestHeaders: redactHeaders(p.http.headers),
-      requestBody: serializeForLog(p.http.body, this.maxChars),
-      upstreamRequestBody: p.upstreamRequest != null ? serializeForLog(p.upstreamRequest, this.maxChars) : null,
+      requestBody: serializeForLog(p.http.body, maxChars),
+      upstreamRequestBody: p.upstreamRequest != null ? serializeForLog(p.upstreamRequest, maxChars) : null,
       responseHeaders: p.responseHeaders ? redactHeaders(p.responseHeaders) : null,
-      responseBody: p.responseBody != null ? serializeForLog(p.responseBody, this.maxChars) : null,
+      responseBody: p.responseBody != null ? serializeForLog(p.responseBody, maxChars) : null,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,

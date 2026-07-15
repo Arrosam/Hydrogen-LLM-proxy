@@ -10,14 +10,21 @@ import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./o
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
+/** Resolve a possibly-live token rate (number | getter). Default 2000. */
+function resolveRate(r: number | (() => number) | undefined): number {
+  if (r == null) return 2000;
+  return typeof r === "function" ? r() : r;
+}
+
 /** Shared dependencies every executor needs. */
 export interface ServiceDeps {
   catalog: Catalog;
   transport: Transport;
   /** Optional active-request registry for real-time progress tracking. */
   progress?: ActiveRequestRegistry | null;
-  /** Token rate (tokens/second) for simulated/fabricated streams. Default 2000. */
-  simulatedStreamingTokenRate?: number;
+  /** Token rate (tokens/second) for simulated/fabricated streams. Default 2000.
+   * A getter is accepted so the rate can be changed at runtime from the dashboard. */
+  simulatedStreamingTokenRate?: number | (() => number);
 }
 
 export interface InvokeOptions {
@@ -113,7 +120,7 @@ export class ModelService {
   protected fabricated(inv: Invocation, startedAt?: number): StreamInvocation {
     if (!inv.result.ok) return { result: inv.result, attemptPath: inv.attemptPath, attempts: inv.attempts };
     const v = inv.result.value;
-    const tokenRate = this.deps.simulatedStreamingTokenRate ?? 2000;
+    const tokenRate = resolveRate(this.deps.simulatedStreamingTokenRate);
     return {
       result: {
         ok: true,

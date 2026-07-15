@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
+import { useI18n } from "../lib/i18n";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { useToast } from "./Toast";
@@ -8,25 +9,27 @@ import type { User } from "../types";
 
 interface NavItem {
   to: string;
-  label: string;
+  labelKey: string;
   icon: string;
   end?: boolean;
 }
 
 const NAV: NavItem[] = [
-  { to: "/", label: "Overview", icon: "bi-speedometer2", end: true },
-  { to: "/services", label: "Model Services", icon: "bi-diagram-3" },
-  { to: "/micro-agents", label: "Micro Agents", icon: "bi-robot" },
-  { to: "/models", label: "Models", icon: "bi-box" },
-  { to: "/providers", label: "Providers", icon: "bi-hdd-network" },
-  { to: "/tokens", label: "Tokens", icon: "bi-key" },
-  { to: "/logs", label: "Logs", icon: "bi-journal-text" },
-  { to: "/active-requests", label: "Active Requests", icon: "bi-activity" },
-  { to: "/users", label: "Users", icon: "bi-people" },
+  { to: "/", labelKey: "nav.overview", icon: "bi-speedometer2", end: true },
+  { to: "/services", labelKey: "nav.modelServices", icon: "bi-diagram-3" },
+  { to: "/micro-agents", labelKey: "nav.microAgents", icon: "bi-robot" },
+  { to: "/models", labelKey: "nav.models", icon: "bi-box" },
+  { to: "/providers", labelKey: "nav.providers", icon: "bi-hdd-network" },
+  { to: "/tokens", labelKey: "nav.tokens", icon: "bi-key" },
+  { to: "/logs", labelKey: "nav.logs", icon: "bi-journal-text" },
+  { to: "/active-requests", labelKey: "nav.activeRequests", icon: "bi-activity" },
+  { to: "/users", labelKey: "nav.users", icon: "bi-people" },
+  { to: "/settings", labelKey: "nav.settings", icon: "bi-gear" },
 ];
 
 export function Layout() {
   const { user, logout, setUser } = useAuth();
+  const { t } = useI18n();
   const toast = useToast();
   const [pwOpen, setPwOpen] = useState(false);
   const [current, setCurrent] = useState("");
@@ -35,19 +38,19 @@ export function Layout() {
   const [busy, setBusy] = useState(false);
 
   const changePassword = async () => {
-    if (next.length < 8) return toast.error("New password must be at least 8 characters");
-    if (next !== confirm) return toast.error("Passwords do not match");
+    if (next.length < 8) return toast.error(t("layout.passwordTooShort"));
+    if (next !== confirm) return toast.error(t("layout.passwordsDoNotMatch"));
     setBusy(true);
     try {
       const r = await api.post<{ user: User }>("/change-password", { currentPassword: current, newPassword: next });
       setUser(r.user);
-      toast.success("Password changed");
+      toast.success(t("layout.passwordChanged"));
       setPwOpen(false);
       setCurrent("");
       setNext("");
       setConfirm("");
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Failed");
+      toast.error(e instanceof ApiError ? e.message : t("layout.failed"));
     } finally {
       setBusy(false);
     }
@@ -61,8 +64,8 @@ export function Layout() {
             <i className="bi bi-lightning-charge-fill text-lg" />
           </span>
           <div>
-            <div className="text-sm font-semibold text-ink-100">Hydrogen</div>
-            <div className="text-[11px] text-ink-500">LLM Proxy</div>
+            <div className="text-sm font-semibold text-ink-100">{t("brand.name")}</div>
+            <div className="text-[11px] text-ink-500">{t("brand.subtitle")}</div>
           </div>
         </div>
 
@@ -70,7 +73,7 @@ export function Layout() {
           {NAV.map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className="nav-link">
               <i className={`bi ${n.icon} text-base`} />
-              <span className="truncate">{n.label}</span>
+              <span className="truncate">{t(n.labelKey)}</span>
             </NavLink>
           ))}
         </nav>
@@ -91,11 +94,11 @@ export function Layout() {
           <div className="flex gap-1.5">
             <button className="btn-ghost flex-1 btn-xs" onClick={() => setPwOpen(true)}>
               <i className="bi bi-key" />
-              Password
+              {t("layout.passwordButton")}
             </button>
             <button className="btn-ghost flex-1 btn-xs" onClick={() => void logout()}>
               <i className="bi bi-box-arrow-right" />
-              Sign out
+              {t("layout.signOut")}
             </button>
           </div>
         </div>
@@ -103,30 +106,30 @@ export function Layout() {
 
       <Modal
         open={pwOpen}
-        title="Change password"
+        title={t("layout.changePasswordTitle")}
         icon="bi-key"
         onClose={() => setPwOpen(false)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setPwOpen(false)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setPwOpen(false)}>{t("common.cancel")}</button>
             <button className="btn-primary" onClick={changePassword} disabled={busy}>
               <i className="bi bi-check-lg" />
-              Update
+              {t("common.update")}
             </button>
           </>
         }
       >
         <div className="space-y-4">
           <div>
-            <label className="label">Current password</label>
+            <label className="label">{t("layout.currentPassword")}</label>
             <input className="input" type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
           </div>
           <div>
-            <label className="label">New password</label>
-            <input className="input" type="password" value={next} onChange={(e) => setNext(e.target.value)} placeholder="at least 8 characters" autoComplete="new-password" />
+            <label className="label">{t("layout.newPassword")}</label>
+            <input className="input" type="password" value={next} onChange={(e) => setNext(e.target.value)} placeholder={t("layout.passwordPlaceholder")} autoComplete="new-password" />
           </div>
           <div>
-            <label className="label">Confirm new password</label>
+            <label className="label">{t("layout.confirmNewPassword")}</label>
             <input className="input" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </div>
         </div>

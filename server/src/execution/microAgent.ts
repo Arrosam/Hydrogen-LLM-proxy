@@ -34,7 +34,7 @@ export interface ServiceResolver {
 
 export interface MicroAgentDeps extends ServiceDeps {
   resolver: ServiceResolver;
-  logMaxChars: number;
+  logMaxChars: number | (() => number);
 }
 
 /**
@@ -92,7 +92,7 @@ function isRouter(stage: AgentDef["stages"][number]): boolean {
  */
 export class MicroAgent extends ModelService {
   private readonly resolver: ServiceResolver;
-  private readonly logMaxChars: number;
+  private readonly logMaxChars: number | (() => number);
 
   constructor(
     private readonly agent: AgentDef,
@@ -103,6 +103,12 @@ export class MicroAgent extends ModelService {
     super({ timeoutMs: agent.timeoutMs, steps: [] }, deps);
     this.resolver = deps.resolver;
     this.logMaxChars = deps.logMaxChars;
+  }
+
+  /** Resolve the (possibly live) log-payload max-chars to a concrete number. */
+  private resolveLogMaxChars(): number {
+    const v = this.logMaxChars;
+    return typeof v === "function" ? v() : v;
   }
 
   /** A Micro Agent always buffers, then replays the complete result as a stream.
@@ -302,7 +308,7 @@ export class MicroAgent extends ModelService {
       status: inv.result.ok ? 200 : inv.result.status,
       latencyMs: Date.now() - started,
       attempts: path,
-      request: inv.result.ok ? serializeForLog(inv.result.value.upstreamRequest, this.logMaxChars) : this.stageRequestPayload(stageReq),
+      request: inv.result.ok ? serializeForLog(inv.result.value.upstreamRequest, this.resolveLogMaxChars()) : this.stageRequestPayload(stageReq),
     };
     if (inv.result.ok) {
       call.usage = inv.result.value.response.usage;
@@ -322,11 +328,11 @@ export class MicroAgent extends ModelService {
         tool_choice: stageReq.toolChoice,
         params: stageReq.params,
       },
-      this.logMaxChars,
+      this.resolveLogMaxChars(),
     );
   }
 
   private stageResponsePayload(response: Response): string {
-    return serializeForLog(response.toLogPayload(), this.logMaxChars);
+    return serializeForLog(response.toLogPayload(), this.resolveLogMaxChars());
   }
 }

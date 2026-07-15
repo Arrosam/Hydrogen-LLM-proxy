@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { mergeOverrides, type GenerationParams, type RequestOverrides } from "../core/ir/params";
+import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -138,7 +138,8 @@ export const OverridesSchema = z
     /** Replace the system prompt for this step/stage. */
     system: z.string(),
   })
-  .partial();
+  .partial()
+  .passthrough();
 
 // --- Model Service (resilience step chain) --------------------------------
 
@@ -150,7 +151,7 @@ export const StepSchema = z.object({
   retry: RetrySchema.optional(),
   /** When to advance to the next step. Omit = advance on any failure. */
   advanceOn: z.array(AdvanceTriggerSchema).optional(),
-  /** Legacy flat thinking override (folded into `overrides` at consumption). */
+  /** @deprecated Use `overrides.thinking` instead. Folded automatically for backward compat. */
   thinking: ThinkingLevelSchema.optional(),
   /** Rich per-step parameter overrides. */
   overrides: OverridesSchema.optional(),
@@ -226,6 +227,7 @@ export const AgentStageSchema = z.object({
   system: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  /** @deprecated Use `overrides.thinking` instead. Folded automatically for backward compat. */
   thinking: ThinkingLevelSchema.optional(),
   /** Rich per-stage parameter overrides (includes the system prompt). */
   overrides: OverridesSchema.optional(),
@@ -291,20 +293,53 @@ export function parseService(raw: unknown): ServiceDef {
 
 // --- override folding (legacy flat fields -> rich overrides) ----------------
 
-/** Effective per-step overrides: the flat `thinking` folded under `overrides`. */
-export function stepOverrides(step: ServiceStep): RequestOverrides | undefined {
-  const flat = step.thinking !== undefined ? { thinking: step.thinking } : undefined;
-  return mergeOverrides(flat, step.overrides as RequestOverrides | undefined);
+/** Canonical override keys that map 1:1 to a GenerationParams/stream/system
+ * field. Anything else on an overrides object is treated as a provider-specific
+ * param and folded into `extra` so it reaches the upstream wire body. */
+const CANONICAL_OVERRIDE_KEYS: ReadonlySet<string> = new Set<OverridableParam>([
+  "temperature", "topP", "topK", "minP", "maxTokens", "stop", "frequencyPenalty",
+  "presencePenalty", "repetitionPenalty", "seed", "n", "logprobs", "topLogprobs",
+  "logitBias", "responseFormat", "parallelToolCalls", "serviceTier", "user",
+  "verbosity", "thinking", "extra",
+]);
+
+/** Move any non-canonical keys on an overrides object into its `extra` record,
+ * so vendor-specific / nested JSON keys are preserved and sent upstream instead
+ * of being silently dropped by the wire-family renderers. */
+function foldUnknownIntoExtra<T extends RequestOverrides | undefined>(ov: T): T {
+  if (!ov) return ov;
+  const extra: Record<string, unknown> = { ...(ov.extra as Record<string, unknown> | undefined ?? {}) };
+  const out: Record<string, unknown> = {};
+  let mutated = false;
+  for (const [k, v] of Object.entries(ov)) {
+    if (k === "stream" || k === "system") { out[k] = v; continue; }
+    if (CANONICAL_OVERRIDE_KEYS.has(k)) { out[k] = v; continue; }
+    extra[k] = v;
+    mutated = true;
+  }
+  if (mutated || Object.keys(extra).length) out.extra = extra;
+  else if (ov.extra !== undefined) out.extra = ov.extra;
+  return { ...ov, ...out } as T;
 }
 
-/** Effective per-stage overrides: flat system/temperature/maxTokens/thinking folded under `overrides`. */
+/** Effective per-step overrides: the flat `thinking` folded under `overrides`,
+ * and any unknown keys folded into `extra`. */
+export function stepOverrides(step: ServiceStep): RequestOverrides | undefined {
+  const flat = step.thinking !== undefined ? { thinking: step.thinking } : undefined;
+  const merged = mergeOverrides(flat, step.overrides as RequestOverrides | undefined);
+  return foldUnknownIntoExtra(merged);
+}
+
+/** Effective per-stage overrides: flat system/temperature/maxTokens/thinking folded under `overrides`,
+ * and any unknown keys folded into `extra`. */
 export function stageOverrides(stage: AgentStage): RequestOverrides | undefined {
   const flat: RequestOverrides = {};
   if (stage.system !== undefined) flat.system = stage.system;
   if (stage.temperature !== undefined) flat.temperature = stage.temperature;
   if (stage.maxTokens !== undefined) flat.maxTokens = stage.maxTokens;
   if (stage.thinking !== undefined) flat.thinking = stage.thinking;
-  return mergeOverrides(Object.keys(flat).length ? flat : undefined, stage.overrides as RequestOverrides | undefined);
+  const merged = mergeOverrides(Object.keys(flat).length ? flat : undefined, stage.overrides as RequestOverrides | undefined);
+  return foldUnknownIntoExtra(merged);
 }
 
 /** Effective OCR generation params (temperature defaults to 0), overrides winning over flat. */

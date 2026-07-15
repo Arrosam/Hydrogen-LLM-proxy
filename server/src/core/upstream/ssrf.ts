@@ -140,7 +140,7 @@ function hostAllowed(host: string, addrs: string[], allowlist: string[]): boolea
 
 export interface SsrfGuardConfig {
   /** Whether private/loopback/CGNAT upstreams are permitted (link-local stays blocked). */
-  allowPrivate: boolean;
+  allowPrivate: boolean | (() => boolean);
   /** Admin-managed trusted-host allowlist, read fresh on each check. */
   allowlist: () => string[];
 }
@@ -153,6 +153,12 @@ export interface SsrfGuardConfig {
  */
 export class SsrfGuard {
   constructor(private readonly cfg: SsrfGuardConfig) {}
+
+  /** Resolve the current allow-private flag (may be a live getter). */
+  private allowPrivate(): boolean {
+    const v = this.cfg.allowPrivate;
+    return typeof v === "function" ? v() : v;
+  }
 
   async assertAllowed(rawUrl: string): Promise<void> {
     let url: URL;
@@ -184,7 +190,7 @@ export class SsrfGuard {
     if (allowlist.length && hostAllowed(host, addrs, allowlist)) return;
 
     for (const addr of addrs) {
-      if (isBlockedAddress(addr, this.cfg.allowPrivate)) {
+      if (isBlockedAddress(addr, this.allowPrivate())) {
         throw new UpstreamUrlError(
           `upstream host "${host}" resolves to a disallowed address (${addr}). ` +
             `Private, loopback, and link-local upstreams are blocked; ` +

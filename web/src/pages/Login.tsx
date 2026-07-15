@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
 import { api } from "../api";
+import { useI18n } from "../lib/i18n";
 
 export function Login() {
+  const { t } = useI18n();
   const { login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -30,7 +32,7 @@ export function Login() {
     try {
       await login(username, password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : t("login.error.fallback"));
     } finally {
       setBusy(false);
     }
@@ -44,8 +46,8 @@ export function Login() {
             <i className="bi bi-lightning-charge-fill text-2xl" />
           </span>
           <div className="text-center">
-            <h1 className="text-xl font-semibold text-ink-100">Hydrogen</h1>
-            <p className="text-sm text-ink-500">Sign in to the LLM proxy console</p>
+            <h1 className="text-xl font-semibold text-ink-100">{t("login.brand")}</h1>
+            <p className="text-sm text-ink-500">{t("login.subtitle")}</p>
           </div>
         </div>
 
@@ -53,17 +55,16 @@ export function Login() {
           <div className="mb-4 flex items-start gap-2 rounded-lg border border-brand-700/40 bg-brand-700/10 px-3 py-2.5 text-sm text-ink-200">
             <i className="bi bi-info-circle-fill mt-0.5 text-brand-400" />
             <div>
-              First time here? Sign in with username{" "}
-              <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.username}</code> and
-              password <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.password}</code>.
-              You'll set your own password next.
+              {t("login.hint.firstTimePrefix")}
+              <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.username}</code>{t("login.hint.andPassword")}
+              <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.password}</code>{t("login.hint.setPasswordNext")}
             </div>
           </div>
         )}
 
         <form onSubmit={submit} className="card card-pad space-y-4">
           <div>
-            <label className="label">Username</label>
+            <label className="label">{t("login.form.username")}</label>
             <input
               className="input"
               value={username}
@@ -73,7 +74,7 @@ export function Login() {
             />
           </div>
           <div>
-            <label className="label">Password</label>
+            <label className="label">{t("login.form.password")}</label>
             <input
               className="input"
               type="password"
@@ -90,7 +91,7 @@ export function Login() {
           )}
           <button className="btn-primary w-full" disabled={busy}>
             {busy ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-box-arrow-in-right" />}
-            Sign in
+            {t("login.form.submit")}
           </button>
         </form>
       </div>

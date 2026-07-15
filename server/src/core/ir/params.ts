@@ -81,13 +81,21 @@ export interface RequestOverrides extends Partial<GenerationParams> {
   system?: string;
 }
 
-/** Merge a patch onto base params, with the patch winning on any present key. */
+/** Merge a patch onto base params, with the patch winning on any present key.
+ * The `extra` record (provider-specific nested params) is deep-merged so a
+ * nested JSON object override never silently drops the base's keys. */
 export function mergeParams(base: GenerationParams, patch?: Partial<GenerationParams>): GenerationParams {
   if (!patch) return base;
   const out: GenerationParams = { ...base };
   for (const key of Object.keys(patch) as OverridableParam[]) {
     const v = patch[key];
-    if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+    if (v === undefined) continue;
+    if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
+      const baseExtra = (out.extra ?? {}) as Record<string, unknown>;
+      (out as Record<string, unknown>).extra = { ...baseExtra, ...(v as Record<string, unknown>) };
+    } else {
+      (out as Record<string, unknown>)[key] = v;
+    }
   }
   return out;
 }
@@ -103,7 +111,13 @@ export function mergeOverrides(base?: RequestOverrides, patch?: RequestOverrides
   const out: RequestOverrides = { ...base };
   for (const key of Object.keys(patch) as (keyof RequestOverrides)[]) {
     const v = patch[key];
-    if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+    if (v === undefined) continue;
+    if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
+      const baseExtra = (out.extra ?? {}) as Record<string, unknown>;
+      (out as Record<string, unknown>).extra = { ...baseExtra, ...(v as Record<string, unknown>) };
+    } else {
+      (out as Record<string, unknown>)[key] = v;
+    }
   }
   return out;
 }

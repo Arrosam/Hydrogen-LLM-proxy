@@ -533,6 +533,13 @@ function isValidAllowlistEntry(raw: string): boolean {
 
 const AllowlistPut = z.object({ entries: z.array(z.string()).max(200) });
 const RetentionPut = z.object({ days: z.number().int().min(0).max(3650) });
+const UiLanguagePut = z.object({ language: z.enum(["en", "zh"]) });
+const EnvSettingsPut = z.object({
+  allowPrivateUpstreams: z.boolean().optional(),
+  logPayloadMaxChars: z.number().int().min(0).max(10_000_000).optional(),
+  simulatedStreamingTokenRate: z.number().int().min(1).max(1_000_000).optional(),
+  sessionTtlMs: z.number().int().min(60_000).max(30 * 86_400_000).optional(),
+});
 
 async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void> {
   // Log retention: keep only the most recent N days of request logs (0 = keep forever).
@@ -566,6 +573,45 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
     if (bad.length) return reply.code(400).send({ error: `invalid entries (use IP, v4 CIDR, or hostname): ${bad.join(", ")}` });
     c.settings.writeAllowlist(entries);
     return { entries };
+  });
+
+  // UI language (localization). Readable by any logged-in user; admin-only to change.
+  app.get("/ui-language", async () => ({ language: c.settings.uiLanguage() }));
+
+  app.put("/ui-language", async (req, reply) => {
+    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change the UI language" });
+    const parsed = parse(UiLanguagePut, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    c.settings.setUiLanguage(parsed.data.language);
+    return { language: parsed.data.language };
+  });
+
+  // Runtime-overridable env settings (the values the dashboard can change
+  // without a restart). Boot-time env vars are the defaults; these persist on
+  // top. Read-only for non-admins.
+  app.get("/env", async () => ({
+    ...c.settings.runtimeEnv(),
+    env: {
+      // Boot-time-only values, surfaced read-only (changing needs a restart).
+      nodeEnv: c.config.nodeEnv,
+      port: c.config.port,
+      host: c.config.host,
+      dataDir: c.config.dataDir,
+      adminUsername: c.config.admin.username,
+      cookieSecure: c.config.cookieSecure,
+    },
+  }));
+
+  app.put("/env", async (req, reply) => {
+    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change environment settings" });
+    const parsed = parse(EnvSettingsPut, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const p = parsed.data;
+    if (p.allowPrivateUpstreams !== undefined) c.settings.writeAllowPrivate(p.allowPrivateUpstreams);
+    if (p.logPayloadMaxChars !== undefined) c.settings.setLogPayloadMaxChars(p.logPayloadMaxChars);
+    if (p.simulatedStreamingTokenRate !== undefined) c.settings.setSimulatedStreamingTokenRate(p.simulatedStreamingTokenRate);
+    if (p.sessionTtlMs !== undefined) c.settings.setSessionTtlMs(p.sessionTtlMs);
+    return { ...c.settings.runtimeEnv() };
   });
 }
 

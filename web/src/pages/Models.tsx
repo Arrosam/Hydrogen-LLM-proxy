@@ -5,6 +5,7 @@ import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
+import { useI18n } from "../lib/i18n";
 import type { Mapping, Model, Provider } from "../types";
 
 interface Data {
@@ -14,6 +15,7 @@ interface Data {
 }
 
 export function Models() {
+  const { t } = useI18n();
   const { data, loading, error, reload } = useAsync<Data>(async () => {
     const [m, p, map] = await Promise.all([
       api.get<{ models: Model[] }>("/models"),
@@ -38,24 +40,24 @@ export function Models() {
       const payload = { name: modelForm.name, description: modelForm.description || null, enabled: modelForm.enabled };
       if (modelForm.id) await api.patch(`/models/${modelForm.id}`, payload);
       else await api.post("/models", payload);
-      toast.success(modelForm.id ? "Model updated" : "Model created");
+      toast.success(modelForm.id ? t("models.toast.updated") : t("models.toast.created"));
       setModelForm(null);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
   };
 
   const removeModel = async (m: Model) => {
-    if (!(await confirm("Delete model", `Delete "${m.name}" and its provider mappings?`))) return;
+    if (!(await confirm(t("models.confirm.delete.title"), t("models.confirm.delete.body", { name: m.name })))) return;
     try {
       await api.del(`/models/${m.id}`);
-      toast.success("Model deleted");
+      toast.success(t("models.toast.deleted"));
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Delete failed");
+      toast.error(e instanceof ApiError ? e.message : t("models.toast.deleteFailed"));
     }
   };
 
@@ -64,11 +66,11 @@ export function Models() {
     setSaving(true);
     try {
       await api.post("/mappings", mapForm);
-      toast.success("Provider mapped");
+      toast.success(t("models.toast.mappingCreated"));
       setMapForm(null);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Mapping failed");
+      toast.error(e instanceof ApiError ? e.message : t("models.toast.mappingFailed"));
     } finally {
       setSaving(false);
     }
@@ -79,14 +81,14 @@ export function Models() {
       await api.del(`/mappings/${mp.id}`);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Failed");
+      toast.error(e instanceof ApiError ? e.message : t("models.toast.mappingDeleteFailed"));
     }
   };
 
   const openNewMapping = (modelId: number) => {
     const firstProvider = data?.providers[0]?.id;
     if (!firstProvider) {
-      toast.error("Create a provider first");
+      toast.error(t("models.toast.createProviderFirst"));
       return;
     }
     setMapForm({ modelId, providerId: firstProvider, upstreamModel: "" });
@@ -95,20 +97,20 @@ export function Models() {
   return (
     <div>
       <PageHeader
-        title="Models"
-        subtitle="Internal catalog. Each model is provided by one or more providers."
+        title={t("models.title")}
+        subtitle={t("models.subtitle")}
         icon="bi-box"
         action={
           <button className="btn-primary" onClick={() => setModelForm({ name: "", description: "", enabled: true })}>
             <i className="bi bi-plus-lg" />
-            New model
+            {t("models.action.new")}
           </button>
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
       {data && data.models.length === 0 && (
-        <EmptyState icon="bi-box" title="No models yet" hint="Define a model (e.g. sonnet4.6) then map it to the providers that serve it." />
+        <EmptyState icon="bi-box" title={t("models.empty.title")} hint={t("models.empty.hint")} />
       )}
 
       <div className="space-y-4">
@@ -120,7 +122,7 @@ export function Models() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-ink-100">{m.name}</span>
-                    {m.enabled ? <span className="badge-green">enabled</span> : <span className="badge-red">disabled</span>}
+                    {m.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
                   </div>
                   {m.description && <p className="mt-0.5 text-sm text-ink-400">{m.description}</p>}
                 </div>
@@ -136,14 +138,14 @@ export function Models() {
 
               <div className="mt-3 border-t border-ink-800 pt-3">
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-400">Providers</span>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-ink-400">{t("models.section.providers")}</span>
                   <button className="btn-ghost btn-xs" onClick={() => openNewMapping(m.id)}>
                     <i className="bi bi-plus-lg" />
-                    Map provider
+                    {t("models.action.mapProvider")}
                   </button>
                 </div>
                 {maps.length === 0 ? (
-                  <p className="text-xs text-ink-500">Not mapped to any provider yet.</p>
+                  <p className="text-xs text-ink-500">{t("models.mapping.empty")}</p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {maps.map((mp) => (
@@ -167,14 +169,14 @@ export function Models() {
 
       <Modal
         open={modelForm !== null}
-        title={modelForm?.id ? "Edit model" : "New model"}
+        title={modelForm?.id ? t("models.modal.edit.title") : t("models.modal.new.title")}
         icon="bi-box"
         onClose={() => setModelForm(null)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setModelForm(null)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setModelForm(null)}>{t("common.cancel")}</button>
             <button className="btn-primary" onClick={saveModel} disabled={saving}>
-              <i className="bi bi-check-lg" />Save
+              <i className="bi bi-check-lg" />{t("common.save")}
             </button>
           </>
         }
@@ -182,28 +184,28 @@ export function Models() {
         {modelForm && (
           <div className="space-y-4">
             <div>
-              <label className="label">Name</label>
-              <input className="input" value={modelForm.name} onChange={(e) => setModelForm({ ...modelForm, name: e.target.value })} placeholder="e.g. sonnet4.6" />
+              <label className="label">{t("models.field.name.label")}</label>
+              <input className="input" value={modelForm.name} onChange={(e) => setModelForm({ ...modelForm, name: e.target.value })} placeholder={t("models.field.name.placeholder")} />
             </div>
             <div>
-              <label className="label">Description (optional)</label>
+              <label className="label">{t("models.field.description.label")}</label>
               <input className="input" value={modelForm.description} onChange={(e) => setModelForm({ ...modelForm, description: e.target.value })} />
             </div>
-            <Toggle checked={modelForm.enabled} onChange={(v) => setModelForm({ ...modelForm, enabled: v })} label="Enabled" />
+            <Toggle checked={modelForm.enabled} onChange={(v) => setModelForm({ ...modelForm, enabled: v })} label={t("models.field.enabled.label")} />
           </div>
         )}
       </Modal>
 
       <Modal
         open={mapForm !== null}
-        title="Map provider"
+        title={t("models.mappingModal.title")}
         icon="bi-diagram-2"
         onClose={() => setMapForm(null)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setMapForm(null)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setMapForm(null)}>{t("common.cancel")}</button>
             <button className="btn-primary" onClick={saveMapping} disabled={saving || !mapForm?.upstreamModel}>
-              <i className="bi bi-check-lg" />Add
+              <i className="bi bi-check-lg" />{t("common.add")}
             </button>
           </>
         }
@@ -211,7 +213,7 @@ export function Models() {
         {mapForm && (
           <div className="space-y-4">
             <div>
-              <label className="label">Provider</label>
+              <label className="label">{t("models.mappingModal.field.provider.label")}</label>
               <select className="input" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
                 {data?.providers.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
@@ -219,9 +221,9 @@ export function Models() {
               </select>
             </div>
             <div>
-              <label className="label">Upstream model id</label>
-              <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder="e.g. gpt-4o or claude-sonnet-4-6" />
-              <p className="mt-1 text-xs text-ink-500">The exact model id this provider expects on the wire.</p>
+              <label className="label">{t("models.mappingModal.field.upstreamModel.label")}</label>
+              <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
+              <p className="mt-1 text-xs text-ink-500">{t("models.mappingModal.field.upstreamModel.hint")}</p>
             </div>
           </div>
         )}

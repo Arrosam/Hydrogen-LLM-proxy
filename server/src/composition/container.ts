@@ -73,18 +73,22 @@ export async function boot(): Promise<Container> {
   const tokens = new TokenRepo(db);
   const users = new UserRepo(db);
   const logs = new RequestLogRepo(db);
-  const settings = new SettingsRepo(db);
+  const settings = new SettingsRepo(db, {
+    allowPrivate: config.allowPrivateUpstreams,
+    logPayloadMaxChars: config.logPayloadMaxChars,
+    simulatedStreamingTokenRate: config.simulatedStreamingTokenRate,
+    sessionTtlMs: config.sessionTtlMs,
+  });
   const stats = new StatsQueries(db);
   const pruner = new LogPruner(db);
 
   const catalog = new Catalog(models, providers, mappings);
-  const ssrf = new SsrfGuard({ allowPrivate: config.allowPrivateUpstreams, allowlist: () => settings.allowlist() });
+  const ssrf = new SsrfGuard({ allowPrivate: () => settings.allowPrivate(), allowlist: () => settings.allowlist() });
   const transport = new UpstreamClient(ssrf);
   const validator = new ServiceValidator(catalog, services);
   const activeRequests = new ActiveRequestRegistry();
-  const factory = new ServiceFactory(services, { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: config.simulatedStreamingTokenRate }, config.logPayloadMaxChars);
-
-  const requestLogger = new RequestLogger(logs, config.logPayloadMaxChars);
+  const factory = new ServiceFactory(services, { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate() }, () => settings.logPayloadMaxChars());
+  const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars());
   const usageMeter = new UsageMeter(tokens);
 
   return {

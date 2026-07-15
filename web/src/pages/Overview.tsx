@@ -1,4 +1,4 @@
-﻿import {
+import {
   Area,
   AreaChart,
   CartesianGrid,
@@ -9,6 +9,7 @@
 } from "recharts";
 import { api } from "../api";
 import { useAsync } from "../lib/hooks";
+import { useI18n } from "../lib/i18n";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -28,30 +29,31 @@ interface OverviewData {
 
 function EndpointsCard() {
   const toast = useToast();
+  const { t } = useI18n();
   const origin = window.location.origin;
   const rows = [
     {
-      label: "OpenAI base URL (Chat Completions)",
+      label: t("overview.endpoints.openaiBaseUrl"),
       value: `${origin}/v1`,
-      hint: "OpenAI SDK baseURL / OPENAI_BASE_URL — serves /chat/completions",
+      hint: t("overview.endpoints.openaiBaseUrlHint"),
     },
     {
-      label: "OpenAI Responses endpoint",
+      label: t("overview.endpoints.openaiResponses"),
       value: `${origin}/v1/responses`,
-      hint: "Full URL for Responses API clients (Codex CLI, etc.)",
+      hint: t("overview.endpoints.openaiResponsesHint"),
     },
-    { label: "Anthropic base URL", value: origin, hint: "Anthropic SDK base_url / ANTHROPIC_BASE_URL" },
+    { label: t("overview.endpoints.anthropicBaseUrl"), value: origin, hint: t("overview.endpoints.anthropicBaseUrlHint") },
   ];
   const copy = async (v: string) => {
     const ok = await copyToClipboard(v);
-    if (ok) toast.success("Copied to clipboard");
-    else toast.error("Copy failed - select the URL and copy it manually");
+    if (ok) toast.success(t("overview.endpoints.copiedToClipboard"));
+    else toast.error(t("overview.endpoints.copyFailed"));
   };
   return (
     <div className="card card-pad">
       <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-200">
         <i className="bi bi-link-45deg text-brand-400" />
-        Endpoints
+        {t("overview.endpoints.title")}
       </h3>
       <div className="grid gap-3 sm:grid-cols-2">
         {rows.map((r) => (
@@ -61,11 +63,11 @@ function EndpointsCard() {
               <code className="flex-1 overflow-x-auto whitespace-nowrap rounded bg-ink-950 px-2 py-1 font-mono text-xs text-brand-400">
                 {r.value}
               </code>
-              <button className="btn-ghost btn-xs shrink-0" onClick={() => copy(r.value)} title="Copy">
+              <button className="btn-ghost btn-xs shrink-0" onClick={() => copy(r.value)} title={t("overview.endpoints.copyButton")}>
                 <i className="bi bi-clipboard" />
               </button>
             </div>
-            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}. Use a Model Service or Micro Agent name as the model.</div>
+            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}{t("overview.endpoints.useModelServiceHint")}</div>
           </div>
         ))}
       </div>
@@ -86,6 +88,7 @@ function StatCard({ icon, label, value, tone }: { icon: string; label: string; v
 }
 
 function TopList({ title, icon, groups }: { title: string; icon: string; groups: GroupCount[] }) {
+  const { t } = useI18n();
   const max = Math.max(1, ...groups.map((g) => g.requests));
   return (
     <div className="card card-pad">
@@ -94,14 +97,14 @@ function TopList({ title, icon, groups }: { title: string; icon: string; groups:
         {title}
       </h3>
       {groups.length === 0 ? (
-        <p className="py-4 text-center text-xs text-ink-500">No usage yet</p>
+        <p className="py-4 text-center text-xs text-ink-500">{t("overview.topList.empty")}</p>
       ) : (
         <ul className="space-y-2.5">
           {groups.slice(0, 6).map((g) => (
             <li key={g.key}>
               <div className="mb-1 flex justify-between text-xs">
                 <span className="truncate text-ink-200">{g.key}</span>
-                <span className="text-ink-500">{formatNumber(g.requests)} req</span>
+                <span className="text-ink-500">{formatNumber(g.requests)} {t("overview.topList.reqUnit")}</span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-ink-800">
                 <div className="h-full rounded-full bg-brand-600" style={{ width: `${(g.requests / max) * 100}%` }} />
@@ -115,6 +118,7 @@ function TopList({ title, icon, groups }: { title: string; icon: string; groups:
 }
 
 export function Overview() {
+  const { t } = useI18n();
   const { data, loading, error } = useAsync<OverviewData>(async () => {
     const [summary, ts, svc, mp] = await Promise.all([
       api.get<StatsSummary>("/stats/summary"),
@@ -127,7 +131,7 @@ export function Overview() {
 
   return (
     <div>
-      <PageHeader title="Overview" subtitle="Traffic and usage across all Model Services and Micro Agents" icon="bi-speedometer2" />
+      <PageHeader title={t("overview.page.title")} subtitle={t("overview.page.subtitle")} icon="bi-speedometer2" />
       <div className="mb-6">
         <EndpointsCard />
       </div>
@@ -136,19 +140,19 @@ export function Overview() {
       {data && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard icon="bi-arrow-left-right" tone="text-brand-400" label="Requests" value={formatNumber(data.summary.requests)} />
-            <StatCard icon="bi-coin" tone="text-amber-400" label="Total tokens" value={formatCompact(data.summary.totalTokens)} />
-            <StatCard icon="bi-exclamation-triangle" tone="text-red-400" label="Errors" value={formatNumber(data.summary.errors)} />
-            <StatCard icon="bi-stopwatch" tone="text-emerald-400" label="Avg latency" value={`${formatNumber(data.summary.avgLatencyMs)} ms`} />
+            <StatCard icon="bi-arrow-left-right" tone="text-brand-400" label={t("overview.stats.requests")} value={formatNumber(data.summary.requests)} />
+            <StatCard icon="bi-coin" tone="text-amber-400" label={t("overview.stats.totalTokens")} value={formatCompact(data.summary.totalTokens)} />
+            <StatCard icon="bi-exclamation-triangle" tone="text-red-400" label={t("overview.stats.errors")} value={formatNumber(data.summary.errors)} />
+            <StatCard icon="bi-stopwatch" tone="text-emerald-400" label={t("overview.stats.avgLatency")} value={`${formatNumber(data.summary.avgLatencyMs)} ms`} />
           </div>
 
           <div className="card card-pad">
             <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink-200">
               <i className="bi bi-graph-up text-brand-400" />
-              Requests over time
+              {t("overview.chart.title")}
             </h3>
             {data.points.length === 0 ? (
-              <EmptyState icon="bi-bar-chart-line" title="No requests logged yet" hint="Send a request through one of your Model Service endpoints to see traffic here." />
+              <EmptyState icon="bi-bar-chart-line" title={t("overview.empty.noRequestsTitle")} hint={t("overview.empty.noRequestsHint")} />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <AreaChart data={data.points} margin={{ top: 4, right: 8, bottom: 0, left: -12 }}>
@@ -172,14 +176,14 @@ export function Overview() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
-            <TopList title="Top Model Services" icon="bi-diagram-3" groups={data.services} />
-            <TopList title="Top models" icon="bi-box" groups={data.models} />
-            <TopList title="Top providers" icon="bi-hdd-network" groups={data.providers} />
+            <TopList title={t("overview.topList.topServices")} icon="bi-diagram-3" groups={data.services} />
+            <TopList title={t("overview.topList.topModels")} icon="bi-box" groups={data.models} />
+            <TopList title={t("overview.topList.topProviders")} icon="bi-hdd-network" groups={data.providers} />
           </div>
           {data.modelsCapped && (
             <p className="flex items-center gap-1.5 text-xs text-ink-500">
               <i className="bi bi-info-circle" />
-              Model &amp; provider breakdown covers the most recent 100,000 requests. Totals above count all requests.
+              {t("overview.modelsCappedNote")}
             </p>
           )}
         </div>

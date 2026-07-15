@@ -1,10 +1,11 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common";
 import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
+import { useI18n } from "../lib/i18n";
 import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
 import { isAgentDef } from "../types";
 
@@ -17,26 +18,26 @@ interface Data {
 
 type Kind = "resilience" | "chain";
 
-const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLabel: string; emptyTitle: string; emptyHint: string }> = {
-  resilience: {
-    title: "Model Services",
-    subtitle: "How this proxy serves a model to clients: try a chain of (model, provider) attempts until one succeeds.",
-    icon: "bi-diagram-3",
-    newLabel: "New Model Service",
-    emptyTitle: "No Model Services yet",
-    emptyHint: "Create a Model Service to expose a resilient endpoint (e.g. sonnet-any: sonnet then fall back to gpt).",
-  },
-  chain: {
-    title: "Micro Agents",
-    subtitle: "Composable pipelines — routing, evaluation, image OCR, nested agents — built on your Model Services.",
-    icon: "bi-robot",
-    newLabel: "New Micro Agent",
-    emptyTitle: "No Micro Agents yet",
-    emptyHint: "Build a Micro Agent: stages that each run a Model Service (or another Micro Agent), routed by conditions.",
-  },
-};
-
 export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
+  const { t } = useI18n();
+  const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLabel: string; emptyTitle: string; emptyHint: string }> = {
+    resilience: {
+      title: t("services.resilience.title"),
+      subtitle: t("services.resilience.subtitle"),
+      icon: "bi-diagram-3",
+      newLabel: t("services.resilience.action.new"),
+      emptyTitle: t("services.resilience.empty.title"),
+      emptyHint: t("services.resilience.empty.hint"),
+    },
+    chain: {
+      title: t("services.chain.title"),
+      subtitle: t("services.chain.subtitle"),
+      icon: "bi-robot",
+      newLabel: t("services.chain.action.new"),
+      emptyTitle: t("services.chain.empty.title"),
+      emptyHint: t("services.chain.empty.hint"),
+    },
+  };
   const { data, loading, error, reload } = useAsync<Data>(async () => {
     const [services, models, providers, mappings] = await Promise.all([
       api.get<{ services: ModelService[] }>("/services"),
@@ -61,13 +62,13 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
       : (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
 
   const remove = async (m: ModelService) => {
-    if (!(await confirm(`Delete ${copy.newLabel.replace("New ", "")}`, `Delete "${m.name}"? Clients using this endpoint will start receiving 404s.`))) return;
+    if (!(await confirm(kind === "chain" ? t("services.chain.confirm.delete.title") : t("services.resilience.confirm.delete.title"), t("services.confirm.delete.body", { name: m.name })))) return;
     try {
       await api.del(`/services/${m.id}`);
-      toast.success("Deleted");
+      toast.success(t("services.toast.deleted"));
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Delete failed");
+      toast.error(e instanceof ApiError ? e.message : t("services.toast.deleteFailed"));
     }
   };
 
@@ -75,8 +76,8 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
     if (!canCreate) {
       toast.error(
         kind === "chain"
-          ? "Create at least one Model Service first — Micro Agent stages run them."
-          : "Create at least one model and provider mapping first",
+          ? t("services.chain.toast.needServiceFirst")
+          : t("services.resilience.toast.needMappingFirst"),
       );
       return;
     }
@@ -103,7 +104,7 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
         <EmptyState
           icon={copy.icon}
           title={copy.emptyTitle}
-          hint={canCreate ? copy.emptyHint : kind === "chain" ? "First create a Model Service. Then compose Micro Agents here." : "First add a provider, a model, and map them. Then build a Model Service here."}
+          hint={canCreate ? copy.emptyHint : kind === "chain" ? t("services.chain.empty.hintNoService") : t("services.resilience.empty.hintNoMapping")}
           action={canCreate ? <button className="btn-primary" onClick={startNew}><i className="bi bi-plus-lg" />{copy.newLabel}</button> : undefined}
         />
       )}
@@ -116,14 +117,14 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
                 <div className="flex items-center gap-2">
                   <i className={`bi ${copy.icon} text-brand-400`} />
                   <span className="truncate font-mono text-sm font-semibold text-ink-100">{m.name}</span>
-                  {m.enabled ? <span className="badge-green">enabled</span> : <span className="badge-red">disabled</span>}
+                  {m.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
                 </div>
                 {m.description && <p className="mt-1 text-xs text-ink-400">{m.description}</p>}
               </div>
               <span className="badge-gray shrink-0">
                 {isAgentDef(m.steps)
-                  ? `${m.steps.stages?.length ?? 0} stages`
-                  : `${(m.steps as ServiceSteps)?.steps?.length ?? 0} steps`}
+                  ? t("services.chain.stagesCount", { count: m.steps.stages?.length ?? 0 })
+                  : t("services.resilience.stepsCount", { count: (m.steps as ServiceSteps)?.steps?.length ?? 0 })}
               </span>
             </div>
 
@@ -135,7 +136,7 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
             <div className="mt-3 flex justify-end gap-1.5">
               <button className="btn-ghost btn-xs" onClick={() => setEditing(m)}>
                 <i className="bi bi-pencil" />
-                Edit
+                {t("services.action.edit")}
               </button>
               <button className="btn-danger btn-xs" onClick={() => remove(m)}>
                 <i className="bi bi-trash3" />

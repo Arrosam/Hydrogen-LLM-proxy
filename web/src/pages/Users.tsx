@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { useAsync } from "../lib/hooks";
+import { useI18n } from "../lib/i18n";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
@@ -18,6 +19,7 @@ interface FormState {
 }
 
 export function Users() {
+  const { t } = useI18n();
   const { user: me } = useAuth();
   const isAdmin = me?.role === "admin";
   const { data, loading, error, reload } = useAsync(() => api.get<{ users: User[] }>("/users"));
@@ -34,28 +36,28 @@ export function Users() {
         const payload: Record<string, unknown> = { role: form.role, enabled: form.enabled };
         if (form.password) payload.password = form.password;
         await api.patch(`/users/${form.id}`, payload);
-        toast.success("User updated");
+        toast.success(t("users.toast.updated"));
       } else {
         await api.post("/users", { username: form.username, password: form.password, role: form.role, enabled: form.enabled });
-        toast.success("User created");
+        toast.success(t("users.toast.created"));
       }
       setForm(null);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("users.toast.saveFailed"));
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async (u: User) => {
-    if (!(await confirm("Delete user", `Delete "${u.username}"?`))) return;
+    if (!(await confirm(t("users.confirm.deleteTitle"), t("users.confirm.deleteBody", { name: u.username })))) return;
     try {
       await api.del(`/users/${u.id}`);
-      toast.success("User deleted");
+      toast.success(t("users.toast.deleted"));
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Delete failed");
+      toast.error(e instanceof ApiError ? e.message : t("users.toast.deleteFailed"));
     }
   };
 
@@ -70,38 +72,38 @@ export function Users() {
     !!editTarget && editTarget.role === "admin" && enabledAdmins.length <= 1 && enabledAdmins[0]?.id === form?.id;
   const lockEnabled = isSelfEdit || isLastEnabledAdmin;
   const lockReason = isSelfEdit
-    ? "You cannot deactivate your own account."
+    ? t("users.lockReason.self")
     : isLastEnabledAdmin
-      ? "The last admin cannot be deactivated."
+      ? t("users.lockReason.lastAdmin")
       : "";
 
   return (
     <div>
       <PageHeader
-        title="Users"
-        subtitle="Console accounts. Managers can do everything except issue tokens."
+        title={t("users.title")}
+        subtitle={t("users.subtitle")}
         icon="bi-people"
         action={
           <button className="btn-primary" onClick={() => setForm({ username: "", password: "", role: "manager", enabled: true })}>
             <i className="bi bi-person-plus" />
-            New user
+            {t("users.action.new")}
           </button>
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
-      {data && data.users.length === 0 && <EmptyState icon="bi-people" title="No users" />}
+      {data && data.users.length === 0 && <EmptyState icon="bi-people" title={t("users.empty.title")} />}
 
       {data && data.users.length > 0 && (
         <div className="card overflow-hidden">
           <table className="table">
             <thead>
               <tr>
-                <th>Username</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Created</th>
-                <th className="text-right">Actions</th>
+                <th>{t("users.table.username")}</th>
+                <th>{t("users.table.role")}</th>
+                <th>{t("users.table.status")}</th>
+                <th>{t("users.table.created")}</th>
+                <th className="text-right">{t("users.table.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -109,7 +111,7 @@ export function Users() {
                 <tr key={u.id}>
                   <td className="font-medium text-ink-100">
                     {u.username}
-                    {u.id === me?.id && <span className="ml-2 badge-gray">you</span>}
+                    {u.id === me?.id && <span className="ml-2 badge-gray">{t("users.youBadge")}</span>}
                   </td>
                   <td>
                     <span className={u.role === "admin" ? "badge-blue" : "badge-gray"}>
@@ -117,7 +119,7 @@ export function Users() {
                       {u.role}
                     </span>
                   </td>
-                  <td>{u.enabled ? <span className="badge-green">active</span> : <span className="badge-red">disabled</span>}</td>
+                  <td>{u.enabled ? <span className="badge-green">{t("users.status.active")}</span> : <span className="badge-red">{t("users.status.disabled")}</span>}</td>
                   <td className="text-xs text-ink-400">{formatDate(u.createdAt)}</td>
                   <td>
                     <div className="flex justify-end gap-1.5">
@@ -142,14 +144,14 @@ export function Users() {
 
       <Modal
         open={form !== null}
-        title={form?.id ? "Edit user" : "New user"}
+        title={form?.id ? t("users.modal.editTitle") : t("users.modal.createTitle")}
         icon="bi-person"
         onClose={() => setForm(null)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setForm(null)}>{t("users.action.cancel")}</button>
             <button className="btn-primary" onClick={save} disabled={saving}>
-              <i className="bi bi-check-lg" />Save
+              <i className="bi bi-check-lg" />{t("users.action.save")}
             </button>
           </>
         }
@@ -158,27 +160,27 @@ export function Users() {
           <div className="space-y-4">
             {!form.id && (
               <div>
-                <label className="label">Username</label>
+                <label className="label">{t("users.form.username")}</label>
                 <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
               </div>
             )}
             <div>
-              <label className="label">{form.id ? "Reset password (optional)" : "Password"}</label>
-              <input className="input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="at least 8 characters" />
+              <label className="label">{form.id ? t("users.form.resetPassword") : t("users.form.password")}</label>
+              <input className="input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={t("users.form.passwordPlaceholder")} />
             </div>
             <div>
-              <label className="label">Role</label>
+              <label className="label">{t("users.form.role")}</label>
               <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })} disabled={!isAdmin}>
-                <option value="manager">Manager</option>
-                <option value="admin">Admin</option>
+                <option value="manager">{t("users.role.manager")}</option>
+                <option value="admin">{t("users.role.admin")}</option>
               </select>
-              {!isAdmin && <p className="mt-1 text-xs text-ink-500">Only admins can assign the admin role.</p>}
+              {!isAdmin && <p className="mt-1 text-xs text-ink-500">{t("users.form.adminRoleRestricted")}</p>}
             </div>
             <div>
               <Toggle
                 checked={form.enabled}
                 onChange={(v) => setForm({ ...form, enabled: v })}
-                label="Enabled"
+                label={t("users.form.enabled")}
                 disabled={lockEnabled}
               />
               {lockReason && <p className="mt-1 text-xs text-ink-500">{lockReason}</p>}

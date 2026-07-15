@@ -11,6 +11,7 @@ import { Tokens } from "./pages/Tokens";
 import { Users } from "./pages/Users";
 import { Logs } from "./pages/Logs";
 import { ActiveRequests } from "./pages/ActiveRequests";
+import { Settings } from "./pages/Settings";
 
 function FullSpinner() {
   return (
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />
         <Route path="active-requests" element={<ActiveRequests />} />
+        <Route path="settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

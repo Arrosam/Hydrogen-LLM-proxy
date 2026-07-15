@@ -1,7 +1,8 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { useAsync } from "../lib/hooks";
+import { useI18n } from "../lib/i18n";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
@@ -36,6 +37,7 @@ const EMPTY: FormState = {
 };
 
 export function Tokens() {
+  const { t: i18n } = useI18n();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const { data, loading, error, reload } = useAsync<Data>(async () => {
@@ -70,7 +72,7 @@ export function Tokens() {
       setSecret(r.secret);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Create failed");
+      toast.error(e instanceof ApiError ? e.message : i18n("tokens.toast.createFailed"));
     } finally {
       setSaving(false);
     }
@@ -81,49 +83,49 @@ export function Tokens() {
       await api.patch(`/tokens/${t.id}`, { enabled: !t.enabled });
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Failed");
+      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
     }
   };
 
   const remove = async (t: Token) => {
-    if (!(await confirm("Revoke token", `Revoke "${t.name}"? Any client using it will stop working immediately.`))) return;
+    if (!(await confirm(i18n("tokens.confirm.revokeTitle"), i18n("tokens.confirm.revokeBody", { name: t.name })))) return;
     try {
       await api.del(`/tokens/${t.id}`);
-      toast.success("Token revoked");
+      toast.success(i18n("tokens.toast.revoked"));
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Failed");
+      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
     }
   };
 
   const copySecret = async () => {
     if (!secret) return;
     const ok = await copyToClipboard(secret);
-    if (ok) toast.success("Copied to clipboard");
-    else toast.error("Copy failed - select the token and copy it manually");
+    if (ok) toast.success(i18n("tokens.toast.copied"));
+    else toast.error(i18n("tokens.toast.copyFailed"));
   };
 
   return (
     <div>
       <PageHeader
-        title="Tokens"
-        subtitle="Client API keys. Scope each to specific Model Services and set optional quotas."
+        title={i18n("tokens.title")}
+        subtitle={i18n("tokens.subtitle")}
         icon="bi-key"
         action={
           isAdmin ? (
             <button className="btn-primary" onClick={() => setForm({ ...EMPTY })}>
               <i className="bi bi-plus-lg" />
-              Issue token
+              {i18n("tokens.action.issue")}
             </button>
           ) : (
-            <span className="badge-gray"><i className="bi bi-shield-lock" />only admins can issue tokens</span>
+            <span className="badge-gray"><i className="bi bi-shield-lock" />{i18n("tokens.adminOnlyHint")}</span>
           )
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
       {data && data.tokens.length === 0 && (
-        <EmptyState icon="bi-key" title="No tokens yet" hint={isAdmin ? "Issue a token to let a client call your Model Service endpoints." : "Ask an admin to issue a token."} />
+        <EmptyState icon="bi-key" title={i18n("tokens.empty.title")} hint={isAdmin ? i18n("tokens.empty.hintAdmin") : i18n("tokens.empty.hintUser")} />
       )}
 
       {data && data.tokens.length > 0 && (
@@ -131,14 +133,14 @@ export function Tokens() {
           <table className="table">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Prefix</th>
-                <th>Scope</th>
-                <th>Requests</th>
-                <th>Tokens</th>
-                <th>Expires</th>
-                <th>Status</th>
-                <th className="text-right">Actions</th>
+                <th>{i18n("tokens.table.name")}</th>
+                <th>{i18n("tokens.table.prefix")}</th>
+                <th>{i18n("tokens.table.scope")}</th>
+                <th>{i18n("tokens.table.requests")}</th>
+                <th>{i18n("tokens.table.tokens")}</th>
+                <th>{i18n("tokens.table.expires")}</th>
+                <th>{i18n("tokens.table.status")}</th>
+                <th className="text-right">{i18n("tokens.table.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -148,7 +150,7 @@ export function Tokens() {
                   <td className="font-mono text-xs text-ink-400">{t.keyPrefix}...</td>
                   <td className="text-xs">
                     {!t.scopeServices || t.scopeServices.length === 0 ? (
-                      <span className="badge-gray">all Model Services</span>
+                      <span className="badge-gray">{i18n("tokens.scope.all")}</span>
                     ) : (
                       <span className="text-ink-300">{t.scopeServices.map(serviceName).join(", ")}</span>
                     )}
@@ -159,13 +161,13 @@ export function Tokens() {
                   <td className="text-xs text-ink-300">
                     {formatNumber(t.usedTokens)}{t.maxTokens ? ` / ${formatNumber(t.maxTokens)}` : ""}
                   </td>
-                  <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : "never"}</td>
+                  <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")}</td>
                   <td><Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} /></td>
                   <td>
                     <div className="flex justify-end">
                       <button className="btn-danger btn-xs" onClick={() => remove(t)}>
                         <i className="bi bi-x-circle" />
-                        Revoke
+                        {i18n("tokens.action.revoke")}
                       </button>
                     </div>
                   </td>
@@ -179,14 +181,14 @@ export function Tokens() {
       {/* Create form */}
       <Modal
         open={form !== null}
-        title="Issue token"
+        title={i18n("tokens.modal.createTitle")}
         icon="bi-key"
         onClose={() => setForm(null)}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+            <button className="btn-ghost" onClick={() => setForm(null)}>{i18n("tokens.action.cancel")}</button>
             <button className="btn-primary" onClick={create} disabled={saving || !form?.name}>
-              <i className="bi bi-check-lg" />Issue
+              <i className="bi bi-check-lg" />{i18n("tokens.action.issueConfirm")}
             </button>
           </>
         }
@@ -194,14 +196,14 @@ export function Tokens() {
         {form && (
           <div className="space-y-4">
             <div>
-              <label className="label">Name</label>
-              <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. my-laptop" />
+              <label className="label">{i18n("tokens.form.name")}</label>
+              <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={i18n("tokens.form.namePlaceholder")} />
             </div>
             <div>
-              <label className="label">Scope</label>
+              <label className="label">{i18n("tokens.form.scope")}</label>
               <label className="mb-2 flex items-center gap-2 text-sm text-ink-300">
                 <input type="checkbox" checked={form.scopeAll} onChange={(e) => setForm({ ...form, scopeAll: e.target.checked })} />
-                Allow all Model Services
+                {i18n("tokens.form.scopeAll")}
               </label>
               {!form.scopeAll && (
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-ink-800 p-2">
@@ -220,25 +222,25 @@ export function Tokens() {
                       <span className="font-mono text-xs">{m.name}</span>
                     </label>
                   ))}
-                  {data?.services.length === 0 && <p className="text-xs text-ink-500">No Model Services to scope to.</p>}
+                  {data?.services.length === 0 && <p className="text-xs text-ink-500">{i18n("tokens.form.noServices")}</p>}
                 </div>
               )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="label">Max requests (optional)</label>
+                <label className="label">{i18n("tokens.form.maxRequests")}</label>
                 <input className="input" type="number" value={form.maxRequests} onChange={(e) => setForm({ ...form, maxRequests: e.target.value })} />
               </div>
               <div>
-                <label className="label">Max tokens (optional)</label>
+                <label className="label">{i18n("tokens.form.maxTokens")}</label>
                 <input className="input" type="number" value={form.maxTokens} onChange={(e) => setForm({ ...form, maxTokens: e.target.value })} />
               </div>
             </div>
             <div>
-              <label className="label">Expires at (optional)</label>
+              <label className="label">{i18n("tokens.form.expiresAt")}</label>
               <input className="input" type="datetime-local" value={form.expiresAt} onChange={(e) => setForm({ ...form, expiresAt: e.target.value })} />
             </div>
-            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Enabled" />
+            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label={i18n("tokens.form.enabled")} />
           </div>
         )}
       </Modal>
@@ -246,19 +248,19 @@ export function Tokens() {
       {/* Reveal-once secret */}
       <Modal
         open={secret !== null}
-        title="Token created"
+        title={i18n("tokens.modal.createdTitle")}
         icon="bi-clipboard-check"
         onClose={() => setSecret(null)}
-        footer={<button className="btn-primary" onClick={() => setSecret(null)}>Done</button>}
+        footer={<button className="btn-primary" onClick={() => setSecret(null)}>{i18n("tokens.action.done")}</button>}
       >
         <div className="space-y-3">
           <div className="flex items-center gap-2 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-300">
             <i className="bi bi-exclamation-triangle-fill" />
-            Copy this now - it is shown only once and never stored in plaintext.
+            {i18n("tokens.secret.warning")}
           </div>
           <div className="flex items-center gap-2">
             <code
-              title="Click to select"
+              title={i18n("tokens.secret.clickToSelect")}
               onClick={(e) => {
                 const range = document.createRange();
                 range.selectNodeContents(e.currentTarget);

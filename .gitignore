@@ -145,3 +145,8 @@ hydrogen-secrets.json
 
 # Local scratch / security-review attack scripts
 /.test/
+
+# Trae debug artifacts
+.dbg/
+debug-proxy-stream-502.md
+.trae/

@@ -2,21 +2,9 @@ import { useEffect, useState } from "react";
 import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
 import { isAgentDef } from "../types";
 import { Toggle } from "./common";
-import { ThinkingLevelInput } from "./ThinkingLevelInput";
 import { OverridesEditor } from "./OverridesEditor";
+import { useI18n } from "../lib/i18n";
 import { selectAll } from "../lib/input";
-
-const BLOCK_KINDS: { value: string; label: string }[] = [
-  { value: "original_conversation", label: "Original full conversation" },
-  { value: "text_conversation", label: "Text-only conversation" },
-  { value: "last_user", label: "Last user request" },
-  { value: "last_user_text", label: "Last user text only" },
-  { value: "last_user_images", label: "Last user images only" },
-  { value: "stage_output", label: "Output from another stage" },
-  { value: "message", label: "New conversation turn" },
-  { value: "tool_turn", label: "Tool use turn" },
-  { value: "plain_text", label: "Plain text" },
-];
 
 function newContextBlock(value: string, earlier: string[]): AgentContextBlock {
   switch (value) {
@@ -40,15 +28,6 @@ function newContextBlock(value: string, earlier: string[]): AgentContextBlock {
   }
 }
 
-const CONDITION_TYPES: { type: AgentCondition["type"]; label: string }[] = [
-  { type: "always", label: "always" },
-  { type: "input_has_image", label: "input has image" },
-  { type: "input_contains", label: "input contains" },
-  { type: "input_matches", label: "input matches (regex)" },
-  { type: "output_contains", label: "output contains" },
-  { type: "output_matches", label: "output matches (regex)" },
-];
-
 const ROUTER = "__router__";
 
 function isModelStage(s: AgentStage): boolean {
@@ -70,6 +49,7 @@ interface Props {
 }
 
 export function StageEditor({ stages, output, onChange, services }: Props) {
+  const { t } = useI18n();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
   const setStages = (next: AgentStage[], nextOutput = output) => onChange(next, nextOutput);
@@ -101,21 +81,21 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
-        <span className="label mb-0">Stages (run from the top; transitions branch to later stages)</span>
+        <span className="label mb-0">{t("stageEditor.stagesLabel")}</span>
         <button className="btn-ghost btn-xs" onClick={addStage}>
           <i className="bi bi-plus-lg" />
-          Add stage
+          {t("stageEditor.addStage")}
         </button>
       </div>
 
       {services.length === 0 && (
         <p className="mb-2 rounded-lg border border-amber-700/40 bg-amber-700/10 px-3 py-2 text-xs text-amber-300">
-          No Model Services exist yet. Create one first — each stage runs a Model Service (or another Micro Agent).
+          {t("stageEditor.noServicesWarning")}
         </p>
       )}
       {stages.length === 0 && (
         <p className="rounded-lg border border-dashed border-ink-700 px-4 py-6 text-center text-xs text-ink-500">
-          No stages. Add one; each stage runs a Model Service or Micro Agent (or routes on conditions).
+          {t("stageEditor.noStagesHint")}
         </p>
       )}
 
@@ -132,20 +112,20 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
                 draggable
                 onDragStart={() => setDragIndex(i)}
                 onDragEnd={() => setDragIndex(null)}
-                title="Drag to reorder"
+                title={t("stageEditor.dragToReorder")}
                 className="cursor-grab text-ink-600 hover:text-ink-300"
               >
                 <i className="bi bi-grip-vertical" />
               </span>
-              <span className="badge-blue">Stage {i + 1}</span>
+              <span className="badge-blue">{t("stageEditor.stageNumber", { n: i + 1 })}</span>
               <input
                 className="input h-7 w-40 py-0 font-mono text-xs"
                 value={stage.name}
                 onChange={(e) => patch(i, { name: e.target.value.replace(/\s+/g, "_") })}
-                placeholder="stage name"
+                placeholder={t("stageEditor.stageNamePlaceholder")}
               />
               <div className="flex-1" />
-              <button className="btn-ghost btn-xs" title="Duplicate stage" onClick={() => duplicateStage(i)}>
+              <button className="btn-ghost btn-xs" title={t("stageEditor.duplicateStageTitle")} onClick={() => duplicateStage(i)}>
                 <i className="bi bi-files" />
               </button>
               <button className="btn-danger btn-xs" onClick={() => removeStage(i)}>
@@ -167,9 +147,9 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
 
       {stages.length > 1 && (
         <div className="mt-3 flex items-center gap-2">
-          <label className="label mb-0">Return the output of</label>
+          <label className="label mb-0">{t("stageEditor.returnOutputOf")}</label>
           <select className="input w-auto" value={output} onChange={(e) => setStages(stages, e.target.value)}>
-            <option value="">the stage where routing ends (default)</option>
+            <option value="">{t("stageEditor.defaultOutput")}</option>
             {stages.map((s) => (
               <option key={s.name} value={s.name}>{s.name}</option>
             ))}
@@ -195,6 +175,7 @@ function StageBody({
   later: string[];
   onPatch: (p: Partial<AgentStage>) => void;
 }) {
+  const { t } = useI18n();
   const [advanced, setAdvanced] = useState(false);
   const model = isModelStage(stage);
   const legacyInline = !stage.service && !!(stage.steps && stage.steps.length);
@@ -203,10 +184,22 @@ function StageBody({
   const setBlocks = (blocks: AgentContextBlock[]) => onPatch({ input: blocks });
   const setTransitions = (transitions: AgentTransition[]) => onPatch({ transitions });
 
+  const BLOCK_KINDS: { value: string; label: string }[] = [
+    { value: "original_conversation", label: t("contextBlock.originalConversation") },
+    { value: "text_conversation", label: t("contextBlock.textConversation") },
+    { value: "last_user", label: t("contextBlock.lastUser") },
+    { value: "last_user_text", label: t("contextBlock.lastUserText") },
+    { value: "last_user_images", label: t("contextBlock.lastUserImages") },
+    { value: "stage_output", label: t("contextBlock.stageOutput") },
+    { value: "message", label: t("contextBlock.message") },
+    { value: "tool_turn", label: t("contextBlock.toolTurn") },
+    { value: "plain_text", label: t("contextBlock.plainText") },
+  ];
+
   return (
     <>
       <div>
-        <label className="label">Runs</label>
+        <label className="label">{t("stageEditor.runs")}</label>
         <select
           className="input"
           value={stage.service ?? (model ? "" : ROUTER)}
@@ -216,26 +209,26 @@ function StageBody({
             else onPatch({ service: v || undefined, steps: undefined });
           }}
         >
-          <option value="">— pick a Model Service or Micro Agent —</option>
-          <optgroup label="Model Services">
+          <option value="">{t("stageEditor.pickService")}</option>
+          <optgroup label={t("stageEditor.modelServicesGroup")}>
             {resilienceServices.map((m) => (
               <option key={m.name} value={m.name}>{m.name}</option>
             ))}
           </optgroup>
           {agentServices.length > 0 && (
-            <optgroup label="Micro Agents">
+            <optgroup label={t("stageEditor.microAgentsGroup")}>
               {agentServices.map((m) => (
                 <option key={m.name} value={m.name}>{m.name}</option>
               ))}
             </optgroup>
           )}
-          <option value={ROUTER}>router (no model call — route by input only)</option>
+          <option value={ROUTER}>{t("stageEditor.routerOption")}</option>
         </select>
         {legacyInline && (
-          <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a Model Service, or edit via Raw JSON.</p>
+          <p className="mt-1 text-xs text-amber-300">{t("stageEditor.legacyInlineWarning")}</p>
         )}
         {!model && (
-          <p className="mt-1 text-xs text-ink-500">Router: evaluates its transitions on the original input; no model runs.</p>
+          <p className="mt-1 text-xs text-ink-500">{t("stageEditor.routerHint")}</p>
         )}
       </div>
 
@@ -243,7 +236,7 @@ function StageBody({
         <>
           <div className="mt-3">
             <div className="mb-1.5 flex items-center justify-between">
-              <label className="label mb-0">Input <span className="normal-case text-ink-500">(empty = pass the original messages through)</span></label>
+              <label className="label mb-0">{t("stageEditor.input")} <span className="normal-case text-ink-500">{t("stageEditor.inputHint")}</span></label>
               <select
                 className="input h-7 w-auto py-0 text-xs"
                 value=""
@@ -252,7 +245,7 @@ function StageBody({
                   setBlocks([...stage.input, newContextBlock(e.target.value, earlier)]);
                 }}
               >
-                <option value="">+ add context block…</option>
+                <option value="">{t("stageEditor.addContextBlock")}</option>
                 {BLOCK_KINDS.map((b) => (
                   <option key={b.value} value={b.value}>{b.label}</option>
                 ))}
@@ -281,44 +274,41 @@ function StageBody({
 
           <button className="mt-2 text-xs text-ink-500 hover:text-ink-300" onClick={() => setAdvanced((a) => !a)}>
             <i className={`bi ${advanced ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
-            Advanced (system, tools, sampling, timeout)
+            {t("stageEditor.advancedLabel")}
           </button>
           {advanced && (
             <div className="mt-2 space-y-3 rounded-lg border border-ink-800 bg-ink-950/40 p-3">
               <div>
-                <label className="label">System override (optional)</label>
+                <label className="label">{t("stageEditor.systemOverride")}</label>
                 <textarea
                   className="input min-h-[56px] font-mono text-xs"
                   value={stage.system ?? ""}
                   onChange={(e) => onPatch({ system: e.target.value || undefined })}
-                  placeholder="Leave empty to inherit the original system prompt"
+                  placeholder={t("stageEditor.systemPlaceholder")}
                 />
               </div>
               <div>
-                <label className="label">Tools</label>
+                <label className="label">{t("stageEditor.tools")}</label>
                 <select
                   className="input"
                   value={stage.tools ?? "inherit"}
                   onChange={(e) => onPatch({ tools: e.target.value === "none" ? "none" : undefined })}
                 >
-                  <option value="inherit">Inherit — callable (tool_choice from request)</option>
-                  <option value="none">Listed but not callable (shown in the prompt)</option>
+                  <option value="inherit">{t("stageEditor.toolsInherit")}</option>
+                  <option value="none">{t("stageEditor.toolsListedOnly")}</option>
                 </select>
                 <p className="mt-1 text-[11px] text-ink-600">
-                  Evaluate/compose stages usually want "Listed but not callable": the tools are described in the prompt
-                  so the model can judge tool use, but they aren't registered as callable (portable across providers).
+                  {t("stageEditor.toolsHint")}
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <NumOverride label="Temperature" value={stage.temperature} onChange={(v) => onPatch({ temperature: v })} decimal />
-                <NumOverride label="Max tokens" value={stage.maxTokens} onChange={(v) => onPatch({ maxTokens: v })} />
-                <NumOverride label="Timeout (ms)" value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
-              <ThinkingLevelInput value={stage.thinking} onChange={(v) => onPatch({ thinking: v })} />
+                <NumOverride label={t("stageEditor.temperature")} value={stage.temperature} onChange={(v) => onPatch({ temperature: v })} decimal />
+                <NumOverride label={t("stageEditor.maxTokens")} value={stage.maxTokens} onChange={(v) => onPatch({ maxTokens: v })} />
+                <NumOverride label={t("stageEditor.timeoutMs")} value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
               </div>
               <OverridesEditor
                 overrides={stage.overrides}
                 onChange={(ov) => onPatch({ overrides: ov })}
-                showThinking={false}
               />
             </div>
           )}
@@ -327,13 +317,13 @@ function StageBody({
 
       <div className="mt-3">
         <div className="mb-1.5 flex items-center justify-between">
-          <label className="label mb-0">Transitions <span className="normal-case text-ink-500">(first match wins; no match = end here and return this stage's output)</span></label>
+          <label className="label mb-0">{t("stageEditor.transitions")} <span className="normal-case text-ink-500">{t("stageEditor.transitionsHint")}</span></label>
           <button
             className="btn-ghost btn-xs"
             onClick={() => setTransitions([...(stage.transitions ?? []), { when: { type: "always" }, goto: later[0] ?? "end" }])}
           >
             <i className="bi bi-plus-lg" />
-            Add transition
+            {t("stageEditor.addTransition")}
           </button>
         </div>
         <div className="space-y-1.5">
@@ -369,12 +359,21 @@ function TransitionRow({
   onChange: (t: AgentTransition) => void;
   onRemove: () => void;
 }) {
+  const { t } = useI18n();
   const c = transition.when;
+  const CONDITION_TYPES: { type: AgentCondition["type"]; label: string }[] = [
+    { type: "always", label: t("condition.always") },
+    { type: "input_has_image", label: t("condition.inputHasImage") },
+    { type: "input_contains", label: t("condition.inputContains") },
+    { type: "input_matches", label: t("condition.inputMatches") },
+    { type: "output_contains", label: t("condition.outputContains") },
+    { type: "output_matches", label: t("condition.outputMatches") },
+  ];
   return (
     <div className="space-y-2 rounded-lg border border-ink-800 bg-ink-900/60 p-2 text-xs">
       {/* Line 1: the condition. */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="w-12 shrink-0 text-ink-500">when</span>
+        <span className="w-12 shrink-0 text-ink-500">{t("stageEditor.when")}</span>
         <select
           className="input h-8 w-40 py-0 text-xs"
           value={c.type}
@@ -390,7 +389,7 @@ function TransitionRow({
             value={(c as { stage?: string }).stage ?? ""}
             onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as AgentCondition })}
           >
-            <option value="">this stage</option>
+            <option value="">{t("stageEditor.thisStage")}</option>
             {earlier.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
@@ -401,13 +400,13 @@ function TransitionRow({
             className="input h-8 min-w-[8rem] flex-1 py-0 font-mono text-xs"
             value={(c as { value: string }).value}
             onChange={(e) => onChange({ ...transition, when: { ...c, value: e.target.value } as AgentCondition })}
-            placeholder={c.type.endsWith("matches") ? "regex" : "text to find"}
+            placeholder={c.type.endsWith("matches") ? t("stageEditor.regexPlaceholder") : t("stageEditor.textToFindPlaceholder")}
           />
         )}
       </div>
       {/* Line 2: the target (and, for "end", which stage's output to return). */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="w-12 shrink-0 text-ink-500">go to</span>
+        <span className="w-12 shrink-0 text-ink-500">{t("stageEditor.goTo")}</span>
         <select
           className="input h-8 w-32 py-0 text-xs"
           value={transition.goto}
@@ -416,20 +415,20 @@ function TransitionRow({
             onChange({ ...transition, goto, output: goto === "end" ? transition.output : undefined });
           }}
         >
-          <option value="end">end (return)</option>
+          <option value="end">{t("stageEditor.endReturn")}</option>
           {later.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
         </select>
         {transition.goto === "end" && (
           <>
-            <span className="text-ink-500">returning</span>
+            <span className="text-ink-500">{t("stageEditor.returning")}</span>
             <select
               className="input h-8 w-32 py-0 text-xs"
               value={transition.output ?? ""}
               onChange={(e) => onChange({ ...transition, output: e.target.value || undefined })}
             >
-              <option value="">this stage's output</option>
+              <option value="">{t("stageEditor.thisStageOutput")}</option>
               {outputStages.map((s) => (
                 <option key={s} value={s}>{s}</option>
               ))}
@@ -437,31 +436,13 @@ function TransitionRow({
           </>
         )}
         <div className="flex-1" />
-        <button className="btn-danger btn-xs shrink-0" onClick={onRemove} title="Remove transition">
+        <button className="btn-danger btn-xs shrink-0" onClick={onRemove} title={t("stageEditor.removeTransitionTitle")}>
           <i className="bi bi-x-lg" />
         </button>
       </div>
     </div>
   );
 }
-
-const BLOCK_LABEL: Record<AgentContextBlock["kind"], string> = {
-  original_conversation: "Full conversation",
-  text_conversation: "Text-only conversation",
-  last_user: "Last user request",
-  last_user_text: "Last user text",
-  last_user_images: "Last user images",
-  stage_output: "Stage output",
-  message: "Turn",
-  tool_turn: "Tool turn",
-};
-const BLOCK_HINT: Partial<Record<AgentContextBlock["kind"], string>> = {
-  original_conversation: "The original messages, images included.",
-  text_conversation: "The original messages with images stripped.",
-  last_user: "The last user message from the original request.",
-  last_user_text: "Only the text of the last user message.",
-  last_user_images: "Only the image(s) of the last user message.",
-};
 
 function ContextBlockRow({
   block,
@@ -476,6 +457,24 @@ function ContextBlockRow({
   onMove: (dir: number) => void;
   onRemove: () => void;
 }) {
+  const { t } = useI18n();
+  const BLOCK_LABEL: Record<AgentContextBlock["kind"], string> = {
+    original_conversation: t("contextBlock.originalConversation"),
+    text_conversation: t("contextBlock.textConversation"),
+    last_user: t("contextBlock.lastUser"),
+    last_user_text: t("contextBlock.lastUserText"),
+    last_user_images: t("contextBlock.lastUserImages"),
+    stage_output: t("contextBlock.stageOutput"),
+    message: t("contextBlock.message"),
+    tool_turn: t("contextBlock.toolTurn"),
+  };
+  const BLOCK_HINT: Partial<Record<AgentContextBlock["kind"], string>> = {
+    original_conversation: t("blockHint.originalConversation"),
+    text_conversation: t("blockHint.textConversation"),
+    last_user: t("blockHint.lastUser"),
+    last_user_text: t("blockHint.lastUserText"),
+    last_user_images: t("blockHint.lastUserImages"),
+  };
   return (
     <div className="rounded-lg border border-ink-800 bg-ink-900/60 p-2 text-xs">
       <div className="flex items-center gap-2">
@@ -487,19 +486,19 @@ function ContextBlockRow({
               value={block.stage}
               onChange={(e) => onChange({ ...block, stage: e.target.value })}
             >
-              {earlier.length === 0 && <option value="">(no earlier stage)</option>}
+              {earlier.length === 0 && <option value="">{t("stageEditor.noEarlierStage")}</option>}
               {earlier.map((n) => (
                 <option key={n} value={n}>{n}</option>
               ))}
             </select>
-            <span className="text-ink-500">as</span>
+            <span className="text-ink-500">{t("stageEditor.as")}</span>
             <select
               className="input h-7 w-24 py-0 text-xs"
               value={block.role}
               onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
             >
-              <option value="assistant">assistant</option>
-              <option value="user">user</option>
+              <option value="assistant">{t("stageEditor.roleAssistant")}</option>
+              <option value="user">{t("stageEditor.roleUser")}</option>
             </select>
           </>
         )}
@@ -509,15 +508,15 @@ function ContextBlockRow({
             value={block.role}
             onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
           >
-            <option value="user">user</option>
-            <option value="assistant">assistant</option>
+            <option value="user">{t("stageEditor.roleUser")}</option>
+            <option value="assistant">{t("stageEditor.roleAssistant")}</option>
           </select>
         )}
         <div className="flex-1" />
-        <button className="btn-ghost btn-xs" title="Move up" onClick={() => onMove(-1)}>
+        <button className="btn-ghost btn-xs" title={t("stageEditor.moveUp")} onClick={() => onMove(-1)}>
           <i className="bi bi-arrow-up" />
         </button>
-        <button className="btn-ghost btn-xs" title="Move down" onClick={() => onMove(1)}>
+        <button className="btn-ghost btn-xs" title={t("stageEditor.moveDown")} onClick={() => onMove(1)}>
           <i className="bi bi-arrow-down" />
         </button>
         <button className="btn-danger btn-xs" onClick={onRemove}>
@@ -530,7 +529,7 @@ function ContextBlockRow({
           className="input mt-1.5 min-h-[36px] font-mono text-xs"
           value={block.text}
           onChange={(e) => onChange({ ...block, text: e.target.value })}
-          placeholder="message text"
+          placeholder={t("stageEditor.messageTextPlaceholder")}
         />
       )}
       {block.kind === "tool_turn" && (
@@ -539,19 +538,19 @@ function ContextBlockRow({
             className="input h-8 py-0 font-mono text-xs"
             value={block.name}
             onChange={(e) => onChange({ ...block, name: e.target.value })}
-            placeholder="tool name"
+            placeholder={t("stageEditor.toolNamePlaceholder")}
           />
           <textarea
             className="input min-h-[32px] font-mono text-xs"
             value={block.input}
             onChange={(e) => onChange({ ...block, input: e.target.value })}
-            placeholder={'arguments (JSON), e.g. {"city":"SF"}'}
+            placeholder={t("stageEditor.toolArgumentsPlaceholder")}
           />
           <textarea
             className="input min-h-[32px] font-mono text-xs"
             value={block.result}
             onChange={(e) => onChange({ ...block, result: e.target.value })}
-            placeholder="tool result text"
+            placeholder={t("stageEditor.toolResultPlaceholder")}
           />
           <label className="flex items-center gap-2 text-ink-400">
             <input
@@ -559,7 +558,7 @@ function ContextBlockRow({
               checked={!!block.isError}
               onChange={(e) => onChange({ ...block, isError: e.target.checked || undefined })}
             />
-            mark as error
+            {t("stageEditor.markAsError")}
           </label>
         </div>
       )}
@@ -588,6 +587,7 @@ function NumOverride({
   onChange: (v: number | undefined) => void;
   decimal?: boolean;
 }) {
+  const { t } = useI18n();
   // Hold the raw text so intermediate values ("0.", "0.70") aren't collapsed by
   // the numeric round-trip; only re-sync from the prop when it truly differs.
   const [text, setText] = useState<string>(value == null ? "" : String(value));
@@ -607,7 +607,7 @@ function NumOverride({
         type="text"
         inputMode="decimal"
         value={text}
-        placeholder="inherit"
+        placeholder={t("stageEditor.inheritPlaceholder")}
         onFocus={selectAll}
         onChange={(e) => {
           const cleaned = cleanNumeric(e.target.value, !!decimal);
@@ -675,6 +675,7 @@ export function OcrEditor({
   onChange: (ocr: AgentOcr | undefined) => void;
   services: ModelService[];
 }) {
+  const { t } = useI18n();
   const [advanced, setAdvanced] = useState(false);
   const enabled = !!ocr;
   const legacyInline = enabled && !ocr.service && !!(ocr.steps && ocr.steps.length);
@@ -687,73 +688,71 @@ export function OcrEditor({
       <Toggle
         checked={enabled}
         onChange={(v) => onChange(v ? { service: resilienceServices[0]?.name } : undefined)}
-        label="Translate images to text (OCR pre-pass)"
+        label={t("ocr.toggleLabel")}
       />
       <p className="mt-1 text-xs text-ink-500">
-        Before the chain runs, every image in the request is sent to a multimodal/OCR model and replaced with its
-        transcription — so text-only stage models can process the request.
+        {t("ocr.description")}
       </p>
 
       {enabled && (
         <div className="mt-3 space-y-3">
           <div>
-            <label className="label">OCR model runs</label>
+            <label className="label">{t("ocr.modelRuns")}</label>
             <select
               className="input"
               value={ocr.service ?? ""}
               onChange={(e) => patch({ service: e.target.value || undefined, steps: undefined })}
             >
-              <option value="">— pick a multimodal Model Service —</option>
+              <option value="">{t("ocr.pickService")}</option>
               {resilienceServices.map((m) => (
                 <option key={m.name} value={m.name}>{m.name}</option>
               ))}
             </select>
             {legacyInline && (
-              <p className="mt-1 text-xs text-amber-300">Uses inline steps (legacy). Pick a Model Service, or edit via Raw JSON.</p>
+              <p className="mt-1 text-xs text-amber-300">{t("stageEditor.legacyInlineWarning")}</p>
             )}
             {resilienceServices.length === 0 && (
               <p className="mt-1 text-xs text-amber-300">
-                No Model Services exist yet — create one that maps to a multimodal model.
+                {t("ocr.noServicesWarning")}
               </p>
             )}
           </div>
 
           <button className="text-xs text-ink-500 hover:text-ink-300" onClick={() => setAdvanced((a) => !a)}>
             <i className={`bi ${advanced ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
-            Advanced (prompt, sampling, timeout)
+            {t("ocr.advancedLabel")}
           </button>
           {advanced && (
             <div className="space-y-3 rounded-lg border border-ink-800 bg-ink-950/40 p-3">
               <div>
                 <div className="mb-1 flex items-center justify-between">
-                  <label className="label mb-0">OCR prompt (optional)</label>
+                  <label className="label mb-0">{t("ocr.promptLabel")}</label>
                   <button
                     className="text-[11px] text-brand-400 hover:text-brand-300"
                     onClick={() => patch({ prompt: DEFAULT_OCR_PROMPT })}
                   >
                     <i className="bi bi-arrow-counterclockwise mr-1" />
-                    Load default
+                    {t("ocr.loadDefault")}
                   </button>
                 </div>
                 <textarea
                   className="input min-h-[120px] font-mono text-xs"
                   value={ocr.prompt ?? ""}
                   onChange={(e) => patch({ prompt: e.target.value || undefined })}
-                  placeholder="Leave empty to use the built-in OCR prompt."
+                  placeholder={t("ocr.promptPlaceholder")}
                 />
                 <p className="mt-1 text-[11px] text-ink-600">
-                  Must instruct the model to return a JSON array of {'{ index, image }'} objects (one per image).
+                  {t("ocr.promptHint")}
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <NumOverride label="Temperature" value={ocr.temperature} onChange={(v) => patch({ temperature: v })} decimal />
-                <NumOverride label="Max tokens" value={ocr.maxTokens} onChange={(v) => patch({ maxTokens: v })} />
-                <NumOverride label="Timeout (ms)" value={ocr.timeoutMs} onChange={(v) => patch({ timeoutMs: v })} />
+                <NumOverride label={t("stageEditor.temperature")} value={ocr.temperature} onChange={(v) => patch({ temperature: v })} decimal />
+                <NumOverride label={t("stageEditor.maxTokens")} value={ocr.maxTokens} onChange={(v) => patch({ maxTokens: v })} />
+                <NumOverride label={t("stageEditor.timeoutMs")} value={ocr.timeoutMs} onChange={(v) => patch({ timeoutMs: v })} />
               </div>
               <OverridesEditor
                 overrides={ocr.overrides}
                 onChange={(ov) => patch({ overrides: ov })}
-                showThinking={false}
               />
             </div>
           )}
