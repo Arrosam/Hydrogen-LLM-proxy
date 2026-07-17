@@ -246,3 +246,92 @@ describe("client params with no canonical field pass through", () => {
     expect(AnthropicRequest.construct(req).render(target("up")).container).toBe("c1");
   });
 });
+
+describe("the proxy never relays provider-side state it does not have", () => {
+  it("drops previous_response_id — the id the client holds is Hydrogen's, not the upstream's", () => {
+    const req = OpenAIResponsesRequest.parse({
+      model: "svc",
+      input: "continue",
+      previous_response_id: "resp-minted-by-hydrogen",
+    });
+    const body = OpenAIResponsesRequest.construct(req).render(target("gpt-5"));
+    expect(body).not.toHaveProperty("previous_response_id");
+  });
+
+  it("drops conversation, background and prompt", () => {
+    const req = OpenAIResponsesRequest.parse({
+      model: "svc",
+      input: "hi",
+      conversation: "conv_123",
+      background: true,
+      prompt: { id: "pmpt_1" },
+    });
+    const body = OpenAIResponsesRequest.construct(req).render(target("gpt-5"));
+    expect(body).not.toHaveProperty("conversation");
+    expect(body).not.toHaveProperty("background");
+    expect(body).not.toHaveProperty("prompt");
+  });
+
+  it("still passes through a param that is merely unrecognized", () => {
+    const req = OpenAIResponsesRequest.parse({ model: "svc", input: "hi", prompt_cache_key: "abc" });
+    const body = OpenAIResponsesRequest.construct(req).render(target("gpt-5"));
+    expect(body.prompt_cache_key).toBe("abc");
+  });
+});
+
+describe("Responses reasoning leaves the answer room under max_output_tokens", () => {
+  const capped = (upstreamModel: string, providerMaxOutputTokens?: number) => ({ upstreamModel, providerMaxOutputTokens });
+
+  /** The reported bug: a client max applied verbatim is a budget the reasoning
+   * spends in full, and the client gets an empty, billed answer. */
+  it("does not hand the client's whole max to the reasoning", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
+    expect(body.reasoning).toEqual({ effort: "high" });
+    // 1024 of answer still available on top of the reasoning budget.
+    expect(body.max_output_tokens).toBe(1024 + 32000);
+  });
+
+  it("keeps the client's max as answer room at every effort", () => {
+    for (const [effort, budget] of [["minimal", 2048], ["low", 4096], ["medium", 16000], ["max", 128000]] as const) {
+      const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 500 });
+      const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: effort })).render(capped("gpt-5"));
+      expect(body.max_output_tokens).toBe(500 + budget);
+    }
+  });
+
+  it("never exceeds the provider's hard cap", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5", 8192));
+    expect(body.max_output_tokens as number).toBeLessThanOrEqual(8192);
+  });
+
+  it("thinks less rather than not answering when the cap is tight", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5", 8192));
+    // high (32k) cannot fit under 8192 with 1024 of answer; low (4096) can.
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(body.max_output_tokens).toBe(1024 + 4096);
+  });
+
+  it("invents no ceiling when the client named no max", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }] });
+    const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
+    expect(body).not.toHaveProperty("max_output_tokens");
+    expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
+  it("leaves the max alone when thinking is off", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAIResponsesRequest.construct(req).render(capped("gpt-5"));
+    expect(body.max_output_tokens).toBe(1024);
+    expect(body).not.toHaveProperty("reasoning");
+  });
+
+  it("gives the answer the whole max when thinking is explicitly disabled", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "disabled" })).render(capped("gpt-5"));
+    expect(body.reasoning).toEqual({ effort: "none" });
+    expect(body.max_output_tokens).toBe(1024);
+  });
+});

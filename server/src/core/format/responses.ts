@@ -161,7 +161,7 @@ function parseThinking(raw: unknown): ThinkingLevel | undefined {
 }
 
 /** Every key this format models itself — parsed above, or emitted by `render`. */
-const RESERVED = new Set([
+const OWNED = new Set([
   "model",
   "input",
   "instructions",
@@ -178,6 +178,25 @@ const RESERVED = new Set([
   "service_tier",
   "user",
 ]);
+
+/**
+ * Fields that name state living on the provider's side, which this proxy does
+ * not have and must never pretend to.
+ *
+ * The proxy is stateless (`store: false`) and mints its own response ids, so an
+ * id a client holds is Hydrogen's invention -- the upstream has never seen it.
+ * Relaying one asks the provider to continue a conversation that does not exist
+ * there; at best it errors, at worst it answers against the wrong context.
+ * `background` is here for the same reason in a different shape: it makes the
+ * provider return a queued placeholder instead of an answer.
+ *
+ * These are dropped rather than rejected, which is what the proxy did before
+ * client passthrough existed. A client relying on them silently loses its
+ * server-side history: it must send the full `input` instead.
+ */
+const PROVIDER_STATE = new Set(["previous_response_id", "conversation", "background", "prompt"]);
+
+const RESERVED = new Set([...OWNED, ...PROVIDER_STATE]);
 
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
@@ -284,8 +303,16 @@ export class OpenAIResponsesRequest extends Request {
       out.tools = this.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters }));
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToResponses(this.toolChoice);
-    const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
-    if (maxTokens != null) out.max_output_tokens = maxTokens;
+    if (p.thinking) {
+      // The thinking policy owns max_output_tokens when reasoning is on: the
+      // reasoning is spent out of that same ceiling, so it has to size it.
+      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
+      out.reasoning = tf.reasoning;
+      if (tf.max_output_tokens != null) out.max_output_tokens = tf.max_output_tokens;
+    } else {
+      const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
+      if (maxTokens != null) out.max_output_tokens = maxTokens;
+    }
     if (p.temperature != null) out.temperature = p.temperature;
     if (p.topP != null) out.top_p = p.topP;
     if (p.responseFormat) out.text = responseFormatToResponses(p.responseFormat);
@@ -293,7 +320,6 @@ export class OpenAIResponsesRequest extends Request {
     if (p.serviceTier != null) out.service_tier = p.serviceTier;
     if (p.user != null) out.user = p.user;
     if (this.stream) out.stream = true;
-    if (p.thinking) out.reasoning = ThinkingPolicy.responses(p.thinking).reasoning;
     applyNonCanonical(out, p, this.family);
     return out;
   }

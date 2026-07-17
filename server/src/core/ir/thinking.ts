@@ -60,7 +60,14 @@ export interface AnthropicThinkingFields {
 
 export interface ResponsesThinkingFields {
   reasoning: { effort: string };
+  /** The ceiling that has to hold the reasoning AND the answer. undefined = send
+   * none and let the provider's own default bound the response. */
+  max_output_tokens?: number;
 }
+
+/** Named efforts, cheapest first — the order the effort steps down in when a
+ * provider's cap cannot hold the reasoning and the answer both. */
+const EFFORT_LADDER: EffortLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 export const ThinkingPolicy = {
   /** OpenAI Chat Completions reasoning_effort (+ max_tokens when a budget was given). */
@@ -76,12 +83,65 @@ export const ThinkingPolicy = {
     return { reasoning_effort: thinking };
   },
 
-  /** OpenAI Responses API reasoning.effort. */
-  responses(thinking: ThinkingLevel): ResponsesThinkingFields {
-    if (thinking === "disabled") return { reasoning: { effort: "none" } };
-    if (thinking === "enabled" || thinking === "auto") return { reasoning: { effort: "medium" } };
-    if (typeof thinking === "object") return { reasoning: { effort: budgetToEffort(thinking.budget) } };
-    return { reasoning: { effort: thinking } };
+  /**
+   * OpenAI Responses reasoning.effort, and the max_output_tokens that has to
+   * hold it.
+   *
+   * The Responses API counts reasoning tokens *inside* max_output_tokens, the
+   * same way Anthropic counts thinking inside max_tokens. So a client's max
+   * passed through verbatim is a budget the reasoning may spend in full: the
+   * model thinks, hits the ceiling, and returns `status: "incomplete"` with no
+   * message at all -- an empty answer, billed in full, reported as a success.
+   *
+   * The client's max means "this much *answer*". Thinking is the service's
+   * decision, not the client's, so it gets room on top rather than out of the
+   * client's budget -- bounded by the provider's hard cap. If even the cap
+   * cannot hold both, the effort steps down until the answer still has room,
+   * because a smaller thought that gets answered beats a bigger one that
+   * doesn't.
+   */
+  responses(
+    thinking: ThinkingLevel,
+    clientMax: number | undefined,
+    providerCap: number | undefined,
+  ): ResponsesThinkingFields {
+    const capped = (n: number | undefined): number | undefined =>
+      n == null ? undefined : providerCap != null ? Math.min(n, providerCap) : n;
+
+    // No reasoning to make room for: the client's max is the whole budget.
+    if (thinking === "disabled") {
+      return { reasoning: { effort: "none" }, max_output_tokens: capped(clientMax) };
+    }
+
+    let effort: EffortLevel;
+    let budget: number;
+    if (thinking === "enabled" || thinking === "auto") {
+      effort = "medium";
+      budget = EFFORT_BUDGETS.medium;
+    } else if (typeof thinking === "object") {
+      effort = budgetToEffort(thinking.budget);
+      budget = thinking.budget;
+    } else {
+      effort = thinking;
+      budget = EFFORT_BUDGETS[thinking];
+    }
+
+    // The client named no max, so nothing is squeezing the answer: let the
+    // provider's own default bound the response rather than inventing a ceiling.
+    if (clientMax == null) return { reasoning: { effort } };
+
+    if (providerCap == null) {
+      return { reasoning: { effort }, max_output_tokens: clientMax + budget };
+    }
+
+    // Under a hard cap, buy the answer its room by thinking less.
+    let rung = EFFORT_LADDER.indexOf(effort);
+    while (clientMax + budget > providerCap && rung > 0) {
+      rung--;
+      effort = EFFORT_LADDER[rung];
+      budget = EFFORT_BUDGETS[effort];
+    }
+    return { reasoning: { effort }, max_output_tokens: Math.min(clientMax + budget, providerCap) };
   },
 
   /**
