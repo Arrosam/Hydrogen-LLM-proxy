@@ -40,7 +40,9 @@ export default function App() {
         <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />
         <Route path="active-requests" element={<ActiveRequests />} />
-        <Route path="settings" element={<Settings />} />
+        {/* Settings is admin-only. Hiding the nav link is presentation; this is
+            what makes typing the URL not work. The server enforces it too. */}
+        {user.role === "admin" && <Route path="settings" element={<Settings />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

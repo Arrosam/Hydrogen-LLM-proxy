@@ -178,3 +178,71 @@ describe("OpenAI Responses API round-trip", () => {
     expect(body.store).toBe(false);
   });
 });
+
+describe("provider max output tokens is a hard cap", () => {
+  const capped = (upstreamModel: string, providerMaxOutputTokens: number) => ({ upstreamModel, providerMaxOutputTokens });
+
+  it("fits an over-cap max_tokens under the cap (Chat Completions)", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 200_000 });
+    const body = OpenAICompletionRequest.construct(req).render(capped("up", 8192));
+    expect(body.max_tokens).toBe(8192);
+  });
+
+  it("fits an over-cap max_output_tokens under the cap (Responses)", () => {
+    const req = OpenAIResponsesRequest.parse({ model: "svc", input: "hi", max_output_tokens: 200_000 });
+    const body = OpenAIResponsesRequest.construct(req).render(capped("up", 8192));
+    expect(body.max_output_tokens).toBe(8192);
+  });
+
+  it("leaves an under-cap max alone", () => {
+    const req = OpenAIResponsesRequest.parse({ model: "svc", input: "hi", max_output_tokens: 512 });
+    expect(OpenAIResponsesRequest.construct(req).render(capped("up", 8192)).max_output_tokens).toBe(512);
+  });
+
+  it("does not invent a max for a request that named none", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }] });
+    expect(OpenAICompletionRequest.construct(req).render(capped("up", 8192))).not.toHaveProperty("max_tokens");
+  });
+
+  it("caps the max_tokens a thinking budget sizes for itself", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" });
+    const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: { budget: 100_000 } })).render(capped("up", 4096));
+    expect(body.max_tokens).toBe(4096);
+  });
+});
+
+describe("client params with no canonical field pass through", () => {
+  it("carries an unrecognized param to a same-family provider", () => {
+    const req = OpenAICompletionRequest.parse({
+      model: "svc",
+      messages: [{ role: "user", content: "hi" }],
+      enable_thinking: true,
+      chat_template_kwargs: { foo: 1 },
+    });
+    const body = OpenAICompletionRequest.construct(req).render(target("up"));
+    expect(body.enable_thinking).toBe(true);
+    expect(body.chat_template_kwargs).toEqual({ foo: 1 });
+  });
+
+  it("does not leak one family's params onto another family's body", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], enable_thinking: true });
+    const body = AnthropicRequest.construct(req).render(target("up"));
+    expect(body).not.toHaveProperty("enable_thinking");
+  });
+
+  it("keeps the renderer's own decisions (Responses store stays false)", () => {
+    const req = OpenAIResponsesRequest.parse({ model: "svc", input: "hi", store: true });
+    expect(OpenAIResponsesRequest.construct(req).render(target("up")).store).toBe(false);
+  });
+
+  it("lets a step override win over a passed-through client param", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], provider_routing: "cheap" });
+    const body = OpenAICompletionRequest.construct(req.withOverrides({ extra: { provider_routing: "fast" } })).render(target("up"));
+    expect(body.provider_routing).toBe("fast");
+  });
+
+  it("passes an unrecognized Anthropic param through to an Anthropic provider", () => {
+    const req = AnthropicRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 16, container: "c1" });
+    expect(AnthropicRequest.construct(req).render(target("up")).container).toBe("c1");
+  });
+});

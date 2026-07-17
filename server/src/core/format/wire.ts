@@ -1,6 +1,7 @@
 /** Small wire-format coercion helpers shared by the format subclasses. */
 
 import type { ImagePart } from "../ir/content";
+import type { Family, GenerationParams } from "../ir/params";
 
 export function numOrUndef(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
@@ -45,4 +46,52 @@ export function parseDataUrl(url: string): ImagePart["source"] {
 /** Build a displayable image URL from an image source. */
 export function imageUrlOf(source: ImagePart["source"]): string {
   return source.kind === "base64" ? `data:${source.mediaType};base64,${source.data}` : source.url;
+}
+
+/**
+ * Fit a requested output-token max under the provider's hard cap. Asking for
+ * more than a provider allows gets the whole request rejected, so the cap wins.
+ * A request that named no max keeps naming none — the provider's own default is
+ * already within its limit.
+ */
+export function capMaxTokens(maxTokens: number | undefined, cap: number | undefined): number | undefined {
+  if (maxTokens == null) return undefined;
+  return cap != null && maxTokens > cap ? cap : maxTokens;
+}
+
+/**
+ * Collect the body keys a format's parser and renderer don't own. Everything a
+ * format models canonically is listed in its `reserved` set; whatever is left is
+ * a param this proxy has no opinion about, and dropping it would silently change
+ * the request the client actually made.
+ */
+export function collectPassthrough(
+  body: Record<string, unknown>,
+  reserved: ReadonlySet<string>,
+  family: Family,
+): GenerationParams["passthrough"] {
+  const params: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (reserved.has(k) || v === undefined) continue;
+    params[k] = v;
+  }
+  return Object.keys(params).length ? { family, params } : undefined;
+}
+
+/**
+ * Merge the non-canonical params onto an outgoing body, weakest first: the
+ * client's own unrecognized params, then the step/stage `extra` override.
+ *
+ * Client passthrough only replays onto its own family — an OpenAI-only knob is
+ * meaningless on an Anthropic body, and sending it there gets the request
+ * rejected. It also never overwrites a key the renderer already decided, so a
+ * translated or overridden value always beats a leftover.
+ */
+export function applyNonCanonical(out: Record<string, unknown>, p: GenerationParams, family: Family): void {
+  if (p.passthrough && p.passthrough.family === family) {
+    for (const [k, v] of Object.entries(p.passthrough.params)) {
+      if (!(k in out)) out[k] = v;
+    }
+  }
+  if (p.extra) Object.assign(out, p.extra);
 }

@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
-import { useAuth } from "../auth";
 import { useI18n, type Language } from "../lib/i18n";
 import { PageHeader } from "../components/Layout";
-import { ErrorNote, Spinner, Toggle } from "../components/common";
+import { ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { useToast } from "../components/Toast";
 
 interface EnvSettings {
@@ -22,18 +21,16 @@ interface EnvSettings {
   };
 }
 
+/** Admin-only: the route and every settings endpoint are gated to admins, so
+ * this page never has to render a read-only variant of itself. */
 export function Settings() {
   const { t } = useI18n();
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
 
   return (
     <div>
       <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} icon="bi-gear" />
-      {!isAdmin && (
-        <ErrorNote message={t("settings.env.hint")} />
-      )}
       <LanguageCard />
+      <BackupCard />
       <RetentionCard />
       <AllowlistCard />
       <EnvCard />
@@ -80,6 +77,211 @@ function LanguageCard() {
           {t("settings.language.zh")}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Row counts the server reports back after a restore, keyed by table name. */
+type RestoreReport = { ok: true; restored: Record<string, number>; includedLogs: boolean; providerKeysRestored: number };
+
+/** Save `text` to the user's disk as `filename`, without a server round-trip. */
+function downloadFile(filename: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** `hydrogen-backup-2026-07-17.json` — dated so successive backups don't collide. */
+function backupFilename(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `hydrogen-backup-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.json`;
+}
+
+const MIN_PASSPHRASE = 8;
+
+/**
+ * Export the whole instance to one file, and put it back later.
+ *
+ * The passphrase is the point, not a formality: provider API keys are encrypted
+ * with a master key that lives on the server, so the package re-seals them under
+ * this passphrase to be restorable anywhere. Nothing on the server can recover
+ * it, which is worth saying plainly in the UI rather than discovering later.
+ */
+function BackupCard() {
+  const { t } = useI18n();
+  const toast = useToast();
+  const { confirm, confirmEl } = useConfirm();
+
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmPassphrase, setConfirmPassphrase] = useState("");
+  const [includeLogs, setIncludeLogs] = useState(true);
+  const [exporting, setExporting] = useState(false);
+
+  const [file, setFile] = useState<File | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoring, setRestoring] = useState(false);
+
+  const runExport = async () => {
+    if (passphrase.length < MIN_PASSPHRASE) {
+      toast.error(t("settings.backup.toast.passphraseTooShort", { min: MIN_PASSPHRASE }));
+      return;
+    }
+    if (passphrase !== confirmPassphrase) {
+      toast.error(t("settings.backup.toast.passphraseMismatch"));
+      return;
+    }
+    setExporting(true);
+    try {
+      const r = await api.post<{ backup: unknown }>("/backup/export", { passphrase, includeLogs });
+      downloadFile(backupFilename(), JSON.stringify(r.backup));
+      toast.success(t("settings.backup.toast.exported"));
+      setPassphrase("");
+      setConfirmPassphrase("");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("settings.backup.toast.exportFailed"));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const runRestore = async () => {
+    if (!file) return;
+    if (!restorePassphrase) {
+      toast.error(t("settings.backup.toast.passphraseRequired"));
+      return;
+    }
+    const ok = await confirm(t("settings.backup.confirm.title"), t("settings.backup.confirm.body", { file: file.name }));
+    if (!ok) return;
+
+    setRestoring(true);
+    try {
+      const text = await file.text();
+      let backup: unknown;
+      try {
+        backup = JSON.parse(text);
+      } catch {
+        toast.error(t("settings.backup.toast.notJson"));
+        return;
+      }
+      const r = await api.post<RestoreReport>("/backup/restore", { passphrase: restorePassphrase, backup });
+      const rows = Object.values(r.restored).reduce((a, b) => a + b, 0);
+      toast.success(t("settings.backup.toast.restored", { rows }));
+      // The server has ended this session — the users table it authenticated
+      // against no longer exists. Reload straight into the login screen.
+      setTimeout(() => window.location.assign("/"), 1200);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("settings.backup.toast.restoreFailed"));
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  return (
+    <div className="card card-pad mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <i className="bi bi-archive text-brand-400" />
+        <h3 className="font-medium text-ink-100">{t("settings.backup")}</h3>
+      </div>
+      <p className="mb-4 text-xs text-ink-500">{t("settings.backup.hint")}</p>
+
+      {/* Export */}
+      <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+        <div className="mb-1 flex items-center gap-2">
+          <i className="bi bi-download text-ink-400" />
+          <h4 className="text-sm font-medium text-ink-200">{t("settings.backup.export")}</h4>
+        </div>
+        <p className="mb-3 text-xs text-ink-500">{t("settings.backup.export.hint")}</p>
+
+        <div className="grid max-w-xl gap-2 sm:grid-cols-2">
+          <div>
+            <label className="label">{t("settings.backup.passphrase")}</label>
+            <input
+              type="password"
+              autoComplete="new-password"
+              className="input text-xs"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder={t("settings.backup.passphrase.placeholder")}
+            />
+          </div>
+          <div>
+            <label className="label">{t("settings.backup.passphraseConfirm")}</label>
+            <input
+              type="password"
+              autoComplete="new-password"
+              className="input text-xs"
+              value={confirmPassphrase}
+              onChange={(e) => setConfirmPassphrase(e.target.value)}
+              placeholder={t("settings.backup.passphrase.placeholder")}
+            />
+          </div>
+        </div>
+
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-amber-400/90">
+          <i className="bi bi-exclamation-triangle mt-0.5" />
+          <span>{t("settings.backup.passphrase.warning")}</span>
+        </p>
+
+        <div className="mt-3 flex items-center gap-2">
+          <Toggle checked={includeLogs} onChange={setIncludeLogs} />
+          <span className="text-xs text-ink-300">{t("settings.backup.includeLogs")}</span>
+          <span className="text-xs text-ink-500">{t("settings.backup.includeLogs.hint")}</span>
+        </div>
+
+        <button className="btn-primary btn-xs mt-4" onClick={runExport} disabled={exporting}>
+          {exporting ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-download" />}
+          {t("settings.backup.exportAction")}
+        </button>
+      </div>
+
+      {/* Restore */}
+      <div className="mt-4 rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+        <div className="mb-1 flex items-center gap-2">
+          <i className="bi bi-upload text-ink-400" />
+          <h4 className="text-sm font-medium text-ink-200">{t("settings.backup.restore")}</h4>
+        </div>
+        <p className="mb-3 text-xs text-ink-500">{t("settings.backup.restore.hint")}</p>
+
+        <div className="grid max-w-xl gap-2 sm:grid-cols-2">
+          <div>
+            <label className="label">{t("settings.backup.file")}</label>
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="input text-xs file:mr-2 file:rounded file:border-0 file:bg-ink-800 file:px-2 file:py-0.5 file:text-xs file:text-ink-200"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+          </div>
+          <div>
+            <label className="label">{t("settings.backup.passphrase")}</label>
+            <input
+              type="password"
+              autoComplete="off"
+              className="input text-xs"
+              value={restorePassphrase}
+              onChange={(e) => setRestorePassphrase(e.target.value)}
+              placeholder={t("settings.backup.passphrase.restorePlaceholder")}
+            />
+          </div>
+        </div>
+
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-amber-400/90">
+          <i className="bi bi-exclamation-triangle mt-0.5" />
+          <span>{t("settings.backup.restore.warning")}</span>
+        </p>
+
+        <button className="btn-ghost btn-xs mt-4" onClick={runRestore} disabled={restoring || !file}>
+          {restoring ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-upload" />}
+          {t("settings.backup.restoreAction")}
+        </button>
+      </div>
+      {confirmEl}
     </div>
   );
 }
@@ -210,8 +412,6 @@ function AllowlistCard() {
 function EnvCard() {
   const { t } = useI18n();
   const toast = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
   const { data, loading, error, reload } = useAsync(() => api.get<EnvSettings>("/settings/env"));
 
   const [allowPrivate, setAllowPrivate] = useState(false);
@@ -278,7 +478,7 @@ function EnvCard() {
               <label className="label">{t("settings.env.allowPrivate")}</label>
               <p className="text-xs text-ink-500">{t("settings.env.allowPrivate.hint")}</p>
             </div>
-            <Toggle checked={allowPrivate} onChange={setAllowPrivate} disabled={!isAdmin} />
+            <Toggle checked={allowPrivate} onChange={setAllowPrivate} />
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -289,7 +489,6 @@ function EnvCard() {
                 inputMode="numeric"
                 value={logPayloadMaxChars}
                 onChange={(e) => setLogPayloadMaxChars(e.target.value)}
-                disabled={!isAdmin}
               />
             </div>
             <div>
@@ -299,7 +498,6 @@ function EnvCard() {
                 inputMode="numeric"
                 value={tokenRate}
                 onChange={(e) => setTokenRate(e.target.value)}
-                disabled={!isAdmin}
               />
             </div>
             <div>
@@ -309,19 +507,16 @@ function EnvCard() {
                 inputMode="numeric"
                 value={sessionTtlMs}
                 onChange={(e) => setSessionTtlMs(e.target.value)}
-                disabled={!isAdmin}
               />
             </div>
           </div>
 
-          {isAdmin && (
-            <div className="flex justify-end">
-              <button className="btn-primary btn-xs" onClick={save} disabled={saving}>
-                {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
-                {t("common.save")}
-              </button>
-            </div>
-          )}
+          <div className="flex justify-end">
+            <button className="btn-primary btn-xs" onClick={save} disabled={saving}>
+              {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
+              {t("common.save")}
+            </button>
+          </div>
 
           <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
             <div className="mb-2 flex items-center gap-2">

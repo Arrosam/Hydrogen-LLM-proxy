@@ -25,6 +25,33 @@ import { isAgentDef } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
 
+/**
+ * One selectable trigger: `value` is the wire enum the server validates against,
+ * `label` is only what the user reads. They must stay separate — a label is
+ * translated, and a translated value is not a trigger the server accepts.
+ */
+interface TriggerOption {
+  value: AdvanceTrigger;
+  label: string;
+}
+
+/** The non-numeric triggers, each with the i18n key for its label. */
+const SYMBOLIC_TRIGGERS = {
+  timeout: "trigger.timeout",
+  network: "trigger.network",
+  error: "trigger.error",
+  exhausted: "trigger.exhausted",
+} as const;
+
+type SymbolicTrigger = keyof typeof SYMBOLIC_TRIGGERS;
+
+const CODE_OPTIONS: TriggerOption[] = CODE_PRESETS.map((c) => ({ value: c, label: String(c) }));
+
+/** Build the symbolic options in `names` order, labelled in the current language. */
+function symbolicOptions(t: (key: string) => string, names: readonly SymbolicTrigger[]): TriggerOption[] {
+  return names.map((name) => ({ value: name, label: t(SYMBOLIC_TRIGGERS[name]) }));
+}
+
 interface Props {
   open: boolean;
   service: ModelService | null; // null = new
@@ -447,7 +474,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                       <div className="mt-3">
                         <label className="label">{t("serviceEditor.retryOn")}</label>
                         <TriggerChips
-                          options={[...CODE_PRESETS, t("trigger.timeout") as Trigger, t("trigger.network") as Trigger, t("trigger.error") as Trigger]}
+                          options={[...CODE_OPTIONS, ...symbolicOptions(t, ["timeout", "network", "error"])]}
                           selected={step.retry?.on ?? []}
                           onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
                           allowCustomCodes
@@ -460,7 +487,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         <div className="mt-3">
                           <label className="label">{t("serviceEditor.advanceOnLabel")} <span className="normal-case text-ink-500">{t("serviceEditor.advanceOnHint")}</span></label>
                           <TriggerChips
-                            options={[...CODE_PRESETS, t("trigger.timeout") as AdvanceTrigger, t("trigger.network") as AdvanceTrigger, t("trigger.error") as AdvanceTrigger, t("trigger.exhausted") as AdvanceTrigger]}
+                            options={[...CODE_OPTIONS, ...symbolicOptions(t, ["timeout", "network", "error", "exhausted"])]}
                             selected={step.advanceOn ?? []}
                             onToggle={(v) => patchStep(i, { advanceOn: toggle(step.advanceOn, v as AdvanceTrigger) })}
                             allowCustomCodes
@@ -507,7 +534,7 @@ function TriggerChips({
   onToggle,
   allowCustomCodes = false,
 }: {
-  options: (Trigger | "exhausted")[];
+  options: TriggerOption[];
   selected: (Trigger | "exhausted")[];
   onToggle: (v: Trigger | "exhausted") => void;
   /** When true, shows a text input for adding arbitrary HTTP status codes. */
@@ -527,7 +554,7 @@ function TriggerChips({
       }
       setInput("");
     } else if (raw === "timeout" || raw === "network" || raw === "error" || raw === "exhausted") {
-      // Also allow symbolic triggers via the input
+      // Also allow symbolic triggers via the input (compared by fixed enum value).
       if (!selected.includes(raw)) {
         onToggle(raw);
       }
@@ -535,25 +562,28 @@ function TriggerChips({
     }
   };
 
-  // Determine which selected values are NOT in the preset options (custom adds)
-  const customSelected = selected.filter((s) => !options.includes(s));
+  // Determine which selected values are NOT in the preset options (custom adds).
+  // These render as their raw value, which also surfaces any bad value a service
+  // was saved with so it can be clicked away.
+  const optionValues = options.map((o) => o.value);
+  const customSelected = selected.filter((s) => !optionValues.includes(s));
 
   return (
     <div className="space-y-2">
       {/* Quick-select preset chips */}
       <div className="flex flex-wrap gap-1.5">
         {options.map((o) => {
-          const active = selected.includes(o);
+          const active = selected.includes(o.value);
           return (
             <button
-              key={String(o)}
+              key={String(o.value)}
               type="button"
-              onClick={() => onToggle(o)}
+              onClick={() => onToggle(o.value)}
               className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
                 active ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"
               }`}
             >
-              {o}
+              {o.label}
             </button>
           );
         })}
@@ -600,7 +630,7 @@ function TriggerChips({
               className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-2 py-0.5 text-xs font-medium text-white transition-colors hover:bg-brand-500"
               title={t("serviceEditor.clickToRemove")}
             >
-              {c}
+              {String(c)}
               <i className="bi bi-x-lg text-[10px]" />
             </button>
           ))}

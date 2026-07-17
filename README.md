@@ -114,12 +114,40 @@ with the dashboard SPA.
 
 ## Roles
 
-- **admin** — everything, including issuing tokens.
-- **manager** — everything **except** issuing tokens; also cannot create or modify admin accounts
-  (to prevent privilege escalation).
+- **admin** — everything, including issuing tokens, and the only role with access to **Settings**
+  (language, log retention, trusted upstreams, runtime env, backup & restore).
+- **manager** — everything **except** issuing tokens and Settings; also cannot create or modify
+  admin accounts (to prevent privilege escalation).
 
 The first admin is created on first boot. If `ADMIN_PASSWORD` is blank, a temporary password is
 generated and printed to the logs, and the admin must set a new password at first login.
+
+---
+
+## Backup & restore
+
+**Settings → Backup & restore** (admin only) exports the whole instance — providers, models,
+mappings, Model Services, tokens, users, settings, and optionally the request logs — as a single
+JSON file, and restores it later to an instance that is identical to the one you backed up.
+Client tokens and dashboard passwords keep working, because their hashes travel with the package.
+
+Provider API keys need care, because they are encrypted with `PROXY_MASTER_KEY`, which lives in
+`hydrogen-secrets.json` rather than in the database. Copying the ciphertext would produce a backup
+that only restores onto the machine that wrote it — the one you no longer have. So on export the
+keys are decrypted and re-sealed under a **passphrase you choose** (scrypt + AES-256-GCM), and on
+restore they are decrypted with that passphrase and re-encrypted under the *target* instance's
+master key.
+
+Two consequences worth knowing before you rely on it:
+
+- **The passphrase is not recoverable.** It is never sent to or stored on the server. Lose it and
+  the package cannot be restored — keep it wherever you keep your other credentials.
+- **Restore replaces everything**, in one transaction: it either fully succeeds or changes nothing
+  (a wrong passphrase or a damaged file is rejected before any data is touched). Afterwards you are
+  signed out, since the user accounts you authenticated against have themselves been replaced.
+
+The downloaded file contains no usable secret without the passphrase, but it does contain your full
+configuration and request history — treat it as sensitive.
 
 ---
 

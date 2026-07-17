@@ -64,6 +64,15 @@ export interface GenerationParams {
   thinking?: ThinkingLevel;
   /** Provider-specific params with no canonical field, passed through verbatim. */
   extra?: Record<string, unknown>;
+  /**
+   * Params the client sent that no canonical field models, kept verbatim so a
+   * request nobody overrode reaches the provider as the client wrote it.
+   *
+   * Distinct from `extra`, which a step/stage sets deliberately and which
+   * therefore applies to any provider: these are the client's own words, so they
+   * are replayed only onto `family` — the wire format they were written for.
+   */
+  passthrough?: { family: Family; params: Record<string, unknown> };
 }
 
 /** Every generation param a step/stage is allowed to override. */

@@ -319,7 +319,10 @@ function foldUnknownIntoExtra<T extends RequestOverrides | undefined>(ov: T): T 
   }
   if (mutated || Object.keys(extra).length) out.extra = extra;
   else if (ov.extra !== undefined) out.extra = ov.extra;
-  return { ...ov, ...out } as T;
+  // `out` already carries every key, so return it as-is: re-spreading `ov` over
+  // it would leave the non-canonical keys at the top level too, copied rather
+  // than moved, and `extra` is the only place a renderer looks for them.
+  return out as T;
 }
 
 /** Effective per-step overrides: the flat `thinking` folded under `overrides`,

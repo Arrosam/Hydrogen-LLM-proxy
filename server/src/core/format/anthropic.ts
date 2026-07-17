@@ -15,7 +15,7 @@ import type { GenerationParams, ThinkingLevel } from "../ir/params";
 import { DEFAULT_ANTHROPIC_MAX_TOKENS, ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
-import { num, numOrUndef } from "./wire";
+import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -200,6 +200,23 @@ function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined
   return undefined;
 }
 
+/** Every key this format models itself — parsed below, or emitted by `render`. */
+const RESERVED = new Set([
+  "model",
+  "messages",
+  "system",
+  "stream",
+  "tools",
+  "tool_choice",
+  "temperature",
+  "top_p",
+  "top_k",
+  "max_tokens",
+  "stop_sequences",
+  "thinking",
+  "metadata",
+]);
+
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
   if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
@@ -210,6 +227,8 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   const thinking = parseThinking(body);
   if (thinking) params.thinking = thinking;
   if (body.metadata !== undefined) params.extra = { metadata: body.metadata };
+  const passthrough = collectPassthrough(body, RESERVED, "anthropic");
+  if (passthrough) params.passthrough = passthrough;
   return params;
 }
 
@@ -264,7 +283,7 @@ export class AnthropicRequest extends Request {
       if (cap != null && maxTokens > cap) maxTokens = cap;
       out.max_tokens = maxTokens;
     }
-    if (p.extra) Object.assign(out, p.extra);
+    applyNonCanonical(out, p, this.family);
     return out;
   }
 

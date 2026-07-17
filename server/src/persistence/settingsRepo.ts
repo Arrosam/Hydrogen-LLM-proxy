@@ -41,6 +41,18 @@ export class SettingsRepo {
     this.allowPrivateCache = this.readAllowPrivate();
   }
 
+  /**
+   * Re-read the cached values from the table. The caches are normally kept in
+   * step by the writers, so this is only for a change made behind their back --
+   * a restore replaces the settings table wholesale, and a stale cache would
+   * leave the SSRF guard enforcing the allowlist of the instance we just
+   * overwrote.
+   */
+  reload(): void {
+    this.allowlistCache = this.readAllowlist();
+    this.allowPrivateCache = this.readAllowPrivate();
+  }
+
   get(key: string): string | undefined {
     return this.db.select().from(settings).where(eq(settings.key, key)).get()?.value;
   }

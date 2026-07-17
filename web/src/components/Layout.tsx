@@ -12,6 +12,8 @@ interface NavItem {
   labelKey: string;
   icon: string;
   end?: boolean;
+  /** Hidden from anyone who is not an admin. */
+  adminOnly?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -24,7 +26,7 @@ const NAV: NavItem[] = [
   { to: "/logs", labelKey: "nav.logs", icon: "bi-journal-text" },
   { to: "/active-requests", labelKey: "nav.activeRequests", icon: "bi-activity" },
   { to: "/users", labelKey: "nav.users", icon: "bi-people" },
-  { to: "/settings", labelKey: "nav.settings", icon: "bi-gear" },
+  { to: "/settings", labelKey: "nav.settings", icon: "bi-gear", adminOnly: true },
 ];
 
 export function Layout() {
@@ -70,7 +72,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 space-y-1 px-3 py-2">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !n.adminOnly || user?.role === "admin").map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className="nav-link">
               <i className={`bi ${n.icon} text-base`} />
               <span className="truncate">{t(n.labelKey)}</span>

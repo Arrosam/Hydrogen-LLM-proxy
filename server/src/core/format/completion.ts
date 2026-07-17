@@ -15,7 +15,18 @@ import type { GenerationParams, ResponseFormat, ThinkingLevel } from "../ir/para
 import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type ResponseData, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
-import { num, numOrUndef, boolOrUndef, strOrUndef, parseDataUrl, parseStop, safeJsonParse } from "./wire";
+import {
+  applyNonCanonical,
+  boolOrUndef,
+  capMaxTokens,
+  collectPassthrough,
+  num,
+  numOrUndef,
+  parseDataUrl,
+  parseStop,
+  safeJsonParse,
+  strOrUndef,
+} from "./wire";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -186,6 +197,37 @@ function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined
 
 // --- params --------------------------------------------------------------
 
+/** Every key this format models itself — parsed below, or emitted by `render`. */
+const RESERVED = new Set([
+  "model",
+  "messages",
+  "stream",
+  "stream_options",
+  "tools",
+  "tool_choice",
+  "temperature",
+  "top_p",
+  "top_k",
+  "min_p",
+  "max_tokens",
+  "max_completion_tokens",
+  "stop",
+  "frequency_penalty",
+  "presence_penalty",
+  "repetition_penalty",
+  "seed",
+  "n",
+  "logprobs",
+  "top_logprobs",
+  "logit_bias",
+  "response_format",
+  "parallel_tool_calls",
+  "service_tier",
+  "user",
+  "verbosity",
+  "reasoning_effort",
+]);
+
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
   const set = <K extends keyof GenerationParams>(k: K, v: GenerationParams[K] | undefined): void => {
@@ -215,16 +257,18 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
     params.verbosity = body.verbosity;
   }
   set("thinking", parseThinking(body));
+  set("passthrough", collectPassthrough(body, RESERVED, "openai_completion"));
   return params;
 }
 
 /** Map canonical params onto the OpenAI Chat Completions wire body. */
-function applyParams(out: Record<string, unknown>, p: GenerationParams): void {
+function applyParams(out: Record<string, unknown>, p: GenerationParams, cap: number | undefined): void {
   if (p.temperature != null) out.temperature = p.temperature;
   if (p.topP != null) out.top_p = p.topP;
   if (p.topK != null) out.top_k = p.topK;
   if (p.minP != null) out.min_p = p.minP;
-  if (p.maxTokens != null) out.max_tokens = p.maxTokens;
+  const maxTokens = capMaxTokens(p.maxTokens, cap);
+  if (maxTokens != null) out.max_tokens = maxTokens;
   if (p.stop && p.stop.length) out.stop = p.stop;
   if (p.frequencyPenalty != null) out.frequency_penalty = p.frequencyPenalty;
   if (p.presencePenalty != null) out.presence_penalty = p.presencePenalty;
@@ -338,7 +382,8 @@ export class OpenAICompletionRequest extends Request {
       out.tools = this.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);
-    applyParams(out, this.params);
+    const cap = target.providerMaxOutputTokens;
+    applyParams(out, this.params, cap);
     if (this.stream) {
       out.stream = true;
       out.stream_options = { include_usage: true };
@@ -346,9 +391,9 @@ export class OpenAICompletionRequest extends Request {
     if (this.params.thinking) {
       const tf = ThinkingPolicy.openai(this.params.thinking, this.params.maxTokens);
       out.reasoning_effort = tf.reasoning_effort;
-      if (tf.max_tokens != null && out.max_tokens == null) out.max_tokens = tf.max_tokens;
+      if (tf.max_tokens != null && out.max_tokens == null) out.max_tokens = capMaxTokens(tf.max_tokens, cap);
     }
-    if (this.params.extra) Object.assign(out, this.params.extra);
+    applyNonCanonical(out, this.params, this.family);
     return out;
   }
 

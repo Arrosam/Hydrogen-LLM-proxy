@@ -14,7 +14,18 @@ import type { GenerationParams, ResponseFormat, ThinkingLevel } from "../ir/para
 import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
-import { boolOrUndef, imageUrlOf, num, numOrUndef, parseDataUrl, safeJsonParse, strOrUndef } from "./wire";
+import {
+  applyNonCanonical,
+  boolOrUndef,
+  capMaxTokens,
+  collectPassthrough,
+  imageUrlOf,
+  num,
+  numOrUndef,
+  parseDataUrl,
+  safeJsonParse,
+  strOrUndef,
+} from "./wire";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -149,6 +160,25 @@ function parseThinking(raw: unknown): ThinkingLevel | undefined {
   return undefined;
 }
 
+/** Every key this format models itself — parsed above, or emitted by `render`. */
+const RESERVED = new Set([
+  "model",
+  "input",
+  "instructions",
+  "stream",
+  "store",
+  "tools",
+  "tool_choice",
+  "temperature",
+  "top_p",
+  "max_output_tokens",
+  "reasoning",
+  "text",
+  "parallel_tool_calls",
+  "service_tier",
+  "user",
+]);
+
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
   if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
@@ -161,6 +191,8 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   if (boolOrUndef(body.parallel_tool_calls) != null) params.parallelToolCalls = boolOrUndef(body.parallel_tool_calls);
   if (strOrUndef(body.service_tier) != null) params.serviceTier = strOrUndef(body.service_tier);
   if (strOrUndef(body.user) != null) params.user = strOrUndef(body.user);
+  const passthrough = collectPassthrough(body, RESERVED, "openai_responses");
+  if (passthrough) params.passthrough = passthrough;
   return params;
 }
 
@@ -252,7 +284,8 @@ export class OpenAIResponsesRequest extends Request {
       out.tools = this.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters }));
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToResponses(this.toolChoice);
-    if (p.maxTokens != null) out.max_output_tokens = p.maxTokens;
+    const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
+    if (maxTokens != null) out.max_output_tokens = maxTokens;
     if (p.temperature != null) out.temperature = p.temperature;
     if (p.topP != null) out.top_p = p.topP;
     if (p.responseFormat) out.text = responseFormatToResponses(p.responseFormat);
@@ -261,7 +294,7 @@ export class OpenAIResponsesRequest extends Request {
     if (p.user != null) out.user = p.user;
     if (this.stream) out.stream = true;
     if (p.thinking) out.reasoning = ThinkingPolicy.responses(p.thinking).reasoning;
-    if (p.extra) Object.assign(out, p.extra);
+    applyNonCanonical(out, p, this.family);
     return out;
   }
 

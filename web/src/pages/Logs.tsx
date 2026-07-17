@@ -337,8 +337,8 @@ export function Logs() {
               </div>
             )}
 
-            <PayloadBlock title={t("logs.payload.clientRequest")} raw={detail.requestPayload} view={payloadView} defaultCollapsed />
-            <PayloadBlock title={t("logs.payload.upstreamRequest")} raw={detail.upstreamRequestPayload} view={payloadView} defaultCollapsed />
+            <PayloadBlock title={t("logs.payload.clientRequest")} raw={detail.requestPayload} view={payloadView} />
+            <PayloadBlock title={t("logs.payload.upstreamRequest")} raw={detail.upstreamRequestPayload} view={payloadView} />
             <PayloadBlock title={t("logs.payload.response")} raw={detail.responsePayload} view={payloadView} />
           </div>
         )}
@@ -449,7 +449,7 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
               <AttemptsTable attempts={call.attempts} />
             </div>
           )}
-          <PayloadBlock title={t("logs.payload.request")} raw={call.request ?? null} view={view} defaultCollapsed />
+          <PayloadBlock title={t("logs.payload.request")} raw={call.request ?? null} view={view} />
           <PayloadBlock title={t("logs.payload.responseShort")} raw={call.response ?? null} view={view} />
           {(call.calls?.length ?? 0) > 0 && (
             <div>
@@ -543,7 +543,7 @@ function AttemptPathTable({
                   <tr>
                     <td colSpan={cols} className="bg-ink-950/40 p-3">
                       <div className="space-y-3">
-                        <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} defaultCollapsed />
+                        <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} />
                         <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
                       </div>
                     </td>
@@ -665,11 +665,13 @@ function HttpInfoBlock({
   );
 }
 
-function PayloadBlock({ title, raw, view, defaultCollapsed = false }: { title: string; raw: string | null; view: PayloadView; defaultCollapsed?: boolean }) {
+/** A payload with its own collapse toggle. Opens expanded: a payload you have to
+ * go looking for reads as a payload that wasn't recorded. */
+function PayloadBlock({ title, raw, view }: { title: string; raw: string | null; view: PayloadView }) {
   const { t } = useI18n();
   const parsed = useMemo(() => parsePayload(raw), [raw]);
   const showFormatted = view === "formatted" && parsed;
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <div>
       <button

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import net from "node:net";
 import { z, ZodError } from "zod";
 import { idParam, parse } from "../util/validate";
@@ -15,6 +15,9 @@ import { failureMessage } from "../core/proxy/errors";
 import { buildHeaders, modelsUrl } from "../core/upstream/endpoints";
 import { familyForProviderType } from "../core/format/family";
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
+import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
+import { PassphraseError } from "../security/passphrase";
+import { APP_VERSION } from "../util/version";
 import type { ModelServiceRow } from "../db/schema";
 
 /** Registered by the app under the /admin/api prefix. */
@@ -31,7 +34,15 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     await scoped.register((s) => logRoutes(s, c));
     await scoped.register((s) => activeRequestRoutes(s, c));
     await scoped.register((s) => settingsRoutes(s, c), { prefix: "/settings" });
+    await scoped.register((s) => backupRoutes(s, c), { prefix: "/backup" });
   });
+}
+
+/** 403 unless the caller is an admin. `action` completes "only an admin can ...". */
+function requireAdmin(req: FastifyRequest, reply: FastifyReply, action: string): boolean {
+  if (req.user?.role === "admin") return true;
+  void reply.code(403).send({ error: `only an admin can ${action}` });
+  return false;
 }
 
 // --- auth -------------------------------------------------------------------
@@ -542,11 +553,17 @@ const EnvSettingsPut = z.object({
 });
 
 async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void> {
-  // Log retention: keep only the most recent N days of request logs (0 = keep forever).
-  app.get("/log-retention", async () => ({ days: Number(c.settings.get("log_retention_days") ?? 0) || 0 }));
+  // The Settings page is admin-only, so its data is too -- with one exception,
+  // /ui-language below, which is not settings data so much as a property of the
+  // whole dashboard: every user's I18nProvider reads it to render any page at
+  // all. Gating that would leave non-admins stuck in English.
+  app.get("/log-retention", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return { days: Number(c.settings.get("log_retention_days") ?? 0) || 0 };
+  });
 
   app.put("/log-retention", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change log retention" });
+    if (!requireAdmin(req, reply, "change log retention")) return reply;
     const parsed = parse(RetentionPut, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     c.settings.set("log_retention_days", String(parsed.data.days));
@@ -562,10 +579,13 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
     return { days: parsed.data.days, pruned };
   });
 
-  app.get("/upstream-allowlist", async () => ({ entries: c.settings.allowlist() }));
+  app.get("/upstream-allowlist", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return { entries: c.settings.allowlist() };
+  });
 
   app.put("/upstream-allowlist", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can edit the upstream allowlist" });
+    if (!requireAdmin(req, reply, "edit the upstream allowlist")) return reply;
     const parsed = parse(AllowlistPut, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const entries = Array.from(new Set(parsed.data.entries.map((e) => e.trim()).filter(Boolean)));
@@ -579,7 +599,7 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
   app.get("/ui-language", async () => ({ language: c.settings.uiLanguage() }));
 
   app.put("/ui-language", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change the UI language" });
+    if (!requireAdmin(req, reply, "change the UI language")) return reply;
     const parsed = parse(UiLanguagePut, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     c.settings.setUiLanguage(parsed.data.language);
@@ -589,21 +609,24 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
   // Runtime-overridable env settings (the values the dashboard can change
   // without a restart). Boot-time env vars are the defaults; these persist on
   // top. Read-only for non-admins.
-  app.get("/env", async () => ({
-    ...c.settings.runtimeEnv(),
-    env: {
-      // Boot-time-only values, surfaced read-only (changing needs a restart).
-      nodeEnv: c.config.nodeEnv,
-      port: c.config.port,
-      host: c.config.host,
-      dataDir: c.config.dataDir,
-      adminUsername: c.config.admin.username,
-      cookieSecure: c.config.cookieSecure,
-    },
-  }));
+  app.get("/env", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return {
+      ...c.settings.runtimeEnv(),
+      env: {
+        // Boot-time-only values, surfaced read-only (changing needs a restart).
+        nodeEnv: c.config.nodeEnv,
+        port: c.config.port,
+        host: c.config.host,
+        dataDir: c.config.dataDir,
+        adminUsername: c.config.admin.username,
+        cookieSecure: c.config.cookieSecure,
+      },
+    };
+  });
 
   app.put("/env", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can change environment settings" });
+    if (!requireAdmin(req, reply, "change environment settings")) return reply;
     const parsed = parse(EnvSettingsPut, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const p = parsed.data;
@@ -612,6 +635,65 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
     if (p.simulatedStreamingTokenRate !== undefined) c.settings.setSimulatedStreamingTokenRate(p.simulatedStreamingTokenRate);
     if (p.sessionTtlMs !== undefined) c.settings.setSessionTtlMs(p.sessionTtlMs);
     return { ...c.settings.runtimeEnv() };
+  });
+}
+
+// --- backup / restore --------------------------------------------------------
+
+/** A passphrase this short is not worth the scrypt call protecting it. */
+const MIN_PASSPHRASE = 8;
+
+const BackupExport = z.object({
+  passphrase: z.string().min(MIN_PASSPHRASE, `passphrase must be at least ${MIN_PASSPHRASE} characters`),
+  includeLogs: z.boolean().optional(),
+});
+const BackupRestore = z.object({
+  passphrase: z.string().min(1, "passphrase is required"),
+  backup: z.unknown(),
+});
+
+/**
+ * A package with request logs is far larger than any other admin payload (the
+ * global cap is sized for chat requests, not for an instance's whole history),
+ * so restore gets its own limit.
+ */
+const RESTORE_BODY_LIMIT = 512 * 1024 * 1024;
+
+async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  app.post("/export", async (req, reply) => {
+    if (!requireAdmin(req, reply, "export a backup")) return reply;
+    const parsed = parse(BackupExport, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const pkg = exportBackup(c.sqlite, c.config.masterKey, {
+      passphrase: parsed.data.passphrase,
+      includeLogs: parsed.data.includeLogs ?? true,
+      appVersion: APP_VERSION,
+    });
+    return { backup: pkg };
+  });
+
+  app.post("/restore", { bodyLimit: RESTORE_BODY_LIMIT }, async (req, reply) => {
+    if (!requireAdmin(req, reply, "restore a backup")) return reply;
+    const parsed = parse(BackupRestore, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    let report;
+    try {
+      report = restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
+    } catch (e) {
+      // A bad passphrase or a malformed package is the caller's mistake, not a
+      // server fault: 400 with the reason, and the database is untouched.
+      if (e instanceof PassphraseError || e instanceof BackupError) {
+        return reply.code(400).send({ error: e.message });
+      }
+      throw e;
+    }
+    // The settings table was replaced underneath the cached allowlist.
+    c.settings.reload();
+    // The users table is gone with everything else, so this session now refers
+    // to a row that may not exist: end it and make them log in against the
+    // restored accounts.
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    return { ok: true, ...report };
   });
 }
 
