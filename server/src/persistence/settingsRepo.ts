@@ -8,6 +8,8 @@ const LOG_PAYLOAD_MAX_CHARS_KEY = "log_payload_max_chars";
 const SIMULATED_STREAMING_TOKEN_RATE_KEY = "simulated_streaming_token_rate";
 const ALLOW_PRIVATE_UPSTREAMS_KEY = "allow_private_upstreams";
 const SESSION_TTL_KEY = "session_ttl";
+/** Instance-wide session cutoff (epoch ms): sessions issued before it are dead. */
+const SESSION_EPOCH_KEY = "session_epoch";
 
 /**
  * Key/value settings, plus an in-memory cache of the SSRF-guard allowlist and
@@ -149,6 +151,18 @@ export class SettingsRepo {
 
   setSessionTtlMs(ms: number): void {
     this.set(SESSION_TTL_KEY, `${Math.round(ms / 1000)}s`);
+  }
+
+  /** The instance-wide session cutoff (epoch ms). 0 = no sessions invalidated. */
+  sessionEpochMs(): number {
+    const raw = this.get(SESSION_EPOCH_KEY);
+    const n = raw != null ? Number(raw) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /** Invalidate every existing session by moving the cutoff to `nowMs`. */
+  bumpSessionEpoch(nowMs: number): void {
+    this.set(SESSION_EPOCH_KEY, String(Math.floor(nowMs)));
   }
 
   /** Snapshot of every runtime-overridable env setting (for the settings UI). */

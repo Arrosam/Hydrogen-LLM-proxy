@@ -204,10 +204,20 @@ describe("provider max output tokens is a hard cap", () => {
     expect(OpenAICompletionRequest.construct(req).render(capped("up", 8192))).not.toHaveProperty("max_tokens");
   });
 
-  it("caps the max_tokens a thinking budget sizes for itself", () => {
-    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" });
+  it("keeps a service-imposed reasoning ceiling within the provider cap (Chat Completions)", () => {
+    // Client asked for 1024 of answer; a step imposes high thinking. The ceiling
+    // must hold both and never exceed the provider's hard cap.
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("up", 4096));
+    expect(body.max_tokens as number).toBeLessThanOrEqual(4096);
+    expect(body.reasoning_effort).toBeDefined();
+  });
+
+  it("invents no ceiling for a thinking request that named no client max", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }] });
     const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: { budget: 100_000 } })).render(capped("up", 4096));
-    expect(body.max_tokens).toBe(4096);
+    expect(body).not.toHaveProperty("max_tokens");
+    expect(body.reasoning_effort).toBe("max");
   });
 });
 
@@ -333,5 +343,46 @@ describe("Responses reasoning leaves the answer room under max_output_tokens", (
     const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "disabled" })).render(capped("gpt-5"));
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(body.max_output_tokens).toBe(1024);
+  });
+});
+
+describe("reasoning budget across families (imposed vs client-requested)", () => {
+  const capped = (upstreamModel: string, providerMaxOutputTokens?: number) => ({ upstreamModel, providerMaxOutputTokens });
+
+  it("Chat Completions: a service-imposed effort reserves answer room on top of the client max (finding 3)", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+    const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.max_tokens).toBe(1024 + 32000);
+  });
+
+  it("does NOT inflate a client's own thinking — its max already includes reasoning (finding 8)", () => {
+    // Native Responses client sends reasoning + max_output_tokens itself; no step override.
+    const req = OpenAIResponsesRequest.parse({ model: "svc", input: "hi", max_output_tokens: 8000, reasoning: { effort: "medium" } });
+    const body = OpenAIResponsesRequest.construct(req).render(capped("gpt-5"));
+    expect(body.reasoning).toEqual({ effort: "medium" });
+    expect(body.max_output_tokens).toBe(8000); // NOT 8000 + 16000
+  });
+
+  it("a client's own thinking on Chat Completions is likewise taken as-is", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 2000, reasoning_effort: "high" });
+    const body = OpenAICompletionRequest.construct(req).render(capped("gpt-5"));
+    expect(body.max_tokens).toBe(2000);
+  });
+
+  it("Anthropic: a tight provider cap drops thinking instead of exceeding it (finding 4)", () => {
+    const req = AnthropicRequest.parse({ model: "svc", max_tokens: 4096, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+    const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 1024));
+    expect(body.max_tokens as number).toBeLessThanOrEqual(1024);
+    expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("Anthropic: an imposed effort with headroom reserves answer room on top", () => {
+    const req = AnthropicRequest.parse({ model: "svc", max_tokens: 1024, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+    const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 131072));
+    expect(body.max_tokens).toBe(1024 + 32000);
+    const t = body.thinking as { budget_tokens: number };
+    expect(t.budget_tokens).toBeLessThan(body.max_tokens as number);
+    expect(t.budget_tokens).toBeGreaterThanOrEqual(1024);
   });
 });

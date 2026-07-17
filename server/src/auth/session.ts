@@ -7,6 +7,9 @@ export interface SessionPayload {
   uid: number;
   username: string;
   role: "admin" | "manager";
+  /** Issued-at, seconds since epoch (set by jwt on sign; present after verify).
+   * Used to reject sessions minted before an instance-wide invalidation. */
+  iat?: number;
 }
 
 export function signSession(payload: SessionPayload): string {
@@ -24,6 +27,7 @@ export function verifySession(token: string): SessionPayload | null {
       uid: decoded.uid,
       username: String(decoded.username),
       role: decoded.role === "admin" ? "admin" : "manager",
+      iat: typeof decoded.iat === "number" ? decoded.iat : undefined,
     };
   } catch {
     return null;

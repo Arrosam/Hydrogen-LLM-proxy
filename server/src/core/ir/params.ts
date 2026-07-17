@@ -62,6 +62,15 @@ export interface GenerationParams {
   verbosity?: "low" | "medium" | "high";
   /** Extended thinking / reasoning level. */
   thinking?: ThinkingLevel;
+  /**
+   * True when `thinking` was set by a service step/stage override rather than
+   * requested by the client. The thinking policy needs this: a service that
+   * imposes thinking must reserve answer room on top of the client's max (the
+   * client never budgeted for it), whereas a client's own thinking is already
+   * accounted for in the max it sent. Set automatically when an override patches
+   * `thinking` (see mergeParams); never sent by a client.
+   */
+  thinkingImposed?: boolean;
   /** Provider-specific params with no canonical field, passed through verbatim. */
   extra?: Record<string, unknown>;
   /**
@@ -106,6 +115,9 @@ export function mergeParams(base: GenerationParams, patch?: Partial<GenerationPa
       (out as Record<string, unknown>)[key] = v;
     }
   }
+  // A patch that sets thinking is a step/stage imposing it: mark it so the
+  // thinking policy reserves answer room the client never budgeted for.
+  if (patch.thinking !== undefined) out.thinkingImposed = true;
   return out;
 }
 

@@ -306,9 +306,9 @@ export class OpenAIResponsesRequest extends Request {
     if (p.thinking) {
       // The thinking policy owns max_output_tokens when reasoning is on: the
       // reasoning is spent out of that same ceiling, so it has to size it.
-      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
-      out.reasoning = tf.reasoning;
-      if (tf.max_output_tokens != null) out.max_output_tokens = tf.max_output_tokens;
+      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens, p.thinkingImposed === true);
+      out.reasoning = { effort: tf.effort };
+      if (tf.maxTokens != null) out.max_output_tokens = tf.maxTokens;
     } else {
       const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
       if (maxTokens != null) out.max_output_tokens = maxTokens;
@@ -471,6 +471,15 @@ export class OpenAIResponsesResponse extends Response {
           const u = (r.usage ?? {}) as Record<string, unknown>;
           if (u.input_tokens != null || u.output_tokens != null) {
             usage = { promptTokens: num(u.input_tokens), completionTokens: num(u.output_tokens), totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens) };
+          }
+          // A failed generation is not an answer: flag it incomplete so the
+          // buffered path reports a retryable failure and the streamed path
+          // aborts the connection, instead of relaying a failure as a completed
+          // response. `incomplete` (max_output_tokens) is a legitimate length
+          // stop and stays a normal finish.
+          if (type === "response.failed") {
+            yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
+            return;
           }
           yield { type: "finish", stopReason: type === "response.incomplete" ? "length" : sawToolCall ? "tool_use" : "stop", usage };
           return;

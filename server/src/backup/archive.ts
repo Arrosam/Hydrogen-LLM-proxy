@@ -47,17 +47,24 @@ type TableName = (typeof TABLES)[number];
 /** Tables holding history rather than configuration; skippable on export. */
 const LOG_TABLES: ReadonlySet<string> = new Set(["request_logs"]);
 
+/** The configuration tables a valid package must carry (everything but history).
+ * A package missing any of these is rejected, so a truncated or hand-edited file
+ * can never delete the target's accounts and leave nothing to log back in with. */
+const REQUIRED_TABLES: readonly TableName[] = TABLES.filter((t) => !LOG_TABLES.has(t));
+
 /** The provider columns that hold master-key-encrypted material. Never exported:
  * they are replaced by the sealed plaintext and rebuilt on restore. */
 const PROVIDER_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
 
 /**
- * Settings keys that describe *this* database rather than its configuration.
- * `master_key_check` is the sentinel proving which master key encrypted this
- * instance's secrets; importing a foreign one would tell the server its own key
- * is wrong and it would refuse to start. The local sentinel always stays.
+ * Settings keys that describe *this* database rather than its configuration, so
+ * they neither leave in an export nor get replaced on restore.
+ * - `master_key_check`: the sentinel proving which master key encrypted this
+ *   instance's secrets; a foreign one would make the server reject its own key.
+ * - `session_epoch`: the instance-wide session cutoff; it is bumped on restore,
+ *   so a value carried in from the source would be meaningless here.
  */
-const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check"]);
+const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check", "session_epoch"]);
 
 type Row = Record<string, unknown>;
 
@@ -91,11 +98,11 @@ function quoteIdent(name: string): string {
 }
 
 /** Export every table to a package whose secrets only `passphrase` can open. */
-export function exportBackup(
+export async function exportBackup(
   sqlite: Database.Database,
   masterKey: Buffer,
   opts: { passphrase: string; includeLogs: boolean; appVersion: string },
-): BackupPackage {
+): Promise<BackupPackage> {
   const tables: Record<string, Row[]> = {};
   const counts: Record<string, number> = {};
   const providerKeys: SecretPayload["providerKeys"] = [];
@@ -130,7 +137,7 @@ export function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = sealWithPassphrase(JSON.stringify({ providerKeys } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys } satisfies SecretPayload), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -158,6 +165,11 @@ function validate(pkg: unknown): asserts pkg is BackupPackage {
     if (!TABLES.includes(name as TableName)) throw new BackupError(`malformed backup: unknown table "${name}"`);
     if (!Array.isArray(rows)) throw new BackupError(`malformed backup: table "${name}" is not a list of rows`);
   }
+  // A config table missing entirely would let restore wipe the target's accounts
+  // and repopulate nothing -- reject before touching the database.
+  for (const t of REQUIRED_TABLES) {
+    if (!Array.isArray(p.tables[t])) throw new BackupError(`malformed backup: missing required table "${t}"`);
+  }
 }
 
 export interface RestoreReport {
@@ -171,25 +183,28 @@ export interface RestoreReport {
  * package that fails halfway leaves the instance exactly as it was rather than
  * half-overwritten.
  */
-export function restoreBackup(
+export async function restoreBackup(
   sqlite: Database.Database,
   masterKey: Buffer,
   pkg: unknown,
   passphrase: string,
-): RestoreReport {
+): Promise<RestoreReport> {
   validate(pkg);
 
   // Open the secrets first: a wrong passphrase must fail before we delete
   // anything, not after.
-  const secrets = JSON.parse(openWithPassphrase(pkg.secrets, passphrase)) as SecretPayload;
+  const secrets = JSON.parse(await openWithPassphrase(pkg.secrets, passphrase)) as SecretPayload;
   const keyById = new Map<number, string>();
   for (const { id, apiKey } of secrets.providerKeys ?? []) keyById.set(id, apiKey);
 
   const restored: Record<string, number> = {};
 
   const run = sqlite.transaction(() => {
-    // Children first, so nothing is ever orphaned mid-restore.
+    // Children first, so nothing is ever orphaned mid-restore. Only clear tables
+    // the package will repopulate: a config-only package (no request_logs) must
+    // leave the target's history in place, not wipe it and put nothing back.
     for (const table of [...TABLES].reverse()) {
+      if (!(table in pkg.tables)) continue;
       if (table === "settings") {
         const keep = [...LOCAL_ONLY_SETTINGS].map(() => "?").join(",");
         sqlite.prepare(`DELETE FROM ${quoteIdent(table)} WHERE "key" NOT IN (${keep})`).run(...LOCAL_ONLY_SETTINGS);

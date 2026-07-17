@@ -74,3 +74,28 @@ describe("fabricate + tap + withoutReasoning", () => {
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
   });
 });
+
+describe("OpenAI Responses failure vs completion", () => {
+  const CREATED = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5","created_at":1}}\n\n';
+  const TEXT = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n';
+
+  it("treats response.failed as an incomplete stream, not a finished answer", async () => {
+    const failed = 'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"server error"}}}\n\n';
+    const { incomplete } = await collectStream(parseStream("openai_responses", frames(CREATED, TEXT, failed)));
+    expect(incomplete).toBe(true);
+  });
+
+  it("treats response.completed as a complete answer", async () => {
+    const done = 'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+    const { incomplete, data } = await collectStream(parseStream("openai_responses", frames(CREATED, TEXT, done)));
+    expect(incomplete).toBe(false);
+    expect(data.stopReason).toBe("stop");
+  });
+
+  it("treats response.incomplete (length) as a normal length stop, not a failure", async () => {
+    const inc = 'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n';
+    const { incomplete, data } = await collectStream(parseStream("openai_responses", frames(CREATED, TEXT, inc)));
+    expect(incomplete).toBe(false);
+    expect(data.stopReason).toBe("length");
+  });
+});

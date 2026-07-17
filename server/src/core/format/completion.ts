@@ -261,14 +261,14 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   return params;
 }
 
-/** Map canonical params onto the OpenAI Chat Completions wire body. */
-function applyParams(out: Record<string, unknown>, p: GenerationParams, cap: number | undefined): void {
+/** Map canonical params onto the OpenAI Chat Completions wire body. `max_tokens`
+ * is set by the caller, not here, because when reasoning is on the thinking
+ * policy owns it (reasoning is billed inside the same ceiling). */
+function applyParams(out: Record<string, unknown>, p: GenerationParams): void {
   if (p.temperature != null) out.temperature = p.temperature;
   if (p.topP != null) out.top_p = p.topP;
   if (p.topK != null) out.top_k = p.topK;
   if (p.minP != null) out.min_p = p.minP;
-  const maxTokens = capMaxTokens(p.maxTokens, cap);
-  if (maxTokens != null) out.max_tokens = maxTokens;
   if (p.stop && p.stop.length) out.stop = p.stop;
   if (p.frequencyPenalty != null) out.frequency_penalty = p.frequencyPenalty;
   if (p.presencePenalty != null) out.presence_penalty = p.presencePenalty;
@@ -383,17 +383,23 @@ export class OpenAICompletionRequest extends Request {
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);
     const cap = target.providerMaxOutputTokens;
-    applyParams(out, this.params, cap);
+    const p = this.params;
+    applyParams(out, p);
     if (this.stream) {
       out.stream = true;
       out.stream_options = { include_usage: true };
     }
-    if (this.params.thinking) {
-      const tf = ThinkingPolicy.openai(this.params.thinking, this.params.maxTokens);
-      out.reasoning_effort = tf.reasoning_effort;
-      if (tf.max_tokens != null && out.max_tokens == null) out.max_tokens = capMaxTokens(tf.max_tokens, cap);
+    if (p.thinking) {
+      // Reasoning is billed inside max_tokens on reasoning models, so the policy
+      // sizes the ceiling to hold the reasoning and still leave the answer room.
+      const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap, p.thinkingImposed === true);
+      out.reasoning_effort = tf.effort;
+      if (tf.maxTokens != null) out.max_tokens = tf.maxTokens;
+    } else {
+      const maxTokens = capMaxTokens(p.maxTokens, cap);
+      if (maxTokens != null) out.max_tokens = maxTokens;
     }
-    applyNonCanonical(out, this.params, this.family);
+    applyNonCanonical(out, p, this.family);
     return out;
   }
 

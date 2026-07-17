@@ -214,7 +214,6 @@ const RESERVED = new Set([
   "max_tokens",
   "stop_sequences",
   "thinking",
-  "metadata",
 ]);
 
 function parseParams(body: Record<string, unknown>): GenerationParams {
@@ -226,7 +225,9 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   if (Array.isArray(body.stop_sequences)) params.stop = body.stop_sequences.map(String);
   const thinking = parseThinking(body);
   if (thinking) params.thinking = thinking;
-  if (body.metadata !== undefined) params.extra = { metadata: body.metadata };
+  // `metadata` (and any other unmodeled key) rides the family-scoped passthrough,
+  // not `extra`: it is an Anthropic-shaped field, so it must reach only Anthropic
+  // providers -- `extra` applies to every family and would leak it to OpenAI.
   const passthrough = collectPassthrough(body, RESERVED, "anthropic");
   if (passthrough) params.passthrough = passthrough;
   return params;
@@ -275,7 +276,7 @@ export class AnthropicRequest extends Request {
     if (p.thinking) {
       // The thinking policy also owns max_tokens: it fits the budget under the
       // client's requested max and the provider's hard cap.
-      const tf = ThinkingPolicy.anthropic(p.thinking, p.maxTokens, cap);
+      const tf = ThinkingPolicy.anthropic(p.thinking, p.maxTokens, cap, p.thinkingImposed === true);
       out.thinking = tf.thinking;
       out.max_tokens = tf.max_tokens;
     } else {

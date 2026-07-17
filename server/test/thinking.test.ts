@@ -78,9 +78,13 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
     expect((out.thinking as { budget_tokens: number }).budget_tokens).toBe(20000 - 4096);
   });
 
-  it("guarantees max_tokens > budget even for a tiny client ceiling", () => {
+  it("drops thinking rather than exceed a tiny client ceiling", () => {
+    // A ceiling that cannot hold even the minimum thinking budget must not be
+    // inflated past what the client asked (the old code emitted max_tokens 1025
+    // for maxTokens 800); thinking is turned off and the answer gets the 800.
     const out = anthropic({ thinking: "max", maxTokens: 800 });
-    expect(out.max_tokens as number).toBeGreaterThan((out.thinking as { budget_tokens: number }).budget_tokens);
+    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(out.max_tokens).toBe(800);
   });
 
   it("fits the budget under the provider's hard output cap", () => {

@@ -5,7 +5,7 @@ import { idParam, parse } from "../util/validate";
 import { asMillis } from "../util/time";
 import type { Container } from "../composition/container";
 import { requireSession } from "../auth/middleware";
-import { cookieOptions, resolveCookieSecure, SESSION_COOKIE, signSession } from "../auth/session";
+import { cookieOptions, resolveCookieSecure, SESSION_COOKIE, signSession, type SessionPayload } from "../auth/session";
 import { DEFAULT_ADMIN_PASSWORD } from "../db/bootstrap";
 import { isAgent, summarizeService, type ServiceDef } from "../execution/definition";
 import { ServiceValidationError } from "../execution/serviceValidator";
@@ -22,10 +22,15 @@ import type { ModelServiceRow } from "../db/schema";
 
 /** Registered by the app under the /admin/api prefix. */
 export async function adminRoutes(app: FastifyInstance, c: Container): Promise<void> {
-  await app.register((scoped) => authRoutes(scoped, c));
+  // One guard instance, shared by every authenticated route. Built once here so
+  // the session-epoch floor cannot be wired into some routes and forgotten in
+  // others (a forgotten one would silently skip post-restore invalidation).
+  const sessionGuard = requireSession(c.users, () => c.settings.sessionEpochMs());
+
+  await app.register((scoped) => authRoutes(scoped, c, sessionGuard));
 
   await app.register(async (scoped) => {
-    scoped.addHook("preHandler", requireSession(c.users));
+    scoped.addHook("preHandler", sessionGuard);
     await scoped.register((s) => userRoutes(s, c), { prefix: "/users" });
     await scoped.register((s) => providerRoutes(s, c), { prefix: "/providers" });
     await scoped.register((s) => catalogRoutes(s, c));
@@ -38,8 +43,13 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
   });
 }
 
-/** 403 unless the caller is an admin. `action` completes "only an admin can ...". */
-function requireAdmin(req: FastifyRequest, reply: FastifyReply, action: string): boolean {
+/** 403 unless the caller is an admin. `action` completes "only an admin can ...".
+ * A type guard, so a route can use `req.user` after it without a non-null cast. */
+function requireAdmin(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  action: string,
+): req is FastifyRequest & { user: SessionPayload } {
   if (req.user?.role === "admin") return true;
   void reply.code(403).send({ error: `only an admin can ${action}` });
   return false;
@@ -53,7 +63,7 @@ const ChangePasswordSchema = z.object({
   currentPassword: z.string().optional(),
 });
 
-async function authRoutes(app: FastifyInstance, c: Container): Promise<void> {
+async function authRoutes(app: FastifyInstance, c: Container, sessionGuard: ReturnType<typeof requireSession>): Promise<void> {
   app.get("/setup-info", async () => {
     const hint = c.users.initialCredentialHint();
     return { initial: hint ? { username: hint.username, password: DEFAULT_ADMIN_PASSWORD } : null };
@@ -74,13 +84,13 @@ async function authRoutes(app: FastifyInstance, c: Container): Promise<void> {
     return { ok: true };
   });
 
-  app.get("/me", { preHandler: requireSession(c.users) }, async (req, reply) => {
+  app.get("/me", { preHandler: sessionGuard }, async (req, reply) => {
     const user = req.user ? c.users.get(req.user.uid) : undefined;
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     return { user: c.users.toPublic(user) };
   });
 
-  app.post("/change-password", { preHandler: requireSession(c.users) }, async (req, reply) => {
+  app.post("/change-password", { preHandler: sessionGuard }, async (req, reply) => {
     const parsed = parse(ChangePasswordSchema, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const result = await c.users.changeOwnPassword(req.user!.uid, parsed.data.newPassword, parsed.data.currentPassword);
@@ -443,7 +453,7 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/", async () => ({ tokens: c.tokens.list().map((t) => c.tokens.toPublic(t)) }));
 
   app.post("/", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can issue tokens" });
+    if (!requireAdmin(req, reply, "issue tokens")) return reply;
     const parsed = parse(TokenCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { token, secret } = c.tokens.create({ ...parsed.data, ownerUserId: req.user.uid });
@@ -507,7 +517,7 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
 
   // Clear the entire request log (and reclaim the file space).
   app.delete("/logs", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can clear logs" });
+    if (!requireAdmin(req, reply, "clear logs")) return reply;
     const deleted = c.logs.deleteAll();
     try {
       c.sqlite.exec("VACUUM");
@@ -664,7 +674,7 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
     if (!requireAdmin(req, reply, "export a backup")) return reply;
     const parsed = parse(BackupExport, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const pkg = exportBackup(c.sqlite, c.config.masterKey, {
+    const pkg = await exportBackup(c.sqlite, c.config.masterKey, {
       passphrase: parsed.data.passphrase,
       includeLogs: parsed.data.includeLogs ?? true,
       appVersion: APP_VERSION,
@@ -678,7 +688,7 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     let report;
     try {
-      report = restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
+      report = await restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
     } catch (e) {
       // A bad passphrase or a malformed package is the caller's mistake, not a
       // server fault: 400 with the reason, and the database is untouched.
@@ -689,9 +699,12 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
     }
     // The settings table was replaced underneath the cached allowlist.
     c.settings.reload();
-    // The users table is gone with everything else, so this session now refers
-    // to a row that may not exist: end it and make them log in against the
-    // restored accounts.
+    // The users table is gone with everything else, so EVERY existing session now
+    // refers to a row that may not exist (or worse, a different account at the
+    // same id). Invalidate them all instance-wide, not just this caller's cookie:
+    // move the session cutoff past every token issued so far, then clear the
+    // caller's own cookie so they re-authenticate against the restored accounts.
+    c.settings.bumpSessionEpoch(Date.now());
     reply.clearCookie(SESSION_COOKIE, { path: "/" });
     return { ok: true, ...report };
   });

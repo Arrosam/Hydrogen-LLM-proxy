@@ -1320,7 +1320,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     let raw = DICTS[language][key] ?? DICTS.en[key] ?? key;
     if (params) {
       for (const [k, v] of Object.entries(params)) {
-        raw = raw.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+        // Function replacer, not a string: a value like a backup filename can
+        // contain $&, $', $` sequences that String.replace would otherwise treat
+        // as special patterns and mangle the interpolated text.
+        raw = raw.replace(new RegExp(`\\{${k}\\}`, "g"), () => String(v));
       }
     }
     return raw;
