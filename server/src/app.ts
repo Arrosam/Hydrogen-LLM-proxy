@@ -9,6 +9,7 @@ import { resolveWebDir } from "./util/paths";
 import type { Container } from "./composition/container";
 import { adminRoutes } from "./transport/adminRoutes";
 import { ProxyController } from "./transport/proxyController";
+import { MediaController } from "./transport/mediaController";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB (allow image payloads)
 
@@ -44,7 +45,11 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   // way to tell whether a fix is actually running.
   app.get("/healthz", async () => ({ status: "ok", build: process.env.GIT_SHA || "dev" }));
 
-  new ProxyController({
+  // Speech-to-text passthrough forwards multipart bodies verbatim; buffer them
+  // raw (Fastify has no default parser for this content type).
+  app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
+
+  const proxyDeps = {
     services: c.services,
     factory: c.factory,
     tokens: c.tokens,
@@ -55,7 +60,9 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     activeRequests: c.activeRequests,
     streamCommitGraceMs: cfg.streamCommitGraceMs,
     streamPingIntervalMs: cfg.streamPingIntervalMs,
-  }).register(app);
+  };
+  new ProxyController(proxyDeps).register(app);
+  new MediaController({ ...proxyDeps, providers: c.providers }).register(app);
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
 

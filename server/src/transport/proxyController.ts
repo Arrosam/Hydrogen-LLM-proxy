@@ -3,7 +3,7 @@ import type { ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
-import { buildErrorBody, buildErrorFrame, extractUpstreamMessage, failureMessage, failureStatus, pingFrame } from "../core/proxy/errors";
+import { buildErrorBody, buildErrorFrame, failureMessage, failureStatus, pingFrame } from "../core/proxy/errors";
 import {
   newAccumulator,
   tapStream,
@@ -13,8 +13,7 @@ import {
 import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
-import { isAgent } from "../execution/definition";
-import { buildHeaders, embeddingsUrl } from "../core/upstream/endpoints";
+import { isChatPipeline, serviceCategory } from "../execution/definition";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import { asMillis } from "../util/time";
@@ -196,9 +195,6 @@ export class ProxyController {
     app.post("/v1/responses", { preHandler: requireClientToken(tokens, "openai_responses") }, (req, reply) =>
       this.handleChat(req, reply, "openai_responses"),
     );
-    app.post("/v1/embeddings", { preHandler: requireClientToken(tokens, "openai_completion") }, (req, reply) =>
-      this.handleEmbeddings(req, reply),
-    );
     app.get(
       "/v1/models",
       {
@@ -249,6 +245,19 @@ export class ProxyController {
       });
       return this.replyError(reply, ingress, 403, `This token is not allowed to use '${serviceName}'.`);
     }
+
+    // Media passthrough categories (image/tts/embedding/...) have their own
+    // endpoints; the chat pipeline serves chat and ocr services.
+    try {
+      const category = serviceCategory(this.deps.services.def(service));
+      if (!isChatPipeline(category)) {
+        this.deps.logger.record({
+          traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
+          httpStatus: 400, http, latencyMs: 0, error: `'${serviceName}' is a ${category} service`,
+        });
+        return this.replyError(reply, ingress, 400, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
+      }
+    } catch { /* an unparsable definition falls through to the 500 below */ }
 
     const started = Date.now();
     let executor;
@@ -564,60 +573,5 @@ export class ProxyController {
       object: "list",
       data: services.map((m) => ({ id: m.name, object: "model", created: Math.floor(created(m) / 1000), owned_by: "hydrogen" })),
     };
-  }
-
-  private async handleEmbeddings(req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
-    const token = req.clientToken!;
-    const http = httpInfo(req);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const serviceName = String(body.model ?? "");
-    const traceId = genId("trace");
-
-    const service = this.deps.services.getByName(serviceName);
-    if (!service || !service.enabled) return this.replyError(reply, "openai_completion", 404, `Model '${serviceName}' not found.`);
-    if (!tokenAllowsService(token, service.id)) {
-      return this.replyError(reply, "openai_completion", 403, `This token is not allowed to use '${serviceName}'.`);
-    }
-
-    let def;
-    try {
-      def = this.deps.services.def(service);
-    } catch {
-      return this.replyError(reply, "openai_completion", 500, `Model '${serviceName}' has an invalid definition.`);
-    }
-    if (isAgent(def)) return this.replyError(reply, "openai_completion", 400, "Embeddings are not supported for Micro Agents.");
-
-    const first = def.steps[0];
-    const res = this.deps.catalog.resolve(first.model, first.provider);
-    if (!res.ok) return this.replyError(reply, "openai_completion", 502, `No usable upstream for '${serviceName}'.`);
-    if (res.target.family === "anthropic") {
-      return this.replyError(reply, "openai_completion", 400, "Embeddings are only supported on OpenAI-compatible providers.");
-    }
-
-    const started = Date.now();
-    const upstreamBody = { ...body, model: res.target.upstreamModel };
-    const r = await this.deps.transport.postJson(
-      embeddingsUrl(res.target.upstream),
-      buildHeaders(res.target.upstream),
-      upstreamBody,
-      { timeoutMs: def.timeoutMs },
-    );
-    const usageObj = (r.json as { usage?: { prompt_tokens?: number; total_tokens?: number } } | undefined)?.usage;
-    const usage: Usage = {
-      promptTokens: usageObj?.prompt_tokens ?? 0,
-      completionTokens: 0,
-      totalTokens: usageObj?.total_tokens ?? usageObj?.prompt_tokens ?? 0,
-    };
-    this.deps.logger.record({
-      traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
-      servedModel: r.status < 400 ? res.target.modelName : null, servedProvider: r.status < 400 ? res.target.providerName : null,
-      ingress: "openai_completion", egress: "openai_completion", streaming: false, httpStatus: r.status, http,
-      upstreamRequest: upstreamBody,
-      responseBody: r.status < 400 ? { ok: true } : r.json, usage, latencyMs: Date.now() - started,
-      attempts: 1, attemptPath: [{ step: 1, attempt: 1, model: first.model, provider: first.provider, status: r.status, kind: r.status < 400 ? "ok" : "http", latencyMs: Date.now() - started }],
-      error: r.status >= 400 ? extractUpstreamMessage(r.json) ?? `upstream ${r.status}` : null,
-    });
-    this.deps.usage.record(token.id, usage.totalTokens);
-    return reply.code(r.status).send(r.json ?? {});
   }
 }

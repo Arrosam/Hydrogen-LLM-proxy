@@ -95,7 +95,19 @@ export interface ServiceStep {
   overrides?: Overrides;
 }
 
+/** What kind of API a Model Service serves. Omitted = "chat". "ocr" runs the
+ * chat pipeline too (OCR models are vision chat models) and IS usable inside
+ * a Micro Agent; the other non-chat categories are OpenAI-style passthrough
+ * endpoints and are NOT. Mirrors the server's ServiceCategorySchema. */
+export type ServiceCategory = "chat" | "ocr" | "image" | "video" | "tts" | "stt" | "embedding" | "rerank";
+
+/** Categories served by the translated chat pipeline (usable in Micro Agents). */
+export function isChatPipelineCategory(c: ServiceCategory): boolean {
+  return c === "chat" || c === "ocr";
+}
+
 export interface ServiceSteps {
+  category?: ServiceCategory;
   timeoutMs: number;
   steps: ServiceStep[];
   reliableStreaming?: boolean;
@@ -152,7 +164,8 @@ export interface AgentOcr {
 }
 
 export interface AgentDef {
-  kind: "agent";
+  /** "micro_agent" is the canonical discriminant; "agent" is the legacy one the editor used to emit. */
+  kind: "micro_agent" | "agent";
   timeoutMs: number;
   stages: AgentStage[];
   output?: string;
@@ -164,7 +177,14 @@ export interface AgentDef {
 export type ServiceDef = ServiceSteps | AgentDef;
 
 export function isAgentDef(def: ServiceDef | null | undefined): def is AgentDef {
-  return !!def && (def as AgentDef).kind === "agent";
+  const kind = def && (def as AgentDef).kind;
+  return kind === "micro_agent" || kind === "agent";
+}
+
+/** The effective category of a definition (agents are always "chat"). */
+export function serviceCategoryOf(def: ServiceDef | null | undefined): ServiceCategory {
+  if (!def || isAgentDef(def)) return "chat";
+  return def.category ?? "chat";
 }
 
 export interface ModelService {

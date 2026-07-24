@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
-import { isAgentDef } from "../types";
+import { isAgentDef, isChatPipelineCategory, serviceCategoryOf } from "../types";
 import { Toggle } from "./common";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { selectAll } from "../lib/input";
+import { useListKeys } from "../lib/useListKeys";
 
 function newContextBlock(value: string, earlier: string[]): AgentContextBlock {
   switch (value) {
@@ -55,22 +56,28 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
   const setStages = (next: AgentStage[], nextOutput = output) => onChange(next, nextOutput);
   const patch = (i: number, p: Partial<AgentStage>) => setStages(stages.map((s, idx) => (idx === i ? { ...s, ...p } : s)));
 
+  const stageKeys = useListKeys(stages.length);
+
   const addStage = () => {
     const name = uniqueName(stages, "stage");
     const first = services[0]?.name;
+    stageKeys.insert(stages.length);
     setStages([...stages, { name, input: [], ...(first ? { service: first } : {}) }]);
   };
   const removeStage = (i: number) => {
     const gone = stages[i].name;
+    stageKeys.remove(i);
     setStages(stages.filter((_, idx) => idx !== i), output === gone ? "" : output);
   };
   const duplicateStage = (i: number) => {
     const copy = JSON.parse(JSON.stringify(stages[i])) as AgentStage;
     copy.name = uniqueName(stages, `${stages[i].name}_copy`);
+    stageKeys.insert(i + 1);
     setStages([...stages.slice(0, i + 1), copy, ...stages.slice(i + 1)]);
   };
   const onDrop = (i: number) => {
     if (dragIndex === null || dragIndex === i) return;
+    stageKeys.move(dragIndex, i);
     const next = [...stages];
     const [moved] = next.splice(dragIndex, 1);
     next.splice(i, 0, moved);
@@ -102,7 +109,7 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
       <div className="space-y-2">
         {stages.map((stage, i) => (
           <div
-            key={i}
+            key={stageKeys.keys[i]}
             onDragOver={(e) => e.preventDefault()}
             onDrop={() => onDrop(i)}
             className="rounded-xl border border-ink-700 bg-ink-850/70 p-3"
@@ -179,7 +186,9 @@ function StageBody({
   const [advanced, setAdvanced] = useState(false);
   const model = isModelStage(stage);
   const legacyInline = !stage.service && !!(stage.steps && stage.steps.length);
-  const resilienceServices = services.filter((m) => !isAgentDef(m.steps));
+  // Media passthrough categories (image/tts/embedding/...) can't run inside an
+  // agent; chat and ocr services both speak the chat pipeline and can.
+  const resilienceServices = services.filter((m) => !isAgentDef(m.steps) && isChatPipelineCategory(serviceCategoryOf(m.steps)));
   const agentServices = services.filter((m) => isAgentDef(m.steps));
   const setBlocks = (blocks: AgentContextBlock[]) => onPatch({ input: blocks });
   const setTransitions = (transitions: AgentTransition[]) => onPatch({ transitions });
@@ -279,15 +288,6 @@ function StageBody({
           {advanced && (
             <div className="mt-2 space-y-3 rounded-lg border border-ink-800 bg-ink-950/40 p-3">
               <div>
-                <label className="label">{t("stageEditor.systemOverride")}</label>
-                <textarea
-                  className="input min-h-[56px] font-mono text-xs"
-                  value={stage.system ?? ""}
-                  onChange={(e) => onPatch({ system: e.target.value || undefined })}
-                  placeholder={t("stageEditor.systemPlaceholder")}
-                />
-              </div>
-              <div>
                 <label className="label">{t("stageEditor.tools")}</label>
                 <select
                   className="input"
@@ -302,8 +302,6 @@ function StageBody({
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <NumOverride label={t("stageEditor.temperature")} value={stage.temperature} onChange={(v) => onPatch({ temperature: v })} decimal />
-                <NumOverride label={t("stageEditor.maxTokens")} value={stage.maxTokens} onChange={(v) => onPatch({ maxTokens: v })} />
                 <NumOverride label={t("stageEditor.timeoutMs")} value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
               </div>
               <OverridesEditor
@@ -567,25 +565,18 @@ function ContextBlockRow({
   );
 }
 
-function cleanNumeric(raw: string, decimal: boolean): string {
-  let s = raw.replace(decimal ? /[^\d.]/g : /[^\d]/g, "");
-  if (decimal) {
-    const dot = s.indexOf(".");
-    if (dot >= 0) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, ""); // keep only the first dot
-  }
-  return s;
+function cleanNumeric(raw: string): string {
+  return raw.replace(/[^\d]/g, "");
 }
 
 function NumOverride({
   label,
   value,
   onChange,
-  decimal,
 }: {
   label: string;
   value: number | undefined;
   onChange: (v: number | undefined) => void;
-  decimal?: boolean;
 }) {
   const { t } = useI18n();
   // Hold the raw text so intermediate values ("0.", "0.70") aren't collapsed by
@@ -605,12 +596,12 @@ function NumOverride({
       <input
         className="input"
         type="text"
-        inputMode="decimal"
+        inputMode="numeric"
         value={text}
         placeholder={t("stageEditor.inheritPlaceholder")}
         onFocus={selectAll}
         onChange={(e) => {
-          const cleaned = cleanNumeric(e.target.value, !!decimal);
+          const cleaned = cleanNumeric(e.target.value);
           setText(cleaned);
           if (cleaned.trim() === "") return onChange(undefined);
           const n = Number(cleaned);
@@ -680,8 +671,9 @@ export function OcrEditor({
   const enabled = !!ocr;
   const legacyInline = enabled && !ocr.service && !!(ocr.steps && ocr.steps.length);
   const patch = (p: Partial<AgentOcr>) => onChange({ ...(ocr ?? {}), ...p });
-  // OCR is a single vision-model call — only resilience services, never Micro Agents.
-  const resilienceServices = services.filter((m) => !isAgentDef(m.steps));
+  // The OCR pre-pass is a single vision-model call — chat or ocr resilience
+  // services (an "ocr" service is the natural pick), never Micro Agents.
+  const resilienceServices = services.filter((m) => !isAgentDef(m.steps) && isChatPipelineCategory(serviceCategoryOf(m.steps)));
 
   return (
     <div className="rounded-xl border border-ink-700 bg-ink-850/70 p-3">
@@ -746,8 +738,6 @@ export function OcrEditor({
                 </p>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <NumOverride label={t("stageEditor.temperature")} value={ocr.temperature} onChange={(v) => patch({ temperature: v })} decimal />
-                <NumOverride label={t("stageEditor.maxTokens")} value={ocr.maxTokens} onChange={(v) => patch({ maxTokens: v })} />
                 <NumOverride label={t("stageEditor.timeoutMs")} value={ocr.timeoutMs} onChange={(v) => patch({ timeoutMs: v })} />
               </div>
               <OverridesEditor

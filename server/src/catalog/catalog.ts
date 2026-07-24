@@ -14,7 +14,9 @@ export interface ResolvedTarget {
   providerMaxOutputTokens?: number;
   modelName: string;
   providerName: string;
-  /** The materialized provider (for embeddings passthrough / model listing). */
+  /** The provider's row id (media passthrough encodes it into video job ids). */
+  providerId: number;
+  /** The materialized provider (for media passthrough / model listing). */
   upstream: UpstreamProvider;
 }
 
@@ -66,6 +68,7 @@ export class Catalog {
         providerMaxOutputTokens: provider.maxOutputTokens ?? undefined,
         modelName: model.name,
         providerName: provider.name,
+        providerId: provider.id,
         upstream,
       },
     };

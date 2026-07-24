@@ -7,6 +7,7 @@ import { OcrEditor, StageEditor } from "./StageEditor";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
+import { useListKeys } from "../lib/useListKeys";
 import type {
   AdvanceTrigger,
   AgentDef,
@@ -15,15 +16,28 @@ import type {
   Mapping,
   Model,
   ModelService,
+  Overrides,
+  ServiceCategory,
   ServiceDef,
   ServiceStep,
   ServiceSteps,
   Provider,
   Trigger,
 } from "../types";
-import { isAgentDef } from "../types";
+import { isAgentDef, isChatPipelineCategory } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
+
+/** The client-facing endpoint each media passthrough category is served on.
+ * (chat and ocr both run the chat pipeline on /v1/chat/completions.) */
+const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, string> = {
+  image: "/v1/images/generations",
+  video: "/v1/videos",
+  tts: "/v1/audio/speech",
+  stt: "/v1/audio/transcriptions",
+  embedding: "/v1/embeddings",
+  rerank: "/v1/rerank",
+};
 
 /**
  * One selectable trigger: `value` is the wire enum the server validates against,
@@ -68,6 +82,30 @@ function blankStep(model: string, provider: string): ServiceStep {
   return { model, provider, retry: { on: [], maxAttempts: 1, intervalMs: 0 } };
 }
 
+/**
+ * The editor only renders `overrides` (parameter/content pairs), so legacy flat
+ * fields are folded into it whenever a definition enters the editor (load AND
+ * raw-JSON sync) — otherwise they would keep applying while being invisible.
+ * Existing `overrides` keys win, matching the server's merge precedence in
+ * stepOverrides/stageOverrides.
+ */
+function foldLegacy<T extends { overrides?: Overrides }>(obj: T, keys: readonly (string & keyof T)[]): T {
+  const flat: Record<string, unknown> = {};
+  const rest: Record<string, unknown> = { ...obj };
+  for (const k of keys) {
+    if (rest[k] !== undefined) {
+      flat[k] = rest[k];
+      delete rest[k];
+    }
+  }
+  if (!Object.keys(flat).length) return obj;
+  return { ...rest, overrides: { ...flat, ...(obj.overrides ?? {}) } } as T;
+}
+
+const foldStage = (s: AgentStage): AgentStage => foldLegacy(s, ["system", "temperature", "maxTokens", "thinking"]);
+const foldOcr = (o: AgentOcr | undefined): AgentOcr | undefined => (o ? foldLegacy(o, ["temperature", "maxTokens"]) : o);
+const foldStep = (s: ServiceStep): ServiceStep => foldLegacy(s, ["thinking"]);
+
 function toggle<T>(arr: T[] | undefined, val: T): T[] {
   const a = arr ?? [];
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
@@ -81,6 +119,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [enabled, setEnabled] = useState(true);
   const [timeoutMs, setTimeoutMs] = useState(60000);
   const [steps, setSteps] = useState<ServiceStep[]>([]);
+  const stepKeys = useListKeys(steps.length);
+  const [category, setCategory] = useState<ServiceCategory>("chat");
   const [kind, setKind] = useState<"resilience" | "chain">("resilience");
   const [stages, setStages] = useState<AgentStage[]>([]);
   const [output, setOutput] = useState("");
@@ -113,25 +153,19 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setTimeoutMs(service.steps?.timeoutMs ?? 60000);
       if (isAgentDef(service.steps)) {
         setKind("chain");
-        setStages((service.steps.stages ?? []).map((s) => {
-          if (s.thinking === undefined) return s;
-          const { thinking, ...rest } = s;
-          return { ...rest, overrides: { ...(rest.overrides ?? {}), thinking } };
-        }));
+        setStages((service.steps.stages ?? []).map(foldStage));
         setOutput(service.steps.output ?? "");
-        setOcr(service.steps.ocr);
+        setOcr(foldOcr(service.steps.ocr));
         setSteps([]);
+        setCategory("chat");
         setReliableStreaming(false);
       } else {
         setKind("resilience");
-        setSteps((service.steps as ServiceSteps)?.steps.map((s) => {
-          if (s.thinking === undefined) return s;
-          const { thinking, ...rest } = s;
-          return { ...rest, overrides: { ...(rest.overrides ?? {}), thinking } };
-        }) ?? []);
+        setSteps((service.steps as ServiceSteps)?.steps.map(foldStep) ?? []);
         setStages([]);
         setOutput("");
         setOcr(undefined);
+        setCategory((service.steps as ServiceSteps)?.category ?? "chat");
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
     } else {
@@ -146,6 +180,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setStages([]);
       setOutput("");
       setOcr(undefined);
+      setCategory("chat");
       setReliableStreaming(false);
     }
     setRaw(false);
@@ -155,8 +190,13 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
-      : ({ timeoutMs, steps, ...(reliableStreaming ? { reliableStreaming: true } : {}) } as ServiceSteps);
+      ? ({ kind: "micro_agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
+      : ({
+          timeoutMs,
+          steps,
+          ...(category !== "chat" ? { category } : {}),
+          ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
+        } as ServiceSteps);
 
   const patchStep = (i: number, patch: Partial<ServiceStep>) =>
     setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
@@ -171,10 +211,12 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const addStep = () => {
     const model = models[0]?.name ?? "";
     const provider = providersForModel(model)[0] ?? "";
+    stepKeys.insert(steps.length);
     setSteps((s) => [...s, blankStep(model, provider)]);
   };
 
   const duplicateStep = (i: number) => {
+    stepKeys.insert(i + 1);
     setSteps((s) => {
       const copy = JSON.parse(JSON.stringify(s[i])) as ServiceStep;
       const alt = providersForModel(copy.model).filter((p) => p !== copy.provider);
@@ -183,10 +225,14 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     });
   };
 
-  const removeStep = (i: number) => setSteps((s) => s.filter((_, idx) => idx !== i));
+  const removeStep = (i: number) => {
+    stepKeys.remove(i);
+    setSteps((s) => s.filter((_, idx) => idx !== i));
+  };
 
   const onDrop = (i: number) => {
     if (dragIndex === null || dragIndex === i) return;
+    stepKeys.move(dragIndex, i);
     setSteps((s) => {
       const next = [...s];
       const [moved] = next.splice(dragIndex, 1);
@@ -202,13 +248,15 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setTimeoutMs(parsed.timeoutMs ?? 60000);
       if (isAgentDef(parsed)) {
         setKind("chain");
-        setStages(parsed.stages ?? []);
+        setStages((parsed.stages ?? []).map(foldStage));
         setOutput(parsed.output ?? "");
-        setOcr(parsed.ocr);
+        setOcr(foldOcr(parsed.ocr));
+        setCategory("chat");
         setReliableStreaming(false);
       } else {
         setKind("resilience");
-        setSteps((parsed as ServiceSteps).steps ?? []);
+        setSteps(((parsed as ServiceSteps).steps ?? []).map(foldStep));
+        setCategory((parsed as ServiceSteps).category ?? "chat");
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       return parsed;
@@ -341,13 +389,33 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           <label className="label">{t("serviceEditor.descriptionLabel")}</label>
           <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
+        {kind === "resilience" && (
+          <div>
+            <label className="label">{t("serviceEditor.categoryLabel")}</label>
+            <select className="input w-auto" value={category} onChange={(e) => setCategory(e.target.value as ServiceCategory)}>
+              {(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"] as const).map((c) => (
+                <option key={c} value={c}>{t(`serviceEditor.category.${c}`)}</option>
+              ))}
+            </select>
+            {category === "ocr" && (
+              <p className="mt-1 text-[11px] text-ink-600">
+                {t("serviceEditor.categoryHintOcr")}
+              </p>
+            )}
+            {category !== "chat" && category !== "ocr" && (
+              <p className="mt-1 text-[11px] text-ink-600">
+                {t("serviceEditor.categoryHint", { endpoint: CATEGORY_ENDPOINTS[category] })}
+              </p>
+            )}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
           <Toggle checked={enabled} onChange={setEnabled} label={t("serviceEditor.enabled")} />
-          {kind === "resilience" && (
+          {kind === "resilience" && isChatPipelineCategory(category) && (
             <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label={t("serviceEditor.reliableStreaming")} />
           )}
         </div>
-        {kind === "resilience" && reliableStreaming && (
+        {kind === "resilience" && isChatPipelineCategory(category) && reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
             {t("serviceEditor.reliableStreamingDescription")}
           </p>
@@ -406,7 +474,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               {steps.map((step, i) => {
                 const provOptions = providersForModel(step.model);
                 return (
-                  <div key={i}>
+                  <div key={stepKeys.keys[i]}>
                     <div
                       onDragOver={(e) => e.preventDefault()}
                       onDrop={() => onDrop(i)}

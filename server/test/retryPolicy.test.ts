@@ -9,8 +9,8 @@
  *   EP  Equivalence Partitioning — the retry-trigger classes (matching status,
  *       non-matching status, "timeout", catch-all "error"), and the three
  *       idempotency classes.
- *   BVA Boundary Value Analysis — retry.maxAttempts at 1 / 2 / 19 / 20 and the
- *       invalid 0 / 21; computeRetryDelay at attempt 1 / 2 and at the backoff
+ *   BVA Boundary Value Analysis — retry.maxAttempts at 1 / 2 / 99 / 100 and the
+ *       invalid 0 / 101; computeRetryDelay at attempt 1 / 2 and at the backoff
  *       cap; jitter at its 0 and near-1 extremes.
  *   DT  Decision Table — the four conditions that decide "retry or not".
  *   ST  State Transition — walking the step chain under `advanceOn`.
@@ -95,11 +95,11 @@ describe("EP: retry.on trigger classes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BVA — retry.maxAttempts, at and around its schema bounds (min 1, max 20)
+// BVA — retry.maxAttempts, at and around its schema bounds (min 1, max 100)
 // ---------------------------------------------------------------------------
 
 describe("BVA: retry.maxAttempts boundaries", () => {
-  for (const maxAttempts of [1, 2, 19, 20]) {
+  for (const maxAttempts of [1, 2, 99, 100]) {
     it(`maxAttempts=${maxAttempts} makes exactly ${maxAttempts} attempt(s)`, async () => {
       const def = chain([{ model: "m", provider: "p", retry: { maxAttempts, on: [503], intervalMs: 0 } }]);
       const { visited, path, result } = await drive(def, Array.from({ length: maxAttempts }, () => httpFail(503)));
@@ -111,8 +111,8 @@ describe("BVA: retry.maxAttempts boundaries", () => {
     });
   }
 
-  it("maxAttempts=20 stops retrying the moment an attempt succeeds", async () => {
-    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 20, on: [503], intervalMs: 0 } }]);
+  it("maxAttempts=100 stops retrying the moment an attempt succeeds", async () => {
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 100, on: [503], intervalMs: 0 } }]);
     const results = [...Array.from({ length: 6 }, () => httpFail(503)), success()];
     const { visited, result } = await drive(def, results);
 
@@ -120,8 +120,8 @@ describe("BVA: retry.maxAttempts boundaries", () => {
     expect(result.ok).toBe(true);
   });
 
-  for (const maxAttempts of [0, 21]) {
-    it(`maxAttempts=${maxAttempts} is rejected by the schema (outside 1..20)`, () => {
+  for (const maxAttempts of [0, 101]) {
+    it(`maxAttempts=${maxAttempts} is rejected by the schema (outside 1..100)`, () => {
       expect(() => chain([{ model: "m", provider: "p", retry: { maxAttempts } }])).toThrow();
     });
   }

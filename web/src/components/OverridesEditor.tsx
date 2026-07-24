@@ -1,104 +1,47 @@
-import { useEffect, useMemo, useState } from "react";
-import type { Overrides, ThinkingLevel } from "../types";
+import { useEffect, useRef, useState } from "react";
+import type { Overrides } from "../types";
 import { useI18n } from "../lib/i18n";
-import { intInput, selectAll } from "../lib/input";
-
-const CUSTOM_SENTINEL = "__custom__";
-
-const THINKING_LEVELS = ["disabled", "auto", "enabled", "low", "medium", "high", "xhigh", "max"] as const;
-const THINKING_BUDGET_PREFIX = "budget:";
+import { selectAll } from "../lib/input";
 
 interface Row {
+  id: number;
   key: string;
   value: string;
-  custom: boolean;
 }
 
-const NUMERIC_KEYS = ["temperature", "topP", "topK", "minP", "maxTokens", "frequencyPenalty", "presencePenalty", "repetitionPenalty", "seed", "n", "topLogprobs"] as const;
-const BOOL_KEYS = ["logprobs", "parallelToolCalls"] as const;
-const STRING_KEYS = ["serviceTier", "user", "system", "verbosity"] as const;
-const ARRAY_KEYS = ["stop"] as const;
-const ENUM_KEYS: Record<string, string[]> = { verbosity: ["low", "medium", "high"] };
+let rowUid = 1;
 
-const ALL_KEYS = [
-  ...NUMERIC_KEYS,
-  ...BOOL_KEYS,
-  ...STRING_KEYS,
-  ...ARRAY_KEYS,
-  "thinking",
-  "responseFormat",
-  "logitBias",
-  "extra",
-] as const;
-
-const CANONICAL_SET: ReadonlySet<string> = new Set<string>([
-  ...ALL_KEYS, "stream", "system",
-]);
-
-function isNumericKey(k: string): boolean {
-  return (NUMERIC_KEYS as readonly string[]).includes(k);
-}
-function isBoolKey(k: string): boolean {
-  return (BOOL_KEYS as readonly string[]).includes(k);
-}
-function isArrayKey(k: string): boolean {
-  return (ARRAY_KEYS as readonly string[]).includes(k);
+function parsesAsJson(s: string): boolean {
+  try {
+    JSON.parse(s);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
+/** Render a stored value for the text input. Strings that would not survive
+ * the plain-text round trip — JSON-parseable, edge whitespace (coerceValue
+ * trims), or embedded newlines (a single-line input strips CR/LF) — are shown
+ * JSON-quoted so coerceValue restores them exactly. */
 function valToString(val: unknown): string {
-  if (val == null) return "";
-  if (typeof val === "object") return JSON.stringify(val);
-  return String(val);
+  if (val === undefined) return "";
+  if (typeof val === "string") {
+    const fragile = val !== val.trim() || /[\r\n]/.test(val) || parsesAsJson(val);
+    return fragile ? JSON.stringify(val) : val;
+  }
+  return JSON.stringify(val);
 }
 
-function thinkingToValue(tv: ThinkingLevel | undefined): string {
-  if (tv == null) return "";
-  if (typeof tv === "object") return `${THINKING_BUDGET_PREFIX}${tv.budget}`;
-  return tv;
-}
-
-function valueToThinking(raw: string): ThinkingLevel | undefined {
+/** JSON when it parses, plain text otherwise. Quote a value to force a string. */
+function coerceValue(raw: string): unknown {
   const trimmed = raw.trim();
   if (trimmed === "") return undefined;
-  if (trimmed.startsWith(THINKING_BUDGET_PREFIX)) {
-    const n = Number(trimmed.slice(THINKING_BUDGET_PREFIX.length));
-    return Number.isFinite(n) && n > 0 && Number.isInteger(n) ? { budget: n } : undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
   }
-  if ((THINKING_LEVELS as readonly string[]).includes(trimmed)) return trimmed as (typeof THINKING_LEVELS)[number];
-  return undefined;
-}
-
-function coerceValue(key: string, raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return undefined;
-  if (key === "thinking") {
-    return valueToThinking(trimmed);
-  }
-  if (isNumericKey(key)) {
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : undefined;
-  }
-  if (isBoolKey(key)) {
-    const lower = trimmed.toLowerCase();
-    if (lower === "true" || lower === "1") return true;
-    if (lower === "false" || lower === "0") return false;
-    return undefined;
-  }
-  if (isArrayKey(key) || key === "logitBias" || key === "responseFormat" || key === "extra") {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return undefined;
-    }
-  }
-  if (!CANONICAL_SET.has(key)) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return trimmed;
-    }
-  }
-  return trimmed;
 }
 
 function rowsToOverrides(rows: Row[]): Overrides | undefined {
@@ -106,7 +49,7 @@ function rowsToOverrides(rows: Row[]): Overrides | undefined {
   for (const r of rows) {
     const key = r.key.trim();
     if (!key) continue;
-    const v = coerceValue(key, r.value);
+    const v = coerceValue(r.value);
     if (v !== undefined) out[key] = v;
   }
   return Object.keys(out).length ? (out as Overrides) : undefined;
@@ -114,15 +57,7 @@ function rowsToOverrides(rows: Row[]): Overrides | undefined {
 
 function overridesToRows(ov: Overrides | undefined): Row[] {
   if (!ov) return [];
-  const rows: Row[] = [];
-  for (const [key, val] of Object.entries(ov)) {
-    if (key === "thinking") {
-      rows.push({ key, value: thinkingToValue(val as ThinkingLevel), custom: false });
-      continue;
-    }
-    rows.push({ key, value: valToString(val), custom: !CANONICAL_SET.has(key) });
-  }
-  return rows;
+  return Object.entries(ov).map(([key, val]) => ({ id: rowUid++, key, value: valToString(val) }));
 }
 
 interface Props {
@@ -136,74 +71,78 @@ export function OverridesEditor({ overrides, onChange }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [jsonText, setJsonText] = useState("");
 
-  const KEY_HINTS: Partial<Record<string, string>> = {
-    temperature: t("overrides.hint.temperature"),
-    topP: t("overrides.hint.topP"),
-    topK: t("overrides.hint.topK"),
-    minP: t("overrides.hint.minP"),
-    maxTokens: t("overrides.hint.maxTokens"),
-    frequencyPenalty: t("overrides.hint.frequencyPenalty"),
-    presencePenalty: t("overrides.hint.presencePenalty"),
-    repetitionPenalty: t("overrides.hint.repetitionPenalty"),
-    seed: t("overrides.hint.seed"),
-    n: t("overrides.hint.n"),
-    topLogprobs: t("overrides.hint.topLogprobs"),
-    stop: t("overrides.hint.stop"),
-    logitBias: t("overrides.hint.logitBias"),
-    responseFormat: t("overrides.hint.responseFormat"),
-    extra: t("overrides.hint.extra"),
-    system: t("overrides.hint.system"),
+  // A row being typed ("min_p" with no content yet) must survive the parent
+  // echoing our own onChange back as a new prop. Track the last value we
+  // emitted; only a prop that differs from it is an external change worth
+  // resetting the editing state for. The effect records what it accepted so
+  // a later external change BACK to an old emission is not mistaken for an
+  // echo.
+  const lastEmitted = useRef<string>("__init__");
+  const emit = (ov: Overrides | undefined) => {
+    lastEmitted.current = JSON.stringify(ov ?? null);
+    onChange(ov);
   };
 
   useEffect(() => {
+    const incoming = JSON.stringify(overrides ?? null);
+    if (incoming === lastEmitted.current) return;
+    lastEmitted.current = incoming;
     setRows(overridesToRows(overrides));
     setJsonText(overrides ? JSON.stringify(overrides, null, 2) : "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overrides]);
+
+  // The inactive view goes stale while the other is edited, so rebuild it from
+  // the (parent-synced) prop when switching.
+  const switchMode = (m: "gui" | "json") => {
+    if (m === mode) return;
+    if (m === "json") setJsonText(overrides ? JSON.stringify(overrides, null, 2) : "");
+    else setRows(overridesToRows(overrides));
+    setMode(m);
+  };
 
   const emitJson = (text: string) => {
     setJsonText(text);
     const trimmed = text.trim();
     if (trimmed === "") {
-      onChange(undefined);
+      emit(undefined);
       return;
     }
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(trimmed) as Overrides;
-      onChange(parsed);
+      parsed = JSON.parse(trimmed);
     } catch {
-      // keep editing
+      return; // keep editing
     }
+    // Overrides is an object patch; null/arrays/scalars would persist and then
+    // bounce off the server's schema, so don't emit them.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    emit(parsed as Overrides);
   };
 
-  const updateRow = (i: number, patch: Partial<Row>) =>
-    setRows((rs) => {
-      const next = rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
-      onChange(rowsToOverrides(next));
-      return next;
-    });
+  const updateRow = (i: number, patch: Partial<Row>) => {
+    const next = rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+    setRows(next);
+    emit(rowsToOverrides(next));
+  };
 
   const addRow = () => {
-    const next = [...rows, { key: "", value: "", custom: false }];
-    setRows(next);
+    setRows([...rows, { id: rowUid++, key: "", value: "" }]);
   };
 
   const removeRow = (i: number) => {
     const next = rows.filter((_, idx) => idx !== i);
     setRows(next);
-    onChange(rowsToOverrides(next));
+    emit(rowsToOverrides(next));
   };
 
-  const onKeySelect = (i: number, selected: string) => {
-    if (selected === CUSTOM_SENTINEL) {
-      updateRow(i, { key: "", value: "", custom: true });
-    } else {
-      updateRow(i, { key: selected, value: "", custom: false });
-    }
-  };
-
-  const usedKeys = useMemo(() => new Set(rows.map((r) => r.key.trim()).filter(Boolean)), [rows]);
-  const availableKeys = (ALL_KEYS as readonly string[]).filter((k) => !usedKeys.has(k));
+  // Duplicate parameter names: the last row silently wins in rowsToOverrides,
+  // so mark every involved row instead of losing a value without warning.
+  const keyCounts = new Map<string, number>();
+  for (const r of rows) {
+    const k = r.key.trim();
+    if (k) keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+  }
+  const hasDuplicates = [...keyCounts.values()].some((n) => n > 1);
 
   return (
     <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
@@ -216,7 +155,7 @@ export function OverridesEditor({ overrides, onChange }: Props) {
           <button
             type="button"
             className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${mode === "gui" ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"}`}
-            onClick={() => setMode("gui")}
+            onClick={() => switchMode("gui")}
           >
             <i className="bi bi-sliders mr-1" />
             {t("overrides.fieldsMode")}
@@ -224,7 +163,7 @@ export function OverridesEditor({ overrides, onChange }: Props) {
           <button
             type="button"
             className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${mode === "json" ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"}`}
-            onClick={() => setMode("json")}
+            onClick={() => switchMode("json")}
           >
             <i className="bi bi-code-slash mr-1" />
             {t("overrides.jsonMode")}
@@ -239,92 +178,25 @@ export function OverridesEditor({ overrides, onChange }: Props) {
           )}
 
           {rows.map((row, i) => {
-            const isCustom = row.custom;
-            const thinkingIsBudget = row.key === "thinking" && row.value.startsWith(THINKING_BUDGET_PREFIX);
-            const thinkingBudget = thinkingIsBudget ? row.value.slice(THINKING_BUDGET_PREFIX.length) : "";
-            const thinkingLevelVal = row.key === "thinking" && !thinkingIsBudget ? row.value : "";
-
+            const dup = (keyCounts.get(row.key.trim()) ?? 0) > 1;
             return (
-              <div key={i} className="flex items-start gap-1.5">
-                {isCustom ? (
-                  <input
-                    className="input h-8 w-36 py-0 text-xs font-mono"
-                    type="text"
-                    placeholder={t("overrides.customKeyPlaceholder")}
-                    value={row.key}
-                    onChange={(e) => updateRow(i, { key: e.target.value, custom: true })}
-                  />
-                ) : (
-                  <select
-                    className="input h-8 w-36 py-0 text-xs"
-                    value={row.key === "" ? "" : row.key}
-                    onChange={(e) => onKeySelect(i, e.target.value)}
-                  >
-                    {row.key === "" && <option value="">{t("overrides.pickField")}</option>}
-                    {row.key !== "" && !availableKeys.includes(row.key) && (
-                      <option value={row.key}>{row.key}</option>
-                    )}
-                    {availableKeys.map((k) => (
-                      <option key={k} value={k}>
-                        {k}
-                      </option>
-                    ))}
-                    <option value={CUSTOM_SENTINEL}>— {t("overrides.customOption")} —</option>
-                  </select>
-                )}
-
-                {row.key === "thinking" ? (
-                  <div className="flex flex-1 items-center gap-1.5">
-                    <select
-                      className="input h-8 flex-1 py-0 text-xs"
-                      value={thinkingIsBudget ? "budget" : thinkingLevelVal}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === "") updateRow(i, { value: "" });
-                        else if (v === "budget") updateRow(i, { value: `${THINKING_BUDGET_PREFIX}8192` });
-                        else updateRow(i, { value: v });
-                      }}
-                    >
-                      <option value="">{t("overrides.inherit")}</option>
-                      {THINKING_LEVELS.map((l) => (
-                        <option key={l} value={l}>{l}</option>
-                      ))}
-                      <option value="budget">{t("thinking.budgetTokens")}</option>
-                    </select>
-                    {thinkingIsBudget && (
-                      <input
-                        className="input h-8 w-28 py-0 text-xs"
-                        type="text"
-                        inputMode="numeric"
-                        value={thinkingBudget}
-                        onFocus={selectAll}
-                        onClick={selectAll}
-                        onChange={(e) => updateRow(i, { value: `${THINKING_BUDGET_PREFIX}${intInput(e.target.value, 8192, 1024)}` })}
-                        placeholder={t("thinking.tokenBudgetPlaceholder")}
-                      />
-                    )}
-                  </div>
-                ) : ENUM_KEYS[row.key] ? (
-                  <select
-                    className="input h-8 flex-1 py-0 text-xs"
-                    value={row.value}
-                    onChange={(e) => updateRow(i, { value: e.target.value })}
-                  >
-                    <option value="">{t("overrides.inherit")}</option>
-                    {ENUM_KEYS[row.key].map((v) => (
-                      <option key={v} value={v}>{v}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="input h-8 flex-1 py-0 font-mono text-xs"
-                    type="text"
-                    value={row.value}
-                    onChange={(e) => updateRow(i, { value: e.target.value })}
-                    onFocus={selectAll}
-                    placeholder={KEY_HINTS[row.key] ?? (isCustom ? t("overrides.jsonOrTextPlaceholder") : t("overrides.valuePlaceholder"))}
-                  />
-                )}
+              <div key={row.id} className="flex items-start gap-1.5">
+                <input
+                  className={`input h-8 w-40 py-0 font-mono text-xs ${dup ? "border-red-500/70" : ""}`}
+                  type="text"
+                  placeholder={t("overrides.paramPlaceholder")}
+                  title={dup ? t("overrides.duplicateKey") : undefined}
+                  value={row.key}
+                  onChange={(e) => updateRow(i, { key: e.target.value })}
+                />
+                <input
+                  className="input h-8 flex-1 py-0 font-mono text-xs"
+                  type="text"
+                  value={row.value}
+                  onChange={(e) => updateRow(i, { value: e.target.value })}
+                  onFocus={selectAll}
+                  placeholder={t("overrides.contentPlaceholder")}
+                />
                 <button
                   type="button"
                   className="btn-danger btn-xs shrink-0"
@@ -337,10 +209,19 @@ export function OverridesEditor({ overrides, onChange }: Props) {
             );
           })}
 
+          {hasDuplicates && (
+            <p className="text-[11px] text-red-400">
+              <i className="bi bi-exclamation-triangle mr-1" />
+              {t("overrides.duplicateKey")}
+            </p>
+          )}
+
           <button type="button" className="btn-ghost btn-xs" onClick={addRow}>
             <i className="bi bi-plus-lg mr-1" />
             {t("overrides.addField")}
           </button>
+
+          <p className="text-[11px] text-ink-600">{t("overrides.coercionHint")}</p>
         </div>
       ) : (
         <div>

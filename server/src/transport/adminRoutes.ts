@@ -7,7 +7,7 @@ import type { Container } from "../composition/container";
 import { requireSession } from "../auth/middleware";
 import { cookieOptions, resolveCookieSecure, SESSION_COOKIE, signSession, type SessionPayload } from "../auth/session";
 import { DEFAULT_ADMIN_PASSWORD } from "../db/bootstrap";
-import { isAgent, summarizeService, type ServiceDef } from "../execution/definition";
+import { isAgent, isChatPipeline, serviceCategory, summarizeService, type ServiceDef } from "../execution/definition";
 import { ServiceValidationError } from "../execution/serviceValidator";
 import { buildRequest } from "../core/format/registry";
 import { textOf } from "../core/ir/content";
@@ -419,6 +419,11 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
       const mapped = serviceValidationError(e);
       if (mapped) return reply.code(mapped.status).send(mapped.body);
       throw e;
+    }
+
+    // The dry-run fires a chat request; media categories speak other shapes.
+    if (!isChatPipeline(serviceCategory(def))) {
+      return reply.code(400).send({ error: `dry-run supports chat-pipeline services only (this is a ${serviceCategory(def)} service)` });
     }
 
     const { executor } = c.factory.buildDef(def);

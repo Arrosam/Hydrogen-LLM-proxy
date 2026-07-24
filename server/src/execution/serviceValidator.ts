@@ -1,6 +1,6 @@
 import type { Catalog } from "../catalog/catalog";
 import type { ServiceRepo } from "../persistence/serviceRepo";
-import { isAgent, parseService, summarizeService, type ServiceDef } from "./definition";
+import { isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
 
 /**
  * Thrown when a definition is structurally valid (passes the zod schema) but
@@ -59,7 +59,15 @@ export class ServiceValidator {
 
         const isRouter = !stage.service && (!stage.steps || stage.steps.length === 0);
         if (stage.service) {
-          if (!this.services.getByName(stage.service)) bad(`references unknown Model Service or Micro Agent "${stage.service}"`);
+          const ref = this.services.getByName(stage.service);
+          if (!ref) bad(`references unknown Model Service or Micro Agent "${stage.service}"`);
+          else {
+            // Media passthrough services (image/video/tts/stt/embedding/rerank)
+            // speak a different request shape; a stage cannot run them. Chat
+            // and OCR services both run the chat pipeline, so both are fine.
+            const cat = this.categoryOf(stage.service);
+            if (cat && !isChatPipeline(cat as ServiceCategory)) bad(`references "${stage.service}", a ${cat} service — only chat/OCR services can run inside a Micro Agent`);
+          }
         } else if (stage.steps && stage.steps.length) {
           for (const s of stage.steps) {
             if (!this.catalog.exists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
@@ -110,6 +118,10 @@ export class ServiceValidator {
           if (isAgent(this.services.def(m))) {
             throw new ServiceValidationError(`image translation (OCR) references a Micro Agent "${o.service}" (must be a Model Service)`, []);
           }
+          const cat = this.categoryOf(o.service);
+          if (cat && !isChatPipeline(cat as ServiceCategory)) {
+            throw new ServiceValidationError(`image translation (OCR) references "${o.service}", a ${cat} service — it must be a chat or OCR Model Service`, []);
+          }
         } else if (o.steps && o.steps.length) {
           for (const s of o.steps) {
             if (!this.catalog.exists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
@@ -119,8 +131,22 @@ export class ServiceValidator {
         }
       }
     } else {
+      const category = serviceCategory(def);
       for (const step of def.steps) {
-        if (!this.catalog.exists(step.model, step.provider)) invalidPairs.push(`${step.model}@${step.provider}`);
+        const res = this.catalog.resolve(step.model, step.provider);
+        if (!res.ok) {
+          invalidPairs.push(`${step.model}@${step.provider}`);
+          continue;
+        }
+        // Media passthrough categories are OpenAI-style endpoints; an
+        // Anthropic provider has no such API surface. Chat-pipeline
+        // categories (chat, ocr) translate, so any provider family works.
+        if (!isChatPipeline(category) && res.target.family === "anthropic") {
+          throw new ServiceValidationError(
+            `step ${step.model}@${step.provider}: ${category} services require an OpenAI-compatible provider`,
+            [],
+          );
+        }
       }
     }
 
@@ -131,5 +157,16 @@ export class ServiceValidator {
       );
     }
     return { def, summary: summarizeService(def) };
+  }
+
+  /** The category of a saved service by name, or null when it can't be read. */
+  private categoryOf(name: string): string | null {
+    const row = this.services.getByName(name);
+    if (!row) return null;
+    try {
+      return serviceCategory(this.services.def(row));
+    } catch {
+      return null;
+    }
   }
 }

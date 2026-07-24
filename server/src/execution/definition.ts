@@ -64,7 +64,7 @@ export const RetrySchema = z.object({
    * 503 (unavailable), a timeout, and a connection that died mid-response.
    */
   on: z.array(TriggerSchema).default(DEFAULT_RETRY_ON),
-  maxAttempts: z.number().int().min(1).max(20).default(DEFAULT_MAX_ATTEMPTS),
+  maxAttempts: z.number().int().min(1).max(100).default(DEFAULT_MAX_ATTEMPTS),
   /** Fixed delay between retries (legacy; ignored when `backoff` is set). */
   intervalMs: z.number().int().min(0).max(600_000).default(0),
   /**
@@ -157,8 +157,28 @@ export const StepSchema = z.object({
   overrides: OverridesSchema.optional(),
 });
 
+/**
+ * What kind of API a Model Service serves. "chat" (the default) is the full
+ * translated chat pipeline. "ocr" is a chat-pipeline category too: OCR models
+ * (DeepSeek-OCR, GLM-OCR, ...) are vision chat models, so an ocr service is
+ * served on the chat endpoints and may run inside a Micro Agent — it exists to
+ * label the service and mark it as an OCR pre-pass candidate. Every other
+ * category is an OpenAI-style passthrough to the provider's matching endpoint,
+ * still running the step chain's retry/fallback; those are NOT allowed inside
+ * a Micro Agent.
+ */
+export const ServiceCategorySchema = z.enum(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"]);
+export type ServiceCategory = z.infer<typeof ServiceCategorySchema>;
+
+/** Categories served by the translated chat pipeline (vs. media passthrough). */
+export function isChatPipeline(category: ServiceCategory): boolean {
+  return category === "chat" || category === "ocr";
+}
+
 export const ServiceStepsSchema = z.object({
   kind: z.literal("model_service").optional(),
+  /** Omitted = "chat" (backward compatible with pre-category definitions). */
+  category: ServiceCategorySchema.optional(),
   timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
   steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
   /**
@@ -282,6 +302,11 @@ export function isAgent(def: ServiceDef): def is AgentDef {
   return kind === "micro_agent" || kind === "agent";
 }
 
+/** The effective category of a definition. Agents are always "chat". */
+export function serviceCategory(def: ServiceDef): ServiceCategory {
+  return isAgent(def) ? "chat" : (def.category ?? "chat");
+}
+
 /** Parse & validate a raw definition (Model Service steps or a Micro Agent). Throws ZodError. */
 export function parseService(raw: unknown): ServiceDef {
   const kind = raw && typeof raw === "object" ? (raw as { kind?: unknown }).kind : undefined;
@@ -369,6 +394,7 @@ export function summarizeService(def: ServiceDef): string {
     const ocr = def.ocr ? "OCR -> " : "";
     return `agent: ${ocr}${names.join(" -> ")}${branching ? " (branching)" : ""}${returns}${reliable}`;
   }
+  const category = def.category && def.category !== "chat" ? `[${def.category}] ` : "";
   const parts = def.steps.map((s) => {
     let label = `${s.model}@${s.provider}`;
     // A step with no `retry` block is not a step without retries: runSteps
@@ -380,5 +406,5 @@ export function summarizeService(def: ServiceDef): string {
     }
     return label;
   });
-  return `${parts.length ? `try ${parts.join("; else ")}; else fail` : "(no steps)"}${reliable}`;
+  return `${category}${parts.length ? `try ${parts.join("; else ")}; else fail` : "(no steps)"}${reliable}`;
 }

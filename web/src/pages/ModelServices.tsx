@@ -7,7 +7,7 @@ import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
 import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
-import { isAgentDef } from "../types";
+import { isAgentDef, serviceCategoryOf } from "../types";
 
 interface Data {
   services: ModelService[];
@@ -118,6 +118,9 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
                   <i className={`bi ${copy.icon} text-brand-400`} />
                   <span className="truncate font-mono text-sm font-semibold text-ink-100">{m.name}</span>
                   {m.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
+                  {serviceCategoryOf(m.steps) !== "chat" && (
+                    <span className="badge-blue">{t(`serviceEditor.category.${serviceCategoryOf(m.steps)}`)}</span>
+                  )}
                 </div>
                 {m.description && <p className="mt-1 text-xs text-ink-400">{m.description}</p>}
               </div>

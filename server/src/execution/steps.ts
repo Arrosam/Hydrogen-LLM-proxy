@@ -142,7 +142,7 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
  *    "read" and "safe_write" steps. "unsafe" steps never retry 499.
  *  - When `retry.backoff` is set, the delay uses exponential growth with full
  *    jitter (initial 100ms, cap 1s). Otherwise a fixed `intervalMs` is used.
- *  - Maximum 3 retry attempts (configurable via `retry.maxAttempts`, capped 20).
+ *  - Maximum 3 retry attempts (configurable via `retry.maxAttempts`, capped 100).
  *
  * Every failed attempt records a `retry` block on its `AttemptRecord` with the
  * retry index, applied delay, suppression flag, and reason — including attempts
@@ -154,7 +154,27 @@ export async function runSteps<T>(
   attempt: (step: ServiceStep, stepIndex: number) => Promise<AttemptResult<T>>,
   opts: { sleep?: (ms: number) => Promise<void>; progress?: ProgressRecorder | null; signal?: AbortSignal } = {},
 ): Promise<RunOutput<T>> {
-  const sleep = opts.sleep ?? defaultSleep;
+  const baseSleep = opts.sleep ?? defaultSleep;
+  // A retry delay can be minutes long (intervalMs caps at 600s); if the client
+  // disconnects mid-sleep, waking only when the timer fires would pin the
+  // request (and its sockets) for the rest of the delay. Resolve early on
+  // abort — the loop's post-sleep abort check does the actual exit.
+  const sleep = (ms: number): Promise<void> => {
+    const signal = opts.signal;
+    if (!signal) return baseSleep(ms);
+    if (signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      signal.addEventListener("abort", finish, { once: true });
+      void baseSleep(ms).then(finish);
+    });
+  };
   const prog = opts.progress ?? null;
   const path: AttemptRecord[] = [];
   let lastFailure: AttemptFailure | null = null;

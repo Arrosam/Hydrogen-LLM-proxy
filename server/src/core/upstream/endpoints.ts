@@ -44,6 +44,28 @@ export function embeddingsUrl(p: UpstreamProvider): string {
   return `${trimBase(p.baseUrl)}/embeddings`;
 }
 
+/** OpenAI-style media endpoints (non-chat service categories). */
+export function imagesUrl(p: UpstreamProvider): string {
+  return `${trimBase(p.baseUrl)}/images/generations`;
+}
+
+export function speechUrl(p: UpstreamProvider): string {
+  return `${trimBase(p.baseUrl)}/audio/speech`;
+}
+
+export function transcriptionsUrl(p: UpstreamProvider): string {
+  return `${trimBase(p.baseUrl)}/audio/transcriptions`;
+}
+
+/** Jina/Cohere-compatible rerank endpoint. */
+export function rerankUrl(p: UpstreamProvider): string {
+  return `${trimBase(p.baseUrl)}/rerank`;
+}
+
+export function videosUrl(p: UpstreamProvider, suffix = ""): string {
+  return `${trimBase(p.baseUrl)}/videos${suffix}`;
+}
+
 export function modelsUrl(p: UpstreamProvider): string {
   const base = trimBase(p.baseUrl);
   return familyForProviderType(p.type) === "anthropic" ? `${base}/v1/models` : `${base}/models`;

@@ -7,7 +7,9 @@
  * configured policy exactly.
  *
  * Design (ISTQB):
- *   BVA  retry.maxAttempts at its schema ceiling (20) and floor (1).
+ *   BVA  retry.maxAttempts at its schema floor (1) and at a high attempt count
+ *        (20). The schema ceiling is 100, but 100 real 2s attempts would cost
+ *        200s of wall clock; the ceiling itself is covered in retryPolicy.test.ts.
  *   ST   the whole chain walked to exhaustion: step 1 -> step 2 -> step 3 -> failed.
  *   EG   which status reaches the client when the steps fail differently, and
  *        what a transport-level death (no HTTP status at all) maps to.
@@ -126,7 +128,7 @@ const repeat = (n: number, b: UpstreamBehavior): UpstreamBehavior[] => Array.fro
 
 describe("retry exhaustion — a long, slow, failing request still ends cleanly", () => {
   it(
-    "BVA: 20 retries (the schema ceiling), each costing 2s, then one 503 for the client",
+    "BVA: 20 retries, each costing 2s, then one 503 for the client",
     async () => {
       const def = {
         timeoutMs: 30_000,
@@ -138,7 +140,7 @@ describe("retry exhaustion — a long, slow, failing request still ends cleanly"
       const got = await call(h.port, h.secret);
       const elapsed = Date.now() - t0;
 
-      expect(h.upstream.requests).toBe(20); // exactly the ceiling — not 19, not 21
+      expect(h.upstream.requests).toBe(20); // exactly maxAttempts — not 19, not 21
       expect(elapsed).toBeGreaterThanOrEqual(20 * ATTEMPT_COST_MS);
 
       expect(got.status).toBe(503);

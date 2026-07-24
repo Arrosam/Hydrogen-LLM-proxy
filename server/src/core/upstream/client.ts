@@ -75,6 +75,46 @@ export class UpstreamClient implements Transport {
     return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
   }
 
+  /** POST a pre-serialized body verbatim (e.g. a multipart form the caller
+   * already framed — headers must carry the matching content-type). */
+  async postRaw(
+    url: string,
+    headers: Record<string, string>,
+    body: Buffer | string,
+    opts: TransportOptions,
+  ): Promise<TransportJsonResult> {
+    await this.ssrf.assertAllowed(url);
+    const res = await request(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      headersTimeout: opts.timeoutMs,
+      bodyTimeout: opts.timeoutMs,
+    });
+    const text = await res.body.text();
+    let json: unknown = undefined;
+    try {
+      json = text ? JSON.parse(text) : undefined;
+    } catch {
+      json = undefined;
+    }
+    return { status: res.statusCode, headers: res.headers, json, text };
+  }
+
+  /** GET returning the raw response stream (binary downloads, e.g. video content). */
+  async getStream(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportStreamResult> {
+    await this.ssrf.assertAllowed(url);
+    const res = await request(url, {
+      method: "GET",
+      headers,
+      signal: opts.signal,
+      headersTimeout: opts.timeoutMs,
+      bodyTimeout: opts.timeoutMs,
+    });
+    return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
+  }
+
   /** GET request returning JSON (provider connection tests / model lists). */
   async getJson(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportJsonResult> {
     await this.ssrf.assertAllowed(url);

@@ -1,6 +1,6 @@
 import type { ModelServiceRow } from "../db/schema";
 import type { ServiceRepo } from "../persistence/serviceRepo";
-import { isAgent, parseService, type ServiceDef } from "./definition";
+import { isAgent, isChatPipeline, parseService, serviceCategory, type ServiceDef } from "./definition";
 import { ModelService, type ServiceDeps } from "./modelService";
 import { MicroAgent, type MicroAgentDeps, type ResolveResult, type ServiceResolver } from "./microAgent";
 
@@ -39,7 +39,14 @@ export class ServiceFactory implements ServiceResolver {
       return { ok: false, message: `references unknown or disabled Model Service or Micro Agent "${name}"` };
     }
     try {
-      const { executor, isAgent: agent } = this.forRow(row);
+      const def = parseService(row.definition);
+      // The save-time validator rejects this too, but the referenced service
+      // can change category after the agent was saved — re-check at runtime.
+      const category = serviceCategory(def);
+      if (!isChatPipeline(category)) {
+        return { ok: false, message: `"${name}" is a ${category} service and cannot run inside a Micro Agent` };
+      }
+      const { executor, isAgent: agent } = this.buildDef(def);
       return { ok: true, executor, isAgent: agent };
     } catch {
       return { ok: false, message: `"${name}" has an invalid definition` };
