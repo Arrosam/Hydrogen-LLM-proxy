@@ -217,7 +217,7 @@ export function ActiveRequests() {
       {/* Progress event stream detail modal */}
       <Modal
         open={detail !== null}
-        wide
+        size="xl"
         title={detail ? t("activeRequests.modal.detailTitle", { traceId: shortTrace(detail.traceId) }) : ""}
         icon="bi-activity"
         onClose={() => setDetail(null)}

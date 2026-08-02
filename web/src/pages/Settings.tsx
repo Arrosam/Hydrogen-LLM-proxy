@@ -300,7 +300,7 @@ function RetentionCard() {
   const save = async () => {
     const n = Number(days.trim() || "0");
     if (!Number.isInteger(n) || n < 0 || n > 3650) {
-      toast.error("Days must be a whole number between 0 and 3650");
+      toast.error(t("settings.logRetention.toast.invalidDays"));
       return;
     }
     setSaving(true);
@@ -308,12 +308,14 @@ function RetentionCard() {
       const r = await api.put<{ days: number; pruned: number }>("/settings/log-retention", { days: n });
       toast.success(
         n === 0
-          ? "Auto-prune disabled — logs are kept forever"
-          : `Keeping the last ${n} day${n === 1 ? "" : "s"}${r.pruned ? ` — removed ${r.pruned} old ${r.pruned === 1 ? "entry" : "entries"}` : ""}`,
+          ? t("settings.logRetention.toast.disabled")
+          : r.pruned
+            ? t("settings.logRetention.toast.savedPruned", { days: n, pruned: r.pruned })
+            : t("settings.logRetention.toast.saved", { days: n }),
       );
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -357,9 +359,9 @@ function AllowlistCard() {
     try {
       await api.put("/settings/upstream-allowlist", { entries: next });
       reload();
-      toast.success("Allowlist updated");
+      toast.success(t("settings.allowlist.toast.updated"));
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -386,7 +388,7 @@ function AllowlistCard() {
         {entries.map((e) => (
           <span key={e} className="inline-flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 font-mono text-xs text-ink-200">
             {e}
-            <button className="text-ink-500 hover:text-red-400" title="Remove" disabled={saving} onClick={() => void put(entries.filter((x) => x !== e))}>
+            <button className="text-ink-500 hover:text-red-400" title={t("common.remove")} disabled={saving} onClick={() => void put(entries.filter((x) => x !== e))}>
               <i className="bi bi-x-lg" />
             </button>
           </span>
@@ -433,15 +435,15 @@ function EnvCard() {
     const rate = Number(tokenRate.trim());
     const ttl = Number(sessionTtlMs.trim());
     if (!Number.isInteger(lpmc) || lpmc < 0 || lpmc > 10_000_000) {
-      toast.error("Log payload max chars must be a whole number between 0 and 10000000");
+      toast.error(t("settings.env.toast.invalidLogPayloadMaxChars"));
       return;
     }
     if (!Number.isInteger(rate) || rate < 1) {
-      toast.error("Simulated streaming token rate must be a positive integer");
+      toast.error(t("settings.env.toast.invalidTokenRate"));
       return;
     }
     if (!Number.isInteger(ttl) || ttl < 60_000) {
-      toast.error("Session TTL must be at least 60000 ms");
+      toast.error(t("settings.env.toast.invalidSessionTtl"));
       return;
     }
     setSaving(true);
@@ -452,10 +454,10 @@ function EnvCard() {
         simulatedStreamingTokenRate: rate,
         sessionTtlMs: ttl,
       });
-      toast.success("Runtime settings saved");
+      toast.success(t("settings.env.toast.saved"));
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Save failed");
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -523,7 +525,7 @@ function EnvCard() {
               <i className="bi bi-lock text-ink-500" />
               <span className="text-xs font-medium text-ink-300">{t("settings.env.bootOnly")}</span>
             </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+            <div className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2">
               <ReadonlyRow label={t("settings.env.nodeEnv")} value={data.env.nodeEnv} />
               <ReadonlyRow label={t("settings.env.port")} value={String(data.env.port)} />
               <ReadonlyRow label={t("settings.env.host")} value={data.env.host} />
@@ -531,7 +533,7 @@ function EnvCard() {
               <ReadonlyRow label={t("settings.env.adminUsername")} value={data.env.adminUsername} />
               <ReadonlyRow label={t("settings.env.cookieSecure")} value={data.env.cookieSecure} />
             </div>
-            <p className="mt-2 text-[11px] text-ink-600">Changing these requires editing the environment and restarting the proxy.</p>
+            <p className="mt-2 text-[11px] text-ink-600">{t("settings.env.bootOnly.hint")}</p>
           </div>
         </div>
       )}
@@ -539,11 +541,17 @@ function EnvCard() {
   );
 }
 
+/** One read-only env value. The data directory can be an arbitrarily long path,
+ * so the value truncates rather than pushing the row wider than its column —
+ * `title` keeps the whole thing reachable, and selecting the row still copies it
+ * in full. */
 function ReadonlyRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-ink-500">{label}</span>
-      <code className="font-mono text-ink-300">{value}</code>
+    <div className="flex items-center justify-between gap-3">
+      <span className="shrink-0 text-ink-500">{label}</span>
+      <code className="min-w-0 truncate font-mono text-ink-300" title={value}>
+        {value}
+      </code>
     </div>
   );
 }

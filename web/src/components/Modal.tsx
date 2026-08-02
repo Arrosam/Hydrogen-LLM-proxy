@@ -1,5 +1,15 @@
 import type { ReactNode } from "react";
 
+/** "md" for a short form, "lg" for a form with paired fields or an embedded
+ * list, "xl" for editors and detail views. */
+export type ModalSize = "md" | "lg" | "xl";
+
+const WIDTHS: Record<ModalSize, string> = {
+  md: "max-w-lg",
+  lg: "max-w-2xl",
+  xl: "max-w-4xl",
+};
+
 interface ModalProps {
   open: boolean;
   title: string;
@@ -9,15 +19,15 @@ interface ModalProps {
   footer?: ReactNode;
   /** Extra controls rendered in the title bar, before the close button. */
   headerExtra?: ReactNode;
-  wide?: boolean;
+  size?: ModalSize;
 }
 
-export function Modal({ open, title, icon, onClose, children, footer, headerExtra, wide }: ModalProps) {
+export function Modal({ open, title, icon, onClose, children, footer, headerExtra, size = "md" }: ModalProps) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
       <div
-        className={`card flex max-h-[92vh] w-full flex-col ${wide ? "max-w-4xl" : "max-w-lg"}`}
+        className={`card flex max-h-[92vh] w-full flex-col ${WIDTHS[size]}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between border-b border-ink-800 px-5 py-3.5">

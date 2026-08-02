@@ -4,25 +4,28 @@ import { useAsync } from "../lib/hooks";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
+import { ModelList } from "../components/ModelList";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Mapping, Model, Provider } from "../types";
+import type { Mapping, Model, Provider, ProviderModels } from "../types";
 
 interface Data {
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
+  providerModels: ProviderModels[];
 }
 
 export function Models() {
   const { t } = useI18n();
   const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [m, p, map] = await Promise.all([
+    const [m, p, map, pm] = await Promise.all([
       api.get<{ models: Model[] }>("/models"),
       api.get<{ providers: Provider[] }>("/providers"),
       api.get<{ mappings: Mapping[] }>("/mappings"),
+      api.get<{ providerModels: ProviderModels[] }>("/provider-models"),
     ]);
-    return { models: m.models, providers: p.providers, mappings: map.mappings };
+    return { models: m.models, providers: p.providers, mappings: map.mappings, providerModels: pm.providerModels };
   });
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
@@ -32,6 +35,8 @@ export function Models() {
   const [saving, setSaving] = useState(false);
 
   const providerName = (id: number) => data?.providers.find((p) => p.id === id)?.name ?? `#${id}`;
+  /** What the selected provider reported the last time it was tested. */
+  const offeredBy = (id: number) => data?.providerModels.find((x) => x.providerId === id)?.models ?? [];
 
   const saveModel = async () => {
     if (!modelForm) return;
@@ -198,6 +203,7 @@ export function Models() {
 
       <Modal
         open={mapForm !== null}
+        size="lg"
         title={t("models.mappingModal.title")}
         icon="bi-diagram-2"
         onClose={() => setMapForm(null)}
@@ -224,6 +230,26 @@ export function Models() {
               <label className="label">{t("models.mappingModal.field.upstreamModel.label")}</label>
               <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
               <p className="mt-1 text-xs text-ink-500">{t("models.mappingModal.field.upstreamModel.hint")}</p>
+              {/* The field above doubles as the search box: type to narrow the
+                  provider's own list, click to fill it in, or ignore the list
+                  entirely and type an id it didn't report. */}
+              <div className="mt-2 space-y-1.5">
+                {offeredBy(mapForm.providerId).length > 0 && (
+                  <div className="text-xs text-ink-500">
+                    {t("models.mappingModal.picker.title", {
+                      provider: providerName(mapForm.providerId),
+                      count: offeredBy(mapForm.providerId).length,
+                    })}
+                  </div>
+                )}
+                <ModelList
+                  models={offeredBy(mapForm.providerId)}
+                  filter={mapForm.upstreamModel}
+                  selected={mapForm.upstreamModel}
+                  onPick={(m) => setMapForm({ ...mapForm, upstreamModel: m })}
+                  emptyText={t("models.mappingModal.picker.empty")}
+                />
+              </div>
             </div>
           </div>
         )}

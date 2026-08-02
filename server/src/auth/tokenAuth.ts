@@ -34,7 +34,7 @@ export function requireClientToken(tokens: TokenRepo, family: Family) {
       return void (await fail(401, "API key has expired."));
     }
     if (token.maxRequests != null && token.usedRequests >= token.maxRequests) {
-      return void (await fail(429, "Token request quota exceeded."));
+      return void (await fail(429, "API key request quota exceeded."));
     }
     if (token.maxTokens != null && token.usedTokens >= token.maxTokens) {
       return void (await fail(429, "Token usage quota exceeded."));

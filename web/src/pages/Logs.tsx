@@ -278,7 +278,7 @@ export function Logs() {
 
       <Modal
         open={detail !== null}
-        wide
+        size="xl"
         title={t("logs.modal.detailTitle", { id: detail?.id ?? "" })}
         icon="bi-journal-text"
         onClose={() => setDetail(null)}

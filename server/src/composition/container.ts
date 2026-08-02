@@ -7,6 +7,7 @@ import { verifyOrInitMasterKey } from "../security/masterKey";
 // Side-effect import: registers all three wire formats with the format registry.
 import "../core/format";
 import { ProviderRepo } from "../persistence/providerRepo";
+import { ProviderModelRepo } from "../persistence/providerModelRepo";
 import { ModelRepo } from "../persistence/modelRepo";
 import { MappingRepo } from "../persistence/mappingRepo";
 import { ServiceRepo } from "../persistence/serviceRepo";
@@ -36,6 +37,7 @@ export interface Container {
   sqlite: Database.Database;
   db: DB;
   providers: ProviderRepo;
+  providerModels: ProviderModelRepo;
   models: ModelRepo;
   mappings: MappingRepo;
   services: ServiceRepo;
@@ -67,6 +69,7 @@ export async function boot(): Promise<Container> {
   if (seed.created) printInitialAdmin(seed);
 
   const providers = new ProviderRepo(db, config.masterKey);
+  const providerModels = new ProviderModelRepo(db);
   const models = new ModelRepo(db);
   const mappings = new MappingRepo(db);
   const services = new ServiceRepo(db);
@@ -93,7 +96,7 @@ export async function boot(): Promise<Container> {
 
   return {
     config, sqlite, db,
-    providers, models, mappings, services, tokens, users, logs, settings, stats, pruner,
+    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, pruner,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests,
   };
 }

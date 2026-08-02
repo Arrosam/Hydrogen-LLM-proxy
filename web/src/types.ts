@@ -23,6 +23,22 @@ export interface Provider {
   createdAt: number;
 }
 
+/** The model ids a provider reported from its own /models endpoint. */
+export interface ProviderModels {
+  providerId: number;
+  models: string[];
+  /** When the list was last refreshed; null when nothing is stored. */
+  fetchedAt: number | null;
+}
+
+/** The result of testing a provider: reachability plus what it serves. */
+export interface ProviderTestResult {
+  ok: boolean;
+  status: number;
+  message: string;
+  models: string[];
+}
+
 export interface Model {
   id: number;
   name: string;

@@ -347,7 +347,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   return (
     <Modal
       open={open}
-      wide
+      size="xl"
       title={service ? t("serviceEditor.editTitle", { name: service.name }) : kind === "chain" ? t("serviceEditor.newMicroAgentTitle") : t("serviceEditor.newModelServiceTitle")}
       icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
       onClose={onClose}

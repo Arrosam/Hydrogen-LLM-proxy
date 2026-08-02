@@ -3,7 +3,7 @@
 This guide takes you from a freshly started Hydrogen to a working API call, then shows how to
 build a **Micro Agent** — a multi-stage pipeline that clients call as if it were a single model.
 
-If you just want the shortest path: **Provider → Model → Model Service → Token → call it.** That
+If you just want the shortest path: **Provider → Model → Model Service → API key → call it.** That
 order is not a suggestion; each step depends on the one before it.
 
 > 中文版：[getting-started.zh.md](getting-started.zh.md)
@@ -46,8 +46,8 @@ Client code keeps asking for `sonnet-any` and never notices.
 You need a running Hydrogen and an admin login. If you haven't got that yet, see **Quick start** in
 the [README](../README.md). Open the dashboard (`http://localhost:8080` by default) and sign in.
 
-The left sidebar is the map of everything below: **Model Services**, **Micro Agents**, **Models**,
-**Providers**, **Tokens**, **Logs**, **Active Requests**.
+The left sidebar is the map of everything below: **Model Services**, **Micro Agents**,
+**Model Mapping**, **Providers**, **API Keys**, **Logs**, **Active Requests**.
 
 ---
 
@@ -65,6 +65,7 @@ The left sidebar is the map of everything below: **Model Services**, **Micro Age
 | **API key** | Encrypted with AES-256-GCM the moment you save. It is never shown again. |
 | **Extra headers (JSON, optional)** | For upstreams that need something extra, e.g. `{"x-org": "team-a"}`. |
 | **Max output tokens (optional cap)** | A hard ceiling this provider accepts. Thinking budgets get fitted under it, so requests aren't rejected for asking too much. |
+| **Connection test** | See below. |
 | **Enabled** | On. |
 
 **Base URL** depends on the Type, and the dialog tells you which suffix gets appended:
@@ -76,14 +77,23 @@ The left sidebar is the map of everything below: **Model Services**, **Micro Age
 Anything OpenAI-compatible works here — a local Ollama, vLLM, OpenRouter, Groq — pick
 `OpenAI (Chat Completions)` and point the Base URL at its `/v1`.
 
-Save, and the provider joins the list. **Test** it right away — it calls the provider's models
-endpoint and reports `Connection OK`, which proves the base URL and the key work before you build
-anything on top of them. The **Key** column shows `set`, never the key itself.
+Before saving, hit **Test** at the bottom of the dialog. It calls the provider's models endpoint
+using exactly what you just typed — base URL, key, extra headers — so a green result proves the
+provider works *before* anything is stored. What comes back is the provider's own list of models,
+shown right there in the dialog and written to the database when you press **Save**.
 
-![The Providers list, with Type, Base URL, Key and a Test button per row](images/01-providers.png)
+That stored list is what turns step 2's *Upstream model id* from a field you have to get right from
+memory into a list you pick from. Re-open the provider and hit **Test** again whenever the upstream
+adds or retires models — each test replaces the list wholesale.
+
+Save, and the provider joins the list. The **Key** column shows `set`, never the key itself; the
+**Models** column shows how many models the last test found.
+
+![The Providers list, with Type, Base URL, Key and Models per row](images/01-providers.png)
 
 > **Editing later:** the API key field always opens blank. Leave it blank to keep the existing key;
-> type a new one only to replace it.
+> type a new one only to replace it. Testing with it blank reuses the stored key, so you can re-test
+> a saved provider without retyping anything.
 
 ---
 
@@ -91,7 +101,7 @@ anything on top of them. The **Key** column shows `set`, never the key itself.
 
 A model is just a name in your catalog. Mapping is what connects it to a provider.
 
-**Models → New model.** Name it something short and stable — `sonnet4.6`, `gpt5.4`, `fast-local`.
+**Model Mapping → New model.** Name it something short and stable — `sonnet4.6`, `gpt5.4`, `fast-local`.
 This is *your* name; upstream ids come later, in the mapping. Description is optional.
 
 Now, on that model's card, click **Map provider**:
@@ -101,6 +111,12 @@ Now, on that model's card, click **Map provider**:
 - **Provider** — the one you made in step 1.
 - **Upstream model id** — the exact string that provider expects on the wire, e.g.
   `claude-sonnet-4-6` or `gpt-4o`. Typos here surface as upstream 404s at call time, not now.
+
+  If you tested the provider in step 1, everything it reported is listed under the field: type to
+  filter it, click to fill it in. Picking from that list is how you avoid the 404 — it is the
+  provider's own answer, not your memory of it. Nothing forces you to use it, though: an id the
+  provider never listed can still be typed in by hand. *"No model list for this provider yet"* means
+  go back to Providers and run the test.
 
 Map the same model to **several providers** when more than one can serve it (say, Anthropic direct
 and a Bedrock-style gateway). That's what makes provider-fallback possible in the next step. Each
@@ -186,18 +202,18 @@ jobs; usually not for a chat UI.
 
 ---
 
-## Step 4 — Issue a token
+## Step 4 — Issue an API key
 
-**Tokens → Issue token.** Admin-only; managers can't issue tokens.
+**API Keys → Issue API key.** Admin-only; managers can't issue API keys.
 
 - **Name** — e.g. `my-laptop`. Required.
 - **Scope** — **Allow all Model Services** is checked by default. Uncheck it to tick specific
   services, which is how you hand someone a key that can only reach the cheap one.
-- **Max requests / Max tokens (optional)** — quotas for this token.
+- **Max requests / Max tokens (optional)** — quotas for this key.
 - **Expires at (optional)**.
 
-The token appears **once**, as `sk-hproxy-...`. Copy it now — only a hash is stored, so nobody,
-including you, can recover it later. Lost token, new token.
+The key appears **once**, as `sk-hproxy-...`. Copy it now — only a hash is stored, so nobody,
+including you, can recover it later. Lost key, new key.
 
 ---
 
@@ -367,7 +383,7 @@ clicking:
 }
 ```
 
-Hit **Validate**, then **Save**. Scope a token to it (or use an all-services token) and call it by
+Hit **Validate**, then **Save**. Scope an API key to it (or use an all-services key) and call it by
 name:
 
 ```bash
@@ -457,11 +473,11 @@ Service, not another Micro Agent.
 
 | What you see | What it means |
 |---|---|
-| `(no providers mapped)` in a step's provider dropdown | That model has no mapping yet. Models → **Map provider**. |
+| `(no providers mapped)` in a step's provider dropdown | That model has no mapping yet. Model Mapping → **Map provider**. |
 | Validate: *"These (model, provider) pairs are not mapped in the catalog"* | The step points at a pair that doesn't exist. Fix the mapping or the step. |
 | Dry-run fails with a 401/403 | Wrong API key on the provider. Re-enter it (blank = keep current, so you must type the new one). |
 | Dry-run fails with a 404 | The **Upstream model id** in the mapping isn't what that provider calls it. |
-| Client gets 401 from Hydrogen | Bad or revoked token, or the token isn't scoped to that service. |
+| Client gets 401 from Hydrogen | Bad or revoked API key, or the key isn't scoped to that service. |
 | Client gets 404 for the model | The `model` you sent isn't a Model Service name, or the service is disabled. |
 | *"Create a provider first"* | Provider → Model → Mapping. In that order. |
 | Agent: *"references unknown Model Service or Micro Agent"* | A stage names a service that doesn't exist. Save the Model Service first. |

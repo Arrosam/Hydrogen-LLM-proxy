@@ -243,7 +243,7 @@ export class ProxyController {
         traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
         httpStatus: 403, http, latencyMs: 0, error: "service out of token scope",
       });
-      return this.replyError(reply, ingress, 403, `This token is not allowed to use '${serviceName}'.`);
+      return this.replyError(reply, ingress, 403, `This API key is not allowed to use '${serviceName}'.`);
     }
 
     // Media passthrough categories (image/tts/embedding/...) have their own

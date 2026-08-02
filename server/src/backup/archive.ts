@@ -34,6 +34,7 @@ export const BACKUP_FORMAT = "hydrogen-backup";
 const TABLES = [
   "users",
   "providers",
+  "provider_available_models",
   "models",
   "model_providers",
   "model_services",
@@ -47,10 +48,19 @@ type TableName = (typeof TABLES)[number];
 /** Tables holding history rather than configuration; skippable on export. */
 const LOG_TABLES: ReadonlySet<string> = new Set(["request_logs"]);
 
-/** The configuration tables a valid package must carry (everything but history).
- * A package missing any of these is rejected, so a truncated or hand-edited file
- * can never delete the target's accounts and leave nothing to log back in with. */
-const REQUIRED_TABLES: readonly TableName[] = TABLES.filter((t) => !LOG_TABLES.has(t));
+/**
+ * Tables holding a cache of what an upstream reported rather than anything the
+ * user configured. Carried in a package when present, but never required on the
+ * way back in: a package written before the table existed must still restore,
+ * and re-testing the provider rebuilds the contents anyway.
+ */
+const DERIVED_TABLES: ReadonlySet<string> = new Set(["provider_available_models"]);
+
+/** The configuration tables a valid package must carry (everything but history
+ * and re-fetchable caches). A package missing any of these is rejected, so a
+ * truncated or hand-edited file can never delete the target's accounts and
+ * leave nothing to log back in with. */
+const REQUIRED_TABLES: readonly TableName[] = TABLES.filter((t) => !LOG_TABLES.has(t) && !DERIVED_TABLES.has(t));
 
 /** The provider columns that hold master-key-encrypted material. Never exported:
  * they are replaced by the sealed plaintext and rebuilt on restore. */

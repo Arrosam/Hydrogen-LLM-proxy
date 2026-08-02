@@ -15,6 +15,13 @@
       "when": 1783435624043,
       "tag": "0001_unique_silver_samurai",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785631564307,
+      "tag": "0002_strong_maximus",
+      "breakpoints": true
     }
   ]
 }

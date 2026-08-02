@@ -49,6 +49,27 @@ export const providers = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Provider model catalogs — the model ids a provider itself reported from its
+// /models endpoint, captured when the provider is tested. Not configuration:
+// a cache of what the upstream offers, so mapping a model can be a pick from a
+// list instead of a hand-typed id. Replaced wholesale on every refresh.
+// ---------------------------------------------------------------------------
+export const providerAvailableModels = sqliteTable(
+  "provider_available_models",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    providerId: integer("provider_id").notNull().references(() => providers.id, { onDelete: "cascade" }),
+    /** The upstream model id, verbatim as the provider reported it. */
+    modelId: text("model_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => ({
+    pairIdx: uniqueIndex("provider_available_models_pair_idx").on(t.providerId, t.modelId),
+    providerIdx: index("provider_available_models_provider_idx").on(t.providerId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Models — internal catalog. Served to clients only through Model Services.
 // ---------------------------------------------------------------------------
 export const models = sqliteTable(
@@ -196,6 +217,7 @@ export const settings = sqliteTable("settings", {
 
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
+export type ProviderAvailableModel = typeof providerAvailableModels.$inferSelect;
 export type Model = typeof models.$inferSelect;
 export type ModelProvider = typeof modelProviders.$inferSelect;
 export type ModelServiceRow = typeof modelServices.$inferSelect;

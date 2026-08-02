@@ -32,15 +32,12 @@ function EndpointsCard() {
   const { t } = useI18n();
   const origin = window.location.origin;
   const rows = [
+    // One row per SDK base URL. The Responses endpoint hangs off the same
+    // OpenAI base URL, so it is a note on that row rather than a row of its own.
     {
       label: t("overview.endpoints.openaiBaseUrl"),
       value: `${origin}/v1`,
       hint: t("overview.endpoints.openaiBaseUrlHint"),
-    },
-    {
-      label: t("overview.endpoints.openaiResponses"),
-      value: `${origin}/v1/responses`,
-      hint: t("overview.endpoints.openaiResponsesHint"),
     },
     { label: t("overview.endpoints.anthropicBaseUrl"), value: origin, hint: t("overview.endpoints.anthropicBaseUrlHint") },
   ];

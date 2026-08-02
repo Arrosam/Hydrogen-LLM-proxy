@@ -12,8 +12,7 @@ import { ServiceValidationError } from "../execution/serviceValidator";
 import { buildRequest } from "../core/format/registry";
 import { textOf } from "../core/ir/content";
 import { failureMessage } from "../core/proxy/errors";
-import { buildHeaders, modelsUrl } from "../core/upstream/endpoints";
-import { familyForProviderType } from "../core/format/family";
+import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../catalog/modelDiscovery";
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
@@ -178,6 +177,13 @@ const BaseUrlSchema = z
   .url()
   .refine((u) => /^https?:$/.test(new URL(u).protocol), { message: "baseUrl must use http or https" });
 
+/** The model list captured from a provider test, persisted alongside the save.
+ * Omitted = leave whatever is stored alone; `[]` = the provider reported none. */
+const AvailableModelsSchema = z
+  .array(z.string().min(1).max(MAX_MODEL_ID_LENGTH))
+  .max(MAX_DISCOVERED_MODELS)
+  .optional();
+
 const ProviderCreate = z.object({
   name: z.string().min(1).max(120),
   type: TypeSchema,
@@ -186,6 +192,7 @@ const ProviderCreate = z.object({
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
   enabled: z.boolean().optional(),
+  availableModels: AvailableModelsSchema,
 });
 const ProviderUpdate = z.object({
   name: z.string().min(1).max(120).optional(),
@@ -195,6 +202,21 @@ const ProviderUpdate = z.object({
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
   enabled: z.boolean().optional(),
+  availableModels: AvailableModelsSchema,
+});
+
+/**
+ * A provider test runs against the form in front of the user, not against what
+ * is stored — that is the whole point of testing before saving. `id` is only
+ * consulted to reuse the saved key when the key field was left blank (the
+ * dashboard never sends a key it doesn't have the plaintext for).
+ */
+const ProviderTest = z.object({
+  id: z.number().int().positive().optional(),
+  type: TypeSchema,
+  baseUrl: BaseUrlSchema,
+  apiKey: z.string().nullable().optional(),
+  extraHeaders: HeadersSchema,
 });
 
 async function providerRoutes(app: FastifyInstance, c: Container): Promise<void> {
@@ -203,7 +225,10 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
   app.post("/", async (req, reply) => {
     const parsed = parse(ProviderCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    return reply.code(201).send({ provider: c.providers.toPublic(c.providers.create(parsed.data)) });
+    const { availableModels, ...input } = parsed.data;
+    const provider = c.providers.create(input);
+    if (availableModels) c.providerModels.replaceForProvider(provider.id, availableModels);
+    return reply.code(201).send({ provider: c.providers.toPublic(provider) });
   });
 
   app.patch("/:id", async (req, reply) => {
@@ -212,7 +237,9 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
     if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
     const parsed = parse(ProviderUpdate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const provider = c.providers.update(id, parsed.data);
+    const { availableModels, ...input } = parsed.data;
+    const provider = c.providers.update(id, input);
+    if (availableModels) c.providerModels.replaceForProvider(id, availableModels);
     return { provider: provider ? c.providers.toPublic(provider) : null };
   });
 
@@ -224,22 +251,28 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
     return { ok: true };
   });
 
-  app.post("/:id/test", async (req, reply) => {
+  /** Reach the provider's models endpoint and report what it serves. Read-only:
+   * the list is stored when the provider itself is saved, not here, so a test
+   * on a form the user then abandons changes nothing. */
+  app.post("/test", async (req, reply) => {
+    const parsed = parse(ProviderTest, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const { id, type, baseUrl, apiKey, extraHeaders } = parsed.data;
+    let key = apiKey ?? null;
+    if (apiKey === undefined && id !== undefined) {
+      const stored = c.providers.get(id);
+      if (!stored) return reply.code(404).send({ error: "not found" });
+      key = c.providers.toUpstream(stored).apiKey;
+    }
+    return discoverModels(c.transport, { type, baseUrl, apiKey: key, extraHeaders: extraHeaders ?? null });
+  });
+
+  /** The stored list for one provider. */
+  app.get("/:id/available-models", async (req, reply) => {
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
-    const provider = c.providers.get(id);
-    if (!provider) return reply.code(404).send({ error: "not found" });
-    const up = c.providers.toUpstream(provider);
-    try {
-      const res = await c.transport.getJson(modelsUrl(up), buildHeaders(up), { timeoutMs: 15_000 });
-      if (res.status >= 200 && res.status < 300) return { ok: true, status: res.status, message: "Connection OK" };
-      const family = familyForProviderType(provider.type);
-      const text = (res.text ?? "").trim();
-      const short = text.length > 200 ? `${text.slice(0, 200)}...` : text;
-      return { ok: false, status: res.status, message: `Upstream returned ${res.status} for the ${family} models endpoint. ${short}` };
-    } catch (e) {
-      return { ok: false, status: 0, message: e instanceof Error ? e.message : String(e) };
-    }
+    if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
+    return c.providerModels.forProvider(id);
   });
 }
 
@@ -278,6 +311,10 @@ async function catalogRoutes(app: FastifyInstance, c: Container): Promise<void> 
     c.models.delete(id);
     return { ok: true };
   });
+
+  /** Every provider's discovered model list, for the mapping picker. Providers
+   * are few, so one call beats a request per provider. */
+  app.get("/provider-models", async () => ({ providerModels: c.providerModels.grouped() }));
 
   app.get("/mappings", async () => ({ mappings: c.mappings.list() }));
   app.post("/mappings", async (req, reply) => {
@@ -458,7 +495,7 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/", async () => ({ tokens: c.tokens.list().map((t) => c.tokens.toPublic(t)) }));
 
   app.post("/", async (req, reply) => {
-    if (!requireAdmin(req, reply, "issue tokens")) return reply;
+    if (!requireAdmin(req, reply, "issue API keys")) return reply;
     const parsed = parse(TokenCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { token, secret } = c.tokens.create({ ...parsed.data, ownerUserId: req.user.uid });
