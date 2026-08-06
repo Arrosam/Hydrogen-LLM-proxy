@@ -28,6 +28,11 @@ import { isAgentDef, isChatPipelineCategory } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
 
+/** The server's default retry trigger set, applied when a step omits `retry`
+ * (mirrors DEFAULT_RETRY_ON in server/src/execution/definition.ts). Shown in
+ * the editor when no explicit retry policy is set. */
+const DEFAULT_RETRY_ON: Trigger[] = [429, 499, 502, 503, "timeout", "network"];
+
 /** The client-facing endpoint each media passthrough category is served on.
  * (chat and ocr both run the chat pipeline on /v1/chat/completions.) */
 const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, string> = {
@@ -79,7 +84,10 @@ interface Props {
 }
 
 function blankStep(model: string, provider: string): ServiceStep {
-  return { model, provider, retry: { on: [], maxAttempts: 1, intervalMs: 0 } };
+  // Omit `retry` entirely: the server then applies its defaults (retry on
+  // [429, 499, 502, 503, timeout, network], 3 attempts). Writing an explicit
+  // `retry: { on: [], maxAttempts: 1 }` here would silently disable retries.
+  return { model, provider };
 }
 
 /**
@@ -203,9 +211,20 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const patchRetry = (i: number, patch: Partial<NonNullable<ServiceStep["retry"]>>) =>
     setSteps((s) =>
-      s.map((st, idx) =>
-        idx === i ? { ...st, retry: { on: [], maxAttempts: 1, intervalMs: 0, ...st.retry, ...patch } } : st,
-      ),
+      s.map((st, idx) => {
+        if (idx !== i) return st;
+        // An all-defaults retry is exactly what the server does when `retry` is
+        // omitted (3 attempts, on [429, 499, 502, 503, timeout, network]). Keep
+        // it explicit only once the user changes something; otherwise drop the
+        // field so the server's defaults keep applying.
+        const merged = { on: [], maxAttempts: 3, intervalMs: 0, ...st.retry, ...patch };
+        const isDefault = merged.on.length === 0 && merged.maxAttempts === 3 && merged.intervalMs === 0;
+        if (isDefault) {
+          const { retry: _retry, ...rest } = st;
+          return rest as ServiceStep;
+        }
+        return { ...st, retry: merged };
+      }),
     );
 
   const addStep = () => {
@@ -531,7 +550,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                       <div className="mt-3 grid grid-cols-2 gap-3">
                         <div>
                           <label className="label">{t("serviceEditor.retryAttempts")}</label>
-                          <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 1} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: intInput(e.target.value, 1, 1) })} />
+                          <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 3} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: intInput(e.target.value, 1, 1) })} />
                         </div>
                         <div>
                           <label className="label">{t("serviceEditor.retryInterval")}</label>
@@ -543,8 +562,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         <label className="label">{t("serviceEditor.retryOn")}</label>
                         <TriggerChips
                           options={[...CODE_OPTIONS, ...symbolicOptions(t, ["timeout", "network", "error"])]}
-                          selected={step.retry?.on ?? []}
-                          onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on, v as Trigger) })}
+                          selected={step.retry?.on ?? DEFAULT_RETRY_ON}
+                          onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on ?? DEFAULT_RETRY_ON, v as Trigger) })}
                           allowCustomCodes
                         />
                       </div>
