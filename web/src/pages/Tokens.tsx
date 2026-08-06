@@ -36,6 +36,26 @@ const EMPTY: FormState = {
   enabled: true,
 };
 
+/** Convert epoch ms to a value suitable for <input type="datetime-local">. */
+function msToLocalInput(ms: number | null | undefined): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const off = d.getTimezoneOffset();
+  return new Date(ms - off * 60000).toISOString().slice(0, 16);
+}
+
+function formFromToken(t: Token): FormState {
+  return {
+    name: t.name,
+    scopeServices: t.scopeServices ?? [],
+    scopeAll: !t.scopeServices || t.scopeServices.length === 0,
+    maxRequests: t.maxRequests != null ? String(t.maxRequests) : "",
+    maxTokens: t.maxTokens != null ? String(t.maxTokens) : "",
+    expiresAt: msToLocalInput(t.expiresAt),
+    enabled: t.enabled,
+  };
+}
+
 export function Tokens() {
   const { t: i18n } = useI18n();
   const { user } = useAuth();
@@ -50,6 +70,7 @@ export function Tokens() {
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
   const [form, setForm] = useState<FormState | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
 
@@ -73,6 +94,30 @@ export function Tokens() {
       reload();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : i18n("tokens.toast.createFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!form || editingId == null) return;
+    setSaving(true);
+    try {
+      const payload: Record<string, unknown> = {
+        name: form.name,
+        scopeServices: form.scopeAll ? null : form.scopeServices,
+        maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
+        maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
+        expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
+        enabled: form.enabled,
+      };
+      await api.patch(`/tokens/${editingId}`, payload);
+      setForm(null);
+      setEditingId(null);
+      toast.success(i18n("tokens.toast.updated"));
+      reload();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : i18n("tokens.toast.updateFailed"));
     } finally {
       setSaving(false);
     }
@@ -105,6 +150,16 @@ export function Tokens() {
     else toast.error(i18n("tokens.toast.copyFailed"));
   };
 
+  const openEdit = (t: Token) => {
+    setEditingId(t.id);
+    setForm(formFromToken(t));
+  };
+
+  const closeForm = () => {
+    setForm(null);
+    setEditingId(null);
+  };
+
   return (
     <div>
       <PageHeader
@@ -113,7 +168,7 @@ export function Tokens() {
         icon="bi-key"
         action={
           isAdmin ? (
-            <button className="btn-primary" onClick={() => setForm({ ...EMPTY })}>
+            <button className="btn-primary" onClick={() => { setEditingId(null); setForm({ ...EMPTY }); }}>
               <i className="bi bi-plus-lg" />
               {i18n("tokens.action.issue")}
             </button>
@@ -164,7 +219,11 @@ export function Tokens() {
                   <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")}</td>
                   <td><Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} /></td>
                   <td>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1.5">
+                      <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
+                        <i className="bi bi-pencil" />
+                        {i18n("tokens.action.edit")}
+                      </button>
                       <button className="btn-danger btn-xs" onClick={() => remove(t)}>
                         <i className="bi bi-x-circle" />
                         {i18n("tokens.action.revoke")}
@@ -178,17 +237,18 @@ export function Tokens() {
         </div>
       )}
 
-      {/* Create form */}
+      {/* Create / Edit form */}
       <Modal
         open={form !== null}
-        title={i18n("tokens.modal.createTitle")}
+        title={editingId != null ? i18n("tokens.modal.editTitle") : i18n("tokens.modal.createTitle")}
         icon="bi-key"
-        onClose={() => setForm(null)}
+        onClose={closeForm}
+        size="lg"
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>{i18n("tokens.action.cancel")}</button>
-            <button className="btn-primary" onClick={create} disabled={saving || !form?.name}>
-              <i className="bi bi-check-lg" />{i18n("tokens.action.issueConfirm")}
+            <button className="btn-ghost" onClick={closeForm}>{i18n("tokens.action.cancel")}</button>
+            <button className="btn-primary" onClick={editingId != null ? saveEdit : create} disabled={saving || !form?.name}>
+              <i className="bi bi-check-lg" />{editingId != null ? i18n("tokens.action.save") : i18n("tokens.action.issueConfirm")}
             </button>
           </>
         }

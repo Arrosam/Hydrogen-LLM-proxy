@@ -27,6 +27,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
   const sessionGuard = requireSession(c.users, () => c.settings.sessionEpochMs());
 
   await app.register((scoped) => authRoutes(scoped, c, sessionGuard));
+  await app.register((scoped) => checkRoutes(scoped, c));
 
   await app.register(async (scoped) => {
     scoped.addHook("preHandler", sessionGuard);
@@ -97,6 +98,37 @@ async function authRoutes(app: FastifyInstance, c: Container, sessionGuard: Retu
     if (result === "wrong_current") return reply.code(400).send({ error: "current password is incorrect" });
     const user = c.users.get(req.user!.uid);
     return { user: user ? c.users.toPublic(user) : null };
+  });
+}
+
+// --- check (public, API-key-authenticated) ----------------------------------
+
+const CheckSchema = z.object({ apiKey: z.string().min(1) });
+
+/** Public endpoint: given an API key, return its live status without requiring
+ * a dashboard session. The key is authenticated the same way a proxy request
+ * would be, so expired/disabled/quota-exceeded keys are reported honestly. */
+async function checkRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  app.post("/check", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const parsed = parse(CheckSchema, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const token = c.tokens.authenticate(parsed.data.apiKey);
+    if (!token || !token.enabled) return reply.code(401).send({ error: "invalid or disabled API key" });
+    const now = Date.now();
+    const expiresAt = token.expiresAt instanceof Date ? token.expiresAt.getTime() : token.expiresAt;
+    const expired = expiresAt != null && expiresAt < now;
+    const requestsExceeded = token.maxRequests != null && token.usedRequests >= token.maxRequests;
+    const tokensExceeded = token.maxTokens != null && token.usedTokens >= token.maxTokens;
+    return {
+      key: c.tokens.toPublic(token),
+      status: {
+        valid: !expired && !requestsExceeded && !tokensExceeded,
+        expired,
+        requestsExceeded,
+        tokensExceeded,
+        checkedAt: now,
+      },
+    };
   });
 }
 
