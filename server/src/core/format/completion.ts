@@ -338,7 +338,9 @@ export class OpenAICompletionRequest extends Request {
     return new OpenAICompletionRequest({
       requestedService: String(body.model ?? ""),
       system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
-      messages: stripStaleReasoning(normalizeMessages(messages)),
+      // Reasoning is NOT stripped here: what a target may be sent back is the
+      // egress family's rule, applied in render().
+      messages: normalizeMessages(messages),
       tools: parseTools(body.tools),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),
@@ -350,7 +352,10 @@ export class OpenAICompletionRequest extends Request {
     const messages: Record<string, unknown>[] = [];
     if (this.system) messages.push({ role: "system", content: this.system });
 
-    for (const m of this.messages) {
+    // Prior turns' reasoning is dropped on the way out: DeepSeek's
+    // OpenAI-compatible endpoint rejects reasoning_content sent back to it, and
+    // the rest of the family ignores it.
+    for (const m of stripStaleReasoning(this.messages)) {
       if (m.role === "assistant") {
         const textParts = m.content.filter((p): p is TextPart => p.type === "text");
         const reasoningParts = m.content.filter((p) => p.type === "reasoning");

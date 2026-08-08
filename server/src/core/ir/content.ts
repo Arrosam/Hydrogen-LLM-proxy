@@ -106,16 +106,23 @@ export function normalizeMessages(messages: Message[]): Message[] {
 /**
  * Drop reasoning/thinking blocks carried in from earlier turns of the request
  * history. Resending them is what makes a continued conversation lose its
- * thinking while a fresh one keeps it: an Anthropic upstream needs a valid
- * signature on a resent thinking block (relayed/cross-provider ones don't have
- * one), DeepSeek rejects reasoning_content sent back to it, and other providers
+ * thinking while a fresh one keeps it: DeepSeek's OpenAI-compatible endpoint
+ * rejects reasoning_content sent back to it, and other OpenAI-family providers
  * just don't re-engage thinking when the history already "thought".
  *
  * Reasoning is kept only inside the CURRENT turn's tool-use loop -- the messages
  * after the last user message that carries real input (text/image); a pure
- * tool_result is a continuation, not a new turn -- because Anthropic *requires*
- * the thinking block there when a tool_result is sent back. Everything before
- * that is a completed turn whose reasoning is stale and dropped.
+ * tool_result is a continuation, not a new turn. Everything before that is a
+ * completed turn whose reasoning is stale and dropped.
+ *
+ * APPLIED PER EGRESS FAMILY, AT RENDER TIME -- not when a request is parsed.
+ * The families disagree about resent thinking: the Anthropic wire format
+ * *requires* it back (DeepSeek's Anthropic-compatible endpoint rejects a
+ * thinking-mode request whose history has none), while the OpenAI families
+ * reject or ignore it. Stripping at parse time decided for every provider before
+ * the egress was even known, which is why an Anthropic target could never get
+ * its thinking blocks back. The canonical Request now carries the reasoning and
+ * each renderer applies its own rule.
  */
 export function stripStaleReasoning(messages: Message[]): Message[] {
   let turnStart = -1;
@@ -130,5 +137,27 @@ export function stripStaleReasoning(messages: Message[]): Message[] {
   return messages.map((m, i) => {
     if (i >= turnStart || m.role !== "assistant" || !m.content.some((p) => p.type === "reasoning")) return m;
     return { ...m, content: m.content.filter((p) => p.type !== "reasoning") };
+  });
+}
+
+/**
+ * Move an assistant message's reasoning to the front of its content.
+ *
+ * Anthropic puts thinking FIRST in an assistant turn, but the OpenAI wire shape
+ * carries reasoning as a sibling field of the content (`reasoning_content`), so
+ * parsing one yields `[text, reasoning]` — rendered verbatim that is an invalid
+ * Anthropic message. A stable partition, so content that is already in the right
+ * order (anything parsed from Anthropic itself) comes back untouched.
+ */
+export function orderReasoningFirst(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (m.role !== "assistant" || !m.content.some((p) => p.type === "reasoning")) return m;
+    return {
+      ...m,
+      content: [
+        ...m.content.filter((p) => p.type === "reasoning"),
+        ...m.content.filter((p) => p.type !== "reasoning"),
+      ],
+    };
   });
 }

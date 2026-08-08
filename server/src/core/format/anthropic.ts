@@ -2,7 +2,7 @@ import { Request, type RenderTarget } from "../ir/request";
 import { Response } from "../ir/response";
 import {
   normalizeMessages,
-  stripStaleReasoning,
+  orderReasoningFirst,
   type ContentPart,
   type ImagePart,
   type Message,
@@ -248,7 +248,9 @@ export class AnthropicRequest extends Request {
     return new AnthropicRequest({
       requestedService: String(body.model ?? ""),
       system: systemToText(body.system),
-      messages: stripStaleReasoning(normalizeMessages(messages)),
+      // Reasoning is NOT stripped here: what a target may be sent back is the
+      // egress family's rule, applied in render().
+      messages: normalizeMessages(messages),
       tools: parseTools(body.tools),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),
@@ -257,7 +259,13 @@ export class AnthropicRequest extends Request {
   }
 
   render(target: RenderTarget): Record<string, unknown> {
-    const messages = this.messages.map((m) => ({ role: m.role, content: partsToBlocks(m.content) }));
+    // Thinking blocks are kept, not stripped: this family REQUIRES the history's
+    // thinking back when thinking mode is on — DeepSeek's Anthropic-compatible
+    // endpoint answers a request whose assistant turns have none with
+    // "content[].thinking in the thinking mode must be passed back" (4028).
+    // They also have to lead their message, which is not the order an OpenAI
+    // ingress produces.
+    const messages = orderReasoningFirst(this.messages).map((m) => ({ role: m.role, content: partsToBlocks(m.content) }));
     const p = this.params;
     const cap = target.providerMaxOutputTokens;
 

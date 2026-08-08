@@ -2,7 +2,6 @@ import { Request, type RenderTarget } from "../ir/request";
 import { Response } from "../ir/response";
 import {
   normalizeMessages,
-  stripStaleReasoning,
   reasoningOf,
   textOf,
   type ContentPart,
@@ -260,7 +259,11 @@ export class OpenAIResponsesRequest extends Request {
     return new OpenAIResponsesRequest({
       requestedService: String(body.model ?? ""),
       system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
-      messages: stripStaleReasoning(normalizeMessages(messages)),
+      // Reasoning is NOT stripped here: what a target may be sent back is the
+      // egress family's rule. This family's render() drops every reasoning part
+      // regardless (they pair with provider-side item ids and can't be replayed),
+      // so there is nothing further to apply on the way out.
+      messages: normalizeMessages(messages),
       tools: parseTools(body.tools),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),

@@ -111,7 +111,10 @@ export abstract class Request implements RequestData {
     return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), stream });
   }
 
-  /** Merge same-role messages and drop stale prior-turn reasoning. */
+  /** Merge same-role messages and drop stale prior-turn reasoning.
+   * NOTE: the pipeline does NOT use this — resent reasoning is an egress-family
+   * decision made in each `render()` (Anthropic keeps it, OpenAI strips it), and
+   * applying it to a canonical Request would decide for every family at once. */
   normalized(): this {
     const messages = stripStaleReasoning(normalizeMessages(this.messages));
     return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), messages });
