@@ -452,6 +452,13 @@ the request is transcribed to text and replaced inline, so downstream stages —
 structured results; the advanced panel lets you replace it. The OCR stage must be a plain Model
 Service, not another Micro Agent.
 
+**Descriptions are cached.** Each image is keyed by a hash of its own content, so the same picture
+is transcribed once and every repeat — in a later turn, a later request, from a different client —
+is answered from the cache without touching the model. A request mixing new and seen images sends
+only the new ones. The cache is bounded by a byte budget in **Settings → OCR image cache**
+(64 MiB by default); when it is exceeded, the least recently used entries are deleted until it fits.
+Set the budget to 0 to turn caching off and empty it.
+
 ## Things to know before you rely on it
 
 - **Streaming is buffered.** Routing needs each stage's complete output, so an agent always runs

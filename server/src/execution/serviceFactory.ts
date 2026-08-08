@@ -3,6 +3,7 @@ import type { ServiceRepo } from "../persistence/serviceRepo";
 import { isAgent, isChatPipeline, parseService, serviceCategory, type ServiceDef } from "./definition";
 import { ModelService, type ServiceDeps } from "./modelService";
 import { MicroAgent, type MicroAgentDeps, type ResolveResult, type ServiceResolver } from "./microAgent";
+import type { OcrCacheStore } from "./ocrCache";
 
 /**
  * Builds a runnable executor (ModelService or MicroAgent) from a saved service.
@@ -15,10 +16,12 @@ export class ServiceFactory implements ServiceResolver {
     private readonly services: ServiceRepo,
     private readonly deps: ServiceDeps,
     private readonly logMaxChars: number | (() => number),
+    /** Image-description cache for the OCR pre-pass; omitted = no caching. */
+    private readonly ocrCache: OcrCacheStore | null = null,
   ) {}
 
   private microDeps(): MicroAgentDeps {
-    return { ...this.deps, resolver: this, logMaxChars: this.logMaxChars };
+    return { ...this.deps, resolver: this, logMaxChars: this.logMaxChars, ocrCache: this.ocrCache };
   }
 
   /** Build an executor from an already-parsed definition (e.g. an ad-hoc dry-run). */

@@ -32,6 +32,7 @@ export function Settings() {
       <LanguageCard />
       <BackupCard />
       <RetentionCard />
+      <ImageCacheCard />
       <AllowlistCard />
       <EnvCard />
     </div>
@@ -342,6 +343,122 @@ function RetentionCard() {
           {t("common.save")}
         </button>
       </div>
+    </div>
+  );
+}
+
+const MIB = 1024 * 1024;
+
+/** Bytes as MiB for display: whole numbers stay whole, odd values keep enough
+ * precision to be recognisable rather than rounding to "0". */
+function toMib(bytes: number): string {
+  const mib = bytes / MIB;
+  if (Number.isInteger(mib)) return String(mib);
+  return mib.toFixed(mib < 10 ? 2 : 1);
+}
+
+type ImageCacheState = { maxBytes: number; entries: number; usedBytes: number };
+
+/**
+ * The OCR image cache: a Micro Agent's image-translation pre-pass remembers each
+ * image's description by content hash, so a repeat of the same image never
+ * reaches the model. The budget is what stops that from growing without end —
+ * when it is exceeded, least-recently-used entries are evicted first.
+ */
+function ImageCacheCard() {
+  const { t } = useI18n();
+  const toast = useToast();
+  const { confirm, confirmEl } = useConfirm();
+  const { data, loading, error, reload } = useAsync(() => api.get<ImageCacheState>("/settings/image-cache"));
+  const [mib, setMib] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    if (data) setMib(toMib(data.maxBytes));
+  }, [data]);
+
+  const save = async () => {
+    const n = Number(mib.trim());
+    if (!Number.isFinite(n) || n < 0 || n > 65536) {
+      toast.error(t("settings.imageCache.toast.invalidSize"));
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await api.put<ImageCacheState & { evicted: number }>("/settings/image-cache", { maxBytes: Math.round(n * MIB) });
+      toast.success(
+        n === 0
+          ? t("settings.imageCache.toast.disabled")
+          : r.evicted
+            ? t("settings.imageCache.toast.savedEvicted", { size: toMib(r.maxBytes), evicted: r.evicted })
+            : t("settings.imageCache.toast.saved", { size: toMib(r.maxBytes) }),
+      );
+      reload();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clear = async () => {
+    const ok = await confirm(t("settings.imageCache.confirm.title"), t("settings.imageCache.confirm.body"));
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const r = await api.del<{ cleared: number }>("/settings/image-cache");
+      toast.success(t("settings.imageCache.toast.cleared", { cleared: r.cleared }));
+      reload();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  return (
+    <div className="card card-pad mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <i className="bi bi-images text-brand-400" />
+        <h3 className="font-medium text-ink-100">{t("settings.imageCache")}</h3>
+      </div>
+      <p className="mb-3 text-xs text-ink-500">{t("settings.imageCache.hint")}</p>
+
+      {loading && <Spinner />}
+      {error && <ErrorNote message={error} />}
+      {data && (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="input w-32 font-mono text-xs"
+              inputMode="decimal"
+              value={mib}
+              onChange={(e) => setMib(e.target.value)}
+              placeholder="64"
+            />
+            <span className="text-xs text-ink-500">{t("settings.imageCache.unit")}</span>
+            <button className="btn-ghost btn-xs whitespace-nowrap" onClick={save} disabled={saving}>
+              {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
+              {t("common.save")}
+            </button>
+            <button className="btn-ghost btn-xs whitespace-nowrap" onClick={clear} disabled={clearing || data.entries === 0}>
+              {clearing ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-trash" />}
+              {t("settings.imageCache.clear")}
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-ink-500">
+            {data.maxBytes === 0
+              ? t("settings.imageCache.off")
+              : t("settings.imageCache.usage", {
+                  used: toMib(data.usedBytes),
+                  max: toMib(data.maxBytes),
+                  entries: data.entries.toLocaleString(),
+                })}
+          </p>
+        </>
+      )}
+      {confirmEl}
     </div>
   );
 }

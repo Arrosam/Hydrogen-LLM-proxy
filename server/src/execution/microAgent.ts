@@ -3,7 +3,7 @@ import { mergeOverrides, type RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
 import type { Response } from "../core/ir/response";
 import { buildResponse } from "../core/format/registry";
-import { textOf } from "../core/ir/content";
+import { textOf, type ImagePart } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { serializeForLog } from "../util/logPayload";
 import { stageOverrides, type AgentDef } from "./definition";
@@ -16,6 +16,7 @@ import {
   parseOcrResults,
   translateImagesInRequest,
 } from "./agentContext";
+import { imageHash, type OcrCacheStore } from "./ocrCache";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "./steps";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
@@ -35,6 +36,8 @@ export interface ServiceResolver {
 export interface MicroAgentDeps extends ServiceDeps {
   resolver: ServiceResolver;
   logMaxChars: number | (() => number);
+  /** Cache for the OCR pre-pass. Omitted/null = every image goes to the model. */
+  ocrCache?: OcrCacheStore | null;
 }
 
 /**
@@ -93,6 +96,7 @@ function isRouter(stage: AgentDef["stages"][number]): boolean {
 export class MicroAgent extends ModelService {
   private readonly resolver: ServiceResolver;
   private readonly logMaxChars: number | (() => number);
+  private readonly ocrCache: OcrCacheStore | null;
 
   constructor(
     private readonly agent: AgentDef,
@@ -103,6 +107,7 @@ export class MicroAgent extends ModelService {
     super({ timeoutMs: agent.timeoutMs, steps: [] }, deps);
     this.resolver = deps.resolver;
     this.logMaxChars = deps.logMaxChars;
+    this.ocrCache = deps.ocrCache ?? null;
   }
 
   /** Resolve the (possibly live) log-payload max-chars to a concrete number. */
@@ -151,8 +156,11 @@ export class MicroAgent extends ModelService {
       if (agent.ocr) {
         const images = collectImages(request);
         if (images.length > 0) {
-          prog?.record("agent", "agent.ocr.start", `OCR pre-pass: ${images.length} image(s) detected`, { images: images.length });
           const ocr = agent.ocr;
+          // Resolve the OCR model BEFORE consulting the cache: a broken
+          // reference must fail the same way whether or not the images happen
+          // to be cached, or a misconfigured agent looks healthy until the
+          // cache turns over.
           let ocrService: ModelService;
           if (ocr.service) {
             const r = this.resolver.resolve(ocr.service);
@@ -164,16 +172,61 @@ export class MicroAgent extends ModelService {
           } else {
             return errorInv("image translation (OCR) is enabled but has no model configured");
           }
-          const ocrReq = buildOcrRequest(request, images, ocr);
-          const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog);
-          calls.push(call);
-          if (!result.ok) {
-            prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
-            return fail(result);
+
+          // Content-addressed cache: a picture already transcribed is not sent
+          // to the model again. Positions are kept in `hashes` so the results
+          // land back on the right images, whatever their cache status.
+          const hashes = images.map(imageHash);
+          const cache = this.ocrCache;
+          const known = cache ? cache.lookup(hashes) : new Map<string, string>();
+
+          // Misses, de-duplicated: the same image pasted twice is one job.
+          const pending: Array<{ hash: string; image: ImagePart }> = [];
+          const queued = new Set<string>();
+          images.forEach((image, i) => {
+            const hash = hashes[i];
+            if (known.has(hash) || queued.has(hash)) return;
+            queued.add(hash);
+            pending.push({ hash, image });
+          });
+
+          const hits = [...known.keys()];
+          prog?.record(
+            "agent",
+            "agent.ocr.start",
+            `OCR pre-pass: ${images.length} image(s) detected, ${images.length - pending.length} from cache, ${pending.length} to transcribe`,
+            { images: images.length, cached: images.length - pending.length, pending: pending.length },
+          );
+
+          const byHash = new Map(known);
+          if (pending.length > 0) {
+            const ocrReq = buildOcrRequest(request, pending.map((p) => p.image), ocr);
+            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog);
+            calls.push(call);
+            if (!result.ok) {
+              prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
+              return fail(result);
+            }
+            usage = addUsage(usage, result.value.response.usage);
+            const fresh = parseOcrResults(result.value.response.text(), pending.length);
+            fresh.forEach((description, i) => byHash.set(pending[i].hash, description));
+            // Only what the model actually produced is remembered: caching an
+            // empty result would make one bad response that image's permanent
+            // description.
+            cache?.store(
+              pending
+                .map((p, i) => ({ hash: p.hash, description: fresh[i] ?? "" }))
+                .filter((e) => e.description.trim() !== ""),
+            );
           }
-          usage = addUsage(usage, result.value.response.usage);
-          source = translateImagesInRequest(request, parseOcrResults(result.value.response.text(), images.length));
-          prog?.record("agent", "agent.ocr.done", "OCR pre-pass complete, images translated to text");
+          // Re-stamp the hits only once the pre-pass actually succeeded, so a
+          // failed run does not extend the life of entries it never used.
+          if (hits.length > 0) cache?.touch(hits);
+
+          source = translateImagesInRequest(request, hashes.map((h) => byHash.get(h) ?? ""));
+          prog?.record("agent", "agent.ocr.done", pending.length === 0
+            ? "OCR pre-pass complete, every image served from the cache"
+            : "OCR pre-pass complete, images translated to text");
         }
       }
 

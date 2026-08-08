@@ -208,6 +208,31 @@ export const requestLogs = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Image (OCR) description cache. Content-addressed: the key is a hash of the
+// image itself, the value the description an OCR model produced for it, so the
+// same picture is never transcribed twice. `lastUsedAt` is the eviction key --
+// the storage budget in settings is enforced by deleting least-recently-used
+// rows -- and it is re-stamped on every hit, which is why it is indexed.
+//
+// Not part of a backup package: nothing here is configuration or history, and
+// every row can be rebuilt by re-running OCR.
+// ---------------------------------------------------------------------------
+export const imageCache = sqliteTable(
+  "image_cache",
+  {
+    /** SHA-256 of the image content — see execution/ocrCache.ts `imageHash`. */
+    hash: text("hash").primaryKey(),
+    description: text("description").notNull(),
+    /** What this row costs against the budget: hash + description, UTF-8 bytes.
+     * Stored rather than derived so the running total is one indexed SUM. */
+    sizeBytes: integer("size_bytes").notNull(),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => ({ lastUsedIdx: index("image_cache_last_used_idx").on(t.lastUsedAt) }),
+);
+
+// ---------------------------------------------------------------------------
 // Key/value settings (master-key sentinel, SSRF allowlist, log retention).
 // ---------------------------------------------------------------------------
 export const settings = sqliteTable("settings", {
@@ -223,3 +248,4 @@ export type ModelProvider = typeof modelProviders.$inferSelect;
 export type ModelServiceRow = typeof modelServices.$inferSelect;
 export type Token = typeof tokens.$inferSelect;
 export type RequestLog = typeof requestLogs.$inferSelect;
+export type ImageCacheRow = typeof imageCache.$inferSelect;

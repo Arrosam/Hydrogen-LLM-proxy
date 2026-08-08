@@ -604,6 +604,11 @@ const EnvSettingsPut = z.object({
   sessionTtlMs: z.number().int().min(60_000).max(30 * 86_400_000).optional(),
 });
 
+/** 64 GiB — far past any sane cache, but a finite cap keeps a typo from being
+ * read as "unbounded". 0 turns the cache off and empties it. */
+const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024 * 1024;
+const ImageCachePut = z.object({ maxBytes: z.number().int().min(0).max(MAX_IMAGE_CACHE_BYTES) });
+
 async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void> {
   // The Settings page is admin-only, so its data is too -- with one exception,
   // /ui-language below, which is not settings data so much as a property of the
@@ -629,6 +634,35 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
       }
     }
     return { days: parsed.data.days, pruned };
+  });
+
+  // OCR image cache: the storage budget plus what it is currently using, so the
+  // number the admin is setting can be compared against the number it bounds.
+  app.get("/image-cache", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return { maxBytes: c.settings.imageCacheMaxBytes(), ...c.imageCache.stats() };
+  });
+
+  app.put("/image-cache", async (req, reply) => {
+    if (!requireAdmin(req, reply, "change the image cache budget")) return reply;
+    const parsed = parse(ImageCachePut, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    c.settings.setImageCacheMaxBytes(parsed.data.maxBytes);
+    // Apply immediately, exactly like log retention: lowering the budget has to
+    // free the space now, not on the next request that happens to cache something.
+    let evicted = 0;
+    try {
+      evicted = c.imageCache.enforceBudget(parsed.data.maxBytes);
+    } catch {
+      /* the setting is saved; the next put() enforces it */
+    }
+    return { maxBytes: parsed.data.maxBytes, evicted, ...c.imageCache.stats() };
+  });
+
+  app.delete("/image-cache", async (req, reply) => {
+    if (!requireAdmin(req, reply, "clear the image cache")) return reply;
+    const cleared = c.imageCache.clear();
+    return { cleared, maxBytes: c.settings.imageCacheMaxBytes(), ...c.imageCache.stats() };
   });
 
   app.get("/upstream-allowlist", async (req, reply) => {

@@ -64,6 +64,12 @@ const EnvSchema = z.object({
   // event. Failures faster than the grace window keep their real HTTP status.
   STREAM_COMMIT_GRACE_MS: z.coerce.number().int().positive().default(2_500),
   STREAM_PING_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
+  // Storage budget for the OCR image-description cache, in bytes. A Micro Agent
+  // that runs an image-translation pre-pass remembers each image's description
+  // by content hash and skips the model on a repeat; when the budget is
+  // exceeded, least-recently-used entries are evicted to make room. 0 turns the
+  // cache off. Default 64 MiB. Overridable at runtime from the dashboard.
+  IMAGE_CACHE_MAX_BYTES: z.coerce.number().int().nonnegative().default(64 * 1024 * 1024),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -84,6 +90,7 @@ export interface AppConfig {
   simulatedStreamingTokenRate: number;
   streamCommitGraceMs: number;
   streamPingIntervalMs: number;
+  imageCacheMaxBytes: number;
 }
 
 /**
@@ -118,6 +125,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     simulatedStreamingTokenRate: e.SIMULATED_STREAMING_TOKEN_RATE,
     streamCommitGraceMs: e.STREAM_COMMIT_GRACE_MS,
     streamPingIntervalMs: e.STREAM_PING_INTERVAL_MS,
+    imageCacheMaxBytes: e.IMAGE_CACHE_MAX_BYTES,
   };
 }
 

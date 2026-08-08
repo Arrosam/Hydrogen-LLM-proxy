@@ -17,6 +17,8 @@ import { RequestLogRepo } from "../persistence/requestLogRepo";
 import { SettingsRepo } from "../persistence/settingsRepo";
 import { StatsQueries } from "../persistence/statsQueries";
 import { LogPruner } from "../persistence/logPruner";
+import { ImageCacheRepo } from "../persistence/imageCacheRepo";
+import { ImageDescriptionCache } from "../execution/ocrCache";
 import { Catalog } from "../catalog/catalog";
 import { SsrfGuard } from "../core/upstream/ssrf";
 import { UpstreamClient } from "../core/upstream/client";
@@ -47,6 +49,7 @@ export interface Container {
   settings: SettingsRepo;
   stats: StatsQueries;
   pruner: LogPruner;
+  imageCache: ImageCacheRepo;
   catalog: Catalog;
   ssrf: SsrfGuard;
   transport: UpstreamClient;
@@ -81,22 +84,29 @@ export async function boot(): Promise<Container> {
     logPayloadMaxChars: config.logPayloadMaxChars,
     simulatedStreamingTokenRate: config.simulatedStreamingTokenRate,
     sessionTtlMs: config.sessionTtlMs,
+    imageCacheMaxBytes: config.imageCacheMaxBytes,
   });
   const stats = new StatsQueries(db);
   const pruner = new LogPruner(db);
+  const imageCache = new ImageCacheRepo(db);
 
   const catalog = new Catalog(models, providers, mappings);
   const ssrf = new SsrfGuard({ allowPrivate: () => settings.allowPrivate(), allowlist: () => settings.allowlist() });
   const transport = new UpstreamClient(ssrf);
   const validator = new ServiceValidator(catalog, services);
   const activeRequests = new ActiveRequestRegistry();
-  const factory = new ServiceFactory(services, { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate() }, () => settings.logPayloadMaxChars());
+  const factory = new ServiceFactory(
+    services,
+    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate() },
+    () => settings.logPayloadMaxChars(),
+    new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
+  );
   const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars());
   const usageMeter = new UsageMeter(tokens);
 
   return {
     config, sqlite, db,
-    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, pruner,
+    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests,
   };
 }

@@ -115,7 +115,7 @@ with the dashboard SPA.
 ## Roles
 
 - **admin** — everything, including issuing tokens, and the only role with access to **Settings**
-  (language, log retention, trusted upstreams, runtime env, backup & restore).
+  (language, log retention, OCR image cache, trusted upstreams, runtime env, backup & restore).
 - **manager** — everything **except** issuing tokens and Settings; also cannot create or modify
   admin accounts (to prevent privilege escalation).
 

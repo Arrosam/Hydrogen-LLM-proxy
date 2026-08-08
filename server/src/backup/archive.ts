@@ -30,6 +30,10 @@ export const BACKUP_FORMAT = "hydrogen-backup";
  * Restore inserts in this order and deletes in reverse, which is what keeps the
  * foreign keys satisfied at every point (they stay ON: a restore that needs them
  * off is a restore that is corrupting something).
+ *
+ * `image_cache` is deliberately absent: it is neither configuration nor history,
+ * every row can be rebuilt by re-running OCR, and it is content-addressed, so
+ * whatever the target instance already holds stays valid across a restore.
  */
 const TABLES = [
   "users",
