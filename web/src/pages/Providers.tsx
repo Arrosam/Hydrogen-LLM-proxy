@@ -222,7 +222,7 @@ export function Providers() {
                   <tr key={p.id}>
                     <td className="font-medium text-ink-100">{p.name}</td>
                     <td><span className="badge-gray">{TYPE_LABELS[p.type]}</span></td>
-                    <td className="font-mono text-xs text-ink-400">{p.baseUrl}</td>
+                    <td className="font-mono text-xs text-ink-400 max-w-[240px] truncate" title={p.baseUrl}>{p.baseUrl}</td>
                     <td>
                       {p.hasKey ? (
                         <span className="badge-green"><i className="bi bi-key-fill" />{t("common.set")}</span>

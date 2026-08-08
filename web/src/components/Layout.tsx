@@ -14,6 +14,8 @@ interface NavItem {
   end?: boolean;
   /** Hidden from anyone who is not an admin. */
   adminOnly?: boolean;
+  /** Opens in a new tab (for public routes outside the Layout). */
+  external?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -26,6 +28,7 @@ const NAV: NavItem[] = [
   { to: "/logs", labelKey: "nav.logs", icon: "bi-journal-text" },
   { to: "/active-requests", labelKey: "nav.activeRequests", icon: "bi-activity" },
   { to: "/users", labelKey: "nav.users", icon: "bi-people" },
+  { to: "/check", labelKey: "nav.check", icon: "bi-search", external: true },
   { to: "/settings", labelKey: "nav.settings", icon: "bi-gear", adminOnly: true },
 ];
 
@@ -72,12 +75,20 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 space-y-1 px-3 py-2">
-          {NAV.filter((n) => !n.adminOnly || user?.role === "admin").map((n) => (
-            <NavLink key={n.to} to={n.to} end={n.end} className="nav-link">
-              <i className={`bi ${n.icon} text-base`} />
-              <span className="truncate">{t(n.labelKey)}</span>
-            </NavLink>
-          ))}
+          {NAV.filter((n) => !n.adminOnly || user?.role === "admin").map((n) =>
+            n.external ? (
+              <a key={n.to} href={n.to} target="_blank" rel="noreferrer" className="nav-link">
+                <i className={`bi ${n.icon} text-base`} />
+                <span className="truncate">{t(n.labelKey)}</span>
+                <i className="bi bi-box-arrow-up-right ml-auto text-xs text-ink-500" />
+              </a>
+            ) : (
+              <NavLink key={n.to} to={n.to} end={n.end} className="nav-link">
+                <i className={`bi ${n.icon} text-base`} />
+                <span className="truncate">{t(n.labelKey)}</span>
+              </NavLink>
+            ),
+          )}
         </nav>
 
         <div className="border-t border-ink-800 px-4 py-3">

@@ -12,6 +12,7 @@ import { Users } from "./pages/Users";
 import { Logs } from "./pages/Logs";
 import { ActiveRequests } from "./pages/ActiveRequests";
 import { Settings } from "./pages/Settings";
+import { Check } from "./pages/Check";
 
 function FullSpinner() {
   return (
@@ -24,13 +25,17 @@ function FullSpinner() {
 export default function App() {
   const { user, loading } = useAuth();
 
-  if (loading) return <FullSpinner />;
-  if (!user) return <Login />;
-  if (user.mustChangePassword) return <SetPassword />;
-
   return (
     <Routes>
-      <Route element={<Layout />}>
+      {/* Public route: API key check, no login required */}
+      <Route path="/check" element={<Check />} />
+
+      {/* Authenticated routes */}
+      <Route
+        element={
+          loading ? <FullSpinner /> : !user ? <Login /> : user.mustChangePassword ? <SetPassword /> : <Layout />
+        }
+      >
         <Route index element={<Overview />} />
         <Route path="providers" element={<Providers />} />
         <Route path="models" element={<Models />} />
@@ -42,7 +47,7 @@ export default function App() {
         <Route path="active-requests" element={<ActiveRequests />} />
         {/* Settings is admin-only. Hiding the nav link is presentation; this is
             what makes typing the URL not work. The server enforces it too. */}
-        {user.role === "admin" && <Route path="settings" element={<Settings />} />}
+        {user?.role === "admin" && <Route path="settings" element={<Settings />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
