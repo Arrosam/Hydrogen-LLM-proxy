@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 import { ActiveRequestRegistry, BLOCK_THRESHOLD_MS } from "../src/observability/activeRequests";
 import { ProgressRecorder } from "../src/observability/progressRecorder";
 import { runSteps, type AttemptResult } from "../src/execution/steps";
@@ -168,6 +168,12 @@ describe("Concurrent progress tracking (10+ concurrent requests)", () => {
 // --- Test 2: Retry progress backtracking ---
 
 describe("Retry progress backtracking via runSteps", () => {
+  // Two tests here pin Math.random to take the backoff jitter out of the
+  // assertions; nothing outside them should inherit a rigged one.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("emits retry.trigger and retry.delay events with correct retryIndex", async () => {
     const reg = new ActiveRequestRegistry();
     const traceId = "trace-retry-1";
@@ -219,11 +225,17 @@ describe("Retry progress backtracking via runSteps", () => {
     expect(exhausted[0].detail?.attempts).toBe(3);
   });
 
-  it("emits retry.delay event before a retry attempt", async () => {
+  /**
+   * One 429 then success, through a *jittered* backoff (the sibling tests above
+   * cover the fixed-interval path). Returns the recorded progress events.
+   *
+   * Pin Math.random before calling: the delay is `floor(random * initialMs)`, so
+   * the real backoff is genuinely 0 about one run in fifty, and a zero delay is
+   * neither slept on nor announced.
+   */
+  const runJitteredRetry = async (traceId: string): Promise<ProgressEvent[]> => {
     const reg = new ActiveRequestRegistry();
-    const traceId = "trace-retry-3";
     reg.start({ traceId, tokenId: null, serviceId: null, serviceName: null, ingress: "openai_completion", streaming: false });
-    const prog = new ProgressRecorder(reg, traceId);
 
     let n = 0;
     const attempt = async (): Promise<AttemptResult<string>> => {
@@ -231,17 +243,38 @@ describe("Retry progress backtracking via runSteps", () => {
       return n < 2 ? { ok: false, status: 429, kind: "http", message: "rate limited" } : { ok: true, value: "ok" };
     };
 
-    await runSteps(
+    const out = await runSteps(
       steps([{ model: "m", provider: "p", retry: { on: [429], maxAttempts: 3, backoff: { initialMs: 50, maxMs: 200 } } }]),
       attempt,
-      { sleep: async () => {}, progress: prog },
+      { ...noSleep, progress: new ProgressRecorder(reg, traceId) },
     );
 
-    const events = reg.get(traceId)!.events;
-    const delays = events.filter((e) => e.node === "retry.delay");
-    expect(delays.length).toBe(1); // one retry, one delay
+    expect(out.result.ok).toBe(true); // the retry is what makes it succeed
+    expect(n).toBe(2);
+    return reg.get(traceId)!.events;
+  };
+
+  it("emits retry.delay event before a retry attempt", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const delays = (await runJitteredRetry("trace-retry-3")).filter((e) => e.node === "retry.delay");
+
+    expect(delays).toHaveLength(1); // one retry, one delay
     expect(delays[0].detail?.retryIndex).toBe(1);
-    expect(delays[0].detail?.delayMs).toBeGreaterThanOrEqual(0);
+    expect(delays[0].detail?.delayMs).toBe(25); // floor(0.5 * initialMs 50)
+  });
+
+  it("announces no delay when the jitter rounds the backoff to zero", async () => {
+    // The other half of full jitter, and the reason the test above has to pin
+    // it: there is no delay worth announcing, but the retry still happens.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const events = await runJitteredRetry("trace-retry-3-zero");
+
+    expect(events.filter((e) => e.node === "retry.delay")).toHaveLength(0);
+    const triggers = events.filter((e) => e.node === "retry.trigger");
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].detail?.retryIndex).toBe(1);
   });
 });
 

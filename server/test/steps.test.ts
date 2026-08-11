@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { computeRetryDelay, is499Retryable, runSteps, type AttemptResult } from "../src/execution/steps";
 import type { ServiceSteps } from "../src/execution/definition";
 
@@ -76,6 +76,12 @@ describe("runSteps (retry / advance engine)", () => {
 // --- 499 retry mechanism ----------------------------------------------------
 
 describe("499 retry mechanism", () => {
+  // One test below pins Math.random to take the backoff jitter out of its
+  // assertions; nothing after it should inherit a rigged one.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("retries 499 by default (idempotency=safe_write) and succeeds on retry", async () => {
     let n = 0;
     const attempt = async (): Promise<AttemptResult<string>> => {
@@ -172,6 +178,12 @@ describe("499 retry mechanism", () => {
   });
 
   it("records retry context (retryIndex, delayMs, reason) on each retried attempt", async () => {
+    // Pin the jitter. A zero delay is never slept on (steps.ts only sleeps when
+    // the delay is > 0), so a real `Math.random` drops one of the two expected
+    // sleeps about once every 70 runs. The jitter's own range is covered by the
+    // computeRetryDelay unit tests below; what this asserts is that the recorded
+    // context carries the delay that was actually slept.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
     const delays: number[] = [];
     const sleep = async (ms: number): Promise<void> => { delays.push(ms); };
     let n = 0;
@@ -186,11 +198,9 @@ describe("499 retry mechanism", () => {
     );
     expect(out.result.ok).toBe(true);
     expect(delays).toHaveLength(2); // 2 sleeps before 2 retries
-    // With full jitter, delay is in [0, base). Base for attempt 2 = 100, for attempt 3 = 200.
-    expect(delays[0]).toBeGreaterThanOrEqual(0);
-    expect(delays[0]).toBeLessThan(100);
-    expect(delays[1]).toBeGreaterThanOrEqual(0);
-    expect(delays[1]).toBeLessThan(200);
+    // Base doubles per attempt: 100 for attempt 2, 200 for attempt 3, each
+    // jittered to floor(0.5 * base) by the pinned random above.
+    expect(delays).toEqual([50, 100]);
     // The retried attempts should carry the delay in their retry context.
     expect(out.path[1].retry!.delayMs).toBe(delays[0]);
     expect(out.path[2].retry!.delayMs).toBe(delays[1]);
