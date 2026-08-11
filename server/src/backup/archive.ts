@@ -31,9 +31,9 @@ export const BACKUP_FORMAT = "hydrogen-backup";
  * foreign keys satisfied at every point (they stay ON: a restore that needs them
  * off is a restore that is corrupting something).
  *
- * `image_cache` is deliberately absent: it is neither configuration nor history,
- * every row can be rebuilt by re-running OCR, and it is content-addressed, so
- * whatever the target instance already holds stays valid across a restore.
+ * `image_cache` comes last and is opt-in (see {@link CACHE_TABLES}): it is
+ * neither configuration nor history, and every row can be rebuilt by re-running
+ * OCR. Carrying it is only ever a way to spare the target that cost.
  */
 const TABLES = [
   "users",
@@ -45,6 +45,7 @@ const TABLES = [
   "tokens",
   "request_logs",
   "settings",
+  "image_cache",
 ] as const;
 
 type TableName = (typeof TABLES)[number];
@@ -60,11 +61,29 @@ const LOG_TABLES: ReadonlySet<string> = new Set(["request_logs"]);
  */
 const DERIVED_TABLES: ReadonlySet<string> = new Set(["provider_available_models"]);
 
+/**
+ * Content-addressed caches: exported only when asked for, never required on the
+ * way back in.
+ *
+ * Off by default, because the cache is the one table whose size is bounded by a
+ * byte budget rather than by how much the instance is configured to do -- at the
+ * default 64 MB it can dwarf every other table combined, and the exporter holds
+ * the whole package in memory. Including it buys exactly one thing: the target
+ * does not have to re-run OCR on images it has already seen.
+ *
+ * Restoring one is safe on any instance because the hash covers the image bytes
+ * and a version tag, not the instance that wrote them; a foreign row either
+ * matches an image byte-for-byte or is never looked up.
+ */
+const CACHE_TABLES: ReadonlySet<string> = new Set(["image_cache"]);
+
 /** The configuration tables a valid package must carry (everything but history
  * and re-fetchable caches). A package missing any of these is rejected, so a
  * truncated or hand-edited file can never delete the target's accounts and
  * leave nothing to log back in with. */
-const REQUIRED_TABLES: readonly TableName[] = TABLES.filter((t) => !LOG_TABLES.has(t) && !DERIVED_TABLES.has(t));
+const REQUIRED_TABLES: readonly TableName[] = TABLES.filter(
+  (t) => !LOG_TABLES.has(t) && !DERIVED_TABLES.has(t) && !CACHE_TABLES.has(t),
+);
 
 /** The provider columns that hold master-key-encrypted material. Never exported:
  * they are replaced by the sealed plaintext and rebuilt on restore. */
@@ -88,6 +107,10 @@ export interface BackupPackage {
   createdAt: number;
   appVersion: string;
   includesLogs: boolean;
+  /** Descriptive metadata for the UI only. Absent in packages written before the
+   * image cache was exportable, so restore decides from the table's presence
+   * rather than trusting this flag. */
+  includesImageCache: boolean;
   /** Row counts, so the UI can describe a package before restoring it. */
   counts: Record<string, number>;
   /** Provider API keys, sealed under the admin's passphrase. */
@@ -115,7 +138,7 @@ function quoteIdent(name: string): string {
 export async function exportBackup(
   sqlite: Database.Database,
   masterKey: Buffer,
-  opts: { passphrase: string; includeLogs: boolean; appVersion: string },
+  opts: { passphrase: string; includeLogs: boolean; includeImageCache: boolean; appVersion: string },
 ): Promise<BackupPackage> {
   const tables: Record<string, Row[]> = {};
   const counts: Record<string, number> = {};
@@ -123,6 +146,7 @@ export async function exportBackup(
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
+    if (CACHE_TABLES.has(table) && !opts.includeImageCache) continue;
     const rows = sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).all() as Row[];
 
     if (table === "providers") {
@@ -159,6 +183,7 @@ export async function exportBackup(
     createdAt: Date.now(),
     appVersion: opts.appVersion,
     includesLogs: opts.includeLogs,
+    includesImageCache: opts.includeImageCache,
     counts,
     secrets,
     tables,
@@ -189,6 +214,9 @@ function validate(pkg: unknown): asserts pkg is BackupPackage {
 export interface RestoreReport {
   restored: Record<string, number>;
   includedLogs: boolean;
+  /** True when the package carried an image cache, and so replaced the target's.
+   * False leaves whatever the target had already cached exactly where it was. */
+  includedImageCache: boolean;
   providerKeysRestored: number;
 }
 
@@ -215,8 +243,9 @@ export async function restoreBackup(
 
   const run = sqlite.transaction(() => {
     // Children first, so nothing is ever orphaned mid-restore. Only clear tables
-    // the package will repopulate: a config-only package (no request_logs) must
-    // leave the target's history in place, not wipe it and put nothing back.
+    // the package will repopulate: a config-only package (no request_logs, no
+    // image_cache) must leave the target's history and cached descriptions in
+    // place, not wipe them and put nothing back.
     for (const table of [...TABLES].reverse()) {
       if (!(table in pkg.tables)) continue;
       if (table === "settings") {
@@ -272,6 +301,10 @@ export async function restoreBackup(
   return {
     restored,
     includedLogs: Boolean(pkg.includesLogs),
+    // The table's presence, not the flag: a hand-assembled package can carry the
+    // rows without the metadata, and the caller has to re-check the budget
+    // whenever rows actually landed.
+    includedImageCache: Array.isArray(pkg.tables.image_cache),
     providerKeysRestored: keyById.size,
   };
 }

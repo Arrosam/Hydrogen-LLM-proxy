@@ -83,7 +83,13 @@ function LanguageCard() {
 }
 
 /** Row counts the server reports back after a restore, keyed by table name. */
-type RestoreReport = { ok: true; restored: Record<string, number>; includedLogs: boolean; providerKeysRestored: number };
+type RestoreReport = {
+  ok: true;
+  restored: Record<string, number>;
+  includedLogs: boolean;
+  includedImageCache: boolean;
+  providerKeysRestored: number;
+};
 
 /** Save `text` to the user's disk as `filename`, without a server round-trip. */
 function downloadFile(filename: string, text: string): void {
@@ -122,6 +128,9 @@ function BackupCard() {
   const [passphrase, setPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [includeLogs, setIncludeLogs] = useState(true);
+  // Off by default, like the server: the descriptions are regenerable, and the
+  // cache can be the largest thing in the package.
+  const [includeImageCache, setIncludeImageCache] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   const [file, setFile] = useState<File | null>(null);
@@ -139,7 +148,7 @@ function BackupCard() {
     }
     setExporting(true);
     try {
-      const r = await api.post<{ backup: unknown }>("/backup/export", { passphrase, includeLogs });
+      const r = await api.post<{ backup: unknown }>("/backup/export", { passphrase, includeLogs, includeImageCache });
       downloadFile(backupFilename(), JSON.stringify(r.backup));
       toast.success(t("settings.backup.toast.exported"));
       setPassphrase("");
@@ -233,6 +242,12 @@ function BackupCard() {
           <Toggle checked={includeLogs} onChange={setIncludeLogs} />
           <span className="text-xs text-ink-300">{t("settings.backup.includeLogs")}</span>
           <span className="text-xs text-ink-500">{t("settings.backup.includeLogs.hint")}</span>
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
+          <Toggle checked={includeImageCache} onChange={setIncludeImageCache} />
+          <span className="text-xs text-ink-300">{t("settings.backup.includeImageCache")}</span>
+          <span className="text-xs text-ink-500">{t("settings.backup.includeImageCache.hint")}</span>
         </div>
 
         <button className="btn-primary btn-xs mt-4" onClick={runExport} disabled={exporting}>

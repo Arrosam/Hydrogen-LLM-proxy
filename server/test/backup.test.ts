@@ -19,6 +19,7 @@ import { MappingRepo } from "../src/persistence/mappingRepo";
 import { ServiceRepo } from "../src/persistence/serviceRepo";
 import { SettingsRepo } from "../src/persistence/settingsRepo";
 import { RequestLogRepo, type LogInsert } from "../src/persistence/requestLogRepo";
+import { entrySize, ImageCacheRepo } from "../src/persistence/imageCacheRepo";
 import { BackupError, exportBackup, restoreBackup, type BackupPackage } from "../src/backup/archive";
 import { PassphraseError, openWithPassphrase, sealWithPassphrase } from "../src/security/passphrase";
 
@@ -88,12 +89,29 @@ function seed(i: Instance, masterKey: Buffer): void {
   void keyless;
 }
 
-const takeBackup = (i: Instance, key: Buffer, includeLogs = true): Promise<BackupPackage> =>
-  exportBackup(i.sqlite, key, { passphrase: PASSPHRASE, includeLogs, appVersion: "1.0.0" });
+const takeBackup = (
+  i: Instance,
+  key: Buffer,
+  includeLogs = true,
+  includeImageCache = false,
+): Promise<BackupPackage> =>
+  exportBackup(i.sqlite, key, { passphrase: PASSPHRASE, includeLogs, includeImageCache, appVersion: "1.0.0" });
 
 /** Round-trip through JSON: a real package arrives as a parsed file, not as the
  * live object the exporter returned. */
 const overTheWire = (pkg: BackupPackage): unknown => JSON.parse(JSON.stringify(pkg));
+
+/** A budget far larger than anything these tests store, so nothing is evicted
+ * behind the assertion's back. */
+const AMPLE_BUDGET = 64 * 1024 * 1024;
+
+/** Put OCR descriptions in an instance's image cache. */
+const cacheImages = (i: Instance, entries: Array<{ hash: string; description: string }>): void => {
+  new ImageCacheRepo(i.db).put(entries, Date.now(), AMPLE_BUDGET);
+};
+
+/** What an instance has cached for `hash`, or undefined. */
+const cached = (i: Instance, hash: string): string | undefined => new ImageCacheRepo(i.db).lookup([hash]).get(hash);
 
 describe("passphrase sealing", () => {
   it("opens what it sealed", async () => {
@@ -256,6 +274,77 @@ describe("restore onto a DIFFERENT master key", () => {
     // Config replaced (a's provider name present), history untouched.
     expect(new ProviderRepo(b.db, KEY_B).getByName("siliconflow")).toBeDefined();
     expect(new RequestLogRepo(b.db).query({}).total).toBe(before);
+  });
+});
+
+/**
+ * The image cache is opt-in on the way out and never required on the way in.
+ * The asymmetry is the point: a package that carries it is a convenience (the
+ * target skips re-running OCR), while one that does not must leave whatever the
+ * target had already transcribed exactly where it was.
+ */
+describe("image description cache", () => {
+  let a: Instance;
+  let b: Instance;
+
+  beforeEach(() => {
+    a = open(KEY_A);
+    seed(a, KEY_A);
+    cacheImages(a, [{ hash: "hash-from-a", description: "a red bicycle against a wall" }]);
+    b = open(KEY_B);
+  });
+  afterEach(() => {
+    close(a);
+    close(b);
+  });
+
+  it("stays out of the package unless asked for", async () => {
+    const pkg = await takeBackup(a, KEY_A);
+    expect(pkg.includesImageCache).toBe(false);
+    expect(pkg.tables.image_cache).toBeUndefined();
+    expect(pkg.counts.image_cache).toBeUndefined();
+  });
+
+  it("travels when asked for, and restores under a different master key", async () => {
+    const pkg = await takeBackup(a, KEY_A, true, true);
+    expect(pkg.includesImageCache).toBe(true);
+    expect(pkg.counts.image_cache).toBe(1);
+
+    const report = await restoreBackup(b.sqlite, KEY_B, overTheWire(pkg), PASSPHRASE);
+    expect(report.includedImageCache).toBe(true);
+    // Descriptions are not encrypted under the master key -- unlike provider
+    // keys, they cross instances as-is.
+    expect(cached(b, "hash-from-a")).toBe("a red bicycle against a wall");
+  });
+
+  it("leaves the target's own cache alone when the package omits it", async () => {
+    cacheImages(b, [{ hash: "hash-from-b", description: "already transcribed here" }]);
+
+    const report = await restoreBackup(b.sqlite, KEY_B, overTheWire(await takeBackup(a, KEY_A)), PASSPHRASE);
+
+    expect(report.includedImageCache).toBe(false);
+    expect(cached(b, "hash-from-b")).toBe("already transcribed here");
+    expect(cached(b, "hash-from-a")).toBeUndefined();
+  });
+
+  it("replaces the target's cache when the package carries one", async () => {
+    cacheImages(b, [{ hash: "hash-from-b", description: "already transcribed here" }]);
+
+    await restoreBackup(b.sqlite, KEY_B, overTheWire(await takeBackup(a, KEY_A, true, true)), PASSPHRASE);
+
+    expect(cached(b, "hash-from-a")).toBe("a red bicycle against a wall");
+    expect(cached(b, "hash-from-b")).toBeUndefined();
+  });
+
+  it("keeps the size bookkeeping intact, so the budget still applies after a restore", async () => {
+    await restoreBackup(b.sqlite, KEY_B, overTheWire(await takeBackup(a, KEY_A, true, true)), PASSPHRASE);
+
+    const repo = new ImageCacheRepo(b.db);
+    // size_bytes rides along on the row; a restore that dropped or zeroed it
+    // would leave the LRU unable to account for what it is holding.
+    expect(repo.stats()).toEqual({ entries: 1, usedBytes: entrySize("hash-from-a", "a red bicycle against a wall") });
+    expect(repo.enforceBudget(1)).toBe(1);
+    expect(repo.stats().entries).toBe(0);
   });
 });
 
