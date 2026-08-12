@@ -10,7 +10,16 @@ export interface HttpRequestInfo {
   path: string;
   query: string;
   headers: Record<string, unknown>;
-  body: unknown;
+  /**
+   * The client body ALREADY serialized and size-bounded, not the parsed object.
+   *
+   * The log row is written when the request ends, which on a streaming call is
+   * minutes after the body was read. Holding the object until then keeps the
+   * whole parsed conversation live for the entire request; holding the bounded
+   * string instead costs at most LOG_PAYLOAD_MAX_CHARS and lets the parse result
+   * be collected as soon as the canonical request has been built from it.
+   */
+  bodyPayload: string;
 }
 
 export interface LogParams {
@@ -26,9 +35,10 @@ export interface LogParams {
   httpStatus: number;
   http: HttpRequestInfo;
   /** The exact wire body sent upstream (after service overrides/translation),
-   * so the effective temperature/thinking/etc. is visible. Null when no upstream
-   * call was made (auth/resolve errors) or for embeddings passthrough. */
-  upstreamRequest?: Record<string, unknown> | null;
+   * so the effective temperature/thinking/etc. is visible — already serialized,
+   * for the same reason as `http.bodyPayload`. Null when no upstream call was
+   * made (auth/resolve errors) or for embeddings passthrough. */
+  upstreamPayload?: string | null;
   responseHeaders?: Record<string, unknown> | null;
   responseBody?: unknown;
   usage?: Usage;
@@ -55,6 +65,16 @@ export class RequestLogger {
     return typeof v === "function" ? v() : v;
   }
 
+  /**
+   * Serialize a payload for the log NOW, at the current size limit, so the caller
+   * can drop its reference to the object while the request is still running.
+   * Capturing early is what keeps a long streaming call from pinning the whole
+   * parsed conversation until its log row is written.
+   */
+  capture(value: unknown): string {
+    return serializeForLog(value, this.limit());
+  }
+
   /** Demote a logged 200 to 499 after late evidence that delivery failed. */
   amendDeliveryFailure(traceId: string, error: string): boolean {
     return this.repo.markDeliveryFailed(traceId, error);
@@ -78,8 +98,8 @@ export class RequestLogger {
       requestPath: p.http.path,
       requestQuery: p.http.query || null,
       requestHeaders: redactHeaders(p.http.headers),
-      requestBody: serializeForLog(p.http.body, maxChars),
-      upstreamRequestBody: p.upstreamRequest != null ? serializeForLog(p.upstreamRequest, maxChars) : null,
+      requestBody: p.http.bodyPayload,
+      upstreamRequestBody: p.upstreamPayload ?? null,
       responseHeaders: p.responseHeaders ? redactHeaders(p.responseHeaders) : null,
       responseBody: p.responseBody != null ? serializeForLog(p.responseBody, maxChars) : null,
       promptTokens: usage.promptTokens,

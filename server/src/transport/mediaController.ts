@@ -55,10 +55,12 @@ function stepParams(step: ServiceStep): Record<string, unknown> {
   return (ov?.extra as Record<string, unknown> | undefined) ?? {};
 }
 
-function httpInfo(req: FastifyRequest): HttpRequestInfo {
+function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpRequestInfo {
   const [path, query = ""] = req.url.split("?");
+  // A multipart upload is already a Buffer; note its size rather than serializing
+  // megabytes of binary into the log.
   const body = Buffer.isBuffer(req.body) ? `(multipart ${req.body.length} bytes)` : req.body;
-  return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, body };
+  return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, bodyPayload: capture(body) };
 }
 
 function tokenAllowsService(token: Token, serviceId: number): boolean {
@@ -185,7 +187,10 @@ export class MediaController {
       servedModel: target?.modelName ?? null, servedProvider: target?.providerName ?? null,
       ingress: "openai_completion", egress: "openai_completion", streaming: false,
       httpStatus, http: ctx.http,
-      upstreamRequest: typeof upstreamRequest === "string" ? { note: upstreamRequest } : (upstreamRequest as Record<string, unknown> | null),
+      upstreamPayload:
+        upstreamRequest == null
+          ? null
+          : this.deps.logger.capture(typeof upstreamRequest === "string" ? { note: upstreamRequest } : upstreamRequest),
       responseBody: ok ? { ok: true } : ((outcome.result as { errorBody?: unknown }).errorBody as Record<string, unknown> | undefined) ?? null,
       usage, latencyMs: Date.now() - ctx.started,
       attempts: outcome.path.length, attemptPath: outcome.path,
@@ -211,7 +216,7 @@ export class MediaController {
     if (!loaded) return reply;
     const { service, def } = loaded;
 
-    const ctx = { traceId: genId("trace"), token, service, serviceName, http: httpInfo(req), started: Date.now() };
+    const ctx = { traceId: genId("trace"), token, service, serviceName, http: httpInfo(req, (v) => this.deps.logger.capture(v)), started: Date.now() };
     const signal = this.abortOnClientClose(reply);
     let lastSent: unknown = null;
 
@@ -251,7 +256,7 @@ export class MediaController {
     if (!loaded) return reply;
     const { service, def } = loaded;
 
-    const ctx = { traceId: genId("trace"), token, service, serviceName, http: httpInfo(req), started: Date.now() };
+    const ctx = { traceId: genId("trace"), token, service, serviceName, http: httpInfo(req, (v) => this.deps.logger.capture(v)), started: Date.now() };
     const signal = this.abortOnClientClose(reply);
     let lastSent: unknown = null;
     let stream: import("node:stream").Readable | null = null;
@@ -304,7 +309,7 @@ export class MediaController {
     if (!loaded) return reply;
     const { service, def } = loaded;
 
-    const ctx = { traceId: genId("trace"), token, service, serviceName: serviceName!, http: httpInfo(req), started: Date.now() };
+    const ctx = { traceId: genId("trace"), token, service, serviceName: serviceName!, http: httpInfo(req, (v) => this.deps.logger.capture(v)), started: Date.now() };
     const signal = this.abortOnClientClose(reply);
 
     const outcome = await this.run(def, "stt", signal, async (_step, target) => {

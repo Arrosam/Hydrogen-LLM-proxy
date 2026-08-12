@@ -32,9 +32,27 @@ interface RequestCtx {
   ingress: Family;
 }
 
-function httpInfo(req: FastifyRequest): HttpRequestInfo {
+/**
+ * Snapshot the client request for the log, serializing the body immediately and
+ * then releasing it.
+ *
+ * `req.body` is cleared deliberately: Fastify holds the request object for as
+ * long as the reply lives, which on a hijacked streaming response is the whole
+ * relay. Nothing downstream reads it — the canonical request has already been
+ * parsed out of it — so the only thing that reference achieved was keeping the
+ * parsed conversation alive until the log row was written.
+ */
+function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpRequestInfo {
   const [path, query = ""] = req.url.split("?");
-  return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, body: req.body };
+  const info: HttpRequestInfo = {
+    method: req.method,
+    path,
+    query,
+    headers: req.headers as Record<string, unknown>,
+    bodyPayload: capture(req.body),
+  };
+  (req as { body?: unknown }).body = undefined;
+  return info;
 }
 
 function tokenAllowsService(token: Token, serviceId: number): boolean {
@@ -213,8 +231,12 @@ export class ProxyController {
 
   private async handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> {
     const token = req.clientToken!;
-    const http = httpInfo(req);
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    // Take the local reference BEFORE httpInfo clears req.body, then let it go as
+    // soon as the canonical request exists: from that point the parsed wire shape
+    // is dead weight, and on a streaming call it would otherwise stay live for
+    // the length of the whole relay.
+    let body: Record<string, unknown> | null = (req.body ?? {}) as Record<string, unknown>;
+    const http = httpInfo(req, (v) => this.deps.logger.capture(v));
 
     let request;
     try {
@@ -222,6 +244,7 @@ export class ProxyController {
     } catch {
       return this.replyError(reply, ingress, 400, "Invalid request body.");
     }
+    body = null;
 
     const serviceName = request.requestedService;
     if (!serviceName) {
@@ -334,7 +357,7 @@ export class ProxyController {
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: value.modelName, servedProvider: value.providerName,
       ingress, egress: value.family, streaming: false, httpStatus: status, http,
-      upstreamRequest: value.upstreamRequest,
+      upstreamPayload: this.deps.logger.capture(value.upstreamRequest),
       responseBody: clientBody, usage: value.response.usage, latencyMs: Date.now() - started,
       attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
     });
@@ -444,6 +467,13 @@ export class ProxyController {
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
     const outGen = serializeStream(ctx.ingress, tapStream(events, acc), { model: ctx.serviceName });
 
+    // Capture the upstream body now and drop it. The log row for a stream is
+    // written when the last chunk has been relayed, which can be minutes later;
+    // until this changed, the full translated conversation stayed live that whole
+    // time for no purpose other than being serialized at the end.
+    const upstreamPayload = this.deps.logger.capture(value.upstreamRequest);
+    value.upstreamRequest = {};
+
     const raw = reply.raw;
     if (!o.committed) {
       // Hijack the reply so Fastify does not interfere with our raw SSE writes.
@@ -536,7 +566,7 @@ export class ProxyController {
           traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
           servedModel: value.modelName, servedProvider: value.providerName,
           ingress: ctx.ingress, egress: value.family, streaming: true, httpStatus: status, http: ctx.http,
-          upstreamRequest: value.upstreamRequest,
+          upstreamPayload,
           responseBody, usage, latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
         });
         this.deps.usage.record(ctx.token.id, usage.totalTokens);
