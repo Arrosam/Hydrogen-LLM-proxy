@@ -1,0 +1,2 @@
+# The live bind mount: SQLite DB, hydrogen-secrets.json (master key), image cache.
+data/

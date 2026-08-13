@@ -1,0 +1,47 @@
+# Hydrogen on a plain VPS: pull the pre-built GHCR image, keep /data on a bind
+# mount next to this file so `tar czf backup.tgz data/` is a complete backup.
+#
+# Phase 1 (this file alone) publishes plain HTTP on the host, so the box is
+# reachable by IP before any DNS is moved. Phase 2 layers docker-compose.tls.yml
+# on top, which pulls the port back to loopback and puts Caddy in front:
+#
+#   docker compose up -d                                        # phase 1
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d   # phase 2
+
+services:
+  hydrogen:
+    # Pinned on purpose. `:latest` moves under you on the next push to main,
+    # which silently turns "restart the container" into an unannounced upgrade.
+    image: ghcr.io/arrosam/hydrogen-llm-proxy:${HYDROGEN_TAG:?set HYDROGEN_TAG in .env}
+    container_name: hydrogen
+    restart: unless-stopped
+    ports:
+      # BIND_ADDR=0.0.0.0 exposes plain HTTP to the internet — fine for a first
+      # smoke test, replaced by loopback + Caddy in phase 2.
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      DATA_DIR: /data
+      NODE_ENV: production
+      # "auto" marks the session cookie Secure only when X-Forwarded-Proto says
+      # https. Correct for both phases: plain HTTP now, Caddy-fronted TLS later.
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      # Blank: a temporary password is generated and printed once in the logs on
+      # first boot. Read it with `docker compose logs hydrogen`.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_TTL: ${SESSION_TTL:-12h}
+      LOG_PAYLOAD_MAX_CHARS: ${LOG_PAYLOAD_MAX_CHARS:-100000}
+      IMAGE_CACHE_MAX_BYTES: ${IMAGE_CACHE_MAX_BYTES:-67108864}
+      # PROXY_MASTER_KEY and SESSION_SECRET are deliberately unset: both are
+      # generated on first boot into /data/hydrogen-secrets.json. That file is
+      # what decrypts stored provider keys — lose it and the server refuses to
+      # boot on a master-key sentinel mismatch. It lives in ./data; back it up.
+    volumes:
+      - ./data:/data
+    # The image already declares a /healthz HEALTHCHECK; `docker ps` shows it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

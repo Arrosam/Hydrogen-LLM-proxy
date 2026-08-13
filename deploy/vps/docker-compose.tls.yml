@@ -1,0 +1,38 @@
+# Phase 2 overlay: terminate TLS with Caddy, stop exposing plain HTTP.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Requires HYDROGEN_DOMAIN and ACME_EMAIL in .env, and an A record for that
+# domain already pointing at this box. Caddy provisions and renews the
+# certificate over HTTP-01, so ports 80 and 443 must both be open and the DNS
+# must NOT be proxied (Cloudflare orange cloud breaks the ACME/SNI path).
+
+services:
+  hydrogen:
+    ports:
+      # Loopback only: Caddy is now the sole way in from outside.
+      - "127.0.0.1:${HOST_PORT:-8080}:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: hydrogen-caddy
+    restart: unless-stopped
+    depends_on:
+      - hydrogen
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      HYDROGEN_DOMAIN: ${HYDROGEN_DOMAIN:?set HYDROGEN_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named volumes, not bind mounts: these hold the issued certificates and
+      # the ACME account key. Losing them means re-issuing, and Let's Encrypt
+      # rate-limits that.
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

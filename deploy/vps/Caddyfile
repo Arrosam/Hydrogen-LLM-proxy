@@ -1,0 +1,15 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$HYDROGEN_DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy hydrogen:8080 {
+		# Streaming correctness, not tuning. Two defaults would break Hydrogen:
+		#
+		# flush_interval -1 disables response buffering, so SSE tokens reach the
+		# client as they are produced instead of arriving in one lump at the end.
+		flush_interval -1
+	}
+}
