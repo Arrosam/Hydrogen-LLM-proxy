@@ -4,6 +4,7 @@ import { useAuth } from "../auth";
 import { useI18n } from "../lib/i18n";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
+import { HydrogenLogo } from "./Logo";
 import { useToast } from "./Toast";
 import type { User } from "../types";
 
@@ -65,9 +66,7 @@ export function Layout() {
     <div className="flex h-screen overflow-hidden">
       <aside className="flex w-64 shrink-0 flex-col border-r border-ink-800 bg-ink-900/60">
         <div className="flex items-center gap-2.5 px-5 py-5">
-          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600/20 text-brand-400">
-            <i className="bi bi-lightning-charge-fill text-lg" />
-          </span>
+          <HydrogenLogo className="h-9 w-9" />
           <div>
             <div className="text-sm font-semibold text-ink-100">{t("brand.name")}</div>
             <div className="text-[11px] text-ink-500">{t("brand.subtitle")}</div>

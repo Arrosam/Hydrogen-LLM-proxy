@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError } from "../api";
+import { HydrogenLogo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 import { formatDate, formatNumber } from "../lib/format";
 
@@ -137,9 +138,7 @@ export function Check() {
         {/* Header */}
         <div className="mb-8 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-600/20 text-brand-400">
-              <i className="bi bi-lightning-charge-fill text-2xl" />
-            </span>
+            <HydrogenLogo className="h-12 w-12" />
             <div>
               <h1 className="text-lg font-semibold text-ink-100">{t("check.title")}</h1>
               <p className="text-sm text-ink-500">{t("check.subtitle")}</p>

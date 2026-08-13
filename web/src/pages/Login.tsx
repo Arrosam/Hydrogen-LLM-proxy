@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
 import { api } from "../api";
+import { HydrogenLogo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 
 export function Login() {
@@ -42,9 +43,7 @@ export function Login() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <div className="mb-8 flex flex-col items-center gap-3">
-          <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-600/20 text-brand-400">
-            <i className="bi bi-lightning-charge-fill text-2xl" />
-          </span>
+          <HydrogenLogo className="h-14 w-14" />
           <div className="text-center">
             <h1 className="text-xl font-semibold text-ink-100">{t("login.brand")}</h1>
             <p className="text-sm text-ink-500">{t("login.subtitle")}</p>

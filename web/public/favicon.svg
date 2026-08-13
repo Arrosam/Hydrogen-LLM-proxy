@@ -1,0 +1,13 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hydrogen's emission-line spectrum. Same artwork as HydrogenLogo in
+       web/src/components/Logo.tsx — keep the two in sync. -->
+  <g transform="translate(32 32) scale(1.295) translate(-32 -32)">
+    <rect x="10" y="14" width="44" height="36" rx="8" fill="#0c1219" stroke="#273140" stroke-width="1.5"/>
+    <line x1="14.5" y1="21" x2="14.5" y2="43" stroke="#22d3ee" stroke-width="1.5" stroke-linecap="round" stroke-opacity=".2"/>
+    <line x1="17" y1="21" x2="17" y2="43" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-opacity=".3"/>
+    <line x1="22.5" y1="21" x2="22.5" y2="43" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-opacity=".5"/>
+    <line x1="30" y1="21" x2="30" y2="43" stroke="#22d3ee" stroke-width="2.5" stroke-linecap="round" stroke-opacity=".8"/>
+    <line x1="42" y1="21" x2="42" y2="43" stroke="#5eead4" stroke-width="7" stroke-linecap="round" stroke-opacity=".18"/>
+    <line x1="42" y1="21" x2="42" y2="43" stroke="#5eead4" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+</svg>
