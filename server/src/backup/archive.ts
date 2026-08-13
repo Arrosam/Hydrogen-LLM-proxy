@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { decryptSecret, encryptSecret } from "../security/crypto";
 import { decryptProviderKey, encryptProviderKey } from "../security/providerKeys";
 import { openWithPassphrase, sealWithPassphrase, type SealedPayload } from "../security/passphrase";
 
@@ -89,6 +90,11 @@ const REQUIRED_TABLES: readonly TableName[] = TABLES.filter(
  * they are replaced by the sealed plaintext and rebuilt on restore. */
 const PROVIDER_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
 
+/** Same treatment for client-token secrets (stored since v1.5.2 so issued keys
+ * can be copied again): sealed as plaintext, re-encrypted under the target's
+ * master key on restore. Hash-only tokens simply have nothing to seal. */
+const TOKEN_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
+
 /**
  * Settings keys that describe *this* database rather than its configuration, so
  * they neither leave in an export nor get replaced on restore.
@@ -121,6 +127,8 @@ export interface BackupPackage {
 /** The shape sealed inside `secrets`. */
 interface SecretPayload {
   providerKeys: { id: number; apiKey: string }[];
+  /** Absent in packages written before v1.5.2. */
+  tokenKeys?: { id: number; secret: string }[];
 }
 
 export class BackupError extends Error {
@@ -143,6 +151,7 @@ export async function exportBackup(
   const tables: Record<string, Row[]> = {};
   const counts: Record<string, number> = {};
   const providerKeys: SecretPayload["providerKeys"] = [];
+  const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
@@ -164,6 +173,19 @@ export async function exportBackup(
       }
     }
 
+    if (table === "tokens") {
+      for (const row of rows) {
+        const ciphertext = (row.key_ciphertext as string | null) ?? null;
+        const iv = (row.key_iv as string | null) ?? null;
+        const tag = (row.key_tag as string | null) ?? null;
+        if (ciphertext && iv && tag) {
+          const secret = decryptSecret({ ciphertext, iv, tag }, masterKey);
+          tokenKeys.push({ id: row.id as number, secret });
+        }
+        for (const col of TOKEN_KEY_COLUMNS) delete row[col];
+      }
+    }
+
     if (table === "settings") {
       const kept = rows.filter((r) => !LOCAL_ONLY_SETTINGS.has(String(r.key)));
       tables[table] = kept;
@@ -175,7 +197,7 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys } satisfies SecretPayload), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -238,6 +260,10 @@ export async function restoreBackup(
   const secrets = JSON.parse(await openWithPassphrase(pkg.secrets, passphrase)) as SecretPayload;
   const keyById = new Map<number, string>();
   for (const { id, apiKey } of secrets.providerKeys ?? []) keyById.set(id, apiKey);
+  // Absent in pre-v1.5.2 packages: their tokens restore hash-only, exactly as
+  // they were on the instance that wrote the package.
+  const tokenKeyById = new Map<number, string>();
+  for (const { id, secret } of secrets.tokenKeys ?? []) tokenKeyById.set(id, secret);
 
   const restored: Record<string, number> = {};
 
@@ -278,6 +304,15 @@ export async function restoreBackup(
           values.key_ciphertext = cols.keyCiphertext;
           values.key_iv = cols.keyIv;
           values.key_tag = cols.keyTag;
+        }
+
+        if (table === "tokens") {
+          // Same rebuild for stored client-token secrets.
+          const secret = tokenKeyById.get(values.id as number);
+          const blob = secret != null ? encryptSecret(secret, masterKey) : null;
+          values.key_ciphertext = blob?.ciphertext ?? null;
+          values.key_iv = blob?.iv ?? null;
+          values.key_tag = blob?.tag ?? null;
         }
 
         const columns = Object.keys(values);

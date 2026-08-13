@@ -123,7 +123,9 @@ export const modelServices = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
-// Client tokens. Secret stored only as a SHA-256 hash + short display prefix.
+// Client tokens. The SHA-256 hash is what authentication looks up; the secret
+// itself is also kept, AES-256-GCM under the master key (same scheme as
+// provider API keys), so an admin can copy an issued key again later.
 // ---------------------------------------------------------------------------
 export const tokens = sqliteTable(
   "tokens",
@@ -132,6 +134,11 @@ export const tokens = sqliteTable(
     name: text("name").notNull(),
     keyHash: text("key_hash").notNull(),
     keyPrefix: text("key_prefix").notNull(),
+    /** Master-key-encrypted secret. Null on tokens issued before v1.5.2 —
+     * those were hash-only and can never be shown again. */
+    keyCiphertext: text("key_ciphertext"),
+    keyIv: text("key_iv"),
+    keyTag: text("key_tag"),
     ownerUserId: integer("owner_user_id").references(() => users.id, { onDelete: "set null" }),
     /** Array of service ids this token may call; null/empty = all. */
     scopeServices: text("scope_services_json", { mode: "json" }).$type<number[] | null>(),

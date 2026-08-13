@@ -150,6 +150,17 @@ export function Tokens() {
     else toast.error(i18n("tokens.toast.copyFailed"));
   };
 
+  const copyKey = async (t: Token) => {
+    try {
+      const r = await api.get<{ secret: string }>(`/tokens/${t.id}/secret`);
+      const ok = await copyToClipboard(r.secret);
+      if (ok) toast.success(i18n("tokens.toast.copied"));
+      else toast.error(i18n("tokens.toast.copyFailed"));
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
+    }
+  };
+
   const openEdit = (t: Token) => {
     setEditingId(t.id);
     setForm(formFromToken(t));
@@ -220,6 +231,17 @@ export function Tokens() {
                   <td><Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} /></td>
                   <td>
                     <div className="flex justify-end gap-1.5">
+                      {isAdmin && (
+                        <button
+                          className="btn-ghost btn-xs"
+                          disabled={!t.hasStoredKey}
+                          title={t.hasStoredKey ? undefined : i18n("tokens.copyKey.unavailable")}
+                          onClick={() => copyKey(t)}
+                        >
+                          <i className="bi bi-clipboard" />
+                          {i18n("tokens.action.copyKey")}
+                        </button>
+                      )}
                       <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
                         <i className="bi bi-pencil" />
                         {i18n("tokens.action.edit")}

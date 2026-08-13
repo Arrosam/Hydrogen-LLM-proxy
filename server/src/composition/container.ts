@@ -76,7 +76,7 @@ export async function boot(): Promise<Container> {
   const models = new ModelRepo(db);
   const mappings = new MappingRepo(db);
   const services = new ServiceRepo(db);
-  const tokens = new TokenRepo(db);
+  const tokens = new TokenRepo(db, config.masterKey);
   const users = new UserRepo(db);
   const logs = new RequestLogRepo(db);
   const settings = new SettingsRepo(db, {

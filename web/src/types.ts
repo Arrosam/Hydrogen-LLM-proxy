@@ -226,6 +226,8 @@ export interface Token {
   expiresAt: number | null;
   enabled: boolean;
   createdAt: number;
+  /** False on tokens issued before secrets were stored (hash-only). */
+  hasStoredKey: boolean;
 }
 
 export interface LogSummary {

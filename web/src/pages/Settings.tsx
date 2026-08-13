@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { useI18n, type Language } from "../lib/i18n";
 import { PageHeader } from "../components/Layout";
+import { HydrogenLogo } from "../components/Logo";
 import { ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { useToast } from "../components/Toast";
 
@@ -35,6 +36,22 @@ export function Settings() {
       <ImageCacheCard />
       <AllowlistCard />
       <EnvCard />
+      <AboutFooter />
+    </div>
+  );
+}
+
+/** The running server's release, reported by the server itself so a stale
+ * cached bundle can never claim a version the server isn't running. */
+function AboutFooter() {
+  const { data } = useAsync(() => api.get<{ version: string }>("/settings/version"));
+  return (
+    <div className="mt-10 flex items-center justify-center gap-2 pb-2 text-xs text-ink-500">
+      <HydrogenLogo className="h-4 w-4" />
+      <span className="font-medium text-ink-400">Hydrogen</span>
+      {data && <span className="font-mono">v{data.version}</span>}
+      <span className="text-ink-600">·</span>
+      <span>LLM Proxy</span>
     </div>
   );
 }

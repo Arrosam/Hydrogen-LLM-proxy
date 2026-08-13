@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { tokens, type Token } from "../db/schema";
 import { asMillis, asMillisOrNull } from "../util/time";
+import { decryptSecret, encryptSecret } from "../security/crypto";
 import { generateToken, hashToken } from "../security/tokens";
 
 export interface TokenInput {
@@ -27,11 +28,18 @@ export interface PublicToken {
   expiresAt: number | null;
   enabled: boolean;
   createdAt: number;
+  /** Whether the secret is stored (encrypted) and can be copied again. False
+   * on tokens issued before v1.5.2, which were hash-only. */
+  hasStoredKey: boolean;
 }
 
-/** Client tokens: secrets stored only as a SHA-256 hash + short display prefix. */
+/** Client tokens: SHA-256 hash for lookup, master-key-encrypted secret so an
+ * admin can copy an issued key again later. */
 export class TokenRepo {
-  constructor(private readonly db: DB) {}
+  constructor(
+    private readonly db: DB,
+    private readonly masterKey: Buffer,
+  ) {}
 
   toPublic(t: Token): PublicToken {
     return {
@@ -47,6 +55,7 @@ export class TokenRepo {
       expiresAt: asMillisOrNull(t.expiresAt),
       enabled: t.enabled,
       createdAt: asMillis(t.createdAt),
+      hasStoredKey: Boolean(t.keyCiphertext && t.keyIv && t.keyTag),
     };
   }
 
@@ -58,15 +67,19 @@ export class TokenRepo {
     return this.db.select().from(tokens).where(eq(tokens.id, id)).get();
   }
 
-  /** Create a token, returning the row plus the one-time plaintext secret. */
+  /** Create a token, returning the row plus the plaintext secret. */
   create(input: TokenInput): { token: Token; secret: string } {
     const gen = generateToken();
+    const blob = encryptSecret(gen.token, this.masterKey);
     const row = this.db
       .insert(tokens)
       .values({
         name: input.name,
         keyHash: gen.hash,
         keyPrefix: gen.prefix,
+        keyCiphertext: blob.ciphertext,
+        keyIv: blob.iv,
+        keyTag: blob.tag,
         ownerUserId: input.ownerUserId ?? null,
         scopeServices: input.scopeServices ?? null,
         maxRequests: input.maxRequests ?? null,
@@ -93,6 +106,14 @@ export class TokenRepo {
 
   delete(id: number): void {
     this.db.delete(tokens).where(eq(tokens.id, id)).run();
+  }
+
+  /** Decrypt a token's stored secret, or null when the token predates stored
+   * keys (hash-only) and can never be shown again. */
+  revealSecret(id: number): string | null {
+    const t = this.get(id);
+    if (!t?.keyCiphertext || !t.keyIv || !t.keyTag) return null;
+    return decryptSecret({ ciphertext: t.keyCiphertext, iv: t.keyIv, tag: t.keyTag }, this.masterKey);
   }
 
   /** Look up a token by the presented secret (via the hash index). */

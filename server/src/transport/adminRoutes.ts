@@ -534,6 +534,18 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
     return reply.code(201).send({ token: c.tokens.toPublic(token), secret });
   });
 
+  // Re-reveal an issued key. Admin-gated like issuing; tokens from before the
+  // secret was stored (hash-only) have nothing to reveal.
+  app.get("/:id/secret", async (req, reply) => {
+    if (!requireAdmin(req, reply, "reveal API keys")) return reply;
+    const id = idParam(req);
+    if (!id) return reply.code(400).send({ error: "invalid id" });
+    if (!c.tokens.get(id)) return reply.code(404).send({ error: "not found" });
+    const secret = c.tokens.revealSecret(id);
+    if (secret == null) return reply.code(409).send({ error: "key issued before stored keys; revoke and reissue to make it copyable" });
+    return { secret };
+  });
+
   app.patch("/:id", async (req, reply) => {
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
@@ -722,6 +734,14 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     c.settings.setUiLanguage(parsed.data.language);
     return { language: parsed.data.language };
+  });
+
+  // The running server's release — the Settings page footer. Reported by the
+  // server rather than baked into the web bundle so a stale cached bundle can
+  // never claim a version the server isn't actually running.
+  app.get("/version", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return { version: APP_VERSION };
   });
 
   // Runtime-overridable env settings (the values the dashboard can change
