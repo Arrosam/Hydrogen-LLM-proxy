@@ -106,20 +106,20 @@
       <g transform="translate(872 116)">
         <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
         <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">2</text>
-        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">wire formats</text>
-        <text x="66" y="54" font-size="12.5" fill="#7d8b99">OpenAI and Anthropic, translated both ways</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">API formats, translated</text>
+        <text x="66" y="54" font-size="12.5" fill="#7d8b99">OpenAI and Anthropic, in either direction</text>
       </g>
       <g transform="translate(872 206)">
         <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
         <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">8</text>
-        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">kinds of service</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">model types supported</text>
         <text x="66" y="54" font-size="12.5" fill="#7d8b99">chat, image, video, speech, embedding, rerank</text>
       </g>
       <g transform="translate(872 296)">
         <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
-        <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">1</text>
-        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">container</text>
-        <text x="66" y="54" font-size="12.5" fill="#7d8b99">SQLite inside, no external services</text>
+        <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">3</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">model servicing powers</text>
+        <text x="66" y="54" font-size="12.5" fill="#7d8b99">overrides · micro agents · automatic failover</text>
       </g>
     </g>
   </g>
