@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" width="1280" height="440" role="img" aria-label="Hydrogen — 自托管 LLM 代理，同时支持 OpenAI 和 Anthropic 协议格式">
+  <title>Hydrogen — LLM 代理</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080c12"/>
+      <stop offset="1" stop-color="#0b1017"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#070b10" stop-opacity="1"/>
+      <stop offset="0.42" stop-color="#070b10" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#070b10" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.74" cy="0.5" r="0.6">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-50%" y="-20%" width="200%" height="140%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="440" fill="url(#bg)"/>
+  <rect width="1280" height="440" fill="url(#glow)"/>
+
+  <g stroke-linecap="round" stroke="#22d3ee">
+    <g filter="url(#soft)" stroke="#5eead4">
+      <line x1="712" y1="52" x2="712" y2="388" stroke-width="9" stroke-opacity="0.16"/>
+      <line x1="900" y1="52" x2="900" y2="388" stroke-width="12" stroke-opacity="0.20"/>
+      <line x1="1090" y1="52" x2="1090" y2="388" stroke-width="16" stroke-opacity="0.26"/>
+    </g>
+    <line x1="150" y1="52" x2="150" y2="388" stroke-width="1.5" stroke-opacity="0.10"/>
+    <line x1="178" y1="52" x2="178" y2="388" stroke-width="2" stroke-opacity="0.12"/>
+    <line x1="206" y1="52" x2="206" y2="388" stroke-width="1.5" stroke-opacity="0.08"/>
+    <line x1="243" y1="52" x2="243" y2="388" stroke-width="2" stroke-opacity="0.16"/>
+    <line x1="270" y1="52" x2="270" y2="388" stroke-width="1" stroke-opacity="0.10"/>
+    <line x1="312" y1="52" x2="312" y2="388" stroke-width="2.5" stroke-opacity="0.20"/>
+    <line x1="340" y1="52" x2="340" y2="388" stroke-width="1.5" stroke-opacity="0.12"/>
+    <line x1="386" y1="52" x2="386" y2="388" stroke-width="2" stroke-opacity="0.22"/>
+    <line x1="420" y1="52" x2="420" y2="388" stroke-width="1" stroke-opacity="0.12"/>
+    <line x1="455" y1="52" x2="455" y2="388" stroke-width="3" stroke-opacity="0.26"/>
+    <line x1="490" y1="52" x2="490" y2="388" stroke-width="1.5" stroke-opacity="0.16"/>
+    <line x1="530" y1="52" x2="530" y2="388" stroke-width="2" stroke-opacity="0.20"/>
+    <line x1="566" y1="52" x2="566" y2="388" stroke-width="1" stroke-opacity="0.12"/>
+    <line x1="600" y1="52" x2="600" y2="388" stroke-width="3" stroke-opacity="0.32"/>
+    <line x1="640" y1="52" x2="640" y2="388" stroke-width="2" stroke-opacity="0.22"/>
+    <line x1="672" y1="52" x2="672" y2="388" stroke-width="1.5" stroke-opacity="0.18"/>
+    <line x1="712" y1="52" x2="712" y2="388" stroke-width="4" stroke-opacity="0.40" stroke="#5eead4"/>
+    <line x1="745" y1="52" x2="745" y2="388" stroke-width="2" stroke-opacity="0.26"/>
+    <line x1="780" y1="52" x2="780" y2="388" stroke-width="1.5" stroke-opacity="0.20"/>
+    <line x1="820" y1="52" x2="820" y2="388" stroke-width="3" stroke-opacity="0.36"/>
+    <line x1="860" y1="52" x2="860" y2="388" stroke-width="2" stroke-opacity="0.28"/>
+    <line x1="900" y1="52" x2="900" y2="388" stroke-width="5" stroke-opacity="0.55" stroke="#5eead4"/>
+    <line x1="940" y1="52" x2="940" y2="388" stroke-width="2" stroke-opacity="0.30"/>
+    <line x1="978" y1="52" x2="978" y2="388" stroke-width="1.5" stroke-opacity="0.24"/>
+    <line x1="1010" y1="52" x2="1010" y2="388" stroke-width="3" stroke-opacity="0.40"/>
+    <line x1="1050" y1="52" x2="1050" y2="388" stroke-width="2" stroke-opacity="0.30"/>
+    <line x1="1090" y1="52" x2="1090" y2="388" stroke-width="6.5" stroke-opacity="0.85" stroke="#5eead4"/>
+    <line x1="1130" y1="52" x2="1130" y2="388" stroke-width="2.5" stroke-opacity="0.34"/>
+    <line x1="1165" y1="52" x2="1165" y2="388" stroke-width="1.5" stroke-opacity="0.24"/>
+    <line x1="1200" y1="52" x2="1200" y2="388" stroke-width="2" stroke-opacity="0.30"/>
+    <line x1="1235" y1="52" x2="1235" y2="388" stroke-width="1.5" stroke-opacity="0.20"/>
+  </g>
+
+  <rect width="1280" height="440" fill="url(#fade)"/>
+
+  <g font-family="'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Inter, system-ui, -apple-system, Helvetica, Arial, sans-serif">
+    <!-- Brand mark -->
+    <g transform="translate(80 58) scale(0.8)">
+      <rect x="0" y="0" width="44" height="36" rx="8" fill="#0c1219" stroke="#273140" stroke-width="1.5"/>
+      <g stroke-linecap="round" stroke="#22d3ee">
+        <line x1="4.5" y1="7" x2="4.5" y2="29" stroke-width="1.5" stroke-opacity="0.2"/>
+        <line x1="7" y1="7" x2="7" y2="29" stroke-width="2" stroke-opacity="0.3"/>
+        <line x1="12.5" y1="7" x2="12.5" y2="29" stroke-width="2" stroke-opacity="0.5"/>
+        <line x1="20" y1="7" x2="20" y2="29" stroke-width="2.5" stroke-opacity="0.8"/>
+        <line x1="32" y1="7" x2="32" y2="29" stroke-width="7" stroke-opacity="0.18" stroke="#5eead4"/>
+        <line x1="32" y1="7" x2="32" y2="29" stroke-width="3.5" stroke="#5eead4"/>
+      </g>
+    </g>
+    <text x="132" y="86" font-size="13" font-weight="600" letter-spacing="3.2" fill="#5eead4">&#x81EA;&#x6258;&#x7BA1; LLM &#x4EE3;&#x7406;</text>
+
+    <!-- Wordmark -->
+    <text x="80" y="204" font-size="84" font-weight="700" letter-spacing="-2" fill="#e8eef4">Hydrogen</text>
+    <text x="80" y="286" font-size="84" font-weight="700" letter-spacing="-2" fill="url(#wordmark)">LLM &#x4EE3;&#x7406;</text>
+
+    <rect x="80" y="312" width="360" height="2" fill="url(#rule)"/>
+
+    <text x="80" y="352" font-size="20" fill="#9fb0c0">&#x4E00;&#x4E2A;&#x7AEF;&#x70B9;&#x670D;&#x52A1;&#x6240;&#x6709;&#x6A21;&#x578B; &#x2014; &#x91CD;&#x8BD5;&#x3001;&#x56DE;&#x9000;&#x3001;&#x7F16;&#x6392;&#xFF0C;</text>
+    <text x="80" y="380" font-size="20" fill="#9fb0c0">&#x65E0;&#x9700;&#x6539;&#x52A8;&#x5BA2;&#x6237;&#x7AEF;&#x4EE3;&#x7801;&#x3002;</text>
+
+    <!-- Stat cards -->
+    <g>
+      <g transform="translate(872 116)">
+        <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
+        <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">2</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">&#x79CD; API &#x683C;&#x5F0F;&#x4E92;&#x8F6C;</text>
+        <text x="66" y="54" font-size="12.5" fill="#7d8b99">OpenAI &#x548C; Anthropic&#xFF0C;&#x53CC;&#x5411;&#x7FFB;&#x8BD1;</text>
+      </g>
+      <g transform="translate(872 206)">
+        <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
+        <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">8</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">&#x79CD;&#x6A21;&#x578B;&#x7C7B;&#x578B;</text>
+        <text x="66" y="54" font-size="12.5" fill="#7d8b99">&#x5BF9;&#x8BDD; &#xB7; &#x56FE;&#x50CF; &#xB7; &#x89C6;&#x9891; &#xB7; &#x8BED;&#x97F3; &#xB7; &#x5D4C;&#x5165; &#xB7; &#x91CD;&#x6392;&#x5E8F;</text>
+      </g>
+      <g transform="translate(872 296)">
+        <rect width="336" height="74" rx="14" fill="#0d141d" fill-opacity="0.82" stroke="#1e2a38"/>
+        <text x="26" y="48" font-size="30" font-weight="700" fill="#5eead4">3</text>
+        <text x="66" y="34" font-size="14" font-weight="600" fill="#d5dee7">&#x5927;&#x6A21;&#x578B;&#x670D;&#x52A1;&#x80FD;&#x529B;</text>
+        <text x="66" y="54" font-size="12.5" fill="#7d8b99">&#x53C2;&#x6570;&#x8986;&#x5199; &#xB7; &#x5FAE;&#x4EE3;&#x7406; &#xB7; &#x81EA;&#x52A8;&#x5F02;&#x5E38;&#x8F6C;&#x79FB;</text>
+      </g>
+    </g>
+  </g>
+</svg>
