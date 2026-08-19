@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
 import { isAgentDef, isChatPipelineCategory, serviceCategoryOf } from "../types";
+import { api, ApiError } from "../api";
 import { Toggle } from "./common";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { selectAll } from "../lib/input";
 import { useListKeys } from "../lib/useListKeys";
+import { formatNumber } from "../lib/format";
+import defaultOcrTestImage from "../assets/ocr-test-default.png";
 
 function newContextBlock(value: string, earlier: string[]): AgentContextBlock {
   switch (value) {
@@ -744,6 +747,163 @@ export function OcrEditor({
                 overrides={ocr.overrides}
                 onChange={(ov) => patch({ overrides: ov })}
               />
+            </div>
+          )}
+
+          <OcrTester ocr={ocr} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- OCR dry-run --------------------------------------------------------------
+
+interface OcrTestResult {
+  ok: boolean;
+  served?: { model: string; provider: string };
+  latencyMs?: number;
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  description?: string;
+  raw?: string;
+  message?: string;
+}
+
+interface TestImage {
+  name: string;
+  mediaType: string;
+  data: string; // base64, no data: prefix
+}
+
+/** Keep base64 expansion (~1.37x) plus JSON overhead under the 25 MB body cap. */
+const MAX_TEST_IMAGE_BYTES = 15 * 1024 * 1024;
+
+function readAsBase64(file: File): Promise<TestImage> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const s = String(fr.result);
+      resolve({ name: file.name, mediaType: file.type || "image/png", data: s.slice(s.indexOf(",") + 1) });
+    };
+    fr.onerror = () => reject(fr.error ?? new Error("could not read file"));
+    fr.readAsDataURL(file);
+  });
+}
+
+/** Send a test image through the current (unsaved) OCR config and show the
+ * model's reply — both the parsed description the stages would see and, on
+ * demand, the raw output. Ships a default screenshot; any image can be picked. */
+function OcrTester({ ocr }: { ocr: AgentOcr }) {
+  const { t } = useI18n();
+  const [custom, setCustom] = useState<TestImage | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<OcrTestResult | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
+
+  const configured = !!ocr.service || !!(ocr.steps && ocr.steps.length);
+  const previewSrc = custom ? `data:${custom.mediaType};base64,${custom.data}` : defaultOcrTestImage;
+
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return setResult({ ok: false, message: t("ocr.test.notAnImage") });
+    if (file.size > MAX_TEST_IMAGE_BYTES) return setResult({ ok: false, message: t("ocr.test.imageTooLarge") });
+    setCustom(await readAsBase64(file));
+    setResult(null);
+  };
+
+  const run = async () => {
+    setTesting(true);
+    setResult(null);
+    setShowRaw(false);
+    try {
+      let image = custom;
+      if (!image) {
+        const blob = await (await fetch(defaultOcrTestImage)).blob();
+        image = await readAsBase64(new File([blob], "overview.png", { type: blob.type || "image/png" }));
+      }
+      const r = await api.post<OcrTestResult>("/services/test-ocr", {
+        ocr,
+        image: { mediaType: image.mediaType, data: image.data },
+      });
+      setResult(r);
+    } catch (e) {
+      setResult({ ok: false, message: e instanceof ApiError ? e.message : String(e) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
+      <div className="mb-1 flex items-center justify-between">
+        <label className="label mb-0">{t("ocr.test.title")}</label>
+      </div>
+      <p className="mb-2 text-[11px] text-ink-600">{t("ocr.test.hint")}</p>
+
+      <div className="flex items-center gap-3">
+        <img src={previewSrc} alt="" className="h-12 w-20 shrink-0 rounded border border-ink-700 object-cover object-top" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs text-ink-300">{custom ? custom.name : t("ocr.test.defaultBadge")}</div>
+          {custom && (
+            <button className="text-[11px] text-brand-400 hover:text-brand-300" onClick={() => { setCustom(null); setResult(null); }}>
+              <i className="bi bi-arrow-counterclockwise mr-1" />
+              {t("ocr.test.resetDefault")}
+            </button>
+          )}
+        </div>
+        <label className="btn-ghost btn-xs cursor-pointer">
+          <i className="bi bi-upload" />
+          {t("ocr.test.upload")}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              void pick(e.target.files?.[0]);
+              e.target.value = ""; // allow re-picking the same file
+            }}
+          />
+        </label>
+        <button className="btn-primary btn-xs" disabled={testing || !configured} onClick={() => void run()}>
+          <i className={`bi ${testing ? "bi-arrow-repeat animate-spin" : "bi-play-fill"}`} />
+          {testing ? t("ocr.test.running") : t("ocr.test.run")}
+        </button>
+      </div>
+      {!configured && <p className="mt-1.5 text-[11px] text-amber-300">{t("ocr.test.noModelHint")}</p>}
+
+      {result && !result.ok && (
+        <div className="mt-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+          <i className="bi bi-x-circle mr-1.5" />
+          {t("ocr.test.failed")}: {result.message}
+        </div>
+      )}
+      {result?.ok && (
+        <div className="mt-2 rounded-lg border border-ink-800 bg-ink-900/60 p-2.5 text-xs">
+          <div className="mb-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-ink-400">
+            <span className="badge-green"><i className="bi bi-check-lg" />{t("ocr.test.ok")}</span>
+            {result.served && (
+              <span className="font-mono">{result.served.model}@{result.served.provider}</span>
+            )}
+            {result.latencyMs != null && <span>{formatNumber(result.latencyMs)} ms</span>}
+            {result.usage && <span>{formatNumber(result.usage.totalTokens)} tokens</span>}
+          </div>
+          {result.description ? (
+            <>
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-ink-500">{t("ocr.test.description")}</div>
+              <div className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded bg-ink-950 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink-200">
+                {result.description}
+              </div>
+              <button className="mt-1.5 text-[11px] text-ink-500 hover:text-ink-300" onClick={() => setShowRaw((v) => !v)}>
+                <i className={`bi ${showRaw ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
+                {t("ocr.test.showRaw")}
+              </button>
+            </>
+          ) : (
+            <p className="mb-1 text-[11px] text-amber-300">{t("ocr.test.parseFailedNote")}</p>
+          )}
+          {(showRaw || !result.description) && (
+            <div className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap rounded bg-ink-950 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink-400">
+              {result.raw || "(empty)"}
             </div>
           )}
         </div>

@@ -7,10 +7,12 @@ import type { Container } from "../composition/container";
 import { requireSession } from "../auth/middleware";
 import { cookieOptions, resolveCookieSecure, SESSION_COOKIE, signSession, type SessionPayload } from "../auth/session";
 import { DEFAULT_ADMIN_PASSWORD } from "../db/bootstrap";
-import { isAgent, isChatPipeline, serviceCategory, summarizeService, type ServiceDef } from "../execution/definition";
+import { AgentOcrSchema, isAgent, isChatPipeline, serviceCategory, summarizeService, type AgentOcr, type ServiceDef } from "../execution/definition";
 import { ServiceValidationError } from "../execution/serviceValidator";
+import { buildOcrRequest, parseOcrResults } from "../execution/agentContext";
+import type { ModelService } from "../execution/modelService";
 import { buildRequest } from "../core/format/registry";
-import { textOf } from "../core/ir/content";
+import { textOf, type ImagePart } from "../core/ir/content";
 import { failureMessage } from "../core/proxy/errors";
 import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../catalog/modelDiscovery";
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
@@ -399,6 +401,14 @@ function presentService(c: Container, m: ModelServiceRow): Record<string, unknow
   return { id: m.id, name: m.name, description: m.description, steps: m.definition, enabled: m.enabled, summary, createdAt: asMillis(m.createdAt) };
 }
 
+const OcrTestSchema = z.object({
+  ocr: z.unknown(),
+  image: z.object({
+    mediaType: z.string().regex(/^image\//, "mediaType must be an image/* MIME type"),
+    data: z.string().min(1, "image data (base64) is required"),
+  }),
+});
+
 function serviceValidationError(e: unknown): { status: number; body: Record<string, unknown> } | null {
   if (e instanceof ServiceValidationError) return { status: 400, body: { error: e.message, invalidPairs: e.invalidPairs } };
   if (e instanceof ZodError) {
@@ -505,6 +515,75 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
       return { ok: true, attemptPath: outcome.attemptPath, served: { model: v.modelName, provider: v.providerName }, output: textOf(v.response.content).slice(0, 500) };
     }
     return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), attemptPath: outcome.attemptPath };
+  });
+
+  // Dry-run the OCR pre-pass: send one test image through an OCR config and
+  // return what the model actually said. The config comes from the editor
+  // (possibly unsaved). The image cache is bypassed by construction -- the OCR
+  // service is invoked directly, so the test always measures the model.
+  app.post("/test-ocr", async (req, reply) => {
+    const parsed = parse(OcrTestSchema, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    let ocr: AgentOcr;
+    try {
+      ocr = AgentOcrSchema.parse(parsed.data.ocr);
+    } catch (e) {
+      const mapped = serviceValidationError(e);
+      if (mapped) return reply.code(mapped.status).send(mapped.body);
+      throw e;
+    }
+
+    // Resolve the OCR model exactly the way the Micro Agent pre-pass does.
+    let executor: ModelService;
+    if (ocr.service) {
+      const r = c.factory.resolve(ocr.service);
+      if (!r.ok) return reply.code(400).send({ error: r.message });
+      if (r.isAgent) return reply.code(400).send({ error: `OCR reference "${ocr.service}" must be a Model Service, not a Micro Agent` });
+      executor = r.executor;
+    } else if (ocr.steps && ocr.steps.length) {
+      try {
+        const { def } = c.validator.validate({ timeoutMs: ocr.timeoutMs ?? 60_000, steps: ocr.steps });
+        executor = c.factory.buildDef(def).executor;
+      } catch (e) {
+        const mapped = serviceValidationError(e);
+        if (mapped) return reply.code(mapped.status).send(mapped.body);
+        throw e;
+      }
+    } else {
+      return reply.code(400).send({ error: "image translation (OCR) is enabled but has no model configured" });
+    }
+
+    const image: ImagePart = {
+      type: "image",
+      source: { kind: "base64", mediaType: parsed.data.image.mediaType, data: parsed.data.image.data },
+    };
+    const parent = buildRequest("openai_completion", {
+      requestedService: "(ocr-test)",
+      messages: [{ role: "user", content: [image] }],
+      params: {},
+      stream: false,
+    });
+    const ocrReq = buildOcrRequest(parent, [image], ocr);
+
+    const started = Date.now();
+    const outcome = await executor.invoke(ocrReq, undefined, ocr.timeoutMs ? { timeoutMs: ocr.timeoutMs } : {});
+    const latencyMs = Date.now() - started;
+    if (outcome.result.ok) {
+      const v = outcome.result.value;
+      const raw = v.response.text();
+      // Index 1 of the OCR output contract; empty when the model ignored it.
+      const [description] = parseOcrResults(raw, 1);
+      return {
+        ok: true,
+        served: { model: v.modelName, provider: v.providerName },
+        latencyMs,
+        usage: v.response.usage,
+        description,
+        raw: raw.slice(0, 20_000),
+        attemptPath: outcome.attemptPath,
+      };
+    }
+    return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), latencyMs, attemptPath: outcome.attemptPath };
   });
 }
 
