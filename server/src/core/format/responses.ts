@@ -214,6 +214,22 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   return params;
 }
 
+/** The reasoning text a "reasoning" item carries. The raw chain of thought
+ * rides in `content` as `reasoning_text` parts (open-weight and compatible
+ * servers), a summary in `summary` as `summary_text`; prefer the raw text. */
+function reasoningItemText(item: Record<string, unknown>): string {
+  const joinTexts = (list: unknown, type: string): string =>
+    (Array.isArray(list) ? list : [])
+      .map((s) => {
+        if (!s || typeof s !== "object") return "";
+        const part = s as Record<string, unknown>;
+        return part.type === type ? String(part.text ?? "") : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  return joinTexts(item.content, "reasoning_text") || joinTexts(item.summary, "summary_text");
+}
+
 // --- request subclass ----------------------------------------------------
 
 export class OpenAIResponsesRequest extends Request {
@@ -251,8 +267,16 @@ export class OpenAIResponsesRequest extends Request {
             role: "user",
             content: [{ type: "tool_result", toolUseId: String(item.call_id ?? ""), content: [{ type: "text", text: outputText(item.output) }] }],
           });
+        } else if (type === "reasoning") {
+          // Replayed thinking is parsed, NOT dropped: what may be resent is the
+          // EGRESS family's rule. An Anthropic-family target requires the
+          // history's thinking back (DeepSeek's 4028), while this family's own
+          // render still drops it (reasoning items pair with provider-side ids).
+          // A reasoning item precedes its turn's message/function_call items, so
+          // normalizeMessages folds it in front of them — the order Anthropic wants.
+          const text = reasoningItemText(item);
+          if (text) messages.push({ role: "assistant", content: [{ type: "reasoning", text }] });
         }
-        // "reasoning" items are history bookkeeping; nothing to send upstream.
       }
     }
 
@@ -260,9 +284,8 @@ export class OpenAIResponsesRequest extends Request {
       requestedService: String(body.model ?? ""),
       system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
       // Reasoning is NOT stripped here: what a target may be sent back is the
-      // egress family's rule. This family's render() drops every reasoning part
-      // regardless (they pair with provider-side item ids and can't be replayed),
-      // so there is nothing further to apply on the way out.
+      // egress family's rule (this family's render() drops every reasoning part;
+      // the Anthropic renderer replays them).
       messages: normalizeMessages(messages),
       tools: parseTools(body.tools),
       toolChoice: parseToolChoice(body.tool_choice),
@@ -354,11 +377,9 @@ export class OpenAIResponsesResponse extends Response {
       if (!raw || typeof raw !== "object") continue;
       const item = raw as Record<string, unknown>;
       if (item.type === "reasoning") {
-        const summary = Array.isArray(item.summary) ? item.summary : [];
-        const text = summary
-          .map((s) => (s && typeof s === "object" ? String((s as Record<string, unknown>).text ?? "") : ""))
-          .filter(Boolean)
-          .join("\n");
+        // Raw chain of thought (content[].reasoning_text) or summary, whichever
+        // the server produced.
+        const text = reasoningItemText(item);
         if (text) content.push({ type: "reasoning", text });
       } else if (item.type === "message") {
         const text = textOf(contentToParts(item.content));

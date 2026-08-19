@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { orderReasoningFirst, stripStaleReasoning, type Message } from "../src/core/ir/content";
-import { AnthropicRequest, OpenAICompletionRequest, OpenAIResponsesRequest } from "../src/core/format";
+import { AnthropicRequest, AnthropicResponse, OpenAICompletionRequest, OpenAICompletionResponse, OpenAIResponsesRequest } from "../src/core/format";
 import type { RenderTarget } from "../src/core/ir/request";
+import type { StreamContext, StreamEvent } from "../src/core/ir/stream";
 
 const hasReasoning = (m: Message | undefined): boolean => !!m && m.content.some((p) => p.type === "reasoning");
 
@@ -113,10 +114,11 @@ describe("resent reasoning is decided by the EGRESS family, not the ingress", ()
 
     const assistant = (out.messages as Array<Record<string, unknown>>).find((m) => m.role === "assistant")!;
     expect(assistant.reasoning).toBeUndefined();
+    expect(assistant.reasoning_content).toBeUndefined();
     expect(assistant.content).toBe("a1");
   });
 
-  it("OpenAI completion egress keeps the CURRENT turn's reasoning (tool loop)", () => {
+  it("OpenAI completion egress keeps the CURRENT turn's reasoning (tool loop), in both dialect spellings", () => {
     const req = OpenAICompletionRequest.parse({
       model: "svc",
       messages: [
@@ -129,6 +131,8 @@ describe("resent reasoning is decided by the EGRESS family, not the ingress", ()
 
     const assistant = (out.messages as Array<Record<string, unknown>>).find((m) => m.role === "assistant")!;
     expect(assistant.reasoning).toBe("deciding");
+    // DeepSeek's spelling — its v3.2 tool loop requires the round's reasoning back.
+    expect(assistant.reasoning_content).toBe("deciding");
   });
 
   it("OpenAI Responses egress never replays reasoning", () => {
@@ -137,6 +141,45 @@ describe("resent reasoning is decided by the EGRESS family, not the ingress", ()
 
     const json = JSON.stringify(out.input);
     expect(json).not.toContain("thought about q1");
+  });
+
+  it("a Responses-ingress reasoning item (raw reasoning_text) reaches an Anthropic target as a thinking block", () => {
+    // The Codex replay shape: the reasoning item precedes its turn's message.
+    const req = OpenAIResponsesRequest.parse({
+      model: "svc",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "q1" }] },
+        { type: "reasoning", id: "rs_1", summary: [], content: [{ type: "reasoning_text", text: "raw thought" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "q2" }] },
+      ],
+    });
+    const out = AnthropicRequest.construct(req).render(target());
+
+    const assistant = (out.messages as AnthropicMsg[]).find((m) => m.role === "assistant")!;
+    expect(assistant.content.map((b) => b.type)).toEqual(["thinking", "text"]);
+    expect(assistant.content[0].thinking).toBe("raw thought");
+
+    // Its own family still drops it on the way out.
+    const selfOut = OpenAIResponsesRequest.construct(req).render(target());
+    expect(JSON.stringify(selfOut.input)).not.toContain("raw thought");
+  });
+
+  it("a summary-only reasoning item is parsed too, and a tool-loop one leads the tool call", () => {
+    const req = OpenAIResponsesRequest.parse({
+      model: "svc",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "q1" }] },
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "summarized thought" }] },
+        { type: "function_call", call_id: "c1", name: "f", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: "42" },
+      ],
+    });
+    const out = AnthropicRequest.construct(req).render(target());
+
+    const assistant = (out.messages as AnthropicMsg[]).find((m) => m.role === "assistant")!;
+    expect(assistant.content.map((b) => b.type)).toEqual(["thinking", "tool_use"]);
+    expect(assistant.content[0].thinking).toBe("summarized thought");
   });
 
   it("an Anthropic-ingress request routed to an OpenAI provider is still stripped", () => {
@@ -153,5 +196,74 @@ describe("resent reasoning is decided by the EGRESS family, not the ingress", ()
 
     const assistant = (out.messages as Array<Record<string, unknown>>).find((m) => m.role === "assistant")!;
     expect(assistant.reasoning).toBeUndefined();
+    expect(assistant.reasoning_content).toBeUndefined();
+  });
+});
+
+// --- the response side of the round trip -------------------------------------
+//
+// A chat-completion client can only replay reasoning it was GIVEN. Hydrogen used
+// to emit it as `reasoning` alone, which a DeepSeek-convention client (reading
+// `reasoning_content`) never saw and so never sent back — and the next request,
+// translated to an Anthropic-family upstream, had no thinking block to resend
+// (DeepSeek 4028). The response render must speak both dialect spellings.
+
+describe("reasoning survives the chat-completion response render", () => {
+  const anthropicUpstreamBody = {
+    id: "msg_1",
+    model: "up",
+    content: [
+      { type: "thinking", thinking: "deep thought" },
+      { type: "text", text: "answer" },
+    ],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 1, output_tokens: 2 },
+  };
+
+  it("an Anthropic upstream's thinking reaches an OpenAI client in both spellings", () => {
+    const res = AnthropicResponse.parse(anthropicUpstreamBody);
+    const out = res.render("openai_completion", "svc");
+    const message = ((out.choices as Array<Record<string, unknown>>)[0].message ?? {}) as Record<string, unknown>;
+    expect(message.reasoning).toBe("deep thought");
+    expect(message.reasoning_content).toBe("deep thought");
+    expect(message.content).toBe("answer");
+  });
+
+  it("what the client replays from that response round-trips into a thinking block", () => {
+    const res = AnthropicResponse.parse(anthropicUpstreamBody);
+    const message = ((res.render("openai_completion", "svc").choices as Array<Record<string, unknown>>)[0]
+      .message ?? {}) as Record<string, unknown>;
+
+    // The client appends the assistant message it received and asks again.
+    const req = OpenAICompletionRequest.parse({
+      model: "svc",
+      messages: [
+        { role: "user", content: "q1" },
+        { role: "assistant", content: message.content, reasoning_content: message.reasoning_content },
+        { role: "user", content: "q2" },
+      ],
+    });
+    const out = AnthropicRequest.construct(req).render(target());
+    const assistant = (out.messages as AnthropicMsg[]).find((m) => m.role === "assistant")!;
+    expect(assistant.content[0]).toEqual({ type: "thinking", thinking: "deep thought" });
+  });
+
+  it("streaming deltas carry both spellings too", async () => {
+    async function* events(): AsyncGenerator<StreamEvent> {
+      yield { type: "start", id: "c1", model: "up", created: 1 };
+      yield { type: "reasoning_delta", text: "hmm" };
+      yield { type: "text_delta", text: "hi" };
+      yield { type: "finish", stopReason: "stop", usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 }, incomplete: false };
+    }
+    let sse = "";
+    for await (const frame of OpenAICompletionResponse.serializeStream(events(), { model: "svc" } as StreamContext)) sse += frame;
+    const reasoningChunk = sse
+      .split("\n\n")
+      .map((l) => l.replace(/^data: /, ""))
+      .filter((l) => l && l !== "[DONE]")
+      .map((l) => JSON.parse(l) as { choices?: Array<{ delta?: Record<string, unknown> }> })
+      .find((c) => c.choices?.[0]?.delta?.reasoning != null);
+    expect(reasoningChunk?.choices?.[0]?.delta?.reasoning).toBe("hmm");
+    expect(reasoningChunk?.choices?.[0]?.delta?.reasoning_content).toBe("hmm");
   });
 });

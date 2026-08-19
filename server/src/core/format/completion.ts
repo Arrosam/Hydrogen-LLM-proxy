@@ -362,7 +362,14 @@ export class OpenAICompletionRequest extends Request {
         const toolUses = m.content.filter((p) => p.type === "tool_use");
         const entry: Record<string, unknown> = { role: "assistant" };
         entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
-        if (reasoningParts.length) entry.reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+        if (reasoningParts.length) {
+          const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+          // Both dialect spellings: DeepSeek reads `reasoning_content` (and its
+          // v3.2 tool loop REQUIRES the current round's reasoning back),
+          // OpenRouter-style providers read `reasoning`.
+          entry.reasoning = reasoning;
+          entry.reasoning_content = reasoning;
+        }
         if (toolUses.length) {
           entry.tool_calls = toolUses.map((tu) => ({
             id: (tu as { id: string }).id,
@@ -466,7 +473,15 @@ export class OpenAICompletionResponse extends Response {
     const reasoningParts = this.content.filter((p) => p.type === "reasoning");
     const toolUses = this.content.filter((p) => p.type === "tool_use");
     const message: Record<string, unknown> = { role: "assistant", content: text || null };
-    if (reasoningParts.length) message.reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+    if (reasoningParts.length) {
+      const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
+      // Both dialect spellings, so a DeepSeek-convention client sees the
+      // reasoning AND replays it — its absence is what broke the next turn
+      // against an Anthropic-family upstream (4028: thinking must be passed
+      // back), because the client had nothing to send.
+      message.reasoning = reasoning;
+      message.reasoning_content = reasoning;
+    }
     if (toolUses.length) {
       message.tool_calls = toolUses.map((tu) => ({
         id: (tu as { id: string }).id,
@@ -571,7 +586,8 @@ export class OpenAICompletionResponse extends Response {
           yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });
           break;
         case "reasoning_delta":
-          yield chunk({ choices: [{ index: 0, delta: { reasoning: ev.text }, finish_reason: null }] });
+          // Both dialect spellings (see renderSelf).
+          yield chunk({ choices: [{ index: 0, delta: { reasoning: ev.text, reasoning_content: ev.text }, finish_reason: null }] });
           break;
         case "tool_start":
           yield chunk({
