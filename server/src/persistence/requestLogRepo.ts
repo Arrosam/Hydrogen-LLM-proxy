@@ -71,8 +71,10 @@ function ms(v: Date | number | null): number {
 export class RequestLogRepo {
   constructor(private readonly db: DB) {}
 
-  insert(row: LogInsert): void {
-    this.db.insert(requestLogs).values(row).run();
+  /** Insert one row and return its id (the StatsCache tracks the highest id folded in). */
+  insert(row: LogInsert): number {
+    const res = this.db.insert(requestLogs).values(row).run();
+    return Number(res.lastInsertRowid);
   }
 
   /**

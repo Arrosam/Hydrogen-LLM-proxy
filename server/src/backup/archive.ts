@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { STATS_CACHE_SETTINGS_KEY } from "../persistence/statsCache";
 import { decryptSecret, encryptSecret } from "../security/crypto";
 import { decryptProviderKey, encryptProviderKey } from "../security/providerKeys";
 import { openWithPassphrase, sealWithPassphrase, type SealedPayload } from "../security/passphrase";
@@ -102,8 +103,10 @@ const TOKEN_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
  *   instance's secrets; a foreign one would make the server reject its own key.
  * - `session_epoch`: the instance-wide session cutoff; it is bumped on restore,
  *   so a value carried in from the source would be meaningless here.
+ * - `stats_cache`: incremental usage counters over THIS instance's request_logs
+ *   (keyed by local row ids); foreign counters would describe a different log.
  */
-const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check", "session_epoch"]);
+const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check", "session_epoch", STATS_CACHE_SETTINGS_KEY]);
 
 type Row = Record<string, unknown>;
 

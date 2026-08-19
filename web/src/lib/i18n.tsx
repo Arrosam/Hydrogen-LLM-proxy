@@ -204,7 +204,6 @@ const en: Dict = {
   "overview.topList.topServices": "Top Model Services",
   "overview.topList.topModels": "Top models",
   "overview.topList.topProviders": "Top providers",
-  "overview.modelsCappedNote": "Model & provider breakdown covers the most recent 100,000 requests. Totals above count all requests.",
 
   "providers.title": "Providers",
   "providers.subtitle": "Upstream API endpoints. Keys are encrypted at rest.",
@@ -905,7 +904,6 @@ const zh: Dict = {
   "overview.topList.topServices": "热门模型服务",
   "overview.topList.topModels": "热门模型",
   "overview.topList.topProviders": "热门提供商",
-  "overview.modelsCappedNote": "模型与提供商明细仅覆盖最近 100,000 条请求。上方的总量统计包含所有请求。",
 
   "providers.title": "提供商",
   "providers.subtitle": "上游 API 端点。密钥已加密存储。",

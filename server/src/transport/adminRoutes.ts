@@ -605,6 +605,7 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.delete("/logs", async (req, reply) => {
     if (!requireAdmin(req, reply, "clear logs")) return reply;
     const deleted = c.logs.deleteAll();
+    c.statsCache.reset();
     try {
       c.sqlite.exec("VACUUM");
     } catch {
@@ -613,14 +614,30 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
     return { deleted };
   });
 
+  // The unbounded queries the dashboard actually issues come straight from the
+  // in-memory StatsCache -- no SQL per view. An explicit from/to still runs the
+  // SQL aggregation, since the cache only accumulates all-time totals.
   const range = (req: { query: unknown }): { from?: number; to?: number } => {
     const q = req.query as Record<string, string>;
     return { from: numParam(q.from), to: numParam(q.to) };
   };
-  app.get("/stats/summary", async (req) => c.stats.summary(range(req)));
-  app.get("/stats/timeseries", async (req) => ({ points: c.stats.timeSeries(range(req)) }));
-  app.get("/stats/by-service", async (req) => ({ groups: c.stats.byService(range(req)) }));
-  app.get("/stats/by-model-provider", async (req) => c.stats.byModelProvider(range(req)));
+  const bounded = (r: { from?: number; to?: number }): boolean => r.from != null || r.to != null;
+  app.get("/stats/summary", async (req) => {
+    const r = range(req);
+    return bounded(r) ? c.stats.summary(r) : c.statsCache.summary();
+  });
+  app.get("/stats/timeseries", async (req) => {
+    const r = range(req);
+    return { points: bounded(r) ? c.stats.timeSeries(r) : c.statsCache.timeSeries() };
+  });
+  app.get("/stats/by-service", async (req) => {
+    const r = range(req);
+    return { groups: bounded(r) ? c.stats.byService(r) : c.statsCache.byService() };
+  });
+  app.get("/stats/by-model-provider", async (req) => {
+    const r = range(req);
+    return bounded(r) ? c.stats.byModelProvider(r) : c.statsCache.byModelProvider();
+  });
 }
 
 // --- settings ---------------------------------------------------------------
@@ -831,6 +848,10 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
     }
     // The settings table was replaced underneath the cached allowlist.
     c.settings.reload();
+    // A package that carried request logs replaced the table the stats counters
+    // describe -- rebuild them from the restored rows. A config-only package
+    // left the log alone, so the accumulated history stays.
+    if (report.includedLogs) c.statsCache.rebuild();
     // Both halves of the budget just changed under each other: the package
     // brought its own image_cache_max_bytes, and possibly its own cache rows,
     // neither of which knows what the other instance was sized for. Re-enforce

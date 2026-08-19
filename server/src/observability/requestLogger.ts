@@ -2,6 +2,7 @@ import type { Family } from "../core/format/family";
 import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { serializeForLog } from "../util/logPayload";
 import type { RequestLogRepo } from "../persistence/requestLogRepo";
+import type { StatsCache } from "../persistence/statsCache";
 import { redactHeaders } from "./redactor";
 
 /** The client's HTTP request, captured verbatim (headers redacted) for the log. */
@@ -57,6 +58,8 @@ export class RequestLogger {
   constructor(
     private readonly repo: RequestLogRepo,
     private readonly maxChars: number | (() => number),
+    /** Optional so tests can log without stats; the container always wires it. */
+    private readonly stats?: StatsCache,
   ) {}
 
   /** Resolve the (possibly live) max-chars to a concrete number. */
@@ -77,13 +80,16 @@ export class RequestLogger {
 
   /** Demote a logged 200 to 499 after late evidence that delivery failed. */
   amendDeliveryFailure(traceId: string, error: string): boolean {
-    return this.repo.markDeliveryFailed(traceId, error);
+    const changed = this.repo.markDeliveryFailed(traceId, error);
+    // The row was folded into the stats as a success when it was written.
+    if (changed) this.stats?.recordDeliveryFailure();
+    return changed;
   }
 
   record(p: LogParams): void {
     const usage = p.usage ?? ZERO_USAGE;
     const maxChars = this.limit();
-    this.repo.insert({
+    const id = this.repo.insert({
       traceId: p.traceId,
       tokenId: p.tokenId,
       serviceId: p.serviceId,
@@ -109,6 +115,17 @@ export class RequestLogger {
       attempts: p.attempts ?? 0,
       attemptPath: p.attemptPath ?? [],
       error: p.error ?? null,
+    });
+    this.stats?.recordRequest({
+      id,
+      httpStatus: p.httpStatus,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      latencyMs: p.latencyMs,
+      requestedService: p.requestedService,
+      servedModel: p.servedModel ?? null,
+      servedProvider: p.servedProvider ?? null,
     });
   }
 }

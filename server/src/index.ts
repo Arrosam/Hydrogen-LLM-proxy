@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     if (pruneTimer) clearInterval(pruneTimer);
     try {
       await app.close();
+      container.statsCache.flush();
       container.sqlite.close();
     } finally {
       process.exit(0);

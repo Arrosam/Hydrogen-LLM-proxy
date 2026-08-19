@@ -1,4 +1,4 @@
-import { and, gte, isNotNull, lte, sql, type SQL } from "drizzle-orm";
+import { and, gt, gte, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import type { DB } from "../db";
 import { requestLogs } from "../db/schema";
 
@@ -26,6 +26,24 @@ export interface GroupCount {
   key: string;
   requests: number;
   totalTokens: number;
+}
+
+/** Everything the StatsCache accumulates, aggregated in one pass over the rows
+ * above `sinceId`. Latency comes back as a SUM so the cache can keep adding to
+ * it and derive the average by division. */
+export interface StatsAccumulators {
+  /** Highest row id covered (== sinceId when no rows were above it). */
+  maxId: number;
+  requests: number;
+  errors: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  latencySumMs: number;
+  byDay: GroupCount[];
+  byService: GroupCount[];
+  byModel: GroupCount[];
+  byProvider: GroupCount[];
 }
 
 /**
@@ -83,6 +101,42 @@ export class StatsQueries {
   /** Requests + tokens grouped by the requested service name. */
   byService(q: StatsQuery): GroupCount[] {
     return this.groupBy(this.range(q), sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`);
+  }
+
+  /**
+   * Seed/catch-up aggregation for the StatsCache: every row with id > sinceId,
+   * in one pass. Runs once at startup (over the whole table on first boot, over
+   * the unflushed tail after that), never per dashboard view.
+   */
+  accumulateSince(sinceId: number): StatsAccumulators {
+    const above = gt(requestLogs.id, sinceId);
+    const totals = this.db
+      .select({
+        maxId: sql<number>`coalesce(max(${requestLogs.id}),0)`,
+        requests: sql<number>`count(*)`,
+        errors: sql<number>`coalesce(sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end),0)`,
+        promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
+        completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
+        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
+      })
+      .from(requestLogs)
+      .where(above)
+      .get();
+    const day = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
+    return {
+      maxId: Math.max(sinceId, totals?.maxId ?? 0),
+      requests: totals?.requests ?? 0,
+      errors: totals?.errors ?? 0,
+      promptTokens: totals?.promptTokens ?? 0,
+      completionTokens: totals?.completionTokens ?? 0,
+      totalTokens: totals?.totalTokens ?? 0,
+      latencySumMs: totals?.latencySumMs ?? 0,
+      byDay: this.groupBy(above, day),
+      byService: this.groupBy(above, sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`),
+      byModel: this.groupBy(and(above, isNotNull(requestLogs.servedModel)), sql<string>`${requestLogs.servedModel}`),
+      byProvider: this.groupBy(and(above, isNotNull(requestLogs.servedProvider)), sql<string>`${requestLogs.servedProvider}`),
+    };
   }
 
   /** Requests grouped by the model/provider that actually served each request. */

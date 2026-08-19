@@ -16,6 +16,7 @@ import { UserRepo } from "../persistence/userRepo";
 import { RequestLogRepo } from "../persistence/requestLogRepo";
 import { SettingsRepo } from "../persistence/settingsRepo";
 import { StatsQueries } from "../persistence/statsQueries";
+import { StatsCache } from "../persistence/statsCache";
 import { LogPruner } from "../persistence/logPruner";
 import { ImageCacheRepo } from "../persistence/imageCacheRepo";
 import { ImageDescriptionCache } from "../execution/ocrCache";
@@ -48,6 +49,7 @@ export interface Container {
   logs: RequestLogRepo;
   settings: SettingsRepo;
   stats: StatsQueries;
+  statsCache: StatsCache;
   pruner: LogPruner;
   imageCache: ImageCacheRepo;
   catalog: Catalog;
@@ -87,6 +89,10 @@ export async function boot(): Promise<Container> {
     imageCacheMaxBytes: config.imageCacheMaxBytes,
   });
   const stats = new StatsQueries(db);
+  // Seed the incremental stats counters: full aggregation on first boot, then
+  // only the rows the last flush missed. Everything after is in-memory bumps.
+  const statsCache = new StatsCache(stats, settings);
+  statsCache.init();
   const pruner = new LogPruner(db);
   const imageCache = new ImageCacheRepo(db);
 
@@ -101,12 +107,12 @@ export async function boot(): Promise<Container> {
     () => settings.logPayloadMaxChars(),
     new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
   );
-  const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars());
+  const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars(), statsCache);
   const usageMeter = new UsageMeter(tokens);
 
   return {
     config, sqlite, db,
-    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, pruner, imageCache,
+    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests,
   };
 }
