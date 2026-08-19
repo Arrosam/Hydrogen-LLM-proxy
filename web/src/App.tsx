@@ -42,11 +42,11 @@ export default function App() {
         <Route path="services" element={<ModelServices kind="resilience" />} />
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
-        <Route path="users" element={<Users />} />
         <Route path="logs" element={<Logs />} />
         <Route path="active-requests" element={<ActiveRequests />} />
-        {/* Settings is admin-only. Hiding the nav link is presentation; this is
-            what makes typing the URL not work. The server enforces it too. */}
+        {/* Users and Settings are admin-only. Hiding the nav link is presentation;
+            this is what makes typing the URL not work. The server enforces it too. */}
+        {user?.role === "admin" && <Route path="users" element={<Users />} />}
         {user?.role === "admin" && <Route path="settings" element={<Settings />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

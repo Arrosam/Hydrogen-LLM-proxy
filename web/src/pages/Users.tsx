@@ -18,10 +18,11 @@ interface FormState {
   enabled: boolean;
 }
 
+// The route and the API are both admin-only, so this page never renders for a
+// manager and needs no per-role degradation.
 export function Users() {
   const { t } = useI18n();
   const { user: me } = useAuth();
-  const isAdmin = me?.role === "admin";
   const { data, loading, error, reload } = useAsync(() => api.get<{ users: User[] }>("/users"));
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
@@ -60,8 +61,6 @@ export function Users() {
       toast.error(e instanceof ApiError ? e.message : t("users.toast.deleteFailed"));
     }
   };
-
-  const canManage = (u: User) => isAdmin || u.role !== "admin";
 
   // Guards for the edit modal's Enabled toggle.
   const users = data?.users ?? [];
@@ -125,12 +124,11 @@ export function Users() {
                     <div className="flex justify-end gap-1.5">
                       <button
                         className="btn-ghost btn-xs"
-                        disabled={!canManage(u)}
                         onClick={() => setForm({ id: u.id, username: u.username, password: "", role: u.role, enabled: u.enabled })}
                       >
                         <i className="bi bi-pencil" />
                       </button>
-                      <button className="btn-danger btn-xs" disabled={!canManage(u) || u.id === me?.id} onClick={() => remove(u)}>
+                      <button className="btn-danger btn-xs" disabled={u.id === me?.id} onClick={() => remove(u)}>
                         <i className="bi bi-trash3" />
                       </button>
                     </div>
@@ -170,11 +168,10 @@ export function Users() {
             </div>
             <div>
               <label className="label">{t("users.form.role")}</label>
-              <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })} disabled={!isAdmin}>
+              <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
                 <option value="manager">{t("users.role.manager")}</option>
                 <option value="admin">{t("users.role.admin")}</option>
               </select>
-              {!isAdmin && <p className="mt-1 text-xs text-ink-500">{t("users.form.adminRoleRestricted")}</p>}
             </div>
             <div>
               <Toggle
