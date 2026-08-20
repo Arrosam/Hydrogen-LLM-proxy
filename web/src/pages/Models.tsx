@@ -31,7 +31,7 @@ export function Models() {
   const { confirm, confirmEl } = useConfirm();
 
   const [modelForm, setModelForm] = useState<{ id?: number; name: string; description: string; enabled: boolean } | null>(null);
-  const [mapForm, setMapForm] = useState<{ modelId: number; providerId: number; upstreamModel: string } | null>(null);
+  const [mapForm, setMapForm] = useState<{ modelId: number; providerId: number; upstreamModel: string; families: string[] } | null>(null);
   const [saving, setSaving] = useState(false);
 
   const providerName = (id: number) => data?.providers.find((p) => p.id === id)?.name ?? `#${id}`;
@@ -70,7 +70,7 @@ export function Models() {
     if (!mapForm) return;
     setSaving(true);
     try {
-      await api.post("/mappings", mapForm);
+      await api.post("/mappings", { ...mapForm, families: mapForm.families.length ? mapForm.families : null });
       toast.success(t("models.toast.mappingCreated"));
       setMapForm(null);
       reload();
@@ -96,7 +96,7 @@ export function Models() {
       toast.error(t("models.toast.createProviderFirst"));
       return;
     }
-    setMapForm({ modelId, providerId: firstProvider, upstreamModel: "" });
+    setMapForm({ modelId, providerId: firstProvider, upstreamModel: "", families: [] });
   };
 
   return (
@@ -226,6 +226,35 @@ export function Models() {
                 ))}
               </select>
             </div>
+            {(() => {
+              const prov = data?.providers.find((p) => p.id === mapForm.providerId);
+              const fams = prov ? [prov.type, ...(prov.altEndpoints ?? []).map((e) => e.type)] : [];
+              const uniq = [...new Set(fams)];
+              if (uniq.length < 2) return null;
+              return (
+                <div>
+                  <label className="label">{t("models.mappingModal.field.families.label")}</label>
+                  <p className="mb-1 text-xs text-ink-500">{t("models.mappingModal.field.families.hint")}</p>
+                  <div className="flex flex-wrap gap-3">
+                    {uniq.map((f) => (
+                      <label key={f} className="flex items-center gap-1.5 text-xs text-ink-300">
+                        <input
+                          type="checkbox"
+                          checked={mapForm.families.includes(f)}
+                          onChange={(e) =>
+                            setMapForm({
+                              ...mapForm,
+                              families: e.target.checked ? [...mapForm.families, f] : mapForm.families.filter((x) => x !== f),
+                            })
+                          }
+                        />
+                        <code>{f}</code>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div>
               <label className="label">{t("models.mappingModal.field.upstreamModel.label")}</label>
               <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />

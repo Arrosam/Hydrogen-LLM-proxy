@@ -12,6 +12,7 @@ interface EnvSettings {
   logPayloadMaxChars: number;
   simulatedStreamingTokenRate: number;
   sessionTtlMs: number;
+  promptCacheTtlMinutes: number;
   env: {
     nodeEnv: string;
     port: number;
@@ -760,6 +761,7 @@ function EnvCard() {
   const [logPayloadMaxChars, setLogPayloadMaxChars] = useState("");
   const [tokenRate, setTokenRate] = useState("");
   const [sessionTtlMs, setSessionTtlMs] = useState("");
+  const [cacheTtl, setCacheTtl] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -768,6 +770,7 @@ function EnvCard() {
     setLogPayloadMaxChars(String(data.logPayloadMaxChars));
     setTokenRate(String(data.simulatedStreamingTokenRate));
     setSessionTtlMs(String(data.sessionTtlMs));
+    setCacheTtl(String(data.promptCacheTtlMinutes));
   }, [data]);
 
   const save = async () => {
@@ -793,6 +796,7 @@ function EnvCard() {
         logPayloadMaxChars: lpmc,
         simulatedStreamingTokenRate: rate,
         sessionTtlMs: ttl,
+        promptCacheTtlMinutes: Number(cacheTtl.trim()) >= 1 ? Number(cacheTtl.trim()) : undefined,
       });
       toast.success(t("settings.env.toast.saved"));
       reload();
@@ -840,6 +844,15 @@ function EnvCard() {
                 inputMode="numeric"
                 value={tokenRate}
                 onChange={(e) => setTokenRate(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label">{t("settings.env.promptCacheTtlMinutes")}</label>
+              <input
+                className="input font-mono text-xs"
+                inputMode="numeric"
+                value={cacheTtl}
+                onChange={(e) => setCacheTtl(e.target.value)}
               />
             </div>
             <div>

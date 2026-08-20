@@ -36,6 +36,26 @@ export class ServiceFactory implements ServiceResolver {
     return this.buildDef(parseService(row.definition));
   }
 
+  /** Resolve an stt-category Model Service to its raw step chain (the ASR
+   * pre-pass drives the transcriptions endpoint itself; there is no chat
+   * executor to build). */
+  sttDef(name: string): { ok: true; def: import("./definition").ServiceSteps } | { ok: false; message: string } {
+    const row = this.services.getByName(name);
+    if (!row || !row.enabled) {
+      return { ok: false, message: `audio transcription (ASR) references unknown or disabled Model Service "${name}"` };
+    }
+    try {
+      const def = parseService(row.definition);
+      if (isAgent(def)) return { ok: false, message: `audio transcription (ASR) references a Micro Agent "${name}" (must be an stt Model Service)` };
+      if (serviceCategory(def) !== "stt") {
+        return { ok: false, message: `audio transcription (ASR) references "${name}", a ${serviceCategory(def)} service — it must be an stt (speech-to-text) Model Service` };
+      }
+      return { ok: true, def };
+    } catch {
+      return { ok: false, message: `"${name}" has an invalid definition` };
+    }
+  }
+
   resolve(name: string): ResolveResult {
     const row = this.services.getByName(name);
     if (!row || !row.enabled) {

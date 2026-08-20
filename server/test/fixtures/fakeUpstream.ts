@@ -70,6 +70,8 @@ export interface FakeUpstream {
   readonly requests: number;
   /** Parsed request body of every attempt, in order. */
   readonly bodies: unknown[];
+  /** Request headers of every attempt, in order (lowercased names). */
+  readonly headers: Array<Record<string, string | string[] | undefined>>;
   /** Attempts that carried an image (i.e. the OCR pre-pass). */
   readonly ocrRequests: number;
   close: () => Promise<void>;
@@ -125,7 +127,7 @@ export async function startFakeUpstream(opts: FakeUpstreamOptions): Promise<Fake
   const script = opts.script ?? [];
   const ocrText = opts.ocrText ?? ((i: number) => `OCR TEXT ${i + 1}`);
 
-  const state = { requests: 0, bodies: [] as unknown[], ocrRequests: 0 };
+  const state = { requests: 0, bodies: [] as unknown[], headers: [] as Array<Record<string, string | string[] | undefined>>, ocrRequests: 0 };
 
   const server = http.createServer((req, res) => {
     let raw = "";
@@ -134,6 +136,7 @@ export async function startFakeUpstream(opts: FakeUpstreamOptions): Promise<Fake
     req.on("end", () => {
       void (async () => {
         const attempt = state.requests++;
+        state.headers.push({ ...req.headers });
         let parsed: { stream?: unknown } = {};
         try { parsed = JSON.parse(raw) as { stream?: unknown }; state.bodies.push(parsed); } catch { state.bodies.push(raw); }
 
@@ -213,6 +216,7 @@ export async function startFakeUpstream(opts: FakeUpstreamOptions): Promise<Fake
     baseUrl: `http://127.0.0.1:${port}/v1`,
     get requests() { return state.requests; },
     get bodies() { return state.bodies; },
+    get headers() { return state.headers; },
     get ocrRequests() { return state.ocrRequests; },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };

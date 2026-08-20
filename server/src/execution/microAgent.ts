@@ -6,7 +6,8 @@ import { buildResponse } from "../core/format/registry";
 import { textOf, type ImagePart } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { serializeForLog } from "../util/logPayload";
-import { stageOverrides, type AgentDef } from "./definition";
+import { stageOverrides, type AgentDef, type ServiceSteps } from "./definition";
+import { audioHash, transcribeAudio } from "./asr";
 import {
   buildOcrRequest,
   buildStageRequest,
@@ -15,6 +16,8 @@ import {
   nextStep,
   parseOcrResults,
   translateImagesInRequest,
+  collectAudio,
+  translateAudioInRequest,
 } from "./agentContext";
 import { imageHash, type OcrCacheStore } from "./ocrCache";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "./steps";
@@ -30,6 +33,8 @@ export type ResolveResult =
   | { ok: false; message: string };
 
 export interface ServiceResolver {
+  /** Resolve an stt-category service's raw step chain for the ASR pre-pass. */
+  sttDef(name: string): { ok: true; def: ServiceSteps } | { ok: false; message: string };
   resolve(name: string): ResolveResult;
 }
 
@@ -227,6 +232,67 @@ export class MicroAgent extends ModelService {
           prog?.record("agent", "agent.ocr.done", pending.length === 0
             ? "OCR pre-pass complete, every image served from the cache"
             : "OCR pre-pass complete, images translated to text");
+        }
+      }
+
+      // --- ASR pre-pass -----------------------------------------------------
+      if (agent.asr) {
+        const audios = collectAudio(source);
+        if (audios.length > 0) {
+          const asr = agent.asr;
+          let asrDef: ServiceSteps;
+          if (asr.service) {
+            const r = this.resolver.sttDef(asr.service);
+            if (!r.ok) return errorInv(r.message);
+            asrDef = r.def;
+          } else if (asr.steps && asr.steps.length) {
+            asrDef = { timeoutMs: asr.timeoutMs ?? agent.timeoutMs, steps: asr.steps };
+          } else {
+            return errorInv("audio transcription (ASR) is enabled but has no model configured");
+          }
+
+          // Content-addressed cache, shared with OCR (hashes are "a:"-prefixed
+          // so the two kinds can never collide).
+          const hashes = audios.map(audioHash);
+          const cache = this.ocrCache;
+          const known = cache ? cache.lookup(hashes) : new Map<string, string>();
+          const pending: Array<{ hash: string; index: number }> = [];
+          const queued = new Set<string>();
+          audios.forEach((_, i) => {
+            const hash = hashes[i];
+            if (known.has(hash) || queued.has(hash)) return;
+            queued.add(hash);
+            pending.push({ hash, index: i });
+          });
+          prog?.record("agent", "agent.asr.start",
+            `ASR pre-pass: ${audios.length} audio attachment(s), ${audios.length - pending.length} from cache, ${pending.length} to transcribe`,
+            { audios: audios.length, cached: audios.length - pending.length, pending: pending.length });
+
+          const byHash = new Map(known);
+          for (const job of pending) {
+            const started = Date.now();
+            const out = await transcribeAudio(asrDef, audios[job.index], this.deps, { timeoutMs: asr.timeoutMs, signal: opts.signal });
+            calls.push({
+              stage: "(asr)", service: asr.service ?? "(inline)", kind: "service",
+              status: out.result.ok ? 200 : out.result.status, latencyMs: Date.now() - started,
+              attempts: out.path, error: out.result.ok ? undefined : out.result.message,
+            });
+            if (!out.result.ok) {
+              prog?.record("error", "agent.asr.fail", `ASR pre-pass failed: ${out.result.message}`);
+              return fail(out.result);
+            }
+            if (out.result.value.trim() !== "") byHash.set(job.hash, out.result.value);
+          }
+          cache?.store(pending
+            .map((j) => ({ hash: j.hash, description: byHash.get(j.hash) ?? "" }))
+            .filter((e) => e.description.trim() !== ""));
+          const hits = [...known.keys()];
+          if (hits.length > 0) cache?.touch(hits);
+
+          source = translateAudioInRequest(source, hashes.map((h) => byHash.get(h) ?? ""));
+          prog?.record("agent", "agent.asr.done", pending.length === 0
+            ? "ASR pre-pass complete, every attachment served from the cache"
+            : "ASR pre-pass complete, audio transcribed to text");
         }
       }
 

@@ -10,6 +10,18 @@ import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./o
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
+/** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
+ * upstream headers — only for an upstream of the SAME wire family, and never
+ * overriding anything the provider config already sets (auth included). */
+function mergeForwardHeaders(
+  base: Record<string, string>,
+  fwd: RequestOverrides["forwardHeaders"] | undefined,
+  family: string,
+): Record<string, string> {
+  if (!fwd || fwd.family !== family) return base;
+  return { ...fwd.headers, ...base };
+}
+
 /** Resolve a possibly-live token rate (number | getter). Default 2000. */
 function resolveRate(r: number | (() => number) | undefined): number {
   if (r == null) return 2000;
@@ -25,6 +37,8 @@ export interface ServiceDeps {
   /** Token rate (tokens/second) for simulated/fabricated streams. Default 2000.
    * A getter is accepted so the rate can be changed at runtime from the dashboard. */
   simulatedStreamingTokenRate?: number | (() => number);
+  /** Auto-cache breakpoint lifetime in minutes (Settings, default 30). */
+  promptCacheTtlMinutes?: number | (() => number);
 }
 
 export interface InvokeOptions {
@@ -62,14 +76,21 @@ export class ModelService {
 
   /** Layer the request with the step's config then the caller's override (override wins). */
   private merge(request: Request, step: ServiceStep, overrides?: RequestOverrides): Request {
-    return request.withOverrides(stepOverrides(step)).withOverrides(overrides);
+    let merged = request.withOverrides(stepOverrides(step)).withOverrides(overrides);
+    // Thread the operator's auto-cache TTL to renderers that need it (only the
+    // Anthropic renderer reads it, and only when the client hinted caching).
+    if (merged.params.cacheHint && merged.params.cacheTtlMinutes == null) {
+      const ttl = this.deps.promptCacheTtlMinutes;
+      merged = merged.withOverrides({ cacheTtlMinutes: typeof ttl === "function" ? ttl() : ttl ?? 30 });
+    }
+    return merged;
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const prog = opts.progress ?? null;
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
-      const res = this.deps.catalog.resolve(step.model, step.provider);
+      const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
       if (!res.ok) {
         prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
@@ -80,7 +101,7 @@ export class ModelService {
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
         url: t.url,
-        headers: t.headers,
+        headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
         providerMaxOutputTokens: t.providerMaxOutputTokens,
         timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,
@@ -159,7 +180,7 @@ export class ModelService {
     }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
-      const res = this.deps.catalog.resolve(step.model, step.provider);
+      const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
       if (!res.ok) {
         prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
@@ -170,7 +191,7 @@ export class ModelService {
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
         url: t.url,
-        headers: t.headers,
+        headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
         providerMaxOutputTokens: t.providerMaxOutputTokens,
         timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
         signal: opts.signal,

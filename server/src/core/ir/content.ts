@@ -9,11 +9,32 @@
 export interface TextPart {
   type: "text";
   text: string;
+  /** Anthropic prompt-caching breakpoint, preserved verbatim for same-family replay. */
+  cacheControl?: unknown;
 }
 
 export interface ImagePart {
   type: "image";
   source: { kind: "base64"; mediaType: string; data: string } | { kind: "url"; url: string };
+  cacheControl?: unknown;
+}
+
+/** A document/file attachment (PDF etc.): Anthropic `document`, Responses
+ * `input_file`, Chat Completions `file` content part. */
+export interface FilePart {
+  type: "file";
+  source: { kind: "base64"; mediaType: string; data: string } | { kind: "url"; url: string };
+  name?: string;
+  cacheControl?: unknown;
+}
+
+/** A content part one wire family understands and the others cannot express
+ * (e.g. Chat Completions `input_audio`). Replayed verbatim to the SAME family;
+ * dropped when crossing families. */
+export interface OpaquePart {
+  type: "opaque";
+  family: "openai_completion" | "anthropic" | "openai_responses";
+  value: unknown;
 }
 
 export interface ToolUsePart {
@@ -21,6 +42,7 @@ export interface ToolUsePart {
   id: string;
   name: string;
   input: unknown;
+  cacheControl?: unknown;
 }
 
 export interface ToolResultPart {
@@ -28,6 +50,7 @@ export interface ToolResultPart {
   toolUseId: string;
   content: Array<TextPart | ImagePart>;
   isError?: boolean;
+  cacheControl?: unknown;
 }
 
 /** A reasoning/thinking block produced by the model (extended thinking). */
@@ -40,13 +63,18 @@ export interface ReasoningPart {
   /** OpenAI Responses reasoning item id (rs_...), kept so a same-family replay
    * restores the item verbatim (encrypted_content is tied to its item id). */
   itemId?: string;
+  /** Anthropic redacted_thinking: the opaque bytes live in `signature`, `text`
+   * is empty, and only a same-family replay can restore the block. */
+  redacted?: boolean;
 }
 
-export type ContentPart = TextPart | ImagePart | ToolUsePart | ToolResultPart | ReasoningPart;
+export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart;
 
 export interface Message {
   role: "user" | "assistant";
   content: ContentPart[];
+  /** OpenAI Chat Completions participant name, kept for same-family replay. */
+  name?: string;
 }
 
 export interface Tool {
@@ -54,6 +82,13 @@ export interface Tool {
   description?: string;
   /** JSON Schema object for the tool's parameters. */
   parameters: Record<string, unknown>;
+  /** OpenAI structured-outputs strict flag. */
+  strict?: boolean;
+  cacheControl?: unknown;
+  /** A provider-executed (server-side) or otherwise family-specific tool
+   * declaration, kept verbatim: replayed untouched to the SAME family, dropped
+   * when crossing families (never mangled into an empty client tool). */
+  raw?: { family: "openai_completion" | "anthropic" | "openai_responses"; value: unknown };
 }
 
 export type ToolChoice =
@@ -100,8 +135,9 @@ export function normalizeMessages(messages: Message[]): Message[] {
     const last = out[out.length - 1];
     if (last && last.role === m.role) {
       last.content.push(...m.content);
+      if (!last.name && m.name) last.name = m.name;
     } else {
-      out.push({ role: m.role, content: [...m.content] });
+      out.push({ role: m.role, content: [...m.content], ...(m.name ? { name: m.name } : {}) });
     }
   }
   return out;

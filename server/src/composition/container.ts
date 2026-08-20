@@ -89,6 +89,7 @@ export async function boot(): Promise<Container> {
     simulatedStreamingTokenRate: config.simulatedStreamingTokenRate,
     sessionTtlMs: config.sessionTtlMs,
     imageCacheMaxBytes: config.imageCacheMaxBytes,
+    promptCacheTtlMinutes: 30,
   });
   const stats = new StatsQueries(db);
   // Seed the incremental stats counters: full aggregation on first boot, then
@@ -105,7 +106,7 @@ export async function boot(): Promise<Container> {
   const activeRequests = new ActiveRequestRegistry();
   const factory = new ServiceFactory(
     services,
-    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate() },
+    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes() },
     () => settings.logPayloadMaxChars(),
     new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
   );

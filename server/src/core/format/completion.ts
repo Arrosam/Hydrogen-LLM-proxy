@@ -79,6 +79,16 @@ function coerceContentToParts(content: unknown): ContentPart[] {
       const img = (item as Record<string, unknown>).image_url as Record<string, unknown> | string;
       const url = typeof img === "string" ? img : String(img?.url ?? "");
       parts.push({ type: "image", source: parseDataUrl(url) });
+    } else if (t === "file") {
+      const f = ((item as Record<string, unknown>).file ?? {}) as Record<string, unknown>;
+      const data = String(f.file_data ?? "");
+      if (data) {
+        const src = data.startsWith("data:") ? parseDataUrl(data) : { kind: "base64" as const, mediaType: "application/pdf", data };
+        parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name: f.filename != null ? String(f.filename) : undefined });
+      }
+    } else if (t === "input_audio") {
+      // No canonical audio type: keep verbatim for same-family replay.
+      parts.push({ type: "opaque", family: "openai_completion", value: item });
     }
   }
   return parts;
@@ -89,12 +99,22 @@ function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"]):
   return { type: "image_url", image_url: { url } };
 }
 
+function filePartToOpenAI(p: Extract<ContentPart, { type: "file" }>): unknown {
+  const data = p.source.kind === "base64" ? `data:${p.source.mediaType};base64,${p.source.data}` : p.source.url;
+  return { type: "file", file: { ...(p.name ? { filename: p.name } : {}), file_data: data } };
+}
+
 function openAiUserContent(parts: ContentPart[]): unknown {
   const onlyText = parts.every((p) => p.type === "text");
   if (onlyText) return parts.map((p) => (p as TextPart).text).join("");
-  return parts.map((p) =>
-    p.type === "image" ? imagePartToOpenAI(p.source) : { type: "text", text: (p as TextPart).text ?? "" },
-  );
+  const out: unknown[] = [];
+  for (const p of parts) {
+    if (p.type === "image") out.push(imagePartToOpenAI(p.source));
+    else if (p.type === "file") out.push(filePartToOpenAI(p));
+    else if (p.type === "opaque") { if (p.family === "openai_completion") out.push(p.value); }
+    else if (p.type === "text") out.push({ type: "text", text: p.text });
+  }
+  return out;
 }
 
 // --- tools ---------------------------------------------------------------
@@ -104,12 +124,19 @@ function parseTools(raw: unknown): Tool[] | undefined {
   const tools: Tool[] = [];
   for (const t of raw) {
     if (!t || typeof t !== "object") continue;
-    const fn = ((t as Record<string, unknown>).function ?? {}) as Record<string, unknown>;
-    if (!fn.name) continue;
+    const entry = t as Record<string, unknown>;
+    const fn = (entry.function ?? {}) as Record<string, unknown>;
+    if (!fn.name) {
+      // Built-in / custom tool types this format cannot model: keep verbatim
+      // for same-family replay instead of silently dropping them.
+      if (entry.type) tools.push({ name: String(entry.type), parameters: {}, raw: { family: "openai_completion", value: entry } });
+      continue;
+    }
     tools.push({
       name: String(fn.name),
       description: fn.description ? String(fn.description) : undefined,
       parameters: (fn.parameters as Record<string, unknown>) ?? { type: "object", properties: {} },
+      ...(typeof fn.strict === "boolean" ? { strict: fn.strict } : {}),
     });
   }
   return tools.length ? tools : undefined;
@@ -257,6 +284,10 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
     params.verbosity = body.verbosity;
   }
   set("thinking", parseThinking(body));
+  // OpenAI's caching is automatic; the presence of its tuning params is the
+  // client saying "this conversation repeats" — enough to auto-plant an
+  // Anthropic breakpoint on a cross-family hop.
+  if (body.prompt_cache_key != null || body.prompt_cache_options != null) params.cacheHint = true;
   set("passthrough", collectPassthrough(body, RESERVED, "openai_completion"));
   return params;
 }
@@ -269,7 +300,7 @@ function applyParams(out: Record<string, unknown>, p: GenerationParams): void {
   if (p.topP != null) out.top_p = p.topP;
   if (p.topK != null) out.top_k = p.topK;
   if (p.minP != null) out.min_p = p.minP;
-  if (p.stop && p.stop.length) out.stop = p.stop;
+  if (p.stop && p.stop.length) out.stop = p.stop.slice(0, 4); // OpenAI wire allows at most 4
   if (p.frequencyPenalty != null) out.frequency_penalty = p.frequencyPenalty;
   if (p.presencePenalty != null) out.presence_penalty = p.presencePenalty;
   if (p.repetitionPenalty != null) out.repetition_penalty = p.repetitionPenalty;
@@ -317,6 +348,7 @@ export class OpenAICompletionRequest extends Request {
         continue;
       }
 
+      const name = typeof msg.name === "string" && msg.name ? msg.name : undefined;
       if (role === "assistant") {
         const content = coerceContentToParts(msg.content);
         // Providers disagree on the field name: DeepSeek says reasoning_content,
@@ -331,11 +363,11 @@ export class OpenAICompletionRequest extends Request {
           const fn = (call.function ?? {}) as Record<string, unknown>;
           content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: safeJsonParse(fn.arguments) });
         }
-        messages.push({ role: "assistant", content });
+        messages.push({ role: "assistant", content, ...(name ? { name } : {}) });
         continue;
       }
 
-      messages.push({ role: "user", content: coerceContentToParts(msg.content) });
+      messages.push({ role: "user", content: coerceContentToParts(msg.content), ...(name ? { name } : {}) });
     }
 
     return new OpenAICompletionRequest({
@@ -363,7 +395,7 @@ export class OpenAICompletionRequest extends Request {
         const textParts = m.content.filter((p): p is TextPart => p.type === "text");
         const reasoningParts = m.content.filter((p) => p.type === "reasoning");
         const toolUses = m.content.filter((p) => p.type === "tool_use");
-        const entry: Record<string, unknown> = { role: "assistant" };
+        const entry: Record<string, unknown> = { role: "assistant", ...(m.name ? { name: m.name } : {}) };
         entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
         if (reasoningParts.length) {
           // Every dialect spelling the DeepSeek-compatible world uses; each
@@ -388,16 +420,26 @@ export class OpenAICompletionRequest extends Request {
       }
       const toolResults = m.content.filter((p) => p.type === "tool_result");
       const others = m.content.filter((p) => p.type !== "tool_result");
+      const resultImages: ContentPart[] = [];
       for (const tr of toolResults) {
         const r = tr as Extract<ContentPart, { type: "tool_result" }>;
         messages.push({ role: "tool", tool_call_id: r.toolUseId, content: textOf(r.content) });
+        // The tool role is text-only on this wire; carry the result's images in
+        // a follow-up user message instead of dropping them (screenshot loops).
+        for (const part of r.content) if (part.type === "image") resultImages.push(part);
       }
-      if (others.length) messages.push({ role: "user", content: openAiUserContent(others) });
+      if (resultImages.length) {
+        messages.push({ role: "user", content: openAiUserContent([{ type: "text", text: "(images returned by the tool results above)" }, ...resultImages]) });
+      }
+      if (others.length) messages.push({ role: "user", content: openAiUserContent(others), ...(m.name ? { name: m.name } : {}) });
     }
 
     const out: Record<string, unknown> = { model: target.upstreamModel, messages };
     if (this.tools) {
-      out.tools = this.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+      const rendered = this.tools
+        .filter((t) => !t.raw || t.raw.family === "openai_completion")
+        .map((t) => (t.raw ? t.raw.value : { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }));
+      if (rendered.length) out.tools = rendered;
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);
     const cap = target.providerMaxOutputTokens;
@@ -461,16 +503,27 @@ export class OpenAICompletionResponse extends Response {
       content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: safeJsonParse(fn.arguments) });
     }
 
+    if (typeof message.refusal === "string" && message.refusal) {
+      content.push({ type: "text", text: message.refusal });
+    }
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const promptTokens = numOrUndef(usage.prompt_tokens) ?? 0;
     const completionTokens = numOrUndef(usage.completion_tokens) ?? 0;
+    const promptDetails = (usage.prompt_tokens_details ?? {}) as Record<string, unknown>;
+    const completionDetails = (usage.completion_tokens_details ?? {}) as Record<string, unknown>;
+    const cachedInputTokens = numOrUndef(promptDetails.cached_tokens);
+    const reasoningTokens = numOrUndef(completionDetails.reasoning_tokens);
     return new OpenAICompletionResponse({
       id: String(body.id ?? genId("chatcmpl")),
       model: String(body.model ?? ""),
       created: numOrUndef(body.created) ?? nowSeconds(),
       content,
       stopReason: finishReasonToStop(choice.finish_reason as string | null),
-      usage: { promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens },
+      usage: {
+        promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
+        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+        ...(reasoningTokens != null ? { reasoningTokens } : {}),
+      },
     });
   }
 
@@ -501,7 +554,11 @@ export class OpenAICompletionResponse extends Response {
       created: this.created,
       model,
       choices: [{ index: 0, message, logprobs: null, finish_reason: stopToFinishReason(this.stopReason) }],
-      usage: { prompt_tokens: this.usage.promptTokens, completion_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens },
+      usage: {
+        prompt_tokens: this.usage.promptTokens, completion_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens,
+        ...(this.usage.cachedInputTokens != null ? { prompt_tokens_details: { cached_tokens: this.usage.cachedInputTokens } } : {}),
+        ...(this.usage.reasoningTokens != null ? { completion_tokens_details: { reasoning_tokens: this.usage.reasoningTokens } } : {}),
+      },
     };
   }
 
@@ -558,10 +615,14 @@ export class OpenAICompletionResponse extends Response {
       }
       if (chunk.usage && typeof chunk.usage === "object") {
         const u = chunk.usage as Record<string, unknown>;
+        const pd = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
+        const cd = (u.completion_tokens_details ?? {}) as Record<string, unknown>;
         usage = {
           promptTokens: num(u.prompt_tokens),
           completionTokens: num(u.completion_tokens),
           totalTokens: num(u.total_tokens) || num(u.prompt_tokens) + num(u.completion_tokens),
+          ...(numOrUndef(pd.cached_tokens) != null ? { cachedInputTokens: num(pd.cached_tokens) } : {}),
+          ...(numOrUndef(cd.reasoning_tokens) != null ? { reasoningTokens: num(cd.reasoning_tokens) } : {}),
         };
       }
     }
@@ -617,7 +678,11 @@ export class OpenAICompletionResponse extends Response {
           if (ev.usage) {
             yield chunk({
               choices: [],
-              usage: { prompt_tokens: ev.usage.promptTokens, completion_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens },
+              usage: {
+                prompt_tokens: ev.usage.promptTokens, completion_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
+                ...(ev.usage.cachedInputTokens != null ? { prompt_tokens_details: { cached_tokens: ev.usage.cachedInputTokens } } : {}),
+                ...(ev.usage.reasoningTokens != null ? { completion_tokens_details: { reasoning_tokens: ev.usage.reasoningTokens } } : {}),
+              },
             });
           }
           yield "data: [DONE]\n\n";

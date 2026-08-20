@@ -58,6 +58,20 @@ function contentToParts(content: unknown): ContentPart[] {
         if (url) parts.push({ type: "image", source: parseDataUrl(url) });
         break;
       }
+      case "input_file": {
+        const name = part.filename != null ? String(part.filename) : undefined;
+        if (typeof part.file_url === "string" && part.file_url) {
+          parts.push({ type: "file", source: { kind: "url", url: part.file_url }, name });
+        } else if (typeof part.file_data === "string" && part.file_data) {
+          const d = part.file_data;
+          const src = d.startsWith("data:") ? parseDataUrl(d) : { kind: "base64" as const, mediaType: "application/pdf", data: d };
+          parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name });
+        }
+        break;
+      }
+      case "refusal":
+        if (part.refusal) parts.push({ type: "text", text: String(part.refusal) });
+        break;
     }
   }
   return parts;
@@ -78,11 +92,17 @@ function parseTools(raw: unknown): Tool[] | undefined {
     if (!t || typeof t !== "object") continue;
     const tool = t as Record<string, unknown>;
     // Responses tools are flattened (no nested "function" object).
-    if (tool.type !== "function" || !tool.name) continue;
+    if (tool.type !== "function" || !tool.name) {
+      // Built-in tools (web_search, file_search, code_interpreter, mcp, ...):
+      // keep verbatim for same-family replay instead of dropping them.
+      if (tool.type) tools.push({ name: String(tool.name ?? tool.type), parameters: {}, raw: { family: "openai_responses", value: tool } });
+      continue;
+    }
     tools.push({
       name: String(tool.name),
       description: tool.description ? String(tool.description) : undefined,
       parameters: (tool.parameters as Record<string, unknown>) ?? { type: "object", properties: {} },
+      ...(typeof tool.strict === "boolean" ? { strict: tool.strict } : {}),
     });
   }
   return tools.length ? tools : undefined;
@@ -209,6 +229,7 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   if (boolOrUndef(body.parallel_tool_calls) != null) params.parallelToolCalls = boolOrUndef(body.parallel_tool_calls);
   if (strOrUndef(body.service_tier) != null) params.serviceTier = strOrUndef(body.service_tier);
   if (strOrUndef(body.user) != null) params.user = strOrUndef(body.user);
+  if (body.prompt_cache_key != null || body.prompt_cache_options != null) params.cacheHint = true;
   const passthrough = collectPassthrough(body, RESERVED, "openai_responses");
   if (passthrough) params.passthrough = passthrough;
   return params;
@@ -327,12 +348,33 @@ export class OpenAIResponsesRequest extends Request {
           parts.push({ type: m.role === "assistant" ? "output_text" : "input_text", text: p.text });
         } else if (p.type === "image") {
           parts.push({ type: "input_image", image_url: imageUrlOf(p.source) });
+        } else if (p.type === "file") {
+          const data = p.source.kind === "base64" ? `data:${p.source.mediaType};base64,${p.source.data}` : undefined;
+          parts.push({
+            type: "input_file",
+            ...(p.name ? { filename: p.name } : {}),
+            ...(data ? { file_data: data } : { file_url: p.source.kind === "url" ? p.source.url : "" }),
+          });
+        } else if (p.type === "opaque") {
+          if (p.family === "openai_responses") parts.push(p.value as Record<string, unknown>);
         } else if (p.type === "tool_use") {
           flushParts();
           input.push({ type: "function_call", call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
         } else if (p.type === "tool_result") {
           flushParts();
           input.push({ type: "function_call_output", call_id: p.toolUseId, output: textOf(p.content) });
+          // function_call_output is text-only: carry the result's images in a
+          // follow-up user message instead of dropping them (screenshot loops).
+          const images = p.content.filter((c) => c.type === "image");
+          if (images.length) {
+            input.push({
+              role: "user",
+              content: [
+                { type: "input_text", text: "(images returned by the tool result above)" },
+                ...images.map((img) => ({ type: "input_image", image_url: imageUrlOf((img as Extract<ContentPart, { type: "image" }>).source) })),
+              ],
+            });
+          }
         } else if (p.type === "reasoning") {
           // Replay reasoning ahead of the action it informed. DeepSeek-family
           // upstreams require the reasoning_text back in thinking-mode tool
@@ -356,7 +398,10 @@ export class OpenAIResponsesRequest extends Request {
     const out: Record<string, unknown> = { model: target.upstreamModel, input, store: false };
     if (this.system) out.instructions = this.system;
     if (this.tools) {
-      out.tools = this.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters }));
+      const rendered = this.tools
+        .filter((t) => !t.raw || t.raw.family === "openai_responses")
+        .map((t) => (t.raw ? t.raw.value : { type: "function", name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) }));
+      if (rendered.length) out.tools = rendered;
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToResponses(this.toolChoice);
     if (p.thinking) {
@@ -432,6 +477,8 @@ export class OpenAIResponsesResponse extends Response {
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const promptTokens = numOrUndef(usage.input_tokens) ?? 0;
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
+    const cachedInputTokens = numOrUndef(((usage.input_tokens_details ?? {}) as Record<string, unknown>).cached_tokens);
+    const reasoningTokens = numOrUndef(((usage.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
     const incomplete = body.status === "incomplete";
     return new OpenAIResponsesResponse({
       id: String(body.id ?? genId("resp")),
@@ -439,7 +486,11 @@ export class OpenAIResponsesResponse extends Response {
       created: numOrUndef(body.created_at) ?? 0,
       content,
       stopReason: incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
-      usage: { promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens },
+      usage: {
+        promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
+        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+        ...(reasoningTokens != null ? { reasoningTokens } : {}),
+      },
     });
   }
 
@@ -482,7 +533,11 @@ export class OpenAIResponsesResponse extends Response {
       incomplete_details: incomplete ? { reason: "max_output_tokens" } : null,
       model,
       output,
-      usage: { input_tokens: this.usage.promptTokens, output_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens },
+      usage: {
+        input_tokens: this.usage.promptTokens, output_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens,
+        ...(this.usage.cachedInputTokens != null ? { input_tokens_details: { cached_tokens: this.usage.cachedInputTokens } } : {}),
+        ...(this.usage.reasoningTokens != null ? { output_tokens_details: { reasoning_tokens: this.usage.reasoningTokens } } : {}),
+      },
     };
   }
 
@@ -574,7 +629,13 @@ export class OpenAIResponsesResponse extends Response {
           const r = (data.response ?? {}) as Record<string, unknown>;
           const u = (r.usage ?? {}) as Record<string, unknown>;
           if (u.input_tokens != null || u.output_tokens != null) {
-            usage = { promptTokens: num(u.input_tokens), completionTokens: num(u.output_tokens), totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens) };
+            const itd = (u.input_tokens_details ?? {}) as Record<string, unknown>;
+            const otd = (u.output_tokens_details ?? {}) as Record<string, unknown>;
+            usage = {
+              promptTokens: num(u.input_tokens), completionTokens: num(u.output_tokens), totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens),
+              ...(numOrUndef(itd.cached_tokens) != null ? { cachedInputTokens: num(itd.cached_tokens) } : {}),
+              ...(numOrUndef(otd.reasoning_tokens) != null ? { reasoningTokens: num(otd.reasoning_tokens) } : {}),
+            };
           }
           // A failed generation is not an answer: flag it incomplete so the
           // buffered path reports a retryable failure and the streamed path

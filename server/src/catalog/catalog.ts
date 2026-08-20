@@ -44,7 +44,16 @@ export class Catalog {
     private readonly mappings: MappingRepo,
   ) {}
 
-  resolve(modelName: string, providerName: string): MappingResolution {
+  /**
+   * Resolve a (model, provider) pair to a concrete endpoint. A provider may
+   * serve several wire formats (its primary type plus altEndpoints); which of
+   * them a mapping may use is chosen on the mapping (`families` — unset means
+   * the primary type only). When the caller states a `preferredFamily` (the
+   * client's own ingress format), a matching endpoint wins: same-format
+   * pass-through beats translation. Otherwise the primary endpoint is used,
+   * falling back to the first enabled family.
+   */
+  resolve(modelName: string, providerName: string, preferredFamily?: Family): MappingResolution {
     const model = this.models.getByName(modelName);
     if (!model) return { ok: false, error: "model_not_found" };
     if (!model.enabled) return { ok: false, error: "model_disabled" };
@@ -58,18 +67,32 @@ export class Catalog {
     if (!mapping.enabled) return { ok: false, error: "mapping_disabled" };
 
     const upstream = this.providers.toUpstream(provider);
+
+    // Endpoint selection: primary first, then declared alternates; filtered by
+    // the mapping's enabled families (unset = primary only).
+    const endpoints: Array<{ type: typeof provider.type; baseUrl: string }> = [
+      { type: provider.type, baseUrl: provider.baseUrl },
+      ...(provider.altEndpoints ?? []),
+    ];
+    const enabledFams = mapping.families && mapping.families.length ? mapping.families : [provider.type];
+    const usable = endpoints.filter((e) => enabledFams.includes(e.type));
+    const pool = usable.length ? usable : [endpoints[0]];
+    const chosen =
+      (preferredFamily && pool.find((e) => familyForProviderType(e.type) === preferredFamily)) ?? pool[0];
+    const chosenUpstream = { ...upstream, type: chosen.type, baseUrl: chosen.baseUrl };
+
     return {
       ok: true,
       target: {
-        family: familyForProviderType(provider.type),
+        family: familyForProviderType(chosen.type),
         upstreamModel: mapping.upstreamModel,
-        url: chatUrl(upstream),
-        headers: buildHeaders(upstream),
+        url: chatUrl(chosenUpstream),
+        headers: buildHeaders(chosenUpstream),
         providerMaxOutputTokens: provider.maxOutputTokens ?? undefined,
         modelName: model.name,
         providerName: provider.name,
         providerId: provider.id,
-        upstream,
+        upstream: chosenUpstream,
       },
     };
   }

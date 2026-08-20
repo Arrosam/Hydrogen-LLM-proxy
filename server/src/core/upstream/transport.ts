@@ -19,6 +19,14 @@ export interface Transport {
     body: unknown,
     opts: TransportOptions,
   ): Promise<TransportStreamResult>;
+  /** POST a pre-serialized body verbatim (multipart forms; the ASR pre-pass).
+   * Optional so lightweight chat-only test stubs stay valid. */
+  postRaw?(
+    url: string,
+    headers: Record<string, string>,
+    body: Buffer | string,
+    opts: TransportOptions,
+  ): Promise<TransportJsonResult>;
 }
 
 export interface TransportOptions {

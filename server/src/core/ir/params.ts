@@ -74,6 +74,22 @@ export interface GenerationParams {
   /** Provider-specific params with no canonical field, passed through verbatim. */
   extra?: Record<string, unknown>;
   /**
+   * True when an OpenAI-family client signalled caching intent
+   * (prompt_cache_key / prompt_cache_options): an Anthropic egress then plants
+   * a cache_control breakpoint automatically (OpenAI upstreams cache without
+   * markers; Anthropic never caches without one).
+   */
+  cacheHint?: boolean;
+  /** Operator-configured cache lifetime (Settings, default 30). Anthropic's
+   * wire accepts only 5m/1h: <=5 renders as the 5m default, longer as 1h. */
+  cacheTtlMinutes?: number;
+  /**
+   * Client HTTP headers worth forwarding (feature flags like `anthropic-beta`),
+   * captured from an allowlist at ingress and sent only to upstreams of the
+   * SAME wire family. Auth headers are never captured.
+   */
+  forwardHeaders?: { family: Family; headers: Record<string, string> };
+  /**
    * Params the client sent that no canonical field models, kept verbatim so a
    * request nobody overrode reaches the provider as the client wrote it.
    *

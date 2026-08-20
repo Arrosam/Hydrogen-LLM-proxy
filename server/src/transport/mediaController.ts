@@ -11,6 +11,7 @@ import type { ModelServiceRow, Token } from "../db/schema";
 import type { HttpRequestInfo } from "../observability/requestLogger";
 import type { Usage } from "../core/ir/usage";
 import type { ProviderRepo } from "../persistence/providerRepo";
+import { JsonKeepalive } from "./jsonKeepalive";
 import type { ProxyDeps } from "./deps";
 
 /**
@@ -220,6 +221,9 @@ export class MediaController {
     const signal = this.abortOnClientClose(reply);
     let lastSent: unknown = null;
 
+    // Image/video generation can take minutes of silence; heartbeat whitespace
+    // so intermediaries (Cloudflare's ~100s 524) don't kill the wait.
+    const keepalive = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);
     const outcome = await this.run(def, category, signal, async (step, target) => {
       const upstreamBody = { ...body, ...stepParams(step), model: target.upstreamModel };
       lastSent = upstreamBody;
@@ -231,11 +235,14 @@ export class MediaController {
       }
       return { ok: false, status: r.status, kind: "http", message: extractUpstreamMessage(r.json) ?? `upstream ${r.status}`, errorBody: r.json ?? r.text };
     });
+    keepalive.stop();
 
     if (!outcome.result.ok) {
       const status = failureStatus(outcome.result);
       this.record(ctx, outcome, status, zeroUsage(), lastSent);
-      return this.replyError(reply, status, failureMessage(outcome.result));
+      const errBody = buildErrorBody("openai_completion", status, failureMessage(outcome.result));
+      if (keepalive.finish(errBody)) return;
+      return reply.code(status).send(errBody);
     }
 
     const hit = outcome.result.value;
@@ -244,6 +251,7 @@ export class MediaController {
       json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId) };
     }
     this.record(ctx, outcome, hit.status, usageFrom(category, json), hit.sentBody);
+    if (keepalive.finish(json ?? hit.text)) return;
     return reply.code(hit.status).send(json ?? hit.text);
   }
 
@@ -312,6 +320,9 @@ export class MediaController {
     const ctx = { traceId: genId("trace"), token, service, serviceName: serviceName!, http: httpInfo(req, (v) => this.deps.logger.capture(v)), started: Date.now() };
     const signal = this.abortOnClientClose(reply);
 
+    // Transcribing a long recording is slow and silent; heartbeat like the
+    // other JSON-out categories. (TTS streams binary audio, so it cannot.)
+    const keepalive = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);
     const outcome = await this.run(def, "stt", signal, async (_step, target) => {
       const rewritten = rewriteMultipartField(raw, contentType, "model", target.upstreamModel);
       if (!rewritten) {
@@ -328,14 +339,21 @@ export class MediaController {
       return { ok: false, status: r.status, kind: "http", message: extractUpstreamMessage(r.json) ?? `upstream ${r.status}`, errorBody: r.json ?? r.text };
     });
 
+    keepalive.stop();
     if (!outcome.result.ok) {
       const status = failureStatus(outcome.result);
       this.record(ctx, outcome, status, zeroUsage(), null);
-      return this.replyError(reply, status, failureMessage(outcome.result));
+      const errBody = buildErrorBody("openai_completion", status, failureMessage(outcome.result));
+      if (keepalive.finish(errBody)) return;
+      return reply.code(status).send(errBody);
     }
     const hit = outcome.result.value;
     this.record(ctx, outcome, hit.status, zeroUsage(), hit.sentBody);
-    if (hit.json !== undefined) return reply.code(hit.status).send(hit.json);
+    if (hit.json !== undefined) {
+      if (keepalive.finish(hit.json)) return;
+      return reply.code(hit.status).send(hit.json);
+    }
+    if (keepalive.finish(hit.text)) return;
     return reply.code(hit.status).type("text/plain; charset=utf-8").send(hit.text);
   }
 

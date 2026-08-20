@@ -217,10 +217,12 @@ const AvailableModelsSchema = z
   .max(MAX_DISCOVERED_MODELS)
   .optional();
 
+const AltEndpointsSchema = z.array(z.object({ type: TypeSchema, baseUrl: BaseUrlSchema })).max(4).nullable().optional();
 const ProviderCreate = z.object({
   name: z.string().min(1).max(120),
   type: TypeSchema,
   baseUrl: BaseUrlSchema,
+  altEndpoints: AltEndpointsSchema,
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
@@ -231,6 +233,7 @@ const ProviderUpdate = z.object({
   name: z.string().min(1).max(120).optional(),
   type: TypeSchema.optional(),
   baseUrl: BaseUrlSchema.optional(),
+  altEndpoints: AltEndpointsSchema,
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
@@ -313,14 +316,16 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
 
 const ModelCreate = z.object({ name: z.string().min(1).max(120), description: z.string().nullable().optional(), enabled: z.boolean().optional() });
 const ModelUpdate = ModelCreate.partial();
+const FamiliesSchema = z.array(z.enum(["openai_completion", "openai_responses", "anthropic"])).max(3).nullable().optional();
 const MappingCreate = z.object({
   modelId: z.number().int().positive(),
   providerId: z.number().int().positive(),
   upstreamModel: z.string().min(1),
+  families: FamiliesSchema,
   priority: z.number().int().optional(),
   enabled: z.boolean().optional(),
 });
-const MappingUpdate = z.object({ upstreamModel: z.string().min(1).optional(), priority: z.number().int().optional(), enabled: z.boolean().optional() });
+const MappingUpdate = z.object({ upstreamModel: z.string().min(1).optional(), families: FamiliesSchema, priority: z.number().int().optional(), enabled: z.boolean().optional() });
 
 async function catalogRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/models", async () => ({ models: c.models.list() }));
@@ -753,6 +758,7 @@ const EnvSettingsPut = z.object({
   logPayloadMaxChars: z.number().int().min(0).max(10_000_000).optional(),
   simulatedStreamingTokenRate: z.number().int().min(1).max(1_000_000).optional(),
   sessionTtlMs: z.number().int().min(60_000).max(30 * 86_400_000).optional(),
+  promptCacheTtlMinutes: z.number().int().min(1).max(24 * 60).optional(),
 });
 
 /** 64 GiB — far past any sane cache, but a finite cap keeps a typo from being
@@ -879,6 +885,7 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
     if (p.logPayloadMaxChars !== undefined) c.settings.setLogPayloadMaxChars(p.logPayloadMaxChars);
     if (p.simulatedStreamingTokenRate !== undefined) c.settings.setSimulatedStreamingTokenRate(p.simulatedStreamingTokenRate);
     if (p.sessionTtlMs !== undefined) c.settings.setSessionTtlMs(p.sessionTtlMs);
+    if (p.promptCacheTtlMinutes !== undefined) c.settings.setPromptCacheTtlMinutes(p.promptCacheTtlMinutes);
     return { ...c.settings.runtimeEnv() };
   });
 }

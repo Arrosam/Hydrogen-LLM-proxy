@@ -22,11 +22,14 @@ interface TestState {
   models: string[];
 }
 
+interface AltEndpoint { type: ProviderType; baseUrl: string }
+
 interface FormState {
   id?: number;
   name: string;
   type: ProviderType;
   baseUrl: string;
+  altEndpoints: AltEndpoint[];
   apiKey: string;
   extraHeaders: string;
   maxOutputTokens: string;
@@ -43,6 +46,7 @@ const EMPTY: FormState = {
   name: "",
   type: "openai_completion",
   baseUrl: "",
+  altEndpoints: [],
   apiKey: "",
   extraHeaders: "",
   maxOutputTokens: "",
@@ -80,6 +84,7 @@ export function Providers() {
       name: p.name,
       type: p.type,
       baseUrl: p.baseUrl,
+      altEndpoints: (p as unknown as { altEndpoints?: AltEndpoint[] | null }).altEndpoints ?? [],
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
       maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
@@ -147,6 +152,9 @@ export function Providers() {
         baseUrl: form.baseUrl,
         extraHeaders,
         maxOutputTokens: motRaw ? Number(motRaw) : null,
+        altEndpoints: form.altEndpoints.filter((e) => e.baseUrl.trim()).length
+          ? form.altEndpoints.filter((e) => e.baseUrl.trim())
+          : null,
         enabled: form.enabled,
       };
       if (form.apiKey) payload.apiKey = form.apiKey;
@@ -302,6 +310,38 @@ export function Providers() {
                     ? t("providers.field.baseUrl.hint.openai_responses")
                     : t("providers.field.baseUrl.hint.openai_completion")}
               </p>
+            </div>
+            <div>
+              <label className="label">{t("providers.field.altEndpoints.label")} <span className="normal-case text-ink-500">{t("providers.field.altEndpoints.optional")}</span></label>
+              <p className="mb-2 text-xs text-ink-500">{t("providers.field.altEndpoints.hint")}</p>
+              {form.altEndpoints.map((ep, i) => (
+                <div key={i} className="mb-2 flex gap-2">
+                  <select
+                    className="input w-48"
+                    value={ep.type}
+                    onChange={(e) => setForm({ ...form, altEndpoints: form.altEndpoints.map((x, j) => (j === i ? { ...x, type: e.target.value as ProviderType } : x)) })}
+                  >
+                    {(Object.keys(TYPE_LABELS) as ProviderType[]).map((tp) => (
+                      <option key={tp} value={tp}>{TYPE_LABELS[tp]}</option>
+                    ))}
+                  </select>
+                  <input
+                    className="input font-mono text-xs"
+                    value={ep.baseUrl}
+                    onChange={(e) => setForm({ ...form, altEndpoints: form.altEndpoints.map((x, j) => (j === i ? { ...x, baseUrl: e.target.value } : x)) })}
+                    placeholder="https://…/v1"
+                  />
+                  <button className="btn-ghost btn-xs" onClick={() => setForm({ ...form, altEndpoints: form.altEndpoints.filter((_, j) => j !== i) })}>
+                    <i className="bi bi-x-lg" />
+                  </button>
+                </div>
+              ))}
+              {form.altEndpoints.length < 3 && (
+                <button className="btn-ghost btn-xs" onClick={() => setForm({ ...form, altEndpoints: [...form.altEndpoints, { type: form.type === "openai_completion" ? "openai_responses" : "openai_completion", baseUrl: "" }] })}>
+                  <i className="bi bi-plus-lg" />
+                  {t("providers.field.altEndpoints.add")}
+                </button>
+              )}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>

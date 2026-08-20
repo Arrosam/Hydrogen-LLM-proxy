@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import type { AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
+import type { AgentAsr, AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
 import { isAgentDef, isChatPipelineCategory, serviceCategoryOf } from "../types";
 import { api, ApiError } from "../api";
 import { Toggle } from "./common";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
-import { selectAll } from "../lib/input";
+import { intInput, selectAll } from "../lib/input";
 import { useListKeys } from "../lib/useListKeys";
 import { formatNumber } from "../lib/format";
 import defaultOcrTestImage from "../assets/ocr-test-default.png";
@@ -658,6 +658,66 @@ OUTPUT CONTRACT
 
 Example for two images:
 [{"index":1,"image":"..."},{"index":2,"image":"..."}]`;
+
+/** Optional audio→text ASR pre-pass configured on a chain (runs before stage 1).
+ * Points at an stt-category Model Service — the pre-pass drives the provider's
+ * /audio/transcriptions endpoint with the chain's retry rules. */
+export function AsrEditor({
+  asr,
+  onChange,
+  services,
+}: {
+  asr: AgentAsr | undefined;
+  onChange: (asr: AgentAsr | undefined) => void;
+  services: ModelService[];
+}) {
+  const { t } = useI18n();
+  const enabled = !!asr;
+  const sttServices = services.filter((m) => !isAgentDef(m.steps) && serviceCategoryOf(m.steps) === "stt");
+  const patch = (p: Partial<AgentAsr>) => onChange({ ...(asr ?? {}), ...p });
+
+  return (
+    <div className="rounded-xl border border-ink-700 bg-ink-850/70 p-3">
+      <Toggle
+        checked={enabled}
+        onChange={(v) => onChange(v ? { service: sttServices[0]?.name } : undefined)}
+        label={t("asr.toggleLabel")}
+      />
+      <p className="mt-1 text-xs text-ink-500">{t("asr.description")}</p>
+      {enabled && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="label">{t("asr.modelRuns")}</label>
+            <select
+              className="input"
+              value={asr.service ?? ""}
+              onChange={(e) => patch({ service: e.target.value || undefined, steps: undefined })}
+            >
+              <option value="">{t("asr.pickService")}</option>
+              {sttServices.map((m) => (
+                <option key={m.id} value={m.name}>{m.name}</option>
+              ))}
+            </select>
+            {sttServices.length === 0 && <p className="mt-1 text-xs text-amber-400/90">{t("asr.noSttServices")}</p>}
+          </div>
+          <div>
+            <label className="label">{t("asr.timeout")}</label>
+            <input
+              className="input font-mono text-xs"
+              inputMode="numeric"
+              value={asr.timeoutMs ?? ""}
+              placeholder="60000"
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                patch({ timeoutMs: v ? intInput(v, 60_000, 1_000) : undefined });
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Optional image→text OCR pre-pass configured on a chain (runs before stage 1). */
 export function OcrEditor({

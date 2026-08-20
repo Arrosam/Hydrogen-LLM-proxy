@@ -253,6 +253,23 @@ export class ProxyController {
       return this.replyError(reply, ingress, 400, "Missing 'model' (must be a Model Service or Micro Agent name).");
     }
 
+    // Reject what cannot be honored rather than silently narrowing it: only
+    // choices[0] would survive translation, which is worse than an honest 400.
+    if ((request.params.n ?? 1) > 1) {
+      return this.replyError(reply, ingress, 400, "n > 1 is not supported through this proxy; send one request per completion.");
+    }
+
+    // Carry allowlisted client feature headers to same-family upstreams
+    // (anthropic-beta feature flags, attribution headers). Auth never forwards.
+    const fwd: Record<string, string> = {};
+    const allow = ingress === "anthropic" ? ["anthropic-beta"] : ["openai-beta", "http-referer", "x-title"];
+    for (const key of allow) {
+      const v = req.headers[key];
+      if (typeof v === "string" && v) fwd[key] = v;
+      else if (Array.isArray(v) && v.length) fwd[key] = v.join(",");
+    }
+    if (Object.keys(fwd).length) request.params.forwardHeaders = { family: ingress, headers: fwd };
+
     const traceId = genId("trace");
     const service = this.deps.services.getByName(serviceName);
     if (!service || !service.enabled) {

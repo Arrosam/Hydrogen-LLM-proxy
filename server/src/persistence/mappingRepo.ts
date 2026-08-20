@@ -6,6 +6,9 @@ export interface MappingInput {
   modelId: number;
   providerId: number;
   upstreamModel: string;
+  /** Wire families this mapping may use (of the provider's endpoints).
+   * Null/empty = the provider's primary type only. */
+  families?: string[] | null;
   priority?: number;
   enabled?: boolean;
 }
@@ -41,6 +44,7 @@ export class MappingRepo {
         modelId: input.modelId,
         providerId: input.providerId,
         upstreamModel: input.upstreamModel,
+        families: input.families ?? null,
         priority: input.priority ?? 0,
         enabled: input.enabled ?? true,
       })
@@ -51,6 +55,7 @@ export class MappingRepo {
   update(id: number, input: Partial<Omit<MappingInput, "modelId" | "providerId">>): ModelProvider | undefined {
     const patch: Record<string, unknown> = {};
     if (input.upstreamModel !== undefined) patch.upstreamModel = input.upstreamModel;
+    if (input.families !== undefined) patch.families = input.families;
     if (input.priority !== undefined) patch.priority = input.priority;
     if (input.enabled !== undefined) patch.enabled = input.enabled;
     if (Object.keys(patch).length === 0) return this.get(id);

@@ -3,7 +3,7 @@ import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
 import { useToast } from "./Toast";
-import { OcrEditor, StageEditor } from "./StageEditor";
+import { AsrEditor, OcrEditor, StageEditor } from "./StageEditor";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
@@ -11,6 +11,7 @@ import { useListKeys } from "../lib/useListKeys";
 import type {
   AdvanceTrigger,
   AgentDef,
+  AgentAsr,
   AgentOcr,
   AgentStage,
   Mapping,
@@ -133,6 +134,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [stages, setStages] = useState<AgentStage[]>([]);
   const [output, setOutput] = useState("");
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
+  const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
@@ -164,6 +166,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setStages((service.steps.stages ?? []).map(foldStage));
         setOutput(service.steps.output ?? "");
         setOcr(foldOcr(service.steps.ocr));
+        setAsr(service.steps.asr);
         setSteps([]);
         setCategory("chat");
         setReliableStreaming(false);
@@ -198,7 +201,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "micro_agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}) } as AgentDef)
+      ? ({ kind: "micro_agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}), ...(asr ? { asr } : {}) } as AgentDef)
       : ({
           timeoutMs,
           steps,
@@ -270,6 +273,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setStages((parsed.stages ?? []).map(foldStage));
         setOutput(parsed.output ?? "");
         setOcr(foldOcr(parsed.ocr));
+        setAsr(parsed.asr);
         setCategory("chat");
         setReliableStreaming(false);
       } else {
@@ -463,6 +467,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         ) : kind === "chain" ? (
           <div className="space-y-4">
             <OcrEditor ocr={ocr} onChange={setOcr} services={services.filter((m) => m.id !== service?.id)} />
+            <AsrEditor asr={asr} onChange={setAsr} services={services.filter((m) => m.id !== service?.id)} />
             <StageEditor
               stages={stages}
               output={output}

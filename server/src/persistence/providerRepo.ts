@@ -15,6 +15,8 @@ export interface ProviderInput {
   extraHeaders?: Record<string, string> | null;
   /** Hard cap on output tokens the provider accepts (thinking budgets fit under it). */
   maxOutputTokens?: number | null;
+  /** Additional wire-format endpoints (same key/headers, different family+URL). */
+  altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
   enabled?: boolean;
 }
 
@@ -27,6 +29,7 @@ export interface PublicProvider {
   hasKey: boolean;
   extraHeaders: Record<string, string> | null;
   maxOutputTokens: number | null;
+  altEndpoints: Array<{ type: ProviderType; baseUrl: string }> | null;
   enabled: boolean;
   createdAt: number;
 }
@@ -64,6 +67,7 @@ export class ProviderRepo {
         ...keyCols,
         extraHeaders: input.extraHeaders ?? null,
         maxOutputTokens: input.maxOutputTokens ?? null,
+        altEndpoints: input.altEndpoints ?? null,
         enabled: input.enabled ?? true,
       })
       .returning()
@@ -77,6 +81,7 @@ export class ProviderRepo {
     if (input.baseUrl !== undefined) patch.baseUrl = input.baseUrl;
     if (input.extraHeaders !== undefined) patch.extraHeaders = input.extraHeaders;
     if (input.maxOutputTokens !== undefined) patch.maxOutputTokens = input.maxOutputTokens;
+    if (input.altEndpoints !== undefined) patch.altEndpoints = input.altEndpoints;
     if (input.enabled !== undefined) patch.enabled = input.enabled;
     if (input.apiKey !== undefined) {
       if (input.apiKey === null || input.apiKey === "") {
@@ -102,6 +107,7 @@ export class ProviderRepo {
       hasKey: Boolean(p.keyCiphertext),
       extraHeaders: p.extraHeaders ?? null,
       maxOutputTokens: p.maxOutputTokens ?? null,
+      altEndpoints: p.altEndpoints ?? null,
       enabled: p.enabled,
       createdAt: asMillis(p.createdAt),
     };

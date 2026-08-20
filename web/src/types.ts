@@ -20,7 +20,7 @@ export interface Provider {
   /** Optional hard cap on output tokens (thinking budgets fit under it). null = none. */
   maxOutputTokens: number | null;
   enabled: boolean;
-  createdAt: number;
+  createdAt: number;  altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
 }
 
 /** The model ids a provider reported from its own /models endpoint. */
@@ -169,6 +169,12 @@ export interface AgentStage {
   transitions?: AgentTransition[];
 }
 
+export interface AgentAsr {
+  service?: string;
+  steps?: ServiceStep[];
+  timeoutMs?: number;
+}
+
 export interface AgentOcr {
   service?: string; // referenced Model Service running the OCR/multimodal model
   steps?: ServiceStep[]; // legacy inline steps
@@ -186,6 +192,7 @@ export interface AgentDef {
   stages: AgentStage[];
   output?: string;
   ocr?: AgentOcr; // optional image-to-text pre-pass run before the first stage
+  asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
 }
 

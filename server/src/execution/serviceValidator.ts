@@ -130,6 +130,27 @@ export class ServiceValidator {
           throw new ServiceValidationError("image translation (OCR) is enabled but has no model (pick a Model Service)", []);
         }
       }
+
+      if (def.asr) {
+        const a = def.asr;
+        if (a.service) {
+          const m = this.services.getByName(a.service);
+          if (!m) throw new ServiceValidationError(`audio transcription (ASR) references unknown Model Service "${a.service}"`, []);
+          if (isAgent(this.services.def(m))) {
+            throw new ServiceValidationError(`audio transcription (ASR) references a Micro Agent "${a.service}" (must be an stt Model Service)`, []);
+          }
+          const cat = this.categoryOf(a.service);
+          if (cat !== "stt") {
+            throw new ServiceValidationError(`audio transcription (ASR) references "${a.service}", a ${cat ?? "chat"} service — it must be an stt (speech-to-text) Model Service`, []);
+          }
+        } else if (a.steps && a.steps.length) {
+          for (const st of a.steps) {
+            if (!this.catalog.exists(st.model, st.provider)) invalidPairs.push(`${st.model}@${st.provider}`);
+          }
+        } else {
+          throw new ServiceValidationError("audio transcription (ASR) is enabled but has no model (pick an stt Model Service)", []);
+        }
+      }
     } else {
       const category = serviceCategory(def);
       for (const step of def.steps) {

@@ -210,6 +210,39 @@ OUTPUT CONTRACT
 Example for two images:
 [{"index":1,"image":"..."},{"index":2,"image":"..."}]`;
 
+/** The audio attachments in a request: Chat Completions `input_audio` parts,
+ * carried as same-family opaque parts by the canonical form. */
+export function collectAudio(request: Request): Array<{ data: string; format: string }> {
+  const out: Array<{ data: string; format: string }> = [];
+  for (const m of request.messages) {
+    for (const p of m.content) {
+      if (p.type !== "opaque" || p.family !== "openai_completion") continue;
+      const v = p.value as { type?: unknown; input_audio?: { data?: unknown; format?: unknown } };
+      if (v?.type === "input_audio" && typeof v.input_audio?.data === "string") {
+        out.push({ data: v.input_audio.data, format: String(v.input_audio.format ?? "wav") });
+      }
+    }
+  }
+  return out;
+}
+
+/** Replace each audio attachment with its transcript, in collection order. */
+export function translateAudioInRequest(request: Request, transcripts: string[]): Request {
+  let n = 0;
+  const messages: Message[] = request.messages.map((m) => ({
+    ...m,
+    content: m.content.map((p) => {
+      if (p.type !== "opaque" || p.family !== "openai_completion") return p;
+      const v = p.value as { type?: unknown };
+      if (v?.type !== "input_audio") return p;
+      const i = n++;
+      return { type: "text", text: `\n[Audio ${i + 1} transcript]\n${transcripts[i] ?? ""}\n` } as TextPart;
+    }),
+  }));
+  const data: RequestData = { ...request.data(), messages };
+  return new (request.constructor as new (d: RequestData) => Request)(data);
+}
+
 export function collectImages(request: Request): ImagePart[] {
   const imgs: ImagePart[] = [];
   for (const m of request.messages) {

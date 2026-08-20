@@ -39,6 +39,10 @@ export const providers = sqliteTable(
     keyTag: text("key_tag"),
     /** Extra headers sent upstream, as a JSON object of string -> string. */
     extraHeaders: text("extra_headers", { mode: "json" }).$type<Record<string, string>>(),
+    /** Additional wire-format endpoints this provider serves, beyond the
+     * primary `type`+`baseUrl` (e.g. the same gateway exposing both Chat
+     * Completions and Responses). Same API key and extra headers apply. */
+    altEndpoints: text("alt_endpoints", { mode: "json" }).$type<Array<{ type: "openai_completion" | "openai_responses" | "anthropic"; baseUrl: string }>>(),
     /** Optional hard cap on the max output tokens this provider accepts; the
      * thinking policy fits budgets under it so a request is never rejected. */
     maxOutputTokens: integer("max_output_tokens"),
@@ -94,6 +98,9 @@ export const modelProviders = sqliteTable(
     modelId: integer("model_id").notNull().references(() => models.id, { onDelete: "cascade" }),
     providerId: integer("provider_id").notNull().references(() => providers.id, { onDelete: "cascade" }),
     upstreamModel: text("upstream_model").notNull(),
+    /** Wire families this mapping may use, of the provider's available
+     * endpoints. Null/empty = the provider's primary type only. */
+    families: text("families", { mode: "json" }).$type<string[]>(),
     priority: integer("priority").notNull().default(0),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: createdAt(),

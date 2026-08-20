@@ -268,6 +268,15 @@ export const AgentOcrSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
 });
 
+/** Audio-to-text (ASR) pre-pass config: an stt-category Model Service (or
+ * inline steps) that transcribes input_audio attachments before the stages
+ * run, mirroring the OCR pre-pass for images. */
+export const AgentAsrSchema = z.object({
+  service: z.string().min(1).optional(),
+  steps: z.array(StepSchema).min(1).optional(),
+  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
+});
+
 export const AgentSchema = z.object({
   // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
   kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
@@ -277,6 +286,8 @@ export const AgentSchema = z.object({
   output: z.string().optional(),
   /** Optional image-to-text OCR pre-pass run before the first stage. */
   ocr: AgentOcrSchema.optional(),
+  /** Optional audio-to-text ASR pre-pass run before the first stage. */
+  asr: AgentAsrSchema.optional(),
   /** Reliable streaming for the agent as a whole (see ServiceStepsSchema). */
   reliableStreaming: z.boolean().optional(),
 });
@@ -294,6 +305,7 @@ export type AgentCondition = z.infer<typeof AgentConditionSchema>;
 export type AgentTransition = z.infer<typeof AgentTransitionSchema>;
 export type AgentStage = z.infer<typeof AgentStageSchema>;
 export type AgentOcr = z.infer<typeof AgentOcrSchema>;
+export type AgentAsr = z.infer<typeof AgentAsrSchema>;
 export type AgentDef = z.infer<typeof AgentSchema>;
 export type ServiceDef = AgentDef | ServiceSteps;
 

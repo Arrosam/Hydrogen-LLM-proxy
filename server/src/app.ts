@@ -6,6 +6,7 @@ import { ZodError } from "zod";
 import path from "node:path";
 import fs from "node:fs";
 import { resolveWebDir } from "./util/paths";
+import { fuzzyRewriteUrl } from "./transport/fuzzyUrl";
 import type { Container } from "./composition/container";
 import { adminRoutes } from "./transport/adminRoutes";
 import { ProxyController } from "./transport/proxyController";
@@ -19,6 +20,11 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     bodyLimit: MAX_BODY_BYTES,
     trustProxy: true,
     logger: { level: cfg.isProduction ? "info" : "debug" },
+    // Fuzzy endpoint adapter: forgive doubled slashes, a missing /v1, or a
+    // bare base URL by rewriting onto the canonical route before routing.
+    rewriteUrl(req) {
+      return fuzzyRewriteUrl(req.method, req.url, req.headers);
+    },
   });
 
   await app.register(fastifyCookie, { secret: cfg.sessionSecret });

@@ -6,6 +6,7 @@ const ALLOWLIST_KEY = "upstream_allowlist";
 const UI_LANGUAGE_KEY = "ui_language";
 const LOG_PAYLOAD_MAX_CHARS_KEY = "log_payload_max_chars";
 const SIMULATED_STREAMING_TOKEN_RATE_KEY = "simulated_streaming_token_rate";
+const PROMPT_CACHE_TTL_KEY = "prompt_cache_ttl_minutes";
 const ALLOW_PRIVATE_UPSTREAMS_KEY = "allow_private_upstreams";
 const IMAGE_CACHE_MAX_BYTES_KEY = "image_cache_max_bytes";
 const SESSION_TTL_KEY = "session_ttl";
@@ -34,12 +35,14 @@ export class SettingsRepo {
       simulatedStreamingTokenRate: number;
       sessionTtlMs: number;
       imageCacheMaxBytes: number;
+      promptCacheTtlMinutes: number;
     } = {
       allowPrivate: false,
       logPayloadMaxChars: 100_000,
       simulatedStreamingTokenRate: 2000,
       sessionTtlMs: 12 * 60 * 60 * 1000,
       imageCacheMaxBytes: 64 * 1024 * 1024,
+      promptCacheTtlMinutes: 30,
     },
   ) {
     this.allowlistCache = this.readAllowlist();
@@ -145,6 +148,19 @@ export class SettingsRepo {
     this.set(SIMULATED_STREAMING_TOKEN_RATE_KEY, String(n));
   }
 
+  /** Auto-planted Anthropic cache-breakpoint lifetime, minutes. Wire values are
+   * 5m/1h only: <=5 renders as the 5m default, anything longer as 1h. */
+  promptCacheTtlMinutes(): number {
+    const raw = this.get(PROMPT_CACHE_TTL_KEY);
+    if (raw == null) return this.defaults.promptCacheTtlMinutes;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 && Number.isInteger(n) ? n : this.defaults.promptCacheTtlMinutes;
+  }
+
+  setPromptCacheTtlMinutes(n: number): void {
+    this.set(PROMPT_CACHE_TTL_KEY, String(n));
+  }
+
   /**
    * Storage budget for the OCR image-description cache, in bytes. 0 turns the
    * cache off (and empties it) — every image goes to the OCR model.
@@ -189,12 +205,14 @@ export class SettingsRepo {
     logPayloadMaxChars: number;
     simulatedStreamingTokenRate: number;
     sessionTtlMs: number;
+    promptCacheTtlMinutes: number;
   } {
     return {
       allowPrivateUpstreams: this.allowPrivate(),
       logPayloadMaxChars: this.logPayloadMaxChars(),
       simulatedStreamingTokenRate: this.simulatedStreamingTokenRate(),
       sessionTtlMs: this.sessionTtlMs(),
+      promptCacheTtlMinutes: this.promptCacheTtlMinutes(),
     };
   }
 }
