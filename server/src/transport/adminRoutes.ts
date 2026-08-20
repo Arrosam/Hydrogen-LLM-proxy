@@ -16,6 +16,7 @@ import { textOf, type ImagePart } from "../core/ir/content";
 import { failureMessage } from "../core/proxy/errors";
 import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../catalog/modelDiscovery";
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
+import { withJsonHeartbeat } from "./jsonKeepalive";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
@@ -510,12 +511,18 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
       params: { maxTokens: isAgent(def) ? 64 : 16 },
       stream: false,
     });
-    const outcome = await executor.invoke(request);
-    if (outcome.result.ok) {
-      const v = outcome.result.value;
-      return { ok: true, attemptPath: outcome.attemptPath, served: { model: v.modelName, provider: v.providerName }, output: textOf(v.response.content).slice(0, 500) };
-    }
-    return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), attemptPath: outcome.attemptPath };
+    // A dry-run against a slow chain can outlive intermediary idle timeouts
+    // (Cloudflare 524s a silent origin at ~100s); heartbeat while it runs.
+    // Failures already travel in-body ({ok:false}), so committing 200 early
+    // changes nothing semantically.
+    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, 10_000, async () => {
+      const outcome = await executor.invoke(request);
+      if (outcome.result.ok) {
+        const v = outcome.result.value;
+        return { ok: true, attemptPath: outcome.attemptPath, served: { model: v.modelName, provider: v.providerName }, output: textOf(v.response.content).slice(0, 500) };
+      }
+      return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), attemptPath: outcome.attemptPath };
+    });
   });
 
   // Dry-run the OCR pre-pass: send one test image through an OCR config and
@@ -566,25 +573,31 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
     });
     const ocrReq = buildOcrRequest(parent, [image], ocr);
 
-    const started = Date.now();
-    const outcome = await executor.invoke(ocrReq, undefined, ocr.timeoutMs ? { timeoutMs: ocr.timeoutMs } : {});
-    const latencyMs = Date.now() - started;
-    if (outcome.result.ok) {
-      const v = outcome.result.value;
-      const raw = v.response.text();
-      // Index 1 of the OCR output contract; empty when the model ignored it.
-      const [description] = parseOcrResults(raw, 1);
-      return {
-        ok: true,
-        served: { model: v.modelName, provider: v.providerName },
-        latencyMs,
-        usage: v.response.usage,
-        description,
-        raw: raw.slice(0, 20_000),
-        attemptPath: outcome.attemptPath,
-      };
-    }
-    return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), latencyMs, attemptPath: outcome.attemptPath };
+    // OCR models routinely take 60-180s per attempt; without bytes on the
+    // wire, Cloudflare answers the panel with a 524 at ~100s while the test
+    // keeps running. Heartbeat until the outcome arrives — failures already
+    // travel in-body ({ok:false}), so the early 200 commit costs nothing.
+    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, 10_000, async () => {
+      const started = Date.now();
+      const outcome = await executor.invoke(ocrReq, undefined, ocr.timeoutMs ? { timeoutMs: ocr.timeoutMs } : {});
+      const latencyMs = Date.now() - started;
+      if (outcome.result.ok) {
+        const v = outcome.result.value;
+        const raw = v.response.text();
+        // Index 1 of the OCR output contract; empty when the model ignored it.
+        const [description] = parseOcrResults(raw, 1);
+        return {
+          ok: true,
+          served: { model: v.modelName, provider: v.providerName },
+          latencyMs,
+          usage: v.response.usage,
+          description,
+          raw: raw.slice(0, 20_000),
+          attemptPath: outcome.attemptPath,
+        };
+      }
+      return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), latencyMs, attemptPath: outcome.attemptPath };
+    });
   });
 }
 

@@ -20,6 +20,7 @@ import { asMillis } from "../util/time";
 import type { ModelServiceRow, Token } from "../db/schema";
 import type { HttpRequestInfo } from "../observability/requestLogger";
 import { ProgressRecorder } from "../observability/progressRecorder";
+import { JsonKeepalive } from "./jsonKeepalive";
 import type { ProxyDeps } from "./deps";
 
 interface RequestCtx {
@@ -162,66 +163,6 @@ class SseKeepalive {
   }
 }
 
-const JSON_KEEPALIVE_HEADERS = {
-  "content-type": "application/json; charset=utf-8",
-  "cache-control": "no-cache, no-transform",
-  "x-accel-buffering": "no",
-} as const;
-
-/**
- * Dead-air guard for a NON-streaming request. A slow upstream (an OCR/vision
- * answer routinely takes minutes) produces total silence on a JSON response,
- * and intermediaries kill silent connections long before it finishes —
- * Cloudflare returns its 524 at ~100s, so behind it every slow answer was lost
- * even when the upstream succeeded. After the grace window this commits the
- * 200 and writes whitespace heartbeats into the body until the outcome
- * arrives: leading whitespace is valid JSON that every parser skips, the same
- * technique Anthropic's own API uses for long non-streaming requests. The
- * cost, exactly as with the SSE keep-alive: a failure slower than the grace
- * window is delivered as an error JSON body on the committed 200, while the
- * log keeps the semantic status. graceMs <= 0 disables the guard.
- */
-class JsonKeepalive {
-  committed = false;
-  private graceTimer: NodeJS.Timeout | null = null;
-  private pingTimer: NodeJS.Timeout | null = null;
-
-  constructor(
-    private readonly reply: FastifyReply,
-    graceMs: number,
-    private readonly intervalMs: number,
-  ) {
-    if (graceMs <= 0) return;
-    this.graceTimer = setTimeout(() => this.commit(), graceMs);
-    this.graceTimer.unref?.();
-  }
-
-  private commit(): void {
-    const raw = this.reply.raw;
-    if (this.committed || raw.destroyed || raw.headersSent) return;
-    this.reply.hijack();
-    raw.writeHead(200, JSON_KEEPALIVE_HEADERS);
-    this.committed = true;
-    raw.write("\n");
-    this.pingTimer = setInterval(() => {
-      if (raw.destroyed || raw.writableEnded) {
-        this.stop();
-        return;
-      }
-      raw.write("\n");
-    }, this.intervalMs);
-    this.pingTimer.unref?.();
-  }
-
-  /** The outcome has arrived: stop the grace/ping timers. */
-  stop(): void {
-    if (this.graceTimer) clearTimeout(this.graceTimer);
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
-  }
-}
 
 /**
  * Watch a client socket AFTER its response finished writing, and report whether
