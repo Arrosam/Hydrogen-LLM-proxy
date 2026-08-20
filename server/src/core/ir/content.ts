@@ -34,8 +34,12 @@ export interface ToolResultPart {
 export interface ReasoningPart {
   type: "reasoning";
   text: string;
-  /** Provider signature for the block (Anthropic thinking/redacted_thinking). */
+  /** Provider signature for the block (Anthropic thinking/redacted_thinking),
+   * or the OpenAI Responses reasoning item's encrypted_content. */
   signature?: string;
+  /** OpenAI Responses reasoning item id (rs_...), kept so a same-family replay
+   * restores the item verbatim (encrypted_content is tied to its item id). */
+  itemId?: string;
 }
 
 export type ContentPart = TextPart | ImagePart | ToolUsePart | ToolResultPart | ReasoningPart;
@@ -105,26 +109,31 @@ export function normalizeMessages(messages: Message[]): Message[] {
 
 /**
  * Drop reasoning/thinking blocks carried in from earlier turns of the request
- * history. Resending them is what makes a continued conversation lose its
- * thinking while a fresh one keeps it: DeepSeek's OpenAI-compatible endpoint
- * rejects reasoning_content sent back to it, and other OpenAI-family providers
- * just don't re-engage thinking when the history already "thought".
- *
- * Reasoning is kept only inside the CURRENT turn's tool-use loop -- the messages
- * after the last user message that carries real input (text/image); a pure
- * tool_result is a continuation, not a new turn. Everything before that is a
- * completed turn whose reasoning is stale and dropped.
+ * history when resending them can only hurt. Reasoning is always kept inside
+ * the CURRENT turn's tool-use loop -- the messages after the last user message
+ * that carries real input (text/image); a pure tool_result is a continuation,
+ * not a new turn -- because both Anthropic and DeepSeek *require* it there when
+ * a tool_result is sent back.
  *
  * APPLIED PER EGRESS FAMILY, AT RENDER TIME -- not when a request is parsed.
- * The families disagree about resent thinking: the Anthropic wire format
- * *requires* it back (DeepSeek's Anthropic-compatible endpoint rejects a
- * thinking-mode request whose history has none), while the OpenAI families
- * reject or ignore it. Stripping at parse time decided for every provider before
- * the egress was even known, which is why an Anthropic target could never get
- * its thinking blocks back. The canonical Request now carries the reasoning and
- * each renderer applies its own rule.
+ * The families disagree about resent thinking, and stripping at parse time
+ * decided for every provider before the egress was even known. The canonical
+ * Request carries all the reasoning; each renderer applies its own rule:
+ *  - Anthropic egress keeps everything (never calls this): the Anthropic wire
+ *    format *requires* thinking back -- DeepSeek's Anthropic-compatible
+ *    endpoint rejects a thinking-mode request whose history has none.
+ *  - OpenAI-family egress calls this with the default `keepToolTurns` true: an
+ *    assistant turn that called tools keeps its reasoning, because DeepSeek's
+ *    thinking mode (on by default since v4) returns 400 ("reasoning_content
+ *    ... must be passed back to the API") when a tool-calling assistant
+ *    message anywhere in the history arrives without it. Reasoning on
+ *    tool-less prior turns is still dropped -- no provider needs it, and a
+ *    history that already "thought" stops some providers re-engaging thinking.
+ *  - `keepToolTurns` false drops every prior-turn block, for egress targets
+ *    that validate signatures on resent thinking.
  */
-export function stripStaleReasoning(messages: Message[]): Message[] {
+export function stripStaleReasoning(messages: Message[], opts: { keepToolTurns?: boolean } = {}): Message[] {
+  const keepToolTurns = opts.keepToolTurns ?? true;
   let turnStart = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -136,6 +145,7 @@ export function stripStaleReasoning(messages: Message[]): Message[] {
   if (turnStart <= 0) return messages; // no prior turn to strip
   return messages.map((m, i) => {
     if (i >= turnStart || m.role !== "assistant" || !m.content.some((p) => p.type === "reasoning")) return m;
+    if (keepToolTurns && m.content.some((p) => p.type === "tool_use")) return m;
     return { ...m, content: m.content.filter((p) => p.type !== "reasoning") };
   });
 }

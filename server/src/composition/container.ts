@@ -28,6 +28,7 @@ import { ServiceFactory } from "../execution/serviceFactory";
 import { RequestLogger } from "../observability/requestLogger";
 import { UsageMeter } from "../observability/usageMeter";
 import { ActiveRequestRegistry } from "../observability/activeRequests";
+import { UpdateService } from "../update/updateService";
 
 /**
  * The composition root: owns every long-lived instance and wires the dependency
@@ -60,6 +61,7 @@ export interface Container {
   requestLogger: RequestLogger;
   usageMeter: UsageMeter;
   activeRequests: ActiveRequestRegistry;
+  updates: UpdateService;
 }
 
 /** Load config, open + migrate the DB, verify the master key, seed the admin, wire everything. */
@@ -109,11 +111,12 @@ export async function boot(): Promise<Container> {
   );
   const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars(), statsCache);
   const usageMeter = new UsageMeter(tokens);
+  const updates = new UpdateService({ repo: config.updateRepo, restartEnabled: config.updateRestartEnabled });
 
   return {
     config, sqlite, db,
     providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
-    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests,
+    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates,
   };
 }
 

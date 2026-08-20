@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { ContentPart, StopReason } from "./content";
+import type { ContentPart, ReasoningPart, StopReason } from "./content";
 import type { Usage } from "./usage";
 import { genId, nowSeconds } from "../../util/ids";
 import { num, safeJsonParse } from "../format/wire";
@@ -15,7 +15,12 @@ import { num, safeJsonParse } from "../format/wire";
 export type StreamEvent =
   | { type: "start"; id: string; model: string; created: number; inputTokens?: number }
   | { type: "text_delta"; text: string }
+  /** Optional boundaries around reasoning deltas. Responses providers use these
+   * to preserve the opaque item id/encrypted payload needed for stateless replay;
+   * the other wire families can ignore them and relay the text deltas normally. */
+  | { type: "reasoning_start"; id?: string }
   | { type: "reasoning_delta"; text: string }
+  | { type: "reasoning_stop"; id?: string; signature?: string }
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
@@ -77,11 +82,12 @@ export function safeParseJson(data: string): Record<string, unknown> | null {
 
 // --- reasoning filter ---------------------------------------------------
 
-/** Drop reasoning_delta events from a canonical stream. Enforces a "disabled"
- * thinking level on a live relay even when the upstream emits reasoning anyway. */
+/** Drop all reasoning events from a canonical stream. Enforces a "disabled"
+ * thinking level on a live relay even when the upstream emits reasoning anyway,
+ * without leaving an empty metadata-only reasoning item in the client stream. */
 export async function* withoutReasoning(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
   for await (const ev of events) {
-    if (ev.type !== "reasoning_delta") yield ev;
+    if (ev.type !== "reasoning_start" && ev.type !== "reasoning_delta" && ev.type !== "reasoning_stop") yield ev;
   }
 }
 
@@ -168,7 +174,8 @@ export async function collectStream(
   let model = "";
   let created = nowSeconds();
   let text = "";
-  let reasoning = "";
+  const reasoningParts: ReasoningPart[] = [];
+  let currentReasoning: ReasoningPart | null = null;
   let stopReason: StopReason = null;
   let usage: Usage | undefined;
   let incomplete = false;
@@ -185,8 +192,25 @@ export async function collectStream(
       case "text_delta":
         text += ev.text;
         break;
+      case "reasoning_start":
+        currentReasoning = { type: "reasoning", text: "", itemId: ev.id };
+        reasoningParts.push(currentReasoning);
+        break;
       case "reasoning_delta":
-        reasoning += ev.text;
+        if (!currentReasoning) {
+          currentReasoning = { type: "reasoning", text: "" };
+          reasoningParts.push(currentReasoning);
+        }
+        currentReasoning.text += ev.text;
+        break;
+      case "reasoning_stop":
+        if (!currentReasoning) {
+          currentReasoning = { type: "reasoning", text: "", itemId: ev.id };
+          reasoningParts.push(currentReasoning);
+        }
+        if (ev.id) currentReasoning.itemId = ev.id;
+        if (ev.signature) currentReasoning.signature = ev.signature;
+        currentReasoning = null;
         break;
       case "tool_start":
         toolByIndex.set(ev.index, { id: ev.id, name: ev.name, args: "" });
@@ -206,7 +230,7 @@ export async function collectStream(
   }
 
   const content: ContentPart[] = [];
-  if (reasoning) content.push({ type: "reasoning", text: reasoning });
+  content.push(...reasoningParts.filter((p) => p.text || p.signature));
   if (text) content.push({ type: "text", text });
   for (const index of toolOrder) {
     const tc = toolByIndex.get(index)!;
@@ -283,11 +307,13 @@ export async function* fabricateStream(
         await pace(piece.length);
       }
     } else if (p.type === "reasoning") {
+      yield { type: "reasoning_start", id: p.itemId };
       for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
         const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
         yield { type: "reasoning_delta", text: piece };
         await pace(piece.length);
       }
+      yield { type: "reasoning_stop", id: p.itemId, signature: p.signature };
     } else if (p.type === "tool_use") {
       yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };

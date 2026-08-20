@@ -60,6 +60,7 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     activeRequests: c.activeRequests,
     streamCommitGraceMs: cfg.streamCommitGraceMs,
     streamPingIntervalMs: cfg.streamPingIntervalMs,
+    jsonCommitGraceMs: cfg.jsonCommitGraceMs,
   };
   new ProxyController(proxyDeps).register(app);
   new MediaController({ ...proxyDeps, providers: c.providers }).register(app);

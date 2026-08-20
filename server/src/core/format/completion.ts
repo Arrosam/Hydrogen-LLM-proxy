@@ -319,7 +319,10 @@ export class OpenAICompletionRequest extends Request {
 
       if (role === "assistant") {
         const content = coerceContentToParts(msg.content);
-        const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? "");
+        // Providers disagree on the field name: DeepSeek says reasoning_content,
+        // OpenRouter-style gateways say reasoning, some v4 gateways say
+        // reasoning_text. Accept them all.
+        const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? msg.reasoning_text ?? "");
         if (reasoning) content.push({ type: "reasoning", text: reasoning });
         const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
         for (const tc of toolCalls) {
@@ -363,12 +366,15 @@ export class OpenAICompletionRequest extends Request {
         const entry: Record<string, unknown> = { role: "assistant" };
         entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
         if (reasoningParts.length) {
+          // Every dialect spelling the DeepSeek-compatible world uses; each
+          // upstream reads its own and ignores the rest. DeepSeek reads
+          // `reasoning_content` (and its thinking-mode tool loop REQUIRES the
+          // reasoning back), OpenRouter-style providers read `reasoning`, some
+          // v4 gateways read `reasoning_text`.
           const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
-          // Both dialect spellings: DeepSeek reads `reasoning_content` (and its
-          // v3.2 tool loop REQUIRES the current round's reasoning back),
-          // OpenRouter-style providers read `reasoning`.
-          entry.reasoning = reasoning;
           entry.reasoning_content = reasoning;
+          entry.reasoning = reasoning;
+          entry.reasoning_text = reasoning;
         }
         if (toolUses.length) {
           entry.tool_calls = toolUses.map((tu) => ({
@@ -440,7 +446,7 @@ export class OpenAICompletionResponse extends Response {
     const message = (choice.message ?? {}) as Record<string, unknown>;
 
     const content: ContentPart[] = [];
-    const reasoning = String(message.reasoning ?? message.reasoning_content ?? "");
+    const reasoning = String(message.reasoning ?? message.reasoning_content ?? message.reasoning_text ?? "");
     if (reasoning) content.push({ type: "reasoning", text: reasoning });
     if (typeof message.content === "string" && message.content) {
       content.push({ type: "text", text: message.content });
@@ -530,7 +536,7 @@ export class OpenAICompletionResponse extends Response {
 
       if (typeof delta.content === "string" && delta.content) yield { type: "text_delta", text: delta.content };
 
-      const reasoning = delta.reasoning ?? delta.reasoning_content;
+      const reasoning = delta.reasoning ?? delta.reasoning_content ?? delta.reasoning_text;
       if (typeof reasoning === "string" && reasoning) yield { type: "reasoning_delta", text: reasoning };
 
       const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];

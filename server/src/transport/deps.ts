@@ -22,4 +22,8 @@ export interface ProxyDeps {
   streamCommitGraceMs?: number;
   /** Interval between keep-alive pings once committed. Default 10000ms. */
   streamPingIntervalMs?: number;
+  /** Silence allowed on a NON-streaming request before 200 is committed and
+   * whitespace heartbeats flow into the JSON body (defeats intermediary idle
+   * timeouts, e.g. Cloudflare's ~100s 524). 0 disables. Default 30000ms. */
+  jsonCommitGraceMs?: number;
 }

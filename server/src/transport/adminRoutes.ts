@@ -42,6 +42,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     await scoped.register((s) => activeRequestRoutes(s, c));
     await scoped.register((s) => settingsRoutes(s, c), { prefix: "/settings" });
     await scoped.register((s) => backupRoutes(s, c), { prefix: "/backup" });
+    await scoped.register((s) => updateRoutes(s, c), { prefix: "/update" });
   });
 }
 
@@ -1022,5 +1023,33 @@ async function activeRequestRoutes(app: FastifyInstance, c: Container): Promise<
     const active = c.activeRequests.listActive();
     const blocked = active.filter((r) => now - r.startedAt > BLOCK_THRESHOLD_MS).length;
     return { ...s, blocked, blockThresholdMs: BLOCK_THRESHOLD_MS, now };
+  });
+}
+
+// --- updates ------------------------------------------------------------------
+
+async function updateRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  // Latest-release status. Cached server-side; ?refresh=1 forces a refetch
+  // (the "Check now" button), still admin-gated so the GitHub rate budget
+  // cannot be drained through this proxy by ordinary users.
+  app.get("/check", async (req, reply) => {
+    if (!requireAdmin(req, reply, "check for updates")) return reply;
+    const refresh = (req.query as Record<string, string>).refresh === "1";
+    return c.updates.check(refresh);
+  });
+
+  // Restart-to-upgrade: reply, then shut down cleanly and let the supervisor
+  // start the replacement. The endpoint is disabled unless the operator has
+  // explicitly asserted that the deployment supervisor can do that safely.
+  app.post("/restart", async (req, reply) => {
+    if (!requireAdmin(req, reply, "restart the server")) return reply;
+    if (!c.updates.restartSupported) {
+      return reply.code(409).send({
+        error: "remote restart is disabled for this deployment; update and restart it through its supervisor",
+      });
+    }
+    req.log.warn({ user: req.user.username }, "restart-to-upgrade requested from the settings page");
+    c.updates.scheduleRestart();
+    return { restarting: true };
   });
 }

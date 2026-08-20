@@ -1,5 +1,8 @@
 import { boot } from "./composition/container";
 import { buildApp } from "./app";
+import { closeWithDeadline } from "./util/shutdown";
+
+const SHUTDOWN_GRACE_MS = 30_000;
 
 async function main(): Promise<void> {
   const container = await boot();
@@ -25,15 +28,21 @@ async function main(): Promise<void> {
   const pruneTimer = setInterval(pruneTick, 24 * 60 * 60 * 1000);
   pruneTimer.unref?.();
 
+  let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     app.log.info(`received ${signal}, shutting down`);
     if (pruneTimer) clearInterval(pruneTimer);
     try {
-      await app.close();
+      await closeWithDeadline(app, SHUTDOWN_GRACE_MS);
       container.statsCache.flush();
-      container.sqlite.close();
     } finally {
-      process.exit(0);
+      try {
+        container.sqlite.close();
+      } finally {
+        process.exit(0);
+      }
     }
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

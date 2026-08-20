@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseStream } from "../src/core/format";
+import { parseStream, serializeStream } from "../src/core/format";
 import { collectStream, fabricateStream, newAccumulator, tapStream, withoutReasoning, type StreamEvent } from "../src/core/ir/stream";
 import type { ResponseData } from "../src/core/ir/stream";
 
@@ -46,7 +46,7 @@ describe("fabricate + tap + withoutReasoning", () => {
     model: "m",
     created: 1,
     content: [
-      { type: "reasoning", text: "hmm" },
+      { type: "reasoning", text: "hmm", itemId: "rs_kept", signature: "enc_kept" },
       { type: "text", text: "answer" },
     ],
     stopReason: "stop",
@@ -57,6 +57,7 @@ describe("fabricate + tap + withoutReasoning", () => {
     const { data: back, incomplete } = await collectStream(fabricateStream(data));
     expect(incomplete).toBe(false);
     expect(back.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")).toBe("answer");
+    expect(back.content.find((p) => p.type === "reasoning")).toMatchObject({ itemId: "rs_kept", signature: "enc_kept" });
   });
 
   it("tapStream accumulates text/reasoning/usage as events pass through", async () => {
@@ -70,7 +71,7 @@ describe("fabricate + tap + withoutReasoning", () => {
 
   it("withoutReasoning drops reasoning deltas", async () => {
     const events = await drain(withoutReasoning(fabricateStream(data)));
-    expect(events.some((e) => e.type === "reasoning_delta")).toBe(false);
+    expect(events.some((e) => e.type === "reasoning_start" || e.type === "reasoning_delta" || e.type === "reasoning_stop")).toBe(false);
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
   });
 });
@@ -97,5 +98,33 @@ describe("OpenAI Responses failure vs completion", () => {
     const { incomplete, data } = await collectStream(parseStream("openai_responses", frames(CREATED, TEXT, inc)));
     expect(incomplete).toBe(false);
     expect(data.stopReason).toBe("length");
+  });
+
+  it("preserves a streamed reasoning item's id and encrypted content", async () => {
+    const reasoningFrames = [
+      CREATED,
+      'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_upstream","type":"reasoning","summary":[]}}\n\n',
+      'event: response.reasoning_text.delta\ndata: {"type":"response.reasoning_text.delta","item_id":"rs_upstream","output_index":0,"delta":"why"}\n\n',
+      'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_upstream","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"why"}],"encrypted_content":"enc_upstream"}}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
+    ];
+
+    const collected = await collectStream(parseStream("openai_responses", frames(...reasoningFrames)));
+    expect(collected.data.content.find((p) => p.type === "reasoning")).toMatchObject({
+      text: "why",
+      itemId: "rs_upstream",
+      signature: "enc_upstream",
+    });
+
+    let relayed = "";
+    for await (const chunk of serializeStream(
+      "openai_responses",
+      parseStream("openai_responses", frames(...reasoningFrames)),
+      { model: "svc" },
+    )) {
+      relayed += chunk;
+    }
+    expect(relayed).toContain('"id":"rs_upstream"');
+    expect(relayed).toContain('"encrypted_content":"enc_upstream"');
   });
 });

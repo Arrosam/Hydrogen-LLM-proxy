@@ -20,6 +20,9 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_TTL: ${SESSION_TTL:-12h}
       LOG_PAYLOAD_MAX_CHARS: ${LOG_PAYLOAD_MAX_CHARS:-100000}
+      # A process restart reuses this container's current image; keep remote
+      # restart disabled and recreate it with `docker compose up -d` to update.
+      UPDATE_RESTART_ENABLED: ${UPDATE_RESTART_ENABLED:-false}
     volumes:
       - hydrogen-data:/data
 

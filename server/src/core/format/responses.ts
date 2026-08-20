@@ -2,7 +2,7 @@ import { Request, type RenderTarget } from "../ir/request";
 import { Response } from "../ir/response";
 import {
   normalizeMessages,
-  reasoningOf,
+  stripStaleReasoning,
   textOf,
   type ContentPart,
   type Message,
@@ -270,12 +270,26 @@ export class OpenAIResponsesRequest extends Request {
         } else if (type === "reasoning") {
           // Replayed thinking is parsed, NOT dropped: what may be resent is the
           // EGRESS family's rule. An Anthropic-family target requires the
-          // history's thinking back (DeepSeek's 4028), while this family's own
-          // render still drops it (reasoning items pair with provider-side ids).
-          // A reasoning item precedes its turn's message/function_call items, so
-          // normalizeMessages folds it in front of them — the order Anthropic wants.
+          // history's thinking back (DeepSeek's 4028), and this family's own
+          // render replays it too — DeepSeek-family Responses upstreams 400 a
+          // thinking-mode tool loop whose reasoning_text is not passed back.
+          // encrypted_content and the item id ride along so a same-family
+          // replay restores the item. A reasoning item precedes its turn's
+          // message/function_call items, so normalizeMessages folds it in
+          // front of them — the order every family wants.
           const text = reasoningItemText(item);
-          if (text) messages.push({ role: "assistant", content: [{ type: "reasoning", text }] });
+          const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+          if (text || encrypted) {
+            messages.push({
+              role: "assistant",
+              content: [{
+                type: "reasoning",
+                text,
+                signature: encrypted,
+                itemId: typeof item.id === "string" && item.id ? item.id : undefined,
+              }],
+            });
+          }
         }
       }
     }
@@ -284,8 +298,9 @@ export class OpenAIResponsesRequest extends Request {
       requestedService: String(body.model ?? ""),
       system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
       // Reasoning is NOT stripped here: what a target may be sent back is the
-      // egress family's rule (this family's render() drops every reasoning part;
-      // the Anthropic renderer replays them).
+      // egress family's rule, applied at render time (this family and the
+      // Anthropic renderer both replay it; stale tool-less turns are shed by
+      // stripStaleReasoning in the renderers that call it).
       messages: normalizeMessages(messages),
       tools: parseTools(body.tools),
       toolChoice: parseToolChoice(body.tool_choice),
@@ -296,7 +311,10 @@ export class OpenAIResponsesRequest extends Request {
 
   render(target: RenderTarget): Record<string, unknown> {
     const input: Record<string, unknown>[] = [];
-    for (const m of this.messages) {
+    // Stale (tool-less prior-turn) reasoning is shed; tool-call turns keep
+    // theirs -- DeepSeek-family Responses upstreams 400 a thinking-mode tool
+    // loop whose reasoning_text is not passed back.
+    for (const m of stripStaleReasoning(this.messages)) {
       let parts: Record<string, unknown>[] = [];
       const flushParts = (): void => {
         if (parts.length) {
@@ -315,8 +333,20 @@ export class OpenAIResponsesRequest extends Request {
         } else if (p.type === "tool_result") {
           flushParts();
           input.push({ type: "function_call_output", call_id: p.toolUseId, output: textOf(p.content) });
+        } else if (p.type === "reasoning") {
+          // Replay reasoning ahead of the action it informed. DeepSeek-family
+          // upstreams require the reasoning_text back in thinking-mode tool
+          // loops; OpenAI pairs a replayed item with its original id and
+          // encrypted_content, both preserved when the client sent them.
+          flushParts();
+          input.push({
+            type: "reasoning",
+            id: p.itemId ?? genId("rs"),
+            summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
+            ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
+            ...(p.signature ? { encrypted_content: p.signature } : {}),
+          });
         }
-        // Reasoning parts pair with provider-side item ids; they can't be replayed.
       }
       flushParts();
     }
@@ -378,9 +408,18 @@ export class OpenAIResponsesResponse extends Response {
       const item = raw as Record<string, unknown>;
       if (item.type === "reasoning") {
         // Raw chain of thought (content[].reasoning_text) or summary, whichever
-        // the server produced.
+        // the server produced. encrypted_content and the item id are kept so a
+        // replay can restore the item.
         const text = reasoningItemText(item);
-        if (text) content.push({ type: "reasoning", text });
+        const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+        if (text || encrypted) {
+          content.push({
+            type: "reasoning",
+            text,
+            signature: encrypted,
+            itemId: typeof item.id === "string" && item.id ? item.id : undefined,
+          });
+        }
       } else if (item.type === "message") {
         const text = textOf(contentToParts(item.content));
         if (text) content.push({ type: "text", text });
@@ -407,8 +446,16 @@ export class OpenAIResponsesResponse extends Response {
   renderSelf(model: string): Record<string, unknown> {
     const output: Record<string, unknown>[] = [];
 
-    const reasoning = reasoningOf(this.content);
-    if (reasoning) output.push({ type: "reasoning", id: genId("rs"), summary: [{ type: "summary_text", text: reasoning }] });
+    for (const p of this.content) {
+      if (p.type !== "reasoning" || (!p.text && !p.signature)) continue;
+      output.push({
+        type: "reasoning",
+        id: p.itemId ?? genId("rs"),
+        summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
+        ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
+        ...(p.signature ? { encrypted_content: p.signature } : {}),
+      });
+    }
 
     const text = textOf(this.content);
     if (text) {
@@ -444,6 +491,9 @@ export class OpenAIResponsesResponse extends Response {
     let sawToolCall = false;
     let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
     const toolIndexByItem = new Map<string, number>();
+    const reasoningStarted = new Set<string>();
+    const reasoningWithText = new Set<string>();
+    let currentReasoningId: string | undefined;
     let nextToolIndex = 0;
 
     for await (const frame of parseSSE(readable)) {
@@ -462,12 +512,29 @@ export class OpenAIResponsesResponse extends Response {
           if (typeof data.delta === "string" && data.delta) yield { type: "text_delta", text: data.delta };
           break;
         case "response.reasoning_summary_text.delta":
-        case "response.reasoning_text.delta":
-          if (typeof data.delta === "string" && data.delta) yield { type: "reasoning_delta", text: data.delta };
+        case "response.reasoning_text.delta": {
+          const itemId = typeof data.item_id === "string" && data.item_id ? data.item_id : currentReasoningId;
+          if (itemId && !reasoningStarted.has(itemId)) {
+            reasoningStarted.add(itemId);
+            currentReasoningId = itemId;
+            yield { type: "reasoning_start", id: itemId };
+          }
+          if (typeof data.delta === "string" && data.delta) {
+            reasoningWithText.add(itemId ?? "");
+            yield { type: "reasoning_delta", text: data.delta };
+          }
           break;
+        }
         case "response.output_item.added": {
           const item = (data.item ?? {}) as Record<string, unknown>;
-          if (item.type === "function_call") {
+          if (item.type === "reasoning") {
+            const itemId = String(item.id ?? genId("rs"));
+            currentReasoningId = itemId;
+            if (!reasoningStarted.has(itemId)) {
+              reasoningStarted.add(itemId);
+              yield { type: "reasoning_start", id: itemId };
+            }
+          } else if (item.type === "function_call") {
             sawToolCall = true;
             const index = nextToolIndex++;
             toolIndexByItem.set(String(item.id ?? index), index);
@@ -482,7 +549,20 @@ export class OpenAIResponsesResponse extends Response {
         }
         case "response.output_item.done": {
           const item = (data.item ?? {}) as Record<string, unknown>;
-          if (item.type === "function_call") {
+          if (item.type === "reasoning") {
+            const itemId = String(item.id ?? currentReasoningId ?? genId("rs"));
+            if (!reasoningStarted.has(itemId)) {
+              reasoningStarted.add(itemId);
+              yield { type: "reasoning_start", id: itemId };
+            }
+            if (!reasoningWithText.has(itemId)) {
+              const text = reasoningItemText(item);
+              if (text) yield { type: "reasoning_delta", text };
+            }
+            const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+            yield { type: "reasoning_stop", id: itemId, signature: encrypted };
+            if (currentReasoningId === itemId) currentReasoningId = undefined;
+          } else if (item.type === "function_call") {
             const index = toolIndexByItem.get(String(item.id ?? ""));
             if (index != null) yield { type: "tool_stop", index };
           }
@@ -536,17 +616,36 @@ export class OpenAIResponsesResponse extends Response {
     let msgText: string | null = null; // null = no message item open
     let reasoningId = "";
     let reasoningText: string | null = null;
+    let reasoningSignature: string | undefined;
     const tools = new Map<number, { itemId: string; callId: string; name: string; args: string; index: number }>();
+
+    function* openReasoning(itemId?: string): Generator<string> {
+      reasoningId = itemId || genId("rs");
+      reasoningText = "";
+      reasoningSignature = undefined;
+      yield frame("response.output_item.added", { output_index: outputIndex, item: { id: reasoningId, type: "reasoning", summary: [] } });
+      yield frame("response.reasoning_summary_part.added", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: "" } });
+    }
 
     function* closeReasoning(): Generator<string> {
       if (reasoningText == null) return;
-      const item = { id: reasoningId, type: "reasoning", summary: [{ type: "summary_text", text: reasoningText }] };
-      yield frame("response.reasoning_summary_text.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, text: reasoningText });
-      yield frame("response.reasoning_summary_part.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: reasoningText } });
+      const summary = reasoningText ? [{ type: "summary_text", text: reasoningText }] : [];
+      const item = {
+        id: reasoningId,
+        type: "reasoning",
+        summary,
+        ...(reasoningText ? { content: [{ type: "reasoning_text", text: reasoningText }] } : {}),
+        ...(reasoningSignature ? { encrypted_content: reasoningSignature } : {}),
+      };
+      if (reasoningText) {
+        yield frame("response.reasoning_summary_text.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, text: reasoningText });
+        yield frame("response.reasoning_summary_part.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: reasoningText } });
+      }
       yield frame("response.output_item.done", { output_index: outputIndex, item });
       output.push(item);
       outputIndex++;
       reasoningText = null;
+      reasoningSignature = undefined;
     }
 
     function* closeMessage(): Generator<string> {
@@ -568,16 +667,26 @@ export class OpenAIResponsesResponse extends Response {
           yield frame("response.created", { response: response("in_progress") });
           yield frame("response.in_progress", { response: response("in_progress") });
           break;
+        case "reasoning_start":
+          yield* closeMessage();
+          yield* closeReasoning();
+          yield* openReasoning(ev.id);
+          break;
         case "reasoning_delta":
           if (reasoningText == null) {
             yield* closeMessage();
-            reasoningId = genId("rs");
-            reasoningText = "";
-            yield frame("response.output_item.added", { output_index: outputIndex, item: { id: reasoningId, type: "reasoning", summary: [] } });
-            yield frame("response.reasoning_summary_part.added", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: "" } });
+            yield* openReasoning();
           }
-          reasoningText += ev.text;
+          reasoningText = (reasoningText ?? "") + ev.text;
           yield frame("response.reasoning_summary_text.delta", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, delta: ev.text });
+          break;
+        case "reasoning_stop":
+          if (reasoningText == null) {
+            yield* closeMessage();
+            yield* openReasoning(ev.id);
+          }
+          reasoningSignature = ev.signature;
+          yield* closeReasoning();
           break;
         case "text_delta":
           if (msgText == null) {

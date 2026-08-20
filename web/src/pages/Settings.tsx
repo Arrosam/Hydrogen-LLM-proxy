@@ -30,6 +30,7 @@ export function Settings() {
   return (
     <div>
       <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} icon="bi-gear" />
+      <UpdateCard />
       <LanguageCard />
       <BackupCard />
       <RetentionCard />
@@ -52,6 +53,196 @@ function AboutFooter() {
       {data && <span className="font-mono">v{data.version}</span>}
       <span className="text-ink-600">·</span>
       <span>LLM Proxy</span>
+    </div>
+  );
+}
+
+interface UpdateStatus {
+  current: string;
+  latest: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string | null;
+  releaseNotes: string | null;
+  publishedAt: string | null;
+  checkedAt: number;
+  runtime: "kubernetes" | "docker" | "node";
+  restartSupported: boolean;
+  error?: string;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Version check against GitHub releases, plus an operator-enabled supervised
+ * restart. After a restart the card verifies the exact requested release;
+ * unchanged, intermediate, and downgraded versions all fall back to honest
+ * manual deployment guidance. */
+function UpdateCard() {
+  const { t } = useI18n();
+  const toast = useToast();
+  const { confirm, confirmEl } = useConfirm();
+
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartMismatch, setRestartMismatch] = useState(false);
+
+  const check = async (refresh: boolean) => {
+    setChecking(true);
+    try {
+      const s = await api.get<UpdateStatus>(`/update/check${refresh ? "?refresh=1" : ""}`);
+      setStatus(s);
+      setCheckError(s.error ?? null);
+      if (!s.updateAvailable) setRestartMismatch(false);
+    } catch (e) {
+      setCheckError(e instanceof ApiError ? e.message : t("settings.update.toast.checkFailed"));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    void check(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const upgrade = async () => {
+    if (!status?.latest || !status.restartSupported) return;
+    const target = status.latest;
+    const ok = await confirm(
+      t("settings.update.confirm.title", { version: target }),
+      t("settings.update.confirm.body"),
+    );
+    if (!ok) return;
+
+    const before = status.current;
+    setRestarting(true);
+    setRestartMismatch(false);
+    try {
+      await api.post("/update/restart");
+    } catch (e) {
+      setRestarting(false);
+      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
+      return;
+    }
+
+    // Wait out the shutdown, then poll until the server answers again.
+    await sleep(3000);
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      try {
+        const s = await api.get<UpdateStatus>("/update/check");
+        setStatus(s);
+        setRestarting(false);
+        if (s.current === target) {
+          toast.success(t("settings.update.toast.upgraded", { version: s.current }));
+        } else {
+          setRestartMismatch(true);
+          toast.error(
+            s.current === before
+              ? t("settings.update.toast.sameVersion", { version: s.current })
+              : t("settings.update.toast.unexpectedVersion", { actual: s.current, expected: target }),
+          );
+        }
+        return;
+      } catch {
+        await sleep(2500);
+      }
+    }
+    setRestarting(false);
+    setRestartMismatch(true);
+    toast.error(t("settings.update.toast.timeout"));
+  };
+
+  const publishedDate = status?.publishedAt ? new Date(status.publishedAt).toLocaleDateString() : null;
+
+  return (
+    <div className="card card-pad mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <i className="bi bi-cloud-arrow-down text-brand-400" />
+        <h3 className="font-medium text-ink-100">{t("settings.update")}</h3>
+      </div>
+      <p className="mb-3 text-xs text-ink-500">{t("settings.update.hint")}</p>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-xs text-ink-500">{t("settings.update.current")}</span>
+        <code className="rounded-md border border-ink-700 bg-ink-900 px-2 py-0.5 font-mono text-xs text-ink-200">
+          {status ? `v${status.current}` : "…"}
+        </code>
+        {status && !status.error && !restarting && (
+          status.updateAvailable ? (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+              <i className="bi bi-arrow-up-circle" />
+              {t("settings.update.available", { version: status.latest ?? "?" })}
+              {publishedDate && <span className="text-amber-400/70">· {t("settings.update.publishedAt", { date: publishedDate })}</span>}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400">
+              <i className="bi bi-check-circle" />
+              {t("settings.update.upToDate")}
+            </span>
+          )
+        )}
+        {restarting && (
+          <span className="inline-flex items-center gap-1.5 text-xs text-ink-300">
+            <i className="bi bi-arrow-repeat animate-spin" />
+            {t("settings.update.restarting")}
+          </span>
+        )}
+      </div>
+
+      {checkError && <p className="mt-2 text-xs text-red-400">{checkError}</p>}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button className="btn-ghost btn-xs" onClick={() => void check(true)} disabled={checking || restarting}>
+          {checking ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-arrow-clockwise" />}
+          {t("settings.update.checkNow")}
+        </button>
+        {status?.updateAvailable && status.releaseUrl && (
+          <a className="btn-ghost btn-xs" href={status.releaseUrl} target="_blank" rel="noreferrer">
+            <i className="bi bi-box-arrow-up-right" />
+            {t("settings.update.releaseNotes")}
+          </a>
+        )}
+        {status?.updateAvailable && status.restartSupported && (
+          <button className="btn-primary btn-xs" onClick={() => void upgrade()} disabled={restarting}>
+            {restarting ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-cloud-arrow-down" />}
+            {t("settings.update.upgradeAction")}
+          </button>
+        )}
+      </div>
+
+      {status?.updateAvailable && (!status.restartSupported || restartMismatch) && (
+        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-ink-300">
+          <p className="mb-2">
+            {t(status.restartSupported ? "settings.update.manual.mismatch" : "settings.update.manual.disabled")}
+          </p>
+          {status.runtime === "docker" && (
+            <div className="space-y-2">
+              <div>
+                <p className="mb-1 text-ink-500">{t("settings.update.manual.docker.image")}</p>
+                <code className="block rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-ink-200">
+                  docker compose pull && docker compose up -d
+                </code>
+              </div>
+              <div>
+                <p className="mb-1 text-ink-500">{t("settings.update.manual.docker.source")}</p>
+                <code className="block rounded bg-ink-950 px-2 py-1 font-mono text-[11px] text-ink-200">
+                  git pull && docker compose up -d --build
+                </code>
+              </div>
+            </div>
+          )}
+          {status.runtime === "kubernetes" && (
+            <p>{t("settings.update.manual.kubernetes", { version: status.latest ?? "?" })}</p>
+          )}
+          {status.runtime === "node" && (
+            <p>{t("settings.update.manual.node", { version: status.latest ?? "?" })}</p>
+          )}
+          <p className="mt-2 text-ink-500">{t("settings.update.manual.pinned")}</p>
+        </div>
+      )}
+      {confirmEl}
     </div>
   );
 }

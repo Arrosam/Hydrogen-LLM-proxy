@@ -162,6 +162,67 @@ class SseKeepalive {
   }
 }
 
+const JSON_KEEPALIVE_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-cache, no-transform",
+  "x-accel-buffering": "no",
+} as const;
+
+/**
+ * Dead-air guard for a NON-streaming request. A slow upstream (an OCR/vision
+ * answer routinely takes minutes) produces total silence on a JSON response,
+ * and intermediaries kill silent connections long before it finishes —
+ * Cloudflare returns its 524 at ~100s, so behind it every slow answer was lost
+ * even when the upstream succeeded. After the grace window this commits the
+ * 200 and writes whitespace heartbeats into the body until the outcome
+ * arrives: leading whitespace is valid JSON that every parser skips, the same
+ * technique Anthropic's own API uses for long non-streaming requests. The
+ * cost, exactly as with the SSE keep-alive: a failure slower than the grace
+ * window is delivered as an error JSON body on the committed 200, while the
+ * log keeps the semantic status. graceMs <= 0 disables the guard.
+ */
+class JsonKeepalive {
+  committed = false;
+  private graceTimer: NodeJS.Timeout | null = null;
+  private pingTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly reply: FastifyReply,
+    graceMs: number,
+    private readonly intervalMs: number,
+  ) {
+    if (graceMs <= 0) return;
+    this.graceTimer = setTimeout(() => this.commit(), graceMs);
+    this.graceTimer.unref?.();
+  }
+
+  private commit(): void {
+    const raw = this.reply.raw;
+    if (this.committed || raw.destroyed || raw.headersSent) return;
+    this.reply.hijack();
+    raw.writeHead(200, JSON_KEEPALIVE_HEADERS);
+    this.committed = true;
+    raw.write("\n");
+    this.pingTimer = setInterval(() => {
+      if (raw.destroyed || raw.writableEnded) {
+        this.stop();
+        return;
+      }
+      raw.write("\n");
+    }, this.intervalMs);
+    this.pingTimer.unref?.();
+  }
+
+  /** The outcome has arrived: stop the grace/ping timers. */
+  stop(): void {
+    if (this.graceTimer) clearTimeout(this.graceTimer);
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+}
+
 /**
  * Watch a client socket AFTER its response finished writing, and report whether
  * the peer disproves delivery.
@@ -334,10 +395,23 @@ export class ProxyController {
       return; // relay hijacks the reply and writes asynchronously
     }
 
+    // Keep bytes flowing on the JSON response too: an OCR/vision answer can
+    // take minutes, and a silent connection dies at the first intermediary.
+    const jsonKeepalive = new JsonKeepalive(
+      reply,
+      this.deps.jsonCommitGraceMs ?? 30_000,
+      this.deps.streamPingIntervalMs ?? 10_000,
+    );
     const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal });
+    jsonKeepalive.stop();
     if (!outcome.result.ok) {
       if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, false, outcome);
       this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
+      if (jsonKeepalive.committed) {
+        // The 200 (and heartbeat whitespace) is already on the wire; the
+        // failure travels as the error JSON body.
+        return this.replyFailureInBody(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
+      }
       return this.replyFailure(reply, ctx, outcome.result, { streaming: false, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
     }
 
@@ -347,7 +421,17 @@ export class ProxyController {
     // before send() is how a response nobody received was recorded as success.
     const socket = reply.raw.socket;
     const settled = responseFlushed(reply.raw);
-    reply.code(200).send(clientBody);
+    if (jsonKeepalive.committed) {
+      // Headers + whitespace already sent; append the JSON document and end.
+      try {
+        if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+          reply.raw.write(JSON.stringify(clientBody));
+          reply.raw.end();
+        }
+      } catch { /* the connection died first; responseFlushed reports it */ }
+    } else {
+      reply.code(200).send(clientBody);
+    }
     const flushed = await settled;
     const status = flushed ? 200 : 499;
     const error = flushed ? null : "connection closed before the response was fully sent";
@@ -434,6 +518,37 @@ export class ProxyController {
     });
     this.deps.usage.record(ctx.token.id, 0);
     this.deps.activeRequests.finish(ctx.traceId, status, message);
+  }
+
+  /**
+   * A failure on a NON-streaming request whose 200 was already committed by the
+   * JSON keep-alive: the error is delivered as the protocol's error JSON body
+   * (the only channel left on a committed response). The log row keeps the
+   * SEMANTIC status, exactly like the SSE variant above. The caller has already
+   * finished the active-request entry.
+   */
+  private replyFailureInBody(
+    reply: FastifyReply,
+    ctx: RequestCtx,
+    failure: AttemptFailure,
+    o: { attemptPath: unknown; attempts: number },
+  ): void {
+    const status = failureStatus(failure);
+    const message = failureMessage(failure);
+    const raw = reply.raw;
+    try {
+      if (!raw.destroyed && !raw.writableEnded) {
+        raw.write(JSON.stringify(buildErrorBody(ctx.ingress, status, message)));
+        raw.end();
+      }
+    } catch { /* the connection died first; the log below still tells the truth */ }
+    this.deps.logger.record({
+      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
+      ingress: ctx.ingress, streaming: false, httpStatus: status, http: ctx.http,
+      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath,
+      error: `${message}${this.retrySuffix(o.attemptPath)} (delivered as error body after keep-alive commit)`,
+    });
+    this.deps.usage.record(ctx.token.id, 0);
   }
 
   private replyFailure(

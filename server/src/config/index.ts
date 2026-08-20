@@ -70,6 +70,29 @@ const EnvSchema = z.object({
   // exceeded, least-recently-used entries are evicted to make room. 0 turns the
   // cache off. Default 64 MiB. Overridable at runtime from the dashboard.
   IMAGE_CACHE_MAX_BYTES: z.coerce.number().int().nonnegative().default(64 * 1024 * 1024),
+  // Dead-air guard for NON-streaming chat requests (OCR/vision answers can
+  // take minutes; Cloudflare kills a silent origin at ~100s with a 524). If a
+  // JSON response has produced no outcome within this window, the proxy
+  // commits 200 and emits whitespace heartbeats into the body until the real
+  // JSON follows -- leading whitespace is valid JSON, the same technique
+  // Anthropic's own API uses for long non-streaming requests. A failure after
+  // that point is delivered as an error JSON body on the committed 200 (the
+  // log keeps the semantic status). 0 disables the guard entirely.
+  JSON_COMMIT_GRACE_MS: z.coerce.number().int().nonnegative().default(30_000),
+  // GitHub repo ("owner/name") the Settings page checks for new releases.
+  // Point a fork at itself so its own tags drive the update banner.
+  UPDATE_REPO: z
+    .string()
+    .default("Arrosam/Hydrogen-LLM-proxy")
+    .refine((v) => /^[\w.-]+\/[\w.-]+$/.test(v), "UPDATE_REPO must be owner/name"),
+  // Remote restart is deliberately opt-in. Enabling it asserts that an
+  // external supervisor will both restart the process and deploy the intended
+  // image/version; a bare Node process and a normal Docker restart cannot.
+  UPDATE_RESTART_ENABLED: z
+    .string()
+    .optional()
+    .default("false")
+    .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
 });
 
 export type RawEnv = z.infer<typeof EnvSchema>;
@@ -91,6 +114,9 @@ export interface AppConfig {
   streamCommitGraceMs: number;
   streamPingIntervalMs: number;
   imageCacheMaxBytes: number;
+  jsonCommitGraceMs: number;
+  updateRepo: string;
+  updateRestartEnabled: boolean;
 }
 
 /**
@@ -126,6 +152,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     streamCommitGraceMs: e.STREAM_COMMIT_GRACE_MS,
     streamPingIntervalMs: e.STREAM_PING_INTERVAL_MS,
     imageCacheMaxBytes: e.IMAGE_CACHE_MAX_BYTES,
+    jsonCommitGraceMs: e.JSON_COMMIT_GRACE_MS,
+    updateRepo: e.UPDATE_REPO,
+    updateRestartEnabled: e.UPDATE_RESTART_ENABLED,
   };
 }
 
