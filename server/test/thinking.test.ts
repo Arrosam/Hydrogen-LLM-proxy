@@ -94,3 +94,70 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
     expect(out.max_tokens as number).toBeGreaterThan((out.thinking as { budget_tokens: number }).budget_tokens);
   });
 });
+
+describe("Anthropic thinking is pinned, never omitted (the 4028 fix)", () => {
+  it("a client that said nothing about thinking gets an explicit disable", () => {
+    // Omitting the field is not neutral. DeepSeek's Anthropic-compatible endpoint
+    // defaults V4 to thinking ON when `thinking` is absent, and then 400s with
+    // "content[].thinking in the thinking mode must be passed back" because the
+    // history's assistant turns carry none -- which they never can, since nothing
+    // asked for thinking. Absent means disabled on this wire, so say it out loud.
+    expect(anthropic({}).thinking).toEqual({ type: "disabled" });
+    expect(anthropic({ maxTokens: 32768 }).thinking).toEqual({ type: "disabled" });
+  });
+
+  it("pinning thinking off leaves max_tokens exactly as it was", () => {
+    expect(anthropic({ maxTokens: 32768 }).max_tokens).toBe(32768);
+    // No client budget: still prefer the provider's cap over the built-in default.
+    expect(anthropic({}, 8192).max_tokens).toBe(8192);
+    expect(anthropic({ maxTokens: 99999 }, 8192).max_tokens).toBe(8192);
+    expect(anthropic({}).max_tokens).toBe(4096);
+  });
+
+  it("renders a disable for a real Anthropic request that omits thinking", () => {
+    // The production shape that failed: POST /v1/messages with no `thinking`, and a
+    // history whose assistant turns hold plain text and no thinking blocks.
+    const out = AnthropicRequest.parse({
+      model: "svc",
+      max_tokens: 32768,
+      stream: true,
+      messages: [
+        { role: "user", content: "check the logs" },
+        { role: "assistant", content: [{ type: "text", text: "on it" }] },
+        { role: "user", content: "and then?" },
+      ],
+    }).render({ upstreamModel: "deepseek-v4-flash" });
+    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(out.max_tokens).toBe(32768);
+  });
+
+  it("still lets a client that does ask for thinking have it", () => {
+    const out = AnthropicRequest.parse({
+      model: "svc",
+      max_tokens: 32768,
+      thinking: { type: "enabled", budget_tokens: 8000 },
+      messages: [{ role: "user", content: "hi" }],
+    }).render({ upstreamModel: "m" });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+  });
+
+  it("keeps the thinking blocks a thinking client does send back", () => {
+    // The other half of 4028: when thinking IS on, the history's blocks must
+    // survive the round trip, signature and all.
+    const out = AnthropicRequest.parse({
+      model: "svc",
+      max_tokens: 32768,
+      thinking: { type: "enabled", budget_tokens: 8000 },
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: [
+          { type: "thinking", thinking: "let me see", signature: "sig-abc" },
+          { type: "text", text: "hello" },
+        ] },
+        { role: "user", content: "again" },
+      ],
+    }).render({ upstreamModel: "m" });
+    const assistant = (out.messages as Array<{ role: string; content: unknown[] }>)[1];
+    expect(assistant.content[0]).toEqual({ type: "thinking", thinking: "let me see", signature: "sig-abc" });
+  });
+});

@@ -12,7 +12,7 @@ import {
   type ToolChoice,
 } from "../ir/content";
 import type { GenerationParams, ThinkingLevel } from "../ir/params";
-import { DEFAULT_ANTHROPIC_MAX_TOKENS, ThinkingPolicy } from "../ir/thinking";
+import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
 import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire";
@@ -361,20 +361,24 @@ export class AnthropicRequest extends Request {
       out.system = this.system ? `${this.system}\n\n${jsonNote}` : jsonNote;
     }
 
-    if (p.thinking) {
-      // The thinking policy also owns max_tokens: it fits the budget under the
-      // client's requested max and the provider's hard cap.
-      const tf = ThinkingPolicy.anthropic(p.thinking, p.maxTokens, cap, p.thinkingImposed === true);
-      out.thinking = tf.thinking;
-      out.max_tokens = tf.max_tokens;
-    } else {
-      // max_tokens is required here but optional on the OpenAI wire: prefer the
-      // provider's configured cap over the built-in fallback so a client that
-      // never budgeted is not silently truncated at a small default.
-      let maxTokens = p.maxTokens ?? cap ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
-      if (cap != null && maxTokens > cap) maxTokens = cap;
-      out.max_tokens = maxTokens;
-    }
+    // `thinking` is ALWAYS emitted, never omitted -- the disabled case included.
+    // An absent `thinking` means disabled on this wire, but only for a provider
+    // that honours that: DeepSeek's Anthropic-compatible endpoint defaults V4 to
+    // thinking ON when the field is missing, and then rejects the whole request
+    // with "content[].thinking in the thinking mode must be passed back" (4028),
+    // because the history's assistant turns carry none -- and they never can,
+    // since nothing asked for thinking, so none was ever produced or handed back
+    // to the client to replay. Omitting the field let each provider pick its own
+    // default for the identical request, which is why one conversation succeeded
+    // on the first upstream and 400'd on the next one down the fallback chain.
+    // Pinning it carries the client's intent across the hop.
+    // The policy also owns max_tokens: it fits any budget under the client's
+    // requested max and the provider's hard cap, still prefers that cap over the
+    // built-in fallback when the client never budgeted, and floors the result at
+    // 1 (max_tokens is required here, and 0 is not a valid request).
+    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, p.thinkingImposed === true);
+    out.thinking = tf.thinking;
+    out.max_tokens = tf.max_tokens;
     applyNonCanonical(out, p, this.family);
     // OpenAI's `user` abuse-tracking id maps to metadata.user_id; a client's own
     // passthrough metadata (same family) wins.
