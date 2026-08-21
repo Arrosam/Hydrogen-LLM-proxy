@@ -38,7 +38,11 @@ export default function App() {
       >
         <Route index element={<Overview />} />
         <Route path="providers" element={<Providers />} />
-        <Route path="models" element={<Models />} />
+        {/* Singular, and it must stay singular: the fuzzy endpoint adapter rewrites
+            any path ending "/models" onto the proxy's /v1/models, so a SPA route
+            spelled "/models" never survives a hard load (refresh, bookmark, pasted
+            URL). "/model" is not in that suffix table. See server/src/transport/fuzzyUrl.ts. */}
+        <Route path="model" element={<Models />} />
         <Route path="services" element={<ModelServices kind="resilience" />} />
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
