@@ -99,7 +99,7 @@ export function Layout() {
               <div className="truncate text-sm text-ink-100">{user?.username}</div>
               <span className={user?.role === "admin" ? "badge-blue" : "badge-gray"}>
                 <i className={`bi ${user?.role === "admin" ? "bi-shield-lock" : "bi-person-gear"}`} />
-                {user?.role}
+                {user ? t(`users.role.${user.role}`) : null}
               </span>
             </div>
           </div>

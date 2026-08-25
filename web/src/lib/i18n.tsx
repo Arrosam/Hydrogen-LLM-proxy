@@ -1213,7 +1213,7 @@ const zh: Dict = {
   "users.form.password": "密码",
   "users.form.passwordPlaceholder": "至少 8 个字符",
   "users.form.role": "角色",
-  "users.role.manager": "管理员",
+  "users.role.manager": "经理",
   "users.role.admin": "管理员",
   "users.form.enabled": "已启用",
   "users.lockReason.self": "你不能停用自己的账号。",

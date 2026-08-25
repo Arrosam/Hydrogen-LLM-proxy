@@ -115,7 +115,7 @@ export function Users() {
                   <td>
                     <span className={u.role === "admin" ? "badge-blue" : "badge-gray"}>
                       <i className={`bi ${u.role === "admin" ? "bi-shield-lock" : "bi-person-gear"}`} />
-                      {u.role}
+                      {t(`users.role.${u.role}`)}
                     </span>
                   </td>
                   <td>{u.enabled ? <span className="badge-green">{t("users.status.active")}</span> : <span className="badge-red">{t("users.status.disabled")}</span>}</td>
