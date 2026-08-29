@@ -202,6 +202,18 @@ export const requestLogs = sqliteTable(
     promptTokens: integer("prompt_tokens").notNull().default(0),
     completionTokens: integer("completion_tokens").notNull().default(0),
     totalTokens: integer("total_tokens").notNull().default(0),
+    /** Prompt tokens the provider served from its cache. A SUBSET of
+     * promptTokens, not an addition to it: every provider reports the cache hit
+     * inside the prompt count, so summing the two would double-count. Kept
+     * because the cached share is what a prompt-caching setup is judged on, and
+     * it is billed at a fraction of the miss rate. */
+    cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
+    /** Anthropic cache_creation_input_tokens: prompt tokens written INTO the
+     * cache on this request (billed at a premium). Reported separately from the
+     * prompt count by that API, so it stands on its own here too. */
+    cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
+    /** Reasoning tokens inside completionTokens (a subset, same as cached). */
+    reasoningTokens: integer("reasoning_tokens").notNull().default(0),
     latencyMs: integer("latency_ms").notNull().default(0),
     attempts: integer("attempts").notNull().default(0),
     /** Structured attempt tree (steps / nested agent calls) for the detail view. */

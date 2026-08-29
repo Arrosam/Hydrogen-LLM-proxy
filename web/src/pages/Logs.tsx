@@ -43,6 +43,13 @@ interface ServiceCallEntry {
 }
 
 interface LogDetail extends LogSummary {
+  /** Prompt tokens served from the provider's cache (a SUBSET of promptTokens,
+   * so the two must never be added together). */
+  cachedInputTokens: number;
+  /** Prompt tokens written into an Anthropic cache on this request. */
+  cacheCreationInputTokens: number;
+  /** Reasoning tokens inside completionTokens (also a subset). */
+  reasoningTokens: number;
   attemptPath: unknown;
   requestPayload: string | null;
   upstreamRequestPayload: string | null;
@@ -294,6 +301,13 @@ export function Logs() {
               <Meta label={t("logs.meta.route")} value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
               <Meta label={t("logs.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
               <Meta label={t("logs.meta.tokens")} value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
+              {/* The cached share is part of the prompt count, never added to
+                  it -- shown as "of" so the two are not read as a sum. */}
+              <Meta
+                label={t("logs.meta.cachedTokens")}
+                value={t("logs.meta.cachedOf", { cached: detail.cachedInputTokens ?? 0, prompt: detail.promptTokens })}
+              />
+              <Meta label={t("logs.meta.cacheWrite")} value={String(detail.cacheCreationInputTokens ?? 0)} />
               <Meta label={t("logs.meta.servedModel")} value={detail.servedModel ?? "-"} />
               <Meta label={t("logs.meta.servedProvider")} value={detail.servedProvider ?? "-"} />
               <Meta label={t("logs.meta.trace")} value={detail.traceId ?? "-"} />

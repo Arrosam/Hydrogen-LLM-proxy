@@ -153,7 +153,11 @@ describe("StatsCache", () => {
     logs.deleteAll();
     cache.reset();
 
-    expect(cache.summary()).toEqual({ requests: 0, errors: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, avgLatencyMs: 0 });
+    expect(cache.summary()).toEqual({
+      requests: 0, errors: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0,
+      avgLatencyMs: 0,
+    });
     expect(cache.timeSeries()).toEqual([]);
     expectMatchesSql(cache);
 

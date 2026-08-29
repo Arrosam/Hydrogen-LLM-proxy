@@ -28,6 +28,12 @@ export interface LogInsert {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Subset of promptTokens served from the provider's cache. */
+  cachedInputTokens: number;
+  /** Anthropic cache writes (reported alongside, not inside, promptTokens). */
+  cacheCreationInputTokens: number;
+  /** Subset of completionTokens spent on reasoning. */
+  reasoningTokens: number;
   latencyMs: number;
   attempts: number;
   attemptPath: unknown;

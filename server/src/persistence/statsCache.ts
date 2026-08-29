@@ -9,13 +9,18 @@ export const STATS_CACHE_SETTINGS_KEY = "stats_cache";
  * init() re-aggregates every row above the persisted lastId. */
 const FLUSH_DELAY_MS = 5_000;
 
+/** Bumped whenever a counter is added, so a cache persisted by an older build --
+ * which has no history for the new field -- is discarded and re-seeded from the
+ * table instead of being carried forward with a missing counter. */
+const CACHE_VERSION = 2;
+
 interface Bucket {
   requests: number;
   totalTokens: number;
 }
 
 interface CacheState {
-  v: 1;
+  v: number;
   /** Highest request_logs id folded in; the startup catch-up scans above it. */
   lastId: number;
   requests: number;
@@ -23,6 +28,12 @@ interface CacheState {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Subset of promptTokens served from a provider cache. */
+  cachedInputTokens: number;
+  /** Prompt tokens written into an Anthropic cache (billed separately). */
+  cacheCreationInputTokens: number;
+  /** Subset of completionTokens spent on reasoning. */
+  reasoningTokens: number;
   /** Sum, not average -- the average is a division at read time. */
   latencySumMs: number;
   byDay: Record<string, Bucket>;
@@ -38,6 +49,9 @@ export interface RequestStat {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  reasoningTokens: number;
   latencyMs: number;
   requestedService: string | null;
   servedModel: string | null;
@@ -46,13 +60,16 @@ export interface RequestStat {
 
 function emptyState(): CacheState {
   return {
-    v: 1,
+    v: CACHE_VERSION,
     lastId: 0,
     requests: 0,
     errors: 0,
     promptTokens: 0,
     completionTokens: 0,
     totalTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    reasoningTokens: 0,
     latencySumMs: 0,
     byDay: {},
     byService: {},
@@ -111,6 +128,9 @@ export class StatsCache {
     s.promptTokens += r.promptTokens;
     s.completionTokens += r.completionTokens;
     s.totalTokens += r.totalTokens;
+    s.cachedInputTokens += r.cachedInputTokens;
+    s.cacheCreationInputTokens += r.cacheCreationInputTokens;
+    s.reasoningTokens += r.reasoningTokens;
     s.latencySumMs += r.latencyMs;
     if (r.id > s.lastId) s.lastId = r.id;
 
@@ -138,6 +158,9 @@ export class StatsCache {
       promptTokens: s.promptTokens,
       completionTokens: s.completionTokens,
       totalTokens: s.totalTokens,
+      cachedInputTokens: s.cachedInputTokens,
+      cacheCreationInputTokens: s.cacheCreationInputTokens,
+      reasoningTokens: s.reasoningTokens,
       avgLatencyMs: s.requests > 0 ? Math.round(s.latencySumMs / s.requests) : 0,
     };
   }
@@ -188,10 +211,13 @@ export class StatsCache {
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as Partial<CacheState>;
-      if (p.v !== 1 || typeof p.lastId !== "number" || typeof p.requests !== "number") return null;
+      // A cache written before the token-detail counters existed has no way to
+      // know their history, so an older version is discarded and re-seeded from
+      // the table rather than carried forward with undefined counters.
+      if (p.v !== CACHE_VERSION || typeof p.lastId !== "number" || typeof p.requests !== "number") return null;
       // Missing sub-objects (a hand-edited blob) degrade to a full reseed.
       if (!p.byDay || !p.byService || !p.byModel || !p.byProvider) return null;
-      return { ...emptyState(), ...p, v: 1 };
+      return { ...emptyState(), ...p, v: CACHE_VERSION };
     } catch {
       return null;
     }
@@ -208,6 +234,9 @@ export class StatsCache {
     s.promptTokens += acc.promptTokens;
     s.completionTokens += acc.completionTokens;
     s.totalTokens += acc.totalTokens;
+    s.cachedInputTokens += acc.cachedInputTokens;
+    s.cacheCreationInputTokens += acc.cacheCreationInputTokens;
+    s.reasoningTokens += acc.reasoningTokens;
     s.latencySumMs += acc.latencySumMs;
     for (const g of acc.byDay) bump(s.byDay, g.key, g.totalTokens, g.requests);
     for (const g of acc.byService) bump(s.byService, g.key, g.totalTokens, g.requests);

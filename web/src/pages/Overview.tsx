@@ -70,7 +70,7 @@ function EndpointsCard() {
   );
 }
 
-function StatCard({ icon, label, value, tone }: { icon: string; label: string; value: string; tone: string }) {
+function StatCard({ icon, label, value, tone, hint }: { icon: string; label: string; value: string; tone: string; hint?: string }) {
   return (
     <div className="card card-pad">
       <div className="flex items-center justify-between">
@@ -78,8 +78,16 @@ function StatCard({ icon, label, value, tone }: { icon: string; label: string; v
         <i className={`bi ${icon} ${tone}`} />
       </div>
       <div className="mt-2 text-2xl font-semibold text-ink-100">{value}</div>
+      {hint && <div className="mt-1 text-xs text-ink-500">{hint}</div>}
     </div>
   );
+}
+
+/** The cached share as a percentage of prompt tokens. Cached tokens are counted
+ * INSIDE promptTokens, so this is a ratio, never a second addend. */
+function cacheHitHint(s: StatsSummary): string | undefined {
+  if (!s.promptTokens) return undefined;
+  return `${Math.round((s.cachedInputTokens / s.promptTokens) * 100)}% of input`;
 }
 
 function TopList({ title, icon, groups }: { title: string; icon: string; groups: GroupCount[] }) {
@@ -134,9 +142,18 @@ export function Overview() {
       {error && <ErrorNote message={error} />}
       {data && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <StatCard icon="bi-arrow-left-right" tone="text-brand-400" label={t("overview.stats.requests")} value={formatNumber(data.summary.requests)} />
             <StatCard icon="bi-coin" tone="text-amber-400" label={t("overview.stats.totalTokens")} value={formatCompact(data.summary.totalTokens)} />
+            {/* The cached share of the prompt tokens -- what a prompt-caching
+                setup is actually judged on, and billed at a fraction of a miss. */}
+            <StatCard
+              icon="bi-database-check"
+              tone="text-sky-400"
+              label={t("overview.stats.cachedTokens")}
+              value={formatCompact(data.summary.cachedInputTokens)}
+              hint={cacheHitHint(data.summary)}
+            />
             <StatCard icon="bi-exclamation-triangle" tone="text-red-400" label={t("overview.stats.errors")} value={formatNumber(data.summary.errors)} />
             <StatCard icon="bi-stopwatch" tone="text-emerald-400" label={t("overview.stats.avgLatency")} value={`${formatNumber(data.summary.avgLatencyMs)} ms`} />
           </div>

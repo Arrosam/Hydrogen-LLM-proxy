@@ -13,6 +13,12 @@ export interface StatsSummary {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Subset of promptTokens the providers served from cache. */
+  cachedInputTokens: number;
+  /** Prompt tokens written into an Anthropic cache (reported separately). */
+  cacheCreationInputTokens: number;
+  /** Subset of completionTokens spent on reasoning. */
+  reasoningTokens: number;
   avgLatencyMs: number;
 }
 
@@ -39,6 +45,9 @@ export interface StatsAccumulators {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  reasoningTokens: number;
   latencySumMs: number;
   byDay: GroupCount[];
   byService: GroupCount[];
@@ -71,6 +80,9 @@ export class StatsQueries {
         promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
         completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
         totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
+        cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
         avgLatencyMs: sql<number>`coalesce(avg(${requestLogs.latencyMs}),0)`,
       })
       .from(requestLogs);
@@ -81,6 +93,9 @@ export class StatsQueries {
       promptTokens: r?.promptTokens ?? 0,
       completionTokens: r?.completionTokens ?? 0,
       totalTokens: r?.totalTokens ?? 0,
+      cachedInputTokens: r?.cachedInputTokens ?? 0,
+      cacheCreationInputTokens: r?.cacheCreationInputTokens ?? 0,
+      reasoningTokens: r?.reasoningTokens ?? 0,
       avgLatencyMs: Math.round(r?.avgLatencyMs ?? 0),
     };
   }
@@ -118,6 +133,9 @@ export class StatsQueries {
         promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
         completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
         totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
+        cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
         latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
       })
       .from(requestLogs)
@@ -131,6 +149,9 @@ export class StatsQueries {
       promptTokens: totals?.promptTokens ?? 0,
       completionTokens: totals?.completionTokens ?? 0,
       totalTokens: totals?.totalTokens ?? 0,
+      cachedInputTokens: totals?.cachedInputTokens ?? 0,
+      cacheCreationInputTokens: totals?.cacheCreationInputTokens ?? 0,
+      reasoningTokens: totals?.reasoningTokens ?? 0,
       latencySumMs: totals?.latencySumMs ?? 0,
       byDay: this.groupBy(above, day),
       byService: this.groupBy(above, sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`),

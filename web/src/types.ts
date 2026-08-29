@@ -261,6 +261,12 @@ export interface StatsSummary {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Subset of promptTokens the providers served from cache. */
+  cachedInputTokens: number;
+  /** Prompt tokens written INTO an Anthropic cache (reported separately). */
+  cacheCreationInputTokens: number;
+  /** Subset of completionTokens spent on reasoning. */
+  reasoningTokens: number;
   avgLatencyMs: number;
 }
 

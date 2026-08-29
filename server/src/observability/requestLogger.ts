@@ -111,6 +111,12 @@ export class RequestLogger {
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,
+      // The detail counters were parsed off every provider's response and then
+      // thrown away here, so the cached share of a request -- the whole point of
+      // running prompt caching -- was never visible anywhere.
+      cachedInputTokens: usage.cachedInputTokens ?? 0,
+      cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
+      reasoningTokens: usage.reasoningTokens ?? 0,
       latencyMs: p.latencyMs,
       attempts: p.attempts ?? 0,
       attemptPath: p.attemptPath ?? [],
@@ -122,6 +128,9 @@ export class RequestLogger {
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,
+      cachedInputTokens: usage.cachedInputTokens ?? 0,
+      cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
+      reasoningTokens: usage.reasoningTokens ?? 0,
       latencyMs: p.latencyMs,
       requestedService: p.requestedService,
       servedModel: p.servedModel ?? null,
