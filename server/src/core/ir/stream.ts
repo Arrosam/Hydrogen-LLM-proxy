@@ -17,10 +17,17 @@ export type StreamEvent =
   | { type: "text_delta"; text: string }
   /** Optional boundaries around reasoning deltas. Responses providers use these
    * to preserve the opaque item id/encrypted payload needed for stateless replay;
-   * the other wire families can ignore them and relay the text deltas normally. */
-  | { type: "reasoning_start"; id?: string }
+   * the other wire families can ignore them and relay the text deltas normally.
+   *
+   * `redacted` marks an Anthropic `redacted_thinking` block: encrypted bytes the
+   * model produced in place of readable thinking. It has NO deltas at all — the
+   * payload arrives whole on the block's start event and rides in `signature` —
+   * so a consumer that only watches `reasoning_delta` would see the block as
+   * empty and drop it. Only a same-family replay can restore such a block; every
+   * other family must discard it rather than invent text for it. */
+  | { type: "reasoning_start"; id?: string; signature?: string; redacted?: boolean }
   | { type: "reasoning_delta"; text: string }
-  | { type: "reasoning_stop"; id?: string; signature?: string }
+  | { type: "reasoning_stop"; id?: string; signature?: string; redacted?: boolean }
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
@@ -194,6 +201,10 @@ export async function collectStream(
         break;
       case "reasoning_start":
         currentReasoning = { type: "reasoning", text: "", itemId: ev.id };
+        // A redacted block carries its whole opaque payload here and streams no
+        // deltas; recording it at `start` is the only chance to keep it.
+        if (ev.redacted) currentReasoning.redacted = true;
+        if (ev.signature) currentReasoning.signature = ev.signature;
         reasoningParts.push(currentReasoning);
         break;
       case "reasoning_delta":
@@ -210,6 +221,7 @@ export async function collectStream(
         }
         if (ev.id) currentReasoning.itemId = ev.id;
         if (ev.signature) currentReasoning.signature = ev.signature;
+        if (ev.redacted) currentReasoning.redacted = true;
         currentReasoning = null;
         break;
       case "tool_start":
@@ -230,7 +242,10 @@ export async function collectStream(
   }
 
   const content: ContentPart[] = [];
-  content.push(...reasoningParts.filter((p) => p.text || p.signature));
+  // A redacted block is kept on its `redacted` flag alone: its text is empty by
+  // definition, and dropping it would silently break the next tool-call turn,
+  // which has to replay the block back to the upstream that issued it.
+  content.push(...reasoningParts.filter((p) => p.text || p.signature || p.redacted));
   if (text) content.push({ type: "text", text });
   for (const index of toolOrder) {
     const tc = toolByIndex.get(index)!;
@@ -307,13 +322,18 @@ export async function* fabricateStream(
         await pace(piece.length);
       }
     } else if (p.type === "reasoning") {
-      yield { type: "reasoning_start", id: p.itemId };
+      // The redacted flag and the opaque payload ride on both boundary events:
+      // a same-family serializer needs them at `start` (the block's own wire
+      // form carries the data up front) and the buffered collector reads them
+      // back at either end.
+      const redacted = p.redacted === true;
+      yield { type: "reasoning_start", id: p.itemId, ...(redacted ? { redacted: true, signature: p.signature } : {}) };
       for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
         const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
         yield { type: "reasoning_delta", text: piece };
         await pace(piece.length);
       }
-      yield { type: "reasoning_stop", id: p.itemId, signature: p.signature };
+      yield { type: "reasoning_stop", id: p.itemId, signature: p.signature, ...(redacted ? { redacted: true } : {}) };
     } else if (p.type === "tool_use") {
       yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };

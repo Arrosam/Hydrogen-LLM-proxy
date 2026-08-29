@@ -54,10 +54,10 @@ describe("transcription transport", () => {
 
   it("runs the step chain and returns the transcript text", async () => {
     const catalog = {
-      resolve: () => ({
+      resolveWithin: () => ({
         ok: true,
         target: {
-          family: "openai_completion", upstreamModel: "whisper-1",
+          family: "openai_completion", upstreamModel: "whisper-1", endpointIndex: 0,
           upstream: { type: "openai_completion", baseUrl: "http://u.test/v1", apiKey: "k", extraHeaders: null },
         },
       }),
@@ -82,11 +82,23 @@ describe("transcription transport", () => {
     expect(seen[0].contentType).toContain("multipart/form-data");
   });
 
-  it("rejects an Anthropic-family step with a clear error", async () => {
-    const catalog = { resolve: () => ({ ok: true, target: { family: "anthropic", upstream: {} } }) } as unknown as Catalog;
+  it("rejects a step whose mapping enables no OpenAI endpoint, with a clear error", async () => {
+    // What the constrained resolve reports for an Anthropic-only mapping: the
+    // endpoint pool is empty rather than "the target happens to be Anthropic".
+    const catalog = { resolveWithin: () => ({ ok: false, error: "no_endpoint_in_family" }) } as unknown as Catalog;
     const transport = { postJson: async () => { throw new Error(); }, postStream: async () => { throw new Error(); } } as unknown as Transport;
     const out = await transcribeAudio({ timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] }, { data: AUDIO_B64, format: "wav" }, { catalog, transport });
     expect(out.result.ok).toBe(false);
-    expect((out.result as { message: string }).message).toContain("OpenAI-compatible");
+    expect((out.result as { message: string }).message).toContain("OpenAI-compatible endpoint");
+    // A config fault, not a network blip: retrying the same step cannot help.
+    expect((out.result as { kind: string }).kind).toBe("error");
+  });
+
+  it("an unmapped pair still reports the mapping error, not the endpoint one", async () => {
+    const catalog = { resolveWithin: () => ({ ok: false, error: "mapping_not_found" }) } as unknown as Catalog;
+    const transport = { postJson: async () => { throw new Error(); }, postStream: async () => { throw new Error(); } } as unknown as Transport;
+    const out = await transcribeAudio({ timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] }, { data: AUDIO_B64, format: "wav" }, { catalog, transport });
+    expect(out.result.ok).toBe(false);
+    expect((out.result as { message: string }).message).toContain("mapping m@p: mapping_not_found");
   });
 });

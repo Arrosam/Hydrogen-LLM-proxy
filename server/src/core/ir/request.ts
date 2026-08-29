@@ -15,6 +15,20 @@ export interface RequestData {
   /** The model field as sent by the client (a Model Service / Micro Agent name). */
   requestedService: string;
   system?: string;
+  /**
+   * The Anthropic `system` exactly as the client sent it, when it sent a block
+   * array rather than a string. Flattening it to `system` text loses each
+   * block's `cache_control`, and with it the prompt-cache breakpoint on what is
+   * usually the largest, most stable part of the request.
+   *
+   * Only an Anthropic egress can use these; every other family renders the
+   * flattened `system` text as before. They are advisory, never authoritative:
+   * the renderer replays them ONLY while they still flatten to the current
+   * `system` string, so any override, stage rebuild, or appended tool reference
+   * that changed the prompt automatically discards them instead of silently
+   * resurrecting the prompt the client originally sent.
+   */
+  systemBlocks?: unknown[];
   messages: Message[];
   tools?: Tool[];
   toolChoice?: ToolChoice;
@@ -40,6 +54,7 @@ export interface RenderTarget {
 export abstract class Request implements RequestData {
   requestedService: string;
   system?: string;
+  systemBlocks?: unknown[];
   messages: Message[];
   tools?: Tool[];
   toolChoice?: ToolChoice;
@@ -49,6 +64,7 @@ export abstract class Request implements RequestData {
   constructor(data: RequestData) {
     this.requestedService = data.requestedService;
     this.system = data.system;
+    this.systemBlocks = data.systemBlocks;
     this.messages = data.messages;
     this.tools = data.tools;
     this.toolChoice = data.toolChoice;
@@ -78,6 +94,7 @@ export abstract class Request implements RequestData {
     return {
       requestedService: this.requestedService,
       system: this.system,
+      systemBlocks: this.systemBlocks,
       messages: this.messages,
       tools: this.tools,
       toolChoice: this.toolChoice,

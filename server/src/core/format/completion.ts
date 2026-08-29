@@ -27,6 +27,7 @@ import {
   safeJsonParse,
   strOrUndef,
 } from "./wire";
+import { FormatConversionError } from "./errors";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -81,10 +82,17 @@ function coerceContentToParts(content: unknown): ContentPart[] {
       parts.push({ type: "image", source: parseDataUrl(url) });
     } else if (t === "file") {
       const f = ((item as Record<string, unknown>).file ?? {}) as Record<string, unknown>;
+      const name = f.filename != null ? String(f.filename) : undefined;
       const data = String(f.file_data ?? "");
+      const fileId = strOrUndef(f.file_id);
       if (data) {
         const src = data.startsWith("data:") ? parseDataUrl(data) : { kind: "base64" as const, mediaType: "application/pdf", data };
-        parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name: f.filename != null ? String(f.filename) : undefined });
+        parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name });
+      } else if (fileId) {
+        // Kept rather than dropped: a same-family replay restores the reference
+        // exactly, and any other family now rejects it loudly instead of
+        // quietly sending a request with the attachment missing.
+        parts.push({ type: "file", source: { kind: "file_id", id: fileId, family: "openai_completion" }, name });
       }
     } else if (t === "input_audio") {
       // No canonical audio type: keep verbatim for same-family replay.
@@ -99,9 +107,41 @@ function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"]):
   return { type: "image_url", image_url: { url } };
 }
 
+/**
+ * This wire carries a file either inline (`file_data`, a base64 data URL) or as
+ * a handle into the provider's own storage (`file_id`). It has no field for a
+ * remote URL.
+ *
+ * A URL used to be written into `file_data` verbatim. That field means "the
+ * file's bytes", so the upstream saw a document whose content was the literal
+ * string "https://..." -- most OpenAI-compatible servers reject the request
+ * outright, and one that doesn't silently answers about the wrong content.
+ *
+ * A URL normally never reaches this point: the file pre-pass downloads it and
+ * hands the renderer real bytes before this family is rendered (see
+ * execution/fileFetch.ts). Rendering is synchronous and cannot fetch, so if one
+ * does arrive here -- a transport with no GET, a caller rendering directly --
+ * the only honest answer is to fail loudly rather than invent a document.
+ */
 function filePartToOpenAI(p: Extract<ContentPart, { type: "file" }>): unknown {
-  const data = p.source.kind === "base64" ? `data:${p.source.mediaType};base64,${p.source.data}` : p.source.url;
-  return { type: "file", file: { ...(p.name ? { filename: p.name } : {}), file_data: data } };
+  const named = p.name ? { filename: p.name } : {};
+  switch (p.source.kind) {
+    case "base64":
+      return { type: "file", file: { ...named, file_data: `data:${p.source.mediaType};base64,${p.source.data}` } };
+    case "file_id":
+      if (p.source.family !== "openai_completion") {
+        throw new FormatConversionError(
+          `cannot send a ${p.source.family} file_id ("${p.source.id}") to an OpenAI Chat Completions provider: ` +
+            `a file id only resolves in the API that issued it`,
+        );
+      }
+      return { type: "file", file: { ...named, file_id: p.source.id } };
+    case "url":
+      throw new FormatConversionError(
+        `cannot send a URL file attachment (${p.source.url}) to an OpenAI Chat Completions provider: ` +
+          `this format carries files inline (file_data) or by file_id, and a URL is neither`,
+      );
+  }
 }
 
 function openAiUserContent(parts: ContentPart[]): unknown {
@@ -393,7 +433,11 @@ export class OpenAICompletionRequest extends Request {
     for (const m of stripStaleReasoning(this.messages)) {
       if (m.role === "assistant") {
         const textParts = m.content.filter((p): p is TextPart => p.type === "text");
-        const reasoningParts = m.content.filter((p) => p.type === "reasoning");
+        // An Anthropic redacted_thinking block carries encrypted bytes and no
+        // readable text. This wire has no field for it, and its opaque payload
+        // must not be handed to another provider, so it is dropped rather than
+        // replayed as an empty reasoning string.
+        const reasoningParts = m.content.filter((p) => p.type === "reasoning" && !p.redacted);
         const toolUses = m.content.filter((p) => p.type === "tool_use");
         const entry: Record<string, unknown> = { role: "assistant", ...(m.name ? { name: m.name } : {}) };
         entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
@@ -529,7 +573,8 @@ export class OpenAICompletionResponse extends Response {
 
   renderSelf(model: string): Record<string, unknown> {
     const text = this.text();
-    const reasoningParts = this.content.filter((p) => p.type === "reasoning");
+    // Redacted blocks belong to the Anthropic wire only (see render()).
+    const reasoningParts = this.content.filter((p) => p.type === "reasoning" && !p.redacted);
     const toolUses = this.content.filter((p) => p.type === "tool_use");
     const message: Record<string, unknown> = { role: "assistant", content: text || null };
     if (reasoningParts.length) {

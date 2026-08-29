@@ -19,11 +19,24 @@ export interface ImagePart {
   cacheControl?: unknown;
 }
 
+/**
+ * How a file's bytes are reached.
+ *
+ * `file_id` is a handle into ONE provider's own file storage, so it is scoped to
+ * the family that issued it: replayed verbatim to that family, and never
+ * translated into another's (the id means nothing there, and a family that
+ * cannot express it must say so rather than drop the attachment silently).
+ */
+export type FileSource =
+  | { kind: "base64"; mediaType: string; data: string }
+  | { kind: "url"; url: string }
+  | { kind: "file_id"; id: string; family: "openai_completion" | "anthropic" | "openai_responses" };
+
 /** A document/file attachment (PDF etc.): Anthropic `document`, Responses
  * `input_file`, Chat Completions `file` content part. */
 export interface FilePart {
   type: "file";
-  source: { kind: "base64"; mediaType: string; data: string } | { kind: "url"; url: string };
+  source: FileSource;
   name?: string;
   cacheControl?: unknown;
 }

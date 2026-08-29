@@ -3,7 +3,7 @@ import { buildHeaders, transcriptionsUrl } from "../core/upstream/endpoints";
 import { extractUpstreamMessage } from "../core/proxy/errors";
 import { runSteps, type RunOutput } from "./steps";
 import type { ServiceSteps } from "./definition";
-import type { Catalog } from "../catalog/catalog";
+import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
 import type { Transport } from "../core/upstream/transport";
 
 /**
@@ -52,12 +52,16 @@ export async function transcribeAudio(
   opts: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<RunOutput<string>> {
   return runSteps<string>(def, async (step) => {
-    const res = deps.catalog.resolve(step.model, step.provider);
+    // /audio/transcriptions is an OpenAI-shaped route, so the endpoint has to be
+    // one -- which a provider whose primary is Anthropic can still offer through
+    // a declared alternate.
+    const res = deps.catalog.resolveWithin(step.model, step.provider, MEDIA_FAMILIES);
     if (!res.ok) {
-      return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
-    }
-    if (res.target.family === "anthropic") {
-      return { ok: false, status: 0, kind: "error", message: `audio transcription (ASR) requires an OpenAI-compatible provider (got Anthropic '${step.provider}')` };
+      const message =
+        res.error === "no_endpoint_in_family"
+          ? `audio transcription (ASR) requires an OpenAI-compatible endpoint: ${step.model}@${step.provider} has none enabled (add an OpenAI alternate endpoint to the provider and enable it on the mapping)`
+          : `mapping ${step.model}@${step.provider}: ${res.error}`;
+      return { ok: false, status: 0, kind: "error", message };
     }
     if (!deps.transport.postRaw) {
       return { ok: false, status: 0, kind: "error", message: "transport does not support multipart uploads (ASR)" };

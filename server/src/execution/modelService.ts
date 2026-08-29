@@ -1,6 +1,7 @@
 import { buildRequest } from "../core/format/registry";
-import type { RequestOverrides } from "../core/ir/params";
+import type { Family, RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
+import { inlineUrlFiles, needsUrlFileInlining } from "./fileFetch";
 import { fabricateStream } from "../core/ir/stream";
 import type { SendTarget, Transport } from "../core/upstream/transport";
 import type { Catalog } from "../catalog/catalog";
@@ -86,6 +87,20 @@ export class ModelService {
     return merged;
   }
 
+  /** Inline any URL attachment the egress family cannot carry, announcing the
+   * download so a slow fetch is visible in the live progress feed rather than
+   * looking like the upstream hanging. */
+  private async inlineFiles(
+    merged: Request,
+    family: Family,
+    prog: ProgressRecorder | null,
+    opts: { timeoutMs: number; signal?: AbortSignal },
+  ): Promise<Request> {
+    if (!needsUrlFileInlining(merged, family)) return merged;
+    prog?.record("llm", "llm.files", `downloading URL attachment(s) to inline for ${family}`, { family });
+    return inlineUrlFiles(merged, family, this.deps.transport, opts);
+  }
+
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const prog = opts.progress ?? null;
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
@@ -97,13 +112,18 @@ export class ModelService {
       }
       const t = res.target;
       const merged = this.merge(request, step, overrides);
-      const egress = buildRequest(t.family, merged.data());
+      const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
+      // A URL attachment this family cannot carry is downloaded and inlined
+      // first (see fileFetch). Resolved per step, because the very same request
+      // needs no pre-pass at all on a family that takes URLs natively.
+      const ready = await this.inlineFiles(merged, t.family, prog, { timeoutMs, signal: opts.signal });
+      const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
         providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
+        timeoutMs,
         signal: opts.signal,
       };
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
@@ -187,13 +207,15 @@ export class ModelService {
       }
       const t = res.target;
       const merged = this.merge(request, step, overrides);
-      const egress = buildRequest(t.family, merged.data());
+      const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
+      const ready = await this.inlineFiles(merged, t.family, prog, { timeoutMs, signal: opts.signal });
+      const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
         providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs: opts.timeoutMs ?? this.def.timeoutMs,
+        timeoutMs,
         signal: opts.signal,
       };
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });

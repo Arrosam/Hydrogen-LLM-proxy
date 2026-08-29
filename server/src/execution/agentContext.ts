@@ -163,6 +163,12 @@ export function buildStageRequest(
   const data: RequestData = {
     requestedService: request.requestedService,
     system,
+    // Carried, not re-derived: an Anthropic stage that runs the client's own
+    // system prompt unchanged keeps its cache_control breakpoints. When this
+    // stage overrode the prompt or appended the tool reference above, `system`
+    // no longer matches these blocks and the Anthropic renderer drops them --
+    // it replays them only while they still flatten to the effective prompt.
+    systemBlocks: request.systemBlocks,
     messages,
     tools,
     toolChoice,

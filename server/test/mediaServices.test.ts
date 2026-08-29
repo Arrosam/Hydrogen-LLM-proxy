@@ -155,10 +155,10 @@ describe("service category schema & validation", () => {
     expect(def.stages).toHaveLength(1);
   });
 
-  it("a non-chat service on an Anthropic provider is rejected", () => {
+  it("a non-chat service on an Anthropic-only provider is rejected", () => {
     expect(() =>
       c.validator.validate({ category: "image", timeoutMs: 10_000, steps: [{ model: "m1", provider: "anthro" }] }),
-    ).toThrowError(/image services require an OpenAI-compatible provider/);
+    ).toThrowError(/image services require an OpenAI-compatible endpoint, and this mapping enables none/);
   });
 
   it("the runtime resolver refuses a non-chat service (defense in depth)", () => {
@@ -305,7 +305,9 @@ describe("JSON passthrough (embedding / rerank / image / video)", () => {
     });
     expect(created.statusCode).toBe(200);
     const id = created.json().id as string;
-    expect(id).toBe(`video_abc-h${videoServiceId}x${providerId}`);
+    // ...and the endpoint it was created on (e0 = the provider's primary), so a
+    // poll cannot land on a different endpoint of a multi-endpoint provider.
+    expect(id).toBe(`video_abc-h${videoServiceId}x${providerId}e0`);
 
     upstream.setHandler(jsonHandler(200, { id: "video_abc", status: "completed" }));
     const polled = await app.inject({ method: "GET", url: `/v1/videos/${id}`, headers: auth() });

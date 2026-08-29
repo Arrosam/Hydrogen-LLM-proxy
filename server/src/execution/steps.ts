@@ -124,6 +124,12 @@ export function classifyError(e: unknown): { kind: FailureKind; message: string 
   }
   // A rejected upstream URL is a configuration fault; retrying repeats it.
   if (name === "UpstreamUrlError") return { kind: "error", message };
+  // The request carries something this egress family cannot express (a URL file
+  // for an inline-only family, another family's file_id). Rendering it again
+  // produces the identical failure, so it is a fault rather than a network
+  // blip -- but a later step on a family that CAN express it still gets its turn
+  // through the normal advance rules.
+  if (name === "FormatConversionError") return { kind: "error", message };
   // Anything else thrown out of a send is the connection dying: undici socket
   // errors, resets, a stream that stopped mid-body. Those are worth retrying.
   return { kind: "network", message };

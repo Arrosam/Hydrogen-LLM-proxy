@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AnthropicRequest, OpenAICompletionRequest } from "../src/core/format";
 import type { GenerationParams } from "../src/core/ir/params";
+import { DEFAULT_ANTHROPIC_MAX_TOKENS } from "../src/core/ir/thinking";
 
 function base(params: GenerationParams): OpenAICompletionRequest {
   return new OpenAICompletionRequest({
@@ -111,7 +112,7 @@ describe("Anthropic thinking is pinned, never omitted (the 4028 fix)", () => {
     // No client budget: still prefer the provider's cap over the built-in default.
     expect(anthropic({}, 8192).max_tokens).toBe(8192);
     expect(anthropic({ maxTokens: 99999 }, 8192).max_tokens).toBe(8192);
-    expect(anthropic({}).max_tokens).toBe(4096);
+    expect(anthropic({}).max_tokens).toBe(DEFAULT_ANTHROPIC_MAX_TOKENS);
   });
 
   it("renders a disable for a real Anthropic request that omits thinking", () => {

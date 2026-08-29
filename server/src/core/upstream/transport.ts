@@ -27,6 +27,15 @@ export interface Transport {
     body: Buffer | string,
     opts: TransportOptions,
   ): Promise<TransportJsonResult>;
+  /** GET returning the raw response stream (binary downloads: video content, and
+   * the file pre-pass that inlines a URL attachment). Optional for the same
+   * reason as `postRaw`. The implementation runs the SSRF guard on the URL it is
+   * given, so a caller following redirects must call it once per hop. */
+  getStream?(
+    url: string,
+    headers: Record<string, string>,
+    opts: TransportOptions,
+  ): Promise<TransportStreamResult>;
 }
 
 export interface TransportOptions {

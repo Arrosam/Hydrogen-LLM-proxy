@@ -4,6 +4,7 @@ import {
   normalizeMessages,
   orderReasoningFirst,
   type ContentPart,
+  type FileSource,
   type ImagePart,
   type Message,
   type StopReason,
@@ -16,6 +17,7 @@ import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
 import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire";
+import { FormatConversionError } from "./errors";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -103,9 +105,16 @@ function blocksToParts(content: unknown): ContentPart[] {
         break;
       case "document": {
         const src = (b.source ?? {}) as Record<string, unknown>;
-        if (src.type === "url") parts.push({ type: "file", source: { kind: "url", url: String(src.url ?? "") }, name: b.title != null ? String(b.title) : undefined, ...cc });
+        const title = b.title != null ? String(b.title) : undefined;
+        if (src.type === "url") parts.push({ type: "file", source: { kind: "url", url: String(src.url ?? "") }, name: title, ...cc });
         else if (src.type === "text") parts.push({ type: "text", text: String(src.data ?? ""), ...cc });
-        else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? "application/pdf"), data: String(src.data) }, name: b.title != null ? String(b.title) : undefined, ...cc });
+        // A handle into Anthropic's own Files API. Kept like the other families'
+        // ids: replayed verbatim here, and refused loudly elsewhere rather than
+        // dropped, which would send the prompt on without its attachment.
+        else if (src.type === "file" && typeof src.file_id === "string" && src.file_id) {
+          parts.push({ type: "file", source: { kind: "file_id", id: src.file_id, family: "anthropic" }, name: title, ...cc });
+        }
+        else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? "application/pdf"), data: String(src.data) }, name: title, ...cc });
         break;
       }
       case "tool_use":
@@ -123,6 +132,28 @@ function blocksToParts(content: unknown): ContentPart[] {
     }
   }
   return parts;
+}
+
+/**
+ * A canonical file source as an Anthropic `document.source`. This wire takes
+ * inline base64, remote URLs, and its own Files API ids. A file id from ANOTHER
+ * family is the one shape it cannot carry: id spaces do not overlap, so
+ * forwarding a foreign id either 404s upstream or, worse, resolves to an
+ * unrelated document.
+ */
+function documentSource(source: FileSource): unknown {
+  switch (source.kind) {
+    case "url":
+      return { type: "url", url: source.url };
+    case "base64":
+      return { type: "base64", media_type: source.mediaType, data: source.data };
+    case "file_id":
+      if (source.family === "anthropic") return { type: "file", file_id: source.id };
+      throw new FormatConversionError(
+        `cannot send a ${source.family} file_id ("${source.id}") to an Anthropic provider: ` +
+          `a file id only resolves in the API that issued it`,
+      );
+  }
 }
 
 function partsToBlocks(parts: ContentPart[]): unknown[] {
@@ -144,7 +175,7 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
       case "file":
         blocks.push({
           type: "document",
-          source: p.source.kind === "url" ? { type: "url", url: p.source.url } : { type: "base64", media_type: p.source.mediaType, data: p.source.data },
+          source: documentSource(p.source),
           ...(p.name ? { title: p.name } : {}),
           ...cc(p),
         });
@@ -293,6 +324,10 @@ export class AnthropicRequest extends Request {
     return new AnthropicRequest({
       requestedService: String(body.model ?? ""),
       system: systemToText(body.system),
+      // A block array carries per-block cache_control that the flattened text
+      // cannot; keep it for a same-family replay. A plain string system has
+      // nothing extra to preserve, so it stays text-only.
+      systemBlocks: Array.isArray(body.system) ? body.system : undefined,
       // Reasoning is NOT stripped here: what a target may be sent back is the
       // egress family's rule, applied in render().
       messages: normalizeMessages(messages),
@@ -330,7 +365,18 @@ export class AnthropicRequest extends Request {
     const cap = target.providerMaxOutputTokens;
 
     const out: Record<string, unknown> = { model: target.upstreamModel, messages };
-    if (this.system) out.system = this.system;
+    // Replay the client's own system blocks when they are still the prompt being
+    // sent -- that is what keeps a `cache_control` breakpoint on the system
+    // prompt alive across an Anthropic -> Anthropic hop.
+    //
+    // "Still the prompt" is decided by flattening them and comparing with the
+    // effective `system`, rather than by tracking every place that can change
+    // it. A step or stage override, a Micro Agent stage rebuild, an appended
+    // tool reference: each rewrites `system`, and each therefore drops the stale
+    // blocks here automatically. Nothing downstream has to remember to.
+    const replayable = this.systemBlocks && systemToText(this.systemBlocks) === this.system;
+    if (replayable) out.system = this.systemBlocks;
+    else if (this.system) out.system = this.system;
     if (this.tools) {
       // Same-family server tools replay verbatim; another family's are dropped
       // (they cannot be expressed here) rather than sent as empty client tools.
@@ -461,10 +507,16 @@ export class AnthropicResponse extends Response {
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens: number | undefined;
+    // Cache WRITES are reported here too, and were the one usage field the
+    // streaming path dropped while the buffered path kept it -- so the same
+    // request billed a cache write invisibly when it streamed.
+    let cacheCreationInputTokens: number | undefined;
     const toolBlocks = new Set<number>();
     // Thinking blocks stream their signature in a trailing signature_delta;
-    // hold it per block and attach it to the reasoning_stop.
-    const thinkingBlocks = new Map<number, { signature?: string }>();
+    // hold it per block and attach it to the reasoning_stop. A redacted block is
+    // the exception: its opaque bytes arrive whole in content_block_start.data
+    // and no delta of any kind follows, so the payload is captured there.
+    const thinkingBlocks = new Map<number, { signature?: string; redacted?: boolean }>();
 
     for await (const frame of parseSSE(readable)) {
       const data = safeParseJson(frame.data);
@@ -477,6 +529,7 @@ export class AnthropicResponse extends Response {
           const usage = (message.usage ?? {}) as Record<string, unknown>;
           inputTokens = num(usage.input_tokens);
           if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
+          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
           yield { type: "start", id: String(message.id ?? genId("msg")), model: String(message.model ?? ""), created: nowSeconds(), inputTokens };
           break;
         }
@@ -487,8 +540,10 @@ export class AnthropicResponse extends Response {
             toolBlocks.add(index);
             yield { type: "tool_start", index, id: String(block.id ?? genId("toolu")), name: String(block.name ?? "") };
           } else if (block.type === "thinking" || block.type === "redacted_thinking") {
-            thinkingBlocks.set(index, {});
-            yield { type: "reasoning_start" };
+            const redacted = block.type === "redacted_thinking";
+            const data = redacted && typeof block.data === "string" && block.data ? block.data : undefined;
+            thinkingBlocks.set(index, { signature: data, redacted });
+            yield { type: "reasoning_start", ...(redacted ? { redacted: true, signature: data } : {}) };
           }
           break;
         }
@@ -512,7 +567,7 @@ export class AnthropicResponse extends Response {
           } else if (thinkingBlocks.has(index)) {
             const tb = thinkingBlocks.get(index)!;
             thinkingBlocks.delete(index);
-            yield { type: "reasoning_stop", signature: tb.signature };
+            yield { type: "reasoning_stop", signature: tb.signature, ...(tb.redacted ? { redacted: true } : {}) };
           }
           break;
         }
@@ -521,15 +576,26 @@ export class AnthropicResponse extends Response {
           if (delta.stop_reason) stopReason = stopReasonToStop(delta.stop_reason as string);
           const usage = (data.usage ?? {}) as Record<string, unknown>;
           if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
-          // Some providers report the real prompt count only here.
+          // Some providers report the real prompt count -- and the cache
+          // counters -- only here, at the end.
           if (num(usage.input_tokens) > 0) inputTokens = num(usage.input_tokens);
+          if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
+          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
           break;
         }
         case "message_stop": {
           const stopUsage = (data.usage ?? {}) as Record<string, unknown>;
           if (num(stopUsage.output_tokens) > 0) outputTokens = num(stopUsage.output_tokens);
           if (num(stopUsage.input_tokens) > 0) inputTokens = num(stopUsage.input_tokens);
-          yield { type: "finish", stopReason, usage: { promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens, ...(cachedInputTokens != null ? { cachedInputTokens } : {}) } };
+          yield {
+            type: "finish",
+            stopReason,
+            usage: {
+              promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens,
+              ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+              ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+            },
+          };
           return;
         }
         default:
@@ -550,6 +616,10 @@ export class AnthropicResponse extends Response {
     let textIndex = 0;
     let reasoningOpen = false;
     let reasoningIndex = 0;
+    // A redacted block must be reproduced as `redacted_thinking` with its opaque
+    // data, not dressed up as a `thinking` block: a client replaying an empty
+    // thinking block back to the upstream gets the whole request rejected.
+    let reasoningRedacted = false;
     const toolMap = new Map<number, number>();
 
     const frame = (event: string, data: Record<string, unknown>): string =>
@@ -580,22 +650,38 @@ export class AnthropicResponse extends Response {
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
-            yield frame("content_block_start", { index: reasoningIndex, content_block: { type: "thinking", thinking: "" } });
+            reasoningRedacted = ev.redacted === true;
+            yield frame("content_block_start", {
+              index: reasoningIndex,
+              content_block: reasoningRedacted
+                ? { type: "redacted_thinking", data: ev.signature ?? "" }
+                : { type: "thinking", thinking: "" },
+            });
           }
           break;
         case "reasoning_delta":
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
+            reasoningRedacted = false;
             yield frame("content_block_start", { index: reasoningIndex, content_block: { type: "thinking", thinking: "" } });
           }
-          yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "thinking_delta", thinking: ev.text } });
+          // A redacted block has no readable thinking to delta; the wire form
+          // carries everything it has on the block itself.
+          if (!reasoningRedacted) {
+            yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "thinking_delta", thinking: ev.text } });
+          }
           break;
         case "reasoning_stop":
           if (reasoningOpen) {
-            if (ev.signature) yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.signature } });
+            // signature_delta belongs to a thinking block; a redacted block's
+            // bytes already went out in its content_block_start.data.
+            if (ev.signature && !reasoningRedacted) {
+              yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.signature } });
+            }
             yield frame("content_block_stop", { index: reasoningIndex });
             reasoningOpen = false;
+            reasoningRedacted = false;
           }
           break;
         case "tool_start": {

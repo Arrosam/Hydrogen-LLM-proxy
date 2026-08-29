@@ -45,6 +45,21 @@ describe("fuzzyRewriteUrl", () => {
     expect(fuzzyRewriteUrl("POST", "//v1/messages?beta=true", h)).toBe("/v1/messages?beta=true");
   });
 
+  // Every dashboard SPA route has to survive the rewriter untouched. One that
+  // collides with a SUFFIXES entry is answered with a JSON auth error instead of
+  // the page on refresh, bookmark, or a pasted URL -- in-app navigation still
+  // works, which is what hides it. "/models" did exactly that until the page was
+  // renamed to "/model". Keep this list in step with web/src/App.tsx.
+  it("leaves every dashboard SPA route alone", () => {
+    const SPA_ROUTES = [
+      "/", "/check", "/providers", "/model", "/services", "/micro-agents",
+      "/tokens", "/logs", "/active-requests", "/users", "/settings",
+    ];
+    for (const route of SPA_ROUTES) {
+      expect(fuzzyRewriteUrl("GET", route, h)).toBe(route);
+    }
+  });
+
   it("never touches the dashboard, health, assets, or already-correct routes", () => {
     expect(fuzzyRewriteUrl("POST", "/admin/api/login", h)).toBe("/admin/api/login");
     expect(fuzzyRewriteUrl("GET", "/healthz", h)).toBe("/healthz");

@@ -1,4 +1,4 @@
-import type { Catalog } from "../catalog/catalog";
+import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
 import type { ServiceRepo } from "../persistence/serviceRepo";
 import { isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
 
@@ -144,8 +144,11 @@ export class ServiceValidator {
             throw new ServiceValidationError(`audio transcription (ASR) references "${a.service}", a ${cat ?? "chat"} service — it must be an stt (speech-to-text) Model Service`, []);
           }
         } else if (a.steps && a.steps.length) {
+          // Inline ASR steps call /audio/transcriptions directly, so they carry
+          // the same OpenAI-endpoint requirement an stt service would.
           for (const st of a.steps) {
-            if (!this.catalog.exists(st.model, st.provider)) invalidPairs.push(`${st.model}@${st.provider}`);
+            const bad = this.requireMediaEndpoint(st.model, st.provider, "audio transcription (ASR) steps");
+            if (bad) invalidPairs.push(bad);
           }
         } else {
           throw new ServiceValidationError("audio transcription (ASR) is enabled but has no model (pick an stt Model Service)", []);
@@ -154,20 +157,17 @@ export class ServiceValidator {
     } else {
       const category = serviceCategory(def);
       for (const step of def.steps) {
-        const res = this.catalog.resolve(step.model, step.provider);
-        if (!res.ok) {
-          invalidPairs.push(`${step.model}@${step.provider}`);
+        // Chat-pipeline categories (chat, ocr) translate, so any family works.
+        if (isChatPipeline(category)) {
+          if (!this.catalog.exists(step.model, step.provider)) invalidPairs.push(`${step.model}@${step.provider}`);
           continue;
         }
-        // Media passthrough categories are OpenAI-style endpoints; an
-        // Anthropic provider has no such API surface. Chat-pipeline
-        // categories (chat, ocr) translate, so any provider family works.
-        if (!isChatPipeline(category) && res.target.family === "anthropic") {
-          throw new ServiceValidationError(
-            `step ${step.model}@${step.provider}: ${category} services require an OpenAI-compatible provider`,
-            [],
-          );
-        }
+        // Media passthrough categories are OpenAI-shaped routes. Validate with
+        // the SAME endpoint selection the runtime uses, so a provider whose
+        // primary is Anthropic but which serves an enabled OpenAI alternate
+        // passes here exactly as it will succeed there.
+        const media = this.requireMediaEndpoint(step.model, step.provider, `${category} services`);
+        if (media) invalidPairs.push(media);
       }
     }
 
@@ -178,6 +178,24 @@ export class ServiceValidator {
       );
     }
     return { def, summary: summarizeService(def) };
+  }
+
+  /**
+   * Check that a step can reach an OpenAI-shaped endpoint, the way the media
+   * controller and the ASR pre-pass resolve it at run time. Returns the pair to
+   * report as unmapped when the catalog has no entry at all, or null when the
+   * step is fine; a mapped pair with no usable endpoint throws directly, since
+   * "not mapped" would be the wrong diagnosis for it.
+   */
+  private requireMediaEndpoint(model: string, provider: string, what: string): string | null {
+    const res = this.catalog.resolveWithin(model, provider, MEDIA_FAMILIES);
+    if (res.ok) return null;
+    if (res.error !== "no_endpoint_in_family") return `${model}@${provider}`;
+    throw new ServiceValidationError(
+      `step ${model}@${provider}: ${what} require an OpenAI-compatible endpoint, and this mapping enables none ` +
+        `(add an OpenAI alternate endpoint to the provider and enable it on the mapping)`,
+      [],
+    );
   }
 
   /** The category of a saved service by name, or null when it can't be read. */

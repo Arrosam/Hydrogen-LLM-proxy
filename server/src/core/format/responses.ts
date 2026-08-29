@@ -5,6 +5,7 @@ import {
   stripStaleReasoning,
   textOf,
   type ContentPart,
+  type FileSource,
   type Message,
   type Tool,
   type ToolChoice,
@@ -25,6 +26,8 @@ import {
   safeJsonParse,
   strOrUndef,
 } from "./wire";
+import { FormatConversionError } from "./errors";
+import { decodeRedacted, encodeRedacted } from "./reasoningBridge";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -66,6 +69,11 @@ function contentToParts(content: unknown): ContentPart[] {
           const d = part.file_data;
           const src = d.startsWith("data:") ? parseDataUrl(d) : { kind: "base64" as const, mediaType: "application/pdf", data: d };
           parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name });
+        } else if (typeof part.file_id === "string" && part.file_id) {
+          // A handle into this API's own file storage. Kept so a Responses ->
+          // Responses hop restores it verbatim; another family cannot resolve
+          // it and now says so instead of dropping the attachment.
+          parts.push({ type: "file", source: { kind: "file_id", id: part.file_id, family: "openai_responses" }, name });
         }
         break;
       }
@@ -75,6 +83,28 @@ function contentToParts(content: unknown): ContentPart[] {
     }
   }
   return parts;
+}
+
+/**
+ * A canonical file source as this wire's `input_file` fields. Responses is the
+ * one family that expresses all three shapes -- inline bytes, a remote URL, and
+ * its own `file_id` -- so only a foreign file id is unrepresentable here.
+ */
+function inputFileRef(source: FileSource): Record<string, unknown> {
+  switch (source.kind) {
+    case "base64":
+      return { file_data: `data:${source.mediaType};base64,${source.data}` };
+    case "url":
+      return { file_url: source.url };
+    case "file_id":
+      if (source.family !== "openai_responses") {
+        throw new FormatConversionError(
+          `cannot send a ${source.family} file_id ("${source.id}") to an OpenAI Responses provider: ` +
+            `a file id only resolves in the API that issued it`,
+        );
+      }
+      return { file_id: source.id };
+  }
 }
 
 /** function_call_output "output": a string, or an array of text parts. */
@@ -300,7 +330,13 @@ export class OpenAIResponsesRequest extends Request {
           // front of them — the order every family wants.
           const text = reasoningItemText(item);
           const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
-          if (text || encrypted) {
+          // An Anthropic redacted block this proxy wrapped on the way out (see
+          // reasoningBridge): unwrap it so the canonical part is the redacted
+          // block again, and an Anthropic upstream gets the real thing back.
+          const unwrapped = encrypted ? decodeRedacted(encrypted) : null;
+          if (unwrapped) {
+            messages.push({ role: "assistant", content: [{ type: "reasoning", text: "", ...unwrapped }] });
+          } else if (text || encrypted) {
             messages.push({
               role: "assistant",
               content: [{
@@ -349,12 +385,7 @@ export class OpenAIResponsesRequest extends Request {
         } else if (p.type === "image") {
           parts.push({ type: "input_image", image_url: imageUrlOf(p.source) });
         } else if (p.type === "file") {
-          const data = p.source.kind === "base64" ? `data:${p.source.mediaType};base64,${p.source.data}` : undefined;
-          parts.push({
-            type: "input_file",
-            ...(p.name ? { filename: p.name } : {}),
-            ...(data ? { file_data: data } : { file_url: p.source.kind === "url" ? p.source.url : "" }),
-          });
+          parts.push({ type: "input_file", ...(p.name ? { filename: p.name } : {}), ...inputFileRef(p.source) });
         } else if (p.type === "opaque") {
           if (p.family === "openai_responses") parts.push(p.value as Record<string, unknown>);
         } else if (p.type === "tool_use") {
@@ -380,6 +411,9 @@ export class OpenAIResponsesRequest extends Request {
           // upstreams require the reasoning_text back in thinking-mode tool
           // loops; OpenAI pairs a replayed item with its original id and
           // encrypted_content, both preserved when the client sent them.
+          // An Anthropic redacted block is not replayable here at all: only the
+          // family that encrypted it can read it back.
+          if (p.redacted) continue;
           flushParts();
           input.push({
             type: "reasoning",
@@ -499,6 +533,18 @@ export class OpenAIResponsesResponse extends Response {
 
     for (const p of this.content) {
       if (p.type !== "reasoning" || (!p.text && !p.signature)) continue;
+      // A redacted block goes to the CLIENT wrapped, so the next turn can hand
+      // it back and reach an Anthropic upstream intact. This is the one place
+      // the envelope is created; requests bound for an upstream never carry it.
+      if (p.redacted) {
+        output.push({
+          type: "reasoning",
+          id: p.itemId ?? genId("rs"),
+          summary: [],
+          encrypted_content: encodeRedacted(p),
+        });
+        continue;
+      }
       output.push({
         type: "reasoning",
         id: p.itemId ?? genId("rs"),
@@ -618,8 +664,22 @@ export class OpenAIResponsesResponse extends Response {
             yield { type: "reasoning_stop", id: itemId, signature: encrypted };
             if (currentReasoningId === itemId) currentReasoningId = undefined;
           } else if (item.type === "function_call") {
-            const index = toolIndexByItem.get(String(item.id ?? ""));
-            if (index != null) yield { type: "tool_stop", index };
+            let index = toolIndexByItem.get(String(item.id ?? ""));
+            if (index == null) {
+              // No `output_item.added` opened this call. OpenAI itself always
+              // sends one, but compatible gateways routinely emit only the
+              // terminal item -- and it carries everything the call needs, so
+              // synthesizing it here keeps the whole tool call instead of
+              // dropping it silently. Arguments come from the item, since no
+              // delta ever arrived for them either.
+              sawToolCall = true;
+              index = nextToolIndex++;
+              toolIndexByItem.set(String(item.id ?? index), index);
+              yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
+              const args = typeof item.arguments === "string" ? item.arguments : "";
+              if (args) yield { type: "tool_args_delta", index, delta: args };
+            }
+            yield { type: "tool_stop", index };
           }
           break;
         }
@@ -721,6 +781,16 @@ export class OpenAIResponsesResponse extends Response {
       msgText = null;
     }
 
+    // An Anthropic redacted_thinking block has no native form here, so it is
+    // emitted as a summary-less reasoning item whose encrypted_content is this
+    // proxy's envelope (see reasoningBridge). The client replays the item next
+    // turn, `parse` unwraps it, and an Anthropic upstream sees its own block
+    // again -- which that upstream REQUIRES when the turn called tools.
+    //
+    // `redactedItemId` is set while such a block is open, so the deltas that
+    // never come for it cannot accidentally open a normal reasoning item.
+    let redactedItemId: string | null = null;
+
     for await (const ev of events) {
       switch (ev.type) {
         case "start":
@@ -729,11 +799,22 @@ export class OpenAIResponsesResponse extends Response {
           yield frame("response.in_progress", { response: response("in_progress") });
           break;
         case "reasoning_start":
+          if (ev.redacted) {
+            yield* closeMessage();
+            yield* closeReasoning();
+            redactedItemId = ev.id || genId("rs");
+            yield frame("response.output_item.added", {
+              output_index: outputIndex,
+              item: { id: redactedItemId, type: "reasoning", summary: [] },
+            });
+            break;
+          }
           yield* closeMessage();
           yield* closeReasoning();
           yield* openReasoning(ev.id);
           break;
         case "reasoning_delta":
+          if (redactedItemId) break; // a redacted block streams no text
           if (reasoningText == null) {
             yield* closeMessage();
             yield* openReasoning();
@@ -742,6 +823,20 @@ export class OpenAIResponsesResponse extends Response {
           yield frame("response.reasoning_summary_text.delta", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, delta: ev.text });
           break;
         case "reasoning_stop":
+          if (redactedItemId || ev.redacted) {
+            const id = redactedItemId ?? ev.id ?? genId("rs");
+            const item = {
+              id,
+              type: "reasoning",
+              summary: [],
+              encrypted_content: encodeRedacted({ type: "reasoning", text: "", redacted: true, signature: ev.signature }),
+            };
+            yield frame("response.output_item.done", { output_index: outputIndex, item });
+            output.push(item);
+            outputIndex++;
+            redactedItemId = null;
+            break;
+          }
           if (reasoningText == null) {
             yield* closeMessage();
             yield* openReasoning(ev.id);

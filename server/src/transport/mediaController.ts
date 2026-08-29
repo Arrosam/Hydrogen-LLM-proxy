@@ -1,10 +1,21 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
-import { buildHeaders, embeddingsUrl, imagesUrl, rerankUrl, speechUrl, transcriptionsUrl, videosUrl, type UpstreamProvider } from "../core/upstream/endpoints";
+import {
+  buildHeaders,
+  embeddingsUrl,
+  imagesUrl,
+  providerEndpoints,
+  rerankUrl,
+  servesOpenAiMedia,
+  speechUrl,
+  transcriptionsUrl,
+  videosUrl,
+  type UpstreamProvider,
+} from "../core/upstream/endpoints";
 import { readMultipartField, rewriteMultipartField } from "../core/upstream/multipart";
 import { classifyError, runSteps, type AttemptResult, type RunOutput } from "../execution/steps";
 import { isAgent, serviceCategory, stepOverrides, type ServiceCategory, type ServiceStep, type ServiceSteps } from "../execution/definition";
-import type { ResolvedTarget } from "../catalog/catalog";
+import { MEDIA_FAMILIES, type ResolvedTarget } from "../catalog/catalog";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import type { ModelServiceRow, Token } from "../db/schema";
@@ -70,16 +81,32 @@ function tokenAllowsService(token: Token, serviceId: number): boolean {
   return scope.includes(serviceId);
 }
 
-/** Video job ids are returned to the client with a routing suffix so polling
- * endpoints (which carry no model name) can find the provider statelessly. */
-function suffixVideoId(id: string, serviceId: number, providerId: number): string {
-  return `${id}-h${serviceId}x${providerId}`;
+/**
+ * Video job ids are returned to the client with a routing suffix so polling
+ * endpoints (which carry no model name) can find the provider statelessly.
+ *
+ * The suffix names the ENDPOINT too, not just the provider. A provider whose
+ * primary is Anthropic can still serve video through a declared OpenAI
+ * alternate; encoding only the provider would send the poll and the download to
+ * the primary base URL -- a different host from the one holding the job.
+ */
+function suffixVideoId(id: string, serviceId: number, providerId: number, endpointIndex: number): string {
+  return `${id}-h${serviceId}x${providerId}e${endpointIndex}`;
 }
 
-function parseVideoId(id: string): { upstreamId: string; serviceId: number; providerId: number } | null {
-  const m = /^(.+)-h(\d+)x(\d+)$/.exec(id);
+function parseVideoId(
+  id: string,
+): { upstreamId: string; serviceId: number; providerId: number; endpointIndex: number } | null {
+  // The endpoint group is optional: ids handed out before it existed always
+  // came from the primary endpoint, which is index 0.
+  const m = /^(.+)-h(\d+)x(\d+)(?:e(\d+))?$/.exec(id);
   if (!m) return null;
-  return { upstreamId: m[1], serviceId: Number(m[2]), providerId: Number(m[3]) };
+  return {
+    upstreamId: m[1],
+    serviceId: Number(m[2]),
+    providerId: Number(m[3]),
+    endpointIndex: m[4] != null ? Number(m[4]) : 0,
+  };
 }
 
 interface MediaHit {
@@ -158,12 +185,15 @@ export class MediaController {
     send: (step: ServiceStep, target: ResolvedTarget) => Promise<AttemptResult<MediaHit>>,
   ): Promise<RunOutput<MediaHit>> {
     return runSteps<MediaHit>(def, async (step) => {
-      const res = this.deps.catalog.resolve(step.model, step.provider);
+      // Constrained to the OpenAI-shaped endpoints: a provider that also
+      // declares one reaches it here even when its primary is Anthropic.
+      const res = this.deps.catalog.resolveWithin(step.model, step.provider, MEDIA_FAMILIES);
       if (!res.ok) {
-        return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
-      }
-      if (res.target.family === "anthropic") {
-        return { ok: false, status: 0, kind: "error", message: `${category} passthrough requires an OpenAI-compatible provider (got Anthropic '${step.provider}')` };
+        const message =
+          res.error === "no_endpoint_in_family"
+            ? `${category} passthrough requires an OpenAI-compatible endpoint: ${step.model}@${step.provider} has none enabled (add an OpenAI alternate endpoint to the provider and enable it on the mapping)`
+            : `mapping ${step.model}@${step.provider}: ${res.error}`;
+        return { ok: false, status: 0, kind: "error", message };
       }
       try {
         return await send(step, res.target);
@@ -248,7 +278,7 @@ export class MediaController {
     const hit = outcome.result.value;
     let json = hit.json as Record<string, unknown> | undefined;
     if (category === "video" && json && typeof json.id === "string") {
-      json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId) };
+      json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId, hit.target.endpointIndex) };
     }
     this.record(ctx, outcome, hit.status, usageFrom(category, json), hit.sentBody);
     if (keepalive.finish(json ?? hit.text)) return;
@@ -379,7 +409,23 @@ export class MediaController {
       if (!isAgent(def)) timeoutMs = def.timeoutMs;
     } catch { /* keep the default */ }
 
-    const upstream = this.deps.providers.toUpstream(provider);
+    // Route back to the endpoint that created the job. Its index was encoded
+    // into the id; a provider edited since then can have dropped or retyped
+    // that endpoint, and both cases are a clear error rather than a guess --
+    // posting a video poll at an Anthropic base URL is exactly what the id
+    // suffix exists to prevent.
+    const endpoint = providerEndpoints(provider).find((e) => e.index === parsed.endpointIndex);
+    if (!endpoint) {
+      return this.replyError(reply, 404, "The endpoint that created this video no longer exists on its provider.");
+    }
+    if (!servesOpenAiMedia(endpoint.type)) {
+      return this.replyError(reply, 400, "The endpoint that created this video is no longer OpenAI-compatible.");
+    }
+    const upstream: UpstreamProvider = {
+      ...this.deps.providers.toUpstream(provider),
+      type: endpoint.type,
+      baseUrl: endpoint.baseUrl,
+    };
     const suffix = `/${encodeURIComponent(parsed.upstreamId)}${content ? "/content" : ""}`;
     const url = videosUrl(upstream, suffix);
     const headers = buildHeaders(upstream);
@@ -393,7 +439,7 @@ export class MediaController {
     const r = await this.deps.transport.getJson(url, headers, { timeoutMs });
     let json = r.json as Record<string, unknown> | undefined;
     if (r.status < 400 && json && typeof json.id === "string") {
-      json = { ...json, id: suffixVideoId(json.id, service.id, provider.id) };
+      json = { ...json, id: suffixVideoId(json.id, service.id, provider.id, endpoint.index) };
     }
     return reply.code(r.status).send(json ?? r.text);
   }

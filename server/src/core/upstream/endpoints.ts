@@ -10,6 +10,38 @@ export interface UpstreamProvider {
 
 export const ANTHROPIC_VERSION = "2023-06-01";
 
+/** One endpoint a provider serves, with its position in the provider's list. */
+export interface ProviderEndpoint {
+  /** 0 = the primary endpoint, 1..n = the declared alternates, in order. The
+   * index is stable for a given provider row, so it can be handed to a client
+   * (video job ids) and resolved back to the same endpoint on a later request. */
+  index: number;
+  type: ProviderType;
+  baseUrl: string;
+}
+
+/** Every endpoint a provider serves: its primary first, then its alternates. */
+export function providerEndpoints(p: {
+  type: ProviderType;
+  baseUrl: string;
+  altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
+}): ProviderEndpoint[] {
+  return [
+    { index: 0, type: p.type, baseUrl: p.baseUrl },
+    ...(p.altEndpoints ?? []).map((e, i) => ({ index: i + 1, type: e.type, baseUrl: e.baseUrl })),
+  ];
+}
+
+/**
+ * The media/passthrough surface (`/embeddings`, `/images/generations`,
+ * `/audio/*`, `/rerank`, `/videos`) is OpenAI-shaped, and both OpenAI families
+ * expose it at the same paths under their own base URL. Anthropic has no such
+ * surface at all.
+ */
+export function servesOpenAiMedia(t: ProviderType): boolean {
+  return familyForProviderType(t) !== "anthropic";
+}
+
 /**
  * Headers a caller-supplied `extraHeaders` map may not set: hop-by-hop headers
  * and framing/routing headers that must be controlled by the proxy, not by
