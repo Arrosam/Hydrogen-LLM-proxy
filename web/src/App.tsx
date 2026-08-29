@@ -43,6 +43,11 @@ export default function App() {
             spelled "/models" never survives a hard load (refresh, bookmark, pasted
             URL). "/model" is not in that suffix table. See server/src/transport/fuzzyUrl.ts. */}
         <Route path="model" element={<Models />} />
+        {/* Anything still aimed at the old path from inside the app -- browser
+            Back onto a pre-rename history entry, a stale link -- lands here
+            instead of on the catch-all's silent bounce to Overview. A hard
+            GET /models never reaches the SPA at all: the rewriter takes it. */}
+        <Route path="models" element={<Navigate to="/model" replace />} />
         <Route path="services" element={<ModelServices kind="resilience" />} />
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
