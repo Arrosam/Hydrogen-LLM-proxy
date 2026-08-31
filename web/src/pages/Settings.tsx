@@ -65,6 +65,9 @@ interface UpdateStatus {
   releaseUrl: string | null;
   releaseNotes: string | null;
   publishedAt: string | null;
+  /** Whether the offered release is a pre-release. Only a deployment already
+   * running one is ever offered one, but the badge still says so. */
+  prerelease: boolean;
   checkedAt: number;
   runtime: "kubernetes" | "docker" | "node";
   restartSupported: boolean;
@@ -175,6 +178,11 @@ function UpdateCard() {
             <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
               <i className="bi bi-arrow-up-circle" />
               {t("settings.update.available", { version: status.latest ?? "?" })}
+              {status.prerelease && (
+                <span className="rounded border border-amber-500/40 px-1 text-amber-400/90">
+                  {t("settings.update.prerelease")}
+                </span>
+              )}
               {publishedDate && <span className="text-amber-400/70">· {t("settings.update.publishedAt", { date: publishedDate })}</span>}
             </span>
           ) : (

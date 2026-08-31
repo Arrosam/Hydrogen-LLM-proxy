@@ -28,6 +28,9 @@ export interface UpdateStatus {
   /** Release notes (markdown), truncated for transport. */
   releaseNotes: string | null;
   publishedAt: string | null;
+  /** Whether the offered release is a pre-release. Only a deployment already
+   * running one is ever offered one, but the UI still says so plainly. */
+  prerelease: boolean;
   /** When the underlying GitHub fetch happened (ms epoch) — cached answers keep it. */
   checkedAt: number;
   /** How the server is running, so the UI can word the upgrade step honestly. */
@@ -39,21 +42,78 @@ export interface UpdateStatus {
   error?: string;
 }
 
-/** Compare two dotted versions; true when `candidate` is strictly newer than `base`.
- * Tolerates a leading "v" and ignores pre-release/build suffixes. Unparsable
- * versions are never "newer" — a garbage tag must not trigger the upgrade banner. */
-export function isNewerVersion(candidate: string, base: string): boolean {
-  const parse = (v: string): number[] | null => {
-    const m = /^v?(\d+)\.(\d+)(?:\.(\d+))?/.exec(v.trim());
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : null;
+/** A version parsed into its precedence parts: the numeric core, plus the
+ * dot-separated pre-release identifiers when the tag carries a `-suffix`. */
+interface ParsedVersion {
+  core: [number, number, number];
+  /** null for a normal release; a release always outranks its own pre-releases. */
+  pre: string[] | null;
+}
+
+/** Parse a tag into comparable parts. Tolerates a leading "v", a missing patch,
+ * and trailing build metadata. Null for anything unparsable. */
+export function parseVersion(v: string): ParsedVersion | null {
+  const m = /^v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/.exec(v.trim());
+  if (!m) return null;
+  return {
+    core: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)],
+    pre: m[4] ? m[4].split(".") : null,
   };
-  const a = parse(candidate);
-  const b = parse(base);
-  if (!a || !b) return false;
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] > b[i];
+}
+
+/** Whether a version is a pre-release (1.7.0-rc.1) rather than a normal release.
+ * This is what decides which channel a deployment is offered. */
+export function isPrerelease(v: string): boolean {
+  return parseVersion(v)?.pre != null;
+}
+
+/** Semver pre-release precedence: identifier by identifier, numeric ones
+ * compared as numbers and ranking below alphanumeric ones, and a shorter set of
+ * identifiers ranking below a longer one that shares its prefix. */
+function comparePre(a: string[], b: string[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) return Number(x) < Number(y) ? -1 : 1;
+    if (xNum !== yNum) return xNum ? -1 : 1;
+    return x < y ? -1 : 1;
   }
-  return false;
+  return 0;
+}
+
+/**
+ * Order two versions: -1, 0 or 1. An unparsable version compares as 0 and is
+ * therefore never "newer" -- a garbage tag must not trigger the upgrade banner.
+ *
+ * Pre-releases are ordered rather than truncated away, which is what the old
+ * comparator did: it read 1.7.0-rc.1 and 1.7.0-rc.2 as the same version, so an
+ * operator running a release candidate was never offered the next one -- nor
+ * the final 1.7.0, which it also read as equal, leaving the deployment stranded
+ * on every future release of that line.
+ */
+export function compareVersions(a: string, b: string): number {
+  const x = parseVersion(a);
+  const y = parseVersion(b);
+  if (!x || !y) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (x.core[i] !== y.core[i]) return x.core[i] > y.core[i] ? 1 : -1;
+  }
+  // Same core: the release itself outranks every pre-release of it.
+  if (!x.pre && !y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  return comparePre(x.pre, y.pre);
+}
+
+/** True when `candidate` is strictly newer than `base`. */
+export function isNewerVersion(candidate: string, base: string): boolean {
+  return compareVersions(candidate, base) > 0;
 }
 
 function detectRuntime(): UpdateStatus["runtime"] {
@@ -67,6 +127,10 @@ function detectRuntime(): UpdateStatus["runtime"] {
 }
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
+/** Releases read per check. GitHub returns them newest-first by publish date;
+ * a page this size covers the window in which a still-current version could
+ * be the newest, and the pick inside it is by precedence, not by position. */
+const RELEASE_PAGE_SIZE = 30;
 const NOTES_MAX_CHARS = 4000;
 const FETCH_TIMEOUT_MS = 10_000;
 
@@ -118,6 +182,7 @@ export class UpdateService {
       releaseUrl: null,
       releaseNotes: null,
       publishedAt: null,
+      prerelease: false,
       checkedAt: Date.now(),
       runtime: detectRuntime(),
       restartSupported: this.restartSupported,
@@ -128,7 +193,7 @@ export class UpdateService {
     const out = this.base();
     let res: Response;
     try {
-      res = await this.fetchImpl(`https://api.github.com/repos/${this.repo}/releases/latest`, {
+      res = await this.fetchImpl(`https://api.github.com/repos/${this.repo}/releases?per_page=${RELEASE_PAGE_SIZE}`, {
         headers: {
           accept: "application/vnd.github+json",
           // GitHub rejects requests without a User-Agent.
@@ -147,26 +212,67 @@ export class UpdateService {
           : `GitHub API returned ${res.status}`;
       return out;
     }
-    let body: Record<string, unknown>;
+    let body: unknown;
     try {
-      body = (await res.json()) as Record<string, unknown>;
+      body = await res.json();
     } catch {
       out.error = "GitHub API returned an unreadable body";
       return out;
     }
-    const tag = typeof body.tag_name === "string" ? body.tag_name : "";
-    if (!tag) {
-      out.error = "GitHub API response carried no release tag";
+    if (!Array.isArray(body)) {
+      out.error = "GitHub API returned an unreadable body";
       return out;
     }
+    const best = this.pickRelease(body);
+    if (!best) {
+      out.error = "GitHub API listed no usable release";
+      return out;
+    }
+    const tag = String(best.tag_name);
     out.latest = tag.replace(/^v/, "");
+    out.prerelease = best.prerelease === true;
     out.updateAvailable = isNewerVersion(tag, this.current);
-    out.releaseUrl = typeof body.html_url === "string" ? body.html_url : null;
-    out.publishedAt = typeof body.published_at === "string" ? body.published_at : null;
-    const notes = typeof body.body === "string" ? body.body : "";
+    out.releaseUrl = typeof best.html_url === "string" ? best.html_url : null;
+    out.publishedAt = typeof best.published_at === "string" ? best.published_at : null;
+    const notes = typeof best.body === "string" ? best.body : "";
     out.releaseNotes = notes ? notes.slice(0, NOTES_MAX_CHARS) : null;
     return out;
   }
+
+  /**
+   * The newest release this deployment may be offered.
+   *
+   * `/releases/latest` was the wrong question to ask GitHub: it hides
+   * pre-releases entirely, so a deployment running 1.7.0-rc.1 was told the
+   * newest release was the last STABLE one -- an OLDER version than the one it
+   * was running, and so never an upgrade, however many release candidates had
+   * shipped since.
+   *
+   * The full list is read instead and the pick is by version precedence rather
+   * than by publish order, because a patch to an older line can be published
+   * after a newer minor and would otherwise win on position alone.
+   *
+   * A pre-release is offered only to a deployment already running one. An
+   * operator on a stable version therefore stays on the stable channel with
+   * nothing to configure -- which is the one thing `/releases/latest` did give
+   * for free, and is worth keeping.
+   */
+  private pickRelease(releases: unknown[]): Record<string, unknown> | null {
+    const allowPrerelease = isPrerelease(this.current);
+    let best: Record<string, unknown> | null = null;
+    for (const raw of releases) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      // Drafts are invisible to an unauthenticated read anyway; skipped so an
+      // authenticated one cannot be offered something unpublished.
+      if (r.draft === true) continue;
+      if (r.prerelease === true && !allowPrerelease) continue;
+      if (typeof r.tag_name !== "string" || !parseVersion(r.tag_name)) continue;
+      if (!best || isNewerVersion(r.tag_name, String(best.tag_name))) best = r;
+    }
+    return best;
+  }
+
 
   /**
    * Restart-to-upgrade: reply first, then raise SIGTERM so index.ts runs its
