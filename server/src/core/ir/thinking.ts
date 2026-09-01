@@ -201,17 +201,23 @@ export const ThinkingPolicy = {
 
     let { effort, budget } = resolveEffort(thinking);
 
-    // The output ceiling that must hold the reasoning plus the answer.
-    let ceiling = clientMax != null
-      ? (imposed ? clientMax + budget : clientMax)
-      : budget + THINKING_RESPONSE_ROOM;
-    ceiling = clamp(ceiling);
+    // The client asked for this level: send it, whatever their ceiling is. Effort
+    // is a soft hint the model paces itself against, not a budget the API sets
+    // aside, so there is no arithmetic left that would justify lowering it -- and
+    // quietly answering at a level below the one asked for is the substitution
+    // this proxy does not make. Same early return the OpenAI policy already does.
+    if (!imposed) {
+      const ceiling = clientMax != null ? clamp(clientMax) : clamp(budget + THINKING_RESPONSE_ROOM);
+      return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[effort], max_tokens: Math.max(1, ceiling) };
+    }
 
-    // Step the effort down until the reasoning still leaves the answer its room.
-    // When the effort was IMPOSED the ceiling was built as clientMax + budget, so
-    // the room to protect is the client's own max -- measuring against the generic
-    // reservation there would double-count it and step down a rung for nothing.
-    const answerRoom = imposed && clientMax != null ? clientMax : THINKING_RESPONSE_ROOM;
+    // Service-imposed: the client never budgeted for this thought, so their max is
+    // the answer's room and the reasoning is added on top. A hard provider cap can
+    // cut that sum back, and then the effort steps DOWN the ladder until the
+    // reasoning still leaves the answer its room -- never off, which would drop
+    // the step's intent entirely.
+    const ceiling = clamp(clientMax != null ? clientMax + budget : budget + THINKING_RESPONSE_ROOM);
+    const answerRoom = clientMax ?? THINKING_RESPONSE_ROOM;
     let rung = EFFORT_LADDER.indexOf(effort);
     while (budget + answerRoom > ceiling && rung > 0) {
       rung--;
