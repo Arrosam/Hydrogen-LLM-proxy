@@ -12,7 +12,7 @@ import {
   videosUrl,
   type UpstreamProvider,
 } from "../core/upstream/endpoints";
-import { readMultipartField, rewriteMultipartField } from "../core/upstream/multipart";
+import { readMultipartField, rewriteMultipartField, upsertMultipartField } from "../core/upstream/multipart";
 import { classifyError, runSteps, type AttemptResult, type RunOutput } from "../execution/steps";
 import { isAgent, serviceCategory, stepOverrides, type ServiceCategory, type ServiceStep, type ServiceSteps } from "../execution/definition";
 import { MEDIA_FAMILIES, type ResolvedTarget } from "../catalog/catalog";
@@ -65,6 +65,16 @@ function mediaUrl(category: MediaCategory, p: UpstreamProvider): string {
 function stepParams(step: ServiceStep): Record<string, unknown> {
   const ov = stepOverrides(step);
   return (ov?.extra as Record<string, unknown> | undefined) ?? {};
+}
+
+/** Field names safe to frame into a Content-Disposition header verbatim. */
+const SAFE_FORM_FIELD = /^[A-Za-z0-9_.-]+$/;
+
+/** A step-override value as a multipart text field: scalars go in plain (a
+ * quoted "en" would not be a language), structured values as JSON. */
+function formFieldValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
 }
 
 function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpRequestInfo {
@@ -210,6 +220,10 @@ export class MediaController {
     httpStatus: number,
     usage: Usage,
     upstreamRequest: unknown,
+    /** What to store as the log's response body. Defaults to a bare success
+     * marker, because an embeddings vector or a base64 image is bulk rather
+     * than evidence — a category whose body IS the answer passes it. */
+    loggedResponse?: unknown,
   ): void {
     const ok = outcome.result.ok;
     const target = ok ? (outcome.result as { value: MediaHit }).value.target : null;
@@ -222,7 +236,9 @@ export class MediaController {
         upstreamRequest == null
           ? null
           : this.deps.logger.capture(typeof upstreamRequest === "string" ? { note: upstreamRequest } : upstreamRequest),
-      responseBody: ok ? { ok: true } : ((outcome.result as { errorBody?: unknown }).errorBody as Record<string, unknown> | undefined) ?? null,
+      responseBody: ok
+        ? (loggedResponse ?? { ok: true })
+        : ((outcome.result as { errorBody?: unknown }).errorBody as Record<string, unknown> | undefined) ?? null,
       usage, latencyMs: Date.now() - ctx.started,
       attempts: outcome.path.length, attemptPath: outcome.path,
       error: ok ? null : failureMessage(outcome.result),
@@ -353,8 +369,24 @@ export class MediaController {
     // Transcribing a long recording is slow and silent; heartbeat like the
     // other JSON-out categories. (TTS streams binary audio, so it cannot.)
     const keepalive = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);
-    const outcome = await this.run(def, "stt", signal, async (_step, target) => {
-      const rewritten = rewriteMultipartField(raw, contentType, "model", target.upstreamModel);
+    const outcome = await this.run(def, "stt", signal, async (step, target) => {
+      // Overrides first, then the model rewrite, so `model` always lands on the
+      // mapped upstream name — the precedence the JSON passthrough gets from
+      // spreading `model` last. Every attempt re-derives the form from `raw`, so
+      // a retry never stacks a second copy of the overrides.
+      let form = raw;
+      for (const [k, v] of Object.entries(stepParams(step))) {
+        if (v == null) continue;
+        if (!SAFE_FORM_FIELD.test(k)) {
+          return { ok: false, status: 0, kind: "error", message: `step override '${k}' is not a usable form field name` };
+        }
+        const set = upsertMultipartField(form, contentType, k, formFieldValue(v));
+        if (!set) {
+          return { ok: false, status: 0, kind: "error", message: `multipart body is not framed well enough to set '${k}'` };
+        }
+        form = set;
+      }
+      const rewritten = rewriteMultipartField(form, contentType, "model", target.upstreamModel);
       if (!rewritten) {
         return { ok: false, status: 0, kind: "error", message: "multipart body has no 'model' field to rewrite" };
       }
@@ -378,7 +410,9 @@ export class MediaController {
       return reply.code(status).send(errBody);
     }
     const hit = outcome.result.value;
-    this.record(ctx, outcome, hit.status, zeroUsage(), hit.sentBody);
+    // A transcript is one short line: the one media category where `{ ok: true }`
+    // hid the only thing the log existed to show.
+    this.record(ctx, outcome, hit.status, zeroUsage(), hit.sentBody, hit.json ?? hit.text);
     if (hit.json !== undefined) {
       if (keepalive.finish(hit.json)) return;
       return reply.code(hit.status).send(hit.json);

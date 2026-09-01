@@ -3,9 +3,9 @@
  *
  * The proxy forwards the client's multipart body VERBATIM (same boundary, file
  * parts untouched) and only needs to (a) read the text `model` field to route
- * to a service, and (b) replace that field's value with the mapped upstream
- * model name. Full parsing/re-framing would buffer and re-encode file parts
- * for no benefit.
+ * to a service, (b) replace that field's value with the mapped upstream model
+ * name, and (c) set the step's override parameters as text fields. Full
+ * parsing/re-framing would buffer and re-encode file parts for no benefit.
  */
 
 export function multipartBoundary(contentType: string | undefined): string | null {
@@ -75,4 +75,29 @@ export function rewriteMultipartField(
     }
   }
   return null;
+}
+
+/**
+ * Set a text field's value, appending a new part when the field is absent.
+ * Returns null only when the body has no usable framing (no boundary, or no
+ * closing delimiter to splice in front of).
+ *
+ * `lastIndexOf` finds the closing delimiter rather than a byte sequence that
+ * merely looks like one inside a file part: the real closing delimiter is the
+ * final occurrence.
+ */
+export function upsertMultipartField(
+  body: Buffer,
+  contentType: string | undefined,
+  field: string,
+  value: string,
+): Buffer | null {
+  const replaced = rewriteMultipartField(body, contentType, field, value);
+  if (replaced) return replaced;
+  const boundary = multipartBoundary(contentType);
+  if (!boundary) return null;
+  const at = body.lastIndexOf(Buffer.from(`--${boundary}--`));
+  if (at === -1) return null;
+  const part = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${field}"\r\n\r\n${value}\r\n`, "utf8");
+  return Buffer.concat([body.subarray(0, at), part, body.subarray(at)]);
 }

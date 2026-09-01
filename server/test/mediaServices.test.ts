@@ -104,6 +104,13 @@ beforeAll(async () => {
   mk("reranker", { category: "rerank", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
   mk("tts-svc", { category: "tts", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
   mk("stt-svc", { category: "stt", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
+  mk("stt-params", {
+    category: "stt", timeoutMs: 10_000,
+    steps: [{
+      model: "m1", provider: "fake",
+      overrides: { extra: { language: "ja", temperature: 0, timestamp_granularities: ["word"], model: "hijacked-model" } },
+    }],
+  });
   videoServiceId = mk("video-svc", { category: "video", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] }).id;
   mk("chat-svc", { timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
   mk("ocr-svc", { category: "ocr", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
@@ -323,6 +330,36 @@ describe("JSON passthrough (embedding / rerank / image / video)", () => {
   });
 });
 
+const CRLF = "\r\n";
+const STT_BOUNDARY = "----hydrogenTestBoundary";
+
+/** One transcription upload: a `model` field, a `language` field the overrides
+ * can collide with, and a file part nothing may touch. */
+function sttRequest(service: string): { method: "POST"; url: string; headers: Record<string, string>; payload: string } {
+  const payload = [
+    `--${STT_BOUNDARY}`,
+    'Content-Disposition: form-data; name="model"',
+    "",
+    service,
+    `--${STT_BOUNDARY}`,
+    'Content-Disposition: form-data; name="language"',
+    "",
+    "en-CLIENT",
+    `--${STT_BOUNDARY}`,
+    'Content-Disposition: form-data; name="file"; filename="a.wav"',
+    "Content-Type: audio/wav",
+    "",
+    "RIFF-FAKE-AUDIO-DATA",
+    `--${STT_BOUNDARY}--`,
+    "",
+  ].join(CRLF);
+  return {
+    method: "POST", url: "/v1/audio/transcriptions",
+    headers: { ...auth(), "content-type": `multipart/form-data; boundary=${STT_BOUNDARY}` },
+    payload,
+  };
+}
+
 describe("TTS (binary out) and STT (multipart in)", () => {
   it("tts streams the upstream audio bytes through", async () => {
     upstream.requests.length = 0;
@@ -345,25 +382,8 @@ describe("TTS (binary out) and STT (multipart in)", () => {
   it("stt forwards the multipart verbatim with only the model field rewritten", async () => {
     upstream.requests.length = 0;
     upstream.setHandler(jsonHandler(200, { text: "hello world" }));
-    const boundary = "----hydrogenTestBoundary";
-    const body = [
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="model"',
-      "",
-      "stt-svc",
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="file"; filename="a.wav"',
-      "Content-Type: audio/wav",
-      "",
-      "RIFF-FAKE-AUDIO-DATA",
-      `--${boundary}--`,
-      "",
-    ].join("\r\n");
-    const r = await app.inject({
-      method: "POST", url: "/v1/audio/transcriptions",
-      headers: { ...auth(), "content-type": `multipart/form-data; boundary=${boundary}` },
-      payload: body,
-    });
+    const boundary = STT_BOUNDARY;
+    const r = await app.inject(sttRequest("stt-svc"));
     expect(r.statusCode).toBe(200);
     expect(r.json().text).toBe("hello world");
     const forwarded = upstream.requests[0].body.toString();
@@ -373,5 +393,36 @@ describe("TTS (binary out) and STT (multipart in)", () => {
     expect(forwarded).toContain("real-model");
     expect(forwarded).not.toContain("stt-svc"); // the service name never leaks upstream
     expect(forwarded).toContain("RIFF-FAKE-AUDIO-DATA"); // file part untouched
+  });
+
+  it("stt logs the transcript, not a bare success marker", async () => {
+    upstream.setHandler(jsonHandler(200, { text: "the quick brown fox" }));
+    const r = await app.inject(sttRequest("stt-svc"));
+    expect(r.statusCode).toBe(200);
+
+    const row = c.logs.query({ limit: 1 }).rows[0];
+    expect(row.serviceName).toBe("stt-svc");
+    expect(JSON.parse(c.logs.get(row.id).responsePayload)).toEqual({ text: "the quick brown fox" });
+  });
+
+  it("stt sends the step's override parameters as multipart fields", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { text: "ok" }));
+    const r = await app.inject(sttRequest("stt-params"));
+    expect(r.statusCode).toBe(200);
+
+    const forwarded = upstream.requests[0].body.toString();
+    // `language` replaces the value the client sent; `temperature` and
+    // `timestamp_granularities` are absent from the client form and get appended.
+    expect(forwarded).toContain(`name="language"${CRLF}${CRLF}ja`);
+    expect(forwarded).not.toContain("en-CLIENT");
+    expect(forwarded).toContain(`name="temperature"${CRLF}${CRLF}0`);
+    expect(forwarded).toContain(`name="timestamp_granularities"${CRLF}${CRLF}["word"]`);
+    // The model rewrite still wins over an override that tried to set it.
+    expect(forwarded).toContain(`name="model"${CRLF}${CRLF}real-model`);
+    expect(forwarded).not.toContain("hijacked-model");
+    expect(forwarded).toContain("RIFF-FAKE-AUDIO-DATA"); // file part still untouched
+    // The closing delimiter stays last, so every appended part is inside the form.
+    expect(forwarded.trimEnd().endsWith(`--${STT_BOUNDARY}--`)).toBe(true);
   });
 });
