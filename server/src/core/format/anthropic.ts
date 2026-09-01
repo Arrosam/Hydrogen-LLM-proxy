@@ -259,9 +259,24 @@ function toolChoiceToAnthropic(choice: ToolChoice): unknown {
 // --- thinking / params ---------------------------------------------------
 
 function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined {
+  // `output_config.effort` outranks the on/off flag: saying how much to think
+  // already says that it should. It stays OUT of RESERVED on purpose -- the rest
+  // of `output_config` (structured outputs) has to keep riding the passthrough,
+  // and the renderer merges the effort back into whatever the client sent.
+  const oc = body.output_config;
+  if (oc && typeof oc === "object" && !Array.isArray(oc)) {
+    const effort = (oc as Record<string, unknown>).effort;
+    if (effort === "minimal" || effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
+      return effort;
+    }
+  }
   const t = body.thinking;
   if (!t || typeof t !== "object") return undefined;
   const cfg = t as Record<string, unknown>;
+  // `adaptive` is the current on-switch and the one modern clients send; reading
+  // only `enabled` meant an adaptive request looked like "said nothing", and on a
+  // model where an absent `thinking` means no thinking that silently turned it off.
+  if (cfg.type === "adaptive") return "enabled";
   if (cfg.type === "enabled") {
     const budget = numOrUndef(cfg.budget_tokens);
     return budget != null ? { budget } : "enabled";
@@ -434,7 +449,19 @@ export class AnthropicRequest extends Request {
     // built-in fallback when the client never budgeted, and floors the result at
     // 1 (max_tokens is required here, and 0 is not a valid request).
     const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, p.thinkingImposed === true);
-    if (p.thinking != null) out.thinking = tf.thinking;
+    if (p.thinking != null) {
+      out.thinking = tf.thinking;
+      if (tf.effort) {
+        // `output_config` is shared -- structured outputs live there too -- so an
+        // effort merges INTO whatever the client sent rather than replacing it.
+        // It cannot ride the passthrough merge for this: that only fills keys the
+        // renderer left alone, so writing the key here would drop the client's
+        // `format` outright.
+        const own = p.passthrough?.family === "anthropic" ? p.passthrough.params.output_config : undefined;
+        const base = own && typeof own === "object" && !Array.isArray(own) ? (own as Record<string, unknown>) : {};
+        out.output_config = { ...base, effort: tf.effort };
+      }
+    }
     out.max_tokens = tf.max_tokens;
     applyNonCanonical(out, p, this.family);
     // OpenAI's `user` abuse-tracking id maps to metadata.user_id; a client's own

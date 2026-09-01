@@ -232,7 +232,7 @@ describe("resent reasoning is decided by the EGRESS family, not the ingress", ()
     // This is the block DeepSeek's 4028 complains about being absent.
     expect(assistant.content[0]).toEqual({ type: "thinking", thinking: "thought about q1" });
     expect(assistant.content.map((b) => b.type)).toEqual(["thinking", "text"]);
-    expect(out.thinking).toMatchObject({ type: "enabled" });
+    expect(out.thinking).toEqual({ type: "adaptive" });
   });
 
   it("Anthropic egress preserves the signature when the history carries one", () => {

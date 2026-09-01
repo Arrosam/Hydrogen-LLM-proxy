@@ -59,8 +59,19 @@ const EFFORT_LADDER = Object.keys(EFFORT_BUDGETS) as EffortLevel[];
  * effective ceiling must leave at least this much beneath the reasoning budget.
  */
 const THINKING_RESPONSE_ROOM = 4096;
-/** Anthropic's minimum accepted thinking budget. */
-const MIN_THINKING_BUDGET = 1024;
+/**
+ * Anthropic's own effort scale. Hydrogen's ladder carries one extra rung at the
+ * bottom -- `minimal`, an OpenAI level -- which folds onto `low`.
+ */
+export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+const TO_ANTHROPIC_EFFORT: Record<EffortLevel, AnthropicEffort> = {
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
+};
 
 /**
  * Nearest named effort for an explicit token budget, so a small budget isn't
@@ -92,7 +103,10 @@ export interface ReasoningCeiling {
 }
 
 export interface AnthropicThinkingFields {
-  thinking: { type: "enabled"; budget_tokens: number } | { type: "disabled" };
+  /** Whether to think. `budget_tokens` is gone -- see the note on the policy. */
+  thinking: { type: "adaptive" } | { type: "disabled" };
+  /** How much to think, for `output_config.effort`. Absent when thinking is off. */
+  effort?: AnthropicEffort;
   max_tokens: number;
 }
 
@@ -151,10 +165,25 @@ export const ThinkingPolicy = {
   },
 
   /**
-   * Anthropic thinking.budget_tokens + the max_tokens that bounds it. Anthropic
-   * has an explicit budget field, so the budget is fit *under* the ceiling
-   * rather than laddered by effort -- but the same `imposed` rule and the same
-   * "drop thinking rather than starve the answer" floor apply.
+   * Anthropic: `thinking` says WHETHER, `output_config.effort` says HOW MUCH.
+   *
+   * `thinking: {type:"enabled", budget_tokens: N}` is gone. It is rejected with a
+   * 400 on every current model (Fable 5, Opus 5, 4.8, 4.7, Sonnet 5) and
+   * deprecated on Opus 4.6 / Sonnet 4.6, replaced by adaptive thinking plus a
+   * named effort. `output_config.effort` is GA -- no beta header -- and its
+   * scale (low/medium/high/xhigh/max) is the same one this proxy already speaks,
+   * so an OpenAI `reasoning_effort` now crosses to Anthropic by NAME instead of
+   * being flattened into a token budget it could never be recovered from.
+   *
+   * Note `thinking: {type:"adaptive"}` is still emitted alongside: on Opus 4.8,
+   * 4.7 and Sonnet 5, omitting `thinking` means no thinking at all, so effort
+   * alone would not turn it on.
+   *
+   * max_tokens still has to hold the reasoning and the answer, and the effort
+   * budgets remain the estimate that sizes it. Under a hard cap the effort steps
+   * DOWN the ladder rather than switching thinking off -- a smaller thought that
+   * gets answered beats a bigger one that does not, and silently disabling what
+   * the caller asked for is the failure this proxy does not commit.
    */
   anthropic(
     thinking: ThinkingLevel,
@@ -170,33 +199,26 @@ export const ThinkingPolicy = {
       return { thinking: { type: "disabled" }, max_tokens: Math.max(1, clamp(base)) };
     }
 
-    let { budget } = resolveEffort(thinking);
-    budget = Math.max(MIN_THINKING_BUDGET, budget);
+    let { effort, budget } = resolveEffort(thinking);
 
-    // The output ceiling that must hold the budget plus the answer.
-    let ceiling: number;
-    if (clientMax != null) {
-      ceiling = imposed ? clientMax + budget : clientMax;
-    } else {
-      ceiling = budget + THINKING_RESPONSE_ROOM;
-    }
+    // The output ceiling that must hold the reasoning plus the answer.
+    let ceiling = clientMax != null
+      ? (imposed ? clientMax + budget : clientMax)
+      : budget + THINKING_RESPONSE_ROOM;
     ceiling = clamp(ceiling);
 
-    // Anthropic requires max_tokens > budget_tokens >= MIN_THINKING_BUDGET, so a
-    // ceiling that cannot even hold the minimum budget plus one answer token
-    // cannot carry thinking at all. Drop it so the answer gets the whole ceiling,
-    // rather than emit max_tokens = budget+1 (one-token answer, and above the
-    // cap when the ceiling was the cap).
-    if (ceiling <= MIN_THINKING_BUDGET) {
-      return { thinking: { type: "disabled" }, max_tokens: Math.max(1, ceiling) };
+    // Step the effort down until the reasoning still leaves the answer its room.
+    // When the effort was IMPOSED the ceiling was built as clientMax + budget, so
+    // the room to protect is the client's own max -- measuring against the generic
+    // reservation there would double-count it and step down a rung for nothing.
+    const answerRoom = imposed && clientMax != null ? clientMax : THINKING_RESPONSE_ROOM;
+    let rung = EFFORT_LADDER.indexOf(effort);
+    while (budget + answerRoom > ceiling && rung > 0) {
+      rung--;
+      effort = EFFORT_LADDER[rung];
+      budget = EFFORT_BUDGETS[effort];
     }
-
-    // Fit the budget under the ceiling, leaving the answer its room; floor at the
-    // minimum, which still fits because ceiling > MIN_THINKING_BUDGET.
-    if (budget + THINKING_RESPONSE_ROOM > ceiling) {
-      budget = Math.max(MIN_THINKING_BUDGET, ceiling - THINKING_RESPONSE_ROOM);
-    }
-    return { thinking: { type: "enabled", budget_tokens: budget }, max_tokens: ceiling };
+    return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[effort], max_tokens: Math.max(1, ceiling) };
   },
 };
 

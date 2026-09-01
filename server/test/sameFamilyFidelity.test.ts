@@ -78,6 +78,33 @@ describe("scoped: an unmodeled key does not leak onto another family", () => {
   });
 });
 
+describe("output_config is shared ground", () => {
+  // `output_config` carries both structured outputs and the effort. The renderer
+  // writes `effort` into it, and `applyNonCanonical` only fills keys the renderer
+  // left alone -- so without an explicit merge the client's `format` would vanish.
+  it("effort merges into the client's own output_config instead of replacing it", () => {
+    const format = { type: "json_schema", schema: { type: "object" } };
+    const body = AnthropicRequest.construct(
+      AnthropicRequest.parse({
+        model: "svc",
+        max_tokens: 64000,
+        messages: [{ role: "user", content: "hi" }],
+        output_config: { format, effort: "high" },
+      }),
+    ).render(target("m"));
+    expect(body.output_config).toEqual({ format, effort: "high" });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("an adaptive request is recognised as thinking, not as silence", () => {
+    const body = AnthropicRequest.construct(
+      AnthropicRequest.parse({ ...ANTHROPIC_BODY, thinking: { type: "adaptive" } }),
+    ).render(target("m"));
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toBeDefined();
+  });
+});
+
 describe("precedence: a renderer decision beats a leftover client key", () => {
   it("an override's extra wins over the client's own passthrough", () => {
     const req = OpenAICompletionRequest.parse({ ...COMPLETION_BODY, vendor_knob: "from-client" });

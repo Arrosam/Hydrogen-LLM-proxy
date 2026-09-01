@@ -370,19 +370,22 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
     expect(body.max_tokens).toBe(2000);
   });
 
-  it("Anthropic: a tight provider cap drops thinking instead of exceeding it (finding 4)", () => {
+  it("Anthropic: a tight provider cap steps the effort down instead of exceeding it (finding 4)", () => {
     const req = AnthropicRequest.parse({ model: "svc", max_tokens: 4096, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
     const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 1024));
     expect(body.max_tokens as number).toBeLessThanOrEqual(1024);
-    expect(body.thinking).toEqual({ type: "disabled" });
+    // Still thinking, just less of it: the cap bounds the ceiling, not the intent.
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toEqual({ effort: "low" });
   });
 
   it("Anthropic: an imposed effort with headroom reserves answer room on top", () => {
     const req = AnthropicRequest.parse({ model: "svc", max_tokens: 1024, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
     const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 131072));
+    // The effort budget is still what sizes the ceiling -- it is just no longer
+    // sent as a number, so the reservation shows up only in max_tokens.
     expect(body.max_tokens).toBe(1024 + 32000);
-    const t = body.thinking as { budget_tokens: number };
-    expect(t.budget_tokens).toBeLessThan(body.max_tokens as number);
-    expect(t.budget_tokens).toBeGreaterThanOrEqual(1024);
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toEqual({ effort: "high" });
   });
 });

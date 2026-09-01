@@ -442,10 +442,11 @@ describe("Decision table: thinking requested x egress family", () => {
       expect(sent.reasoning_effort).not.toBe("none");
     },
     anthropic: (sent) => {
-      expect(sent.thinking).toMatchObject({ type: "enabled" });
-      // The budget must fit under the ceiling that also has to hold the answer.
-      const t = sent.thinking as { budget_tokens: number };
-      expect(t.budget_tokens).toBeLessThan(sent.max_tokens as number);
+      // `thinking` says whether, `output_config.effort` says how much. A
+      // budget_tokens here would be a 400 on every current Anthropic model.
+      expect(sent.thinking).toEqual({ type: "adaptive" });
+      expect(sent.thinking).not.toHaveProperty("budget_tokens");
+      expect(sent.output_config).toMatchObject({ effort: expect.any(String) });
     },
     openai_responses: (sent) => {
       expect(sent.reasoning).toBeDefined();
@@ -473,17 +474,17 @@ describe("Decision table: thinking requested x egress family", () => {
   });
 
   it("BVA: a ceiling at the minimum thinking budget drops thinking rather than starving the answer", async () => {
-    // Anthropic requires max_tokens > budget_tokens >= 1024. A client ceiling of
-    // exactly 1024 cannot hold the minimum budget AND leave the answer a token,
-    // so the request goes out with thinking off and the whole ceiling for the
-    // answer -- a smaller thought that gets answered beats a bigger one that
-    // does not. One above the boundary must still carry thinking.
+    // A client ceiling of 1024 cannot hold a heavy thought AND leave the answer
+    // room, so the EFFORT steps down -- it does not switch thinking off, which
+    // would silently drop what the caller asked for. The ceiling is never
+    // inflated past what the client asked. A roomier ceiling keeps the effort up.
     upstream.received.length = 0;
     await app.inject({
       method: "POST", url: "/v1/messages", headers: auth(),
       payload: { model: SERVICE_FOR.anthropic, max_tokens: 1024, messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled", budget_tokens: 2048 } },
     });
-    expect(upstream.received[0].body.thinking).toEqual({ type: "disabled" });
+    expect(upstream.received[0].body.thinking).toEqual({ type: "adaptive" });
+    expect(upstream.received[0].body.output_config).toEqual({ effort: "low" });
     expect(upstream.received[0].body.max_tokens).toBe(1024);
 
     upstream.received.length = 0;
@@ -491,10 +492,9 @@ describe("Decision table: thinking requested x egress family", () => {
       method: "POST", url: "/v1/messages", headers: auth(),
       payload: { model: SERVICE_FOR.anthropic, max_tokens: 8192, messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled", budget_tokens: 2048 } },
     });
-    const t = upstream.received[0].body.thinking as { type: string; budget_tokens: number };
-    expect(t.type).toBe("enabled");
-    expect(t.budget_tokens).toBeGreaterThanOrEqual(1024);
-    expect(t.budget_tokens).toBeLessThan(upstream.received[0].body.max_tokens as number);
+    expect(upstream.received[0].body.thinking).toEqual({ type: "adaptive" });
+    expect(upstream.received[0].body.output_config).toMatchObject({ effort: expect.any(String) });
+    expect(upstream.received[0].body.max_tokens).toBe(8192);
   });
 
   it("thinking: disabled is honored end to end even when the upstream thinks anyway", async () => {

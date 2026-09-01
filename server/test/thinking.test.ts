@@ -15,6 +15,9 @@ function base(params: GenerationParams): OpenAICompletionRequest {
 const openai = (params: GenerationParams) => base(params).render({ upstreamModel: "m" });
 const anthropic = (params: GenerationParams, providerCap?: number) =>
   AnthropicRequest.construct(base(params)).render({ upstreamModel: "m", providerMaxOutputTokens: providerCap });
+/** `output_config.effort` off a rendered body, or undefined when none was set. */
+const effortOf = (body: Record<string, unknown>): string | undefined =>
+  (body.output_config as { effort?: string } | undefined)?.effort;
 
 describe("OpenAI reasoning_effort", () => {
   it("named effort levels pass through", () => {
@@ -44,55 +47,81 @@ describe("OpenAI reasoning_effort", () => {
   });
 });
 
-describe("Anthropic thinking budgets", () => {
-  it("named effort levels map to budgets, max_tokens exceeds the budget", () => {
-    expect(anthropic({ thinking: "low" }).thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
-    const max = anthropic({ thinking: "max" });
-    expect(max.thinking).toEqual({ type: "enabled", budget_tokens: 128000 });
-    expect(max.max_tokens as number).toBeGreaterThan(128000);
-    expect(anthropic({ thinking: { budget: 2048 } }).thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+describe("Anthropic effort (output_config.effort, not budget_tokens)", () => {
+  // `thinking: {type:"enabled", budget_tokens: N}` is rejected with a 400 on every
+  // current Anthropic model and deprecated on the two before them. `thinking` now
+  // says WHETHER to think, `output_config.effort` says HOW MUCH -- and its scale is
+  // the one this proxy already speaks, so a named effort crosses over by name.
+  it("a named effort crosses to Anthropic by name, thinking turned on adaptively", () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+      const out = anthropic({ thinking: level });
+      expect(out.thinking).toEqual({ type: "adaptive" });
+      expect(effortOf(out)).toBe(level);
+    }
   });
 
-  it("disabled turns thinking off", () => {
-    expect(anthropic({ thinking: "disabled" }).thinking).toEqual({ type: "disabled" });
+  it("`minimal` has no Anthropic rung and folds onto low", () => {
+    expect(effortOf(anthropic({ thinking: "minimal" }))).toBe("low");
+  });
+
+  it("an explicit token budget maps to the nearest effort", () => {
+    // The budget itself cannot be sent any more, so it is read as an intensity.
+    expect(effortOf(anthropic({ thinking: { budget: 2048 } }))).toBe("low");
+    expect(effortOf(anthropic({ thinking: { budget: 16000 } }))).toBe("medium");
+    expect(effortOf(anthropic({ thinking: { budget: 128000 } }))).toBe("max");
+  });
+
+  it("never emits budget_tokens", () => {
+    for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+      expect(anthropic({ thinking: level }).thinking).not.toHaveProperty("budget_tokens");
+    }
+    expect(anthropic({ thinking: { budget: 32768 } }).thinking).not.toHaveProperty("budget_tokens");
+  });
+
+  it("disabled turns thinking off and carries no effort", () => {
+    const out = anthropic({ thinking: "disabled" });
+    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(effortOf(out)).toBeUndefined();
   });
 });
 
 describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
-  it("never inflates the client's max_tokens past what they asked (large budget)", () => {
+  it("never inflates the client's max_tokens past what they asked", () => {
     const out = anthropic({ thinking: "max", maxTokens: 3000 });
     expect(out.max_tokens).toBe(3000);
-    const t = out.thinking as { budget_tokens: number };
-    expect(t.budget_tokens).toBeLessThan(3000);
-    expect(t.budget_tokens).toBeGreaterThanOrEqual(1024);
   });
 
-  it("keeps the full budget when the client's max_tokens leaves room", () => {
+  it("keeps the requested effort when the client's max_tokens leaves room", () => {
     const out = anthropic({ thinking: { budget: 32768 }, maxTokens: 64000 });
     expect(out.max_tokens).toBe(64000);
-    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
+    expect(effortOf(out)).toBe("high");
   });
 
-  it("shrinks the budget to fit a tight client max_tokens, leaving response room", () => {
+  it("steps the effort down to fit a tight client max_tokens", () => {
+    // 32768 reads as `high`; 20000 cannot hold that and still leave the answer
+    // room, so the effort drops rather than the ceiling rising. The ladder is
+    // deliberately conservative -- it steps until the estimate clears with room
+    // to spare, not until it barely fits.
     const out = anthropic({ thinking: { budget: 32768 }, maxTokens: 20000 });
     expect(out.max_tokens).toBe(20000);
-    expect((out.thinking as { budget_tokens: number }).budget_tokens).toBe(20000 - 4096);
+    expect(effortOf(out)).toBe("low");
   });
 
-  it("drops thinking rather than exceed a tiny client ceiling", () => {
-    // A ceiling that cannot hold even the minimum thinking budget must not be
-    // inflated past what the client asked (the old code emitted max_tokens 1025
-    // for maxTokens 800); thinking is turned off and the answer gets the 800.
+  it("steps down rather than disabling under a tiny client ceiling", () => {
+    // The old policy turned thinking OFF here, because Anthropic required
+    // max_tokens > budget_tokens >= 1024. There is no budget any more, so there is
+    // no reason to silently drop what the caller asked for: the effort bottoms out
+    // instead, and the answer still gets the whole 800.
     const out = anthropic({ thinking: "max", maxTokens: 800 });
-    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(out.thinking).toEqual({ type: "adaptive" });
+    expect(effortOf(out)).toBe("low");
     expect(out.max_tokens).toBe(800);
   });
 
-  it("fits the budget under the provider's hard output cap", () => {
-    // No client max, but the provider caps output at 5000: budget must fit under it.
+  it("respects the provider's hard output cap", () => {
     const out = anthropic({ thinking: "max" }, 5000);
     expect(out.max_tokens as number).toBeLessThanOrEqual(5000);
-    expect(out.max_tokens as number).toBeGreaterThan((out.thinking as { budget_tokens: number }).budget_tokens);
+    expect(effortOf(out)).toBe("low");
   });
 });
 
@@ -142,7 +171,10 @@ describe("Anthropic thinking is omitted unless a level was set", () => {
       thinking: { type: "enabled", budget_tokens: 8000 },
       messages: [{ role: "user", content: "hi" }],
     }).render({ upstreamModel: "m" });
-    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+    // The budget it asked in cannot be sent on; it is read as an intensity and
+    // re-expressed as the effort nearest to it.
+    expect(out.thinking).toEqual({ type: "adaptive" });
+    expect(out.output_config).toEqual({ effort: "low" });
   });
 
   it("keeps the thinking blocks a thinking client does send back", () => {
