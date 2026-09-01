@@ -496,7 +496,7 @@ export class OpenAICompletionRequest extends Request {
     if (p.thinking) {
       // Reasoning is billed inside max_tokens on reasoning models, so the policy
       // sizes the ceiling to hold the reasoning and still leave the answer room.
-      const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap, p.thinkingImposed === true);
+      const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap);
       out.reasoning_effort = tf.effort;
       if (tf.maxTokens != null) out.max_tokens = tf.maxTokens;
     } else {

@@ -448,7 +448,7 @@ export class AnthropicRequest extends Request {
     // requested max and the provider's hard cap, still prefers that cap over the
     // built-in fallback when the client never budgeted, and floors the result at
     // 1 (max_tokens is required here, and 0 is not a valid request).
-    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, p.thinkingImposed === true);
+    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap);
     if (p.thinking != null) {
       out.thinking = tf.thinking;
       if (tf.effort) {

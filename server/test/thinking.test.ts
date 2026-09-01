@@ -123,22 +123,21 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
   });
 });
 
-describe("Anthropic: an IMPOSED effort reserves answer room, never lowers itself", () => {
-  // A step or stage adding thinking the client never asked for is the one case
-  // that still changes max_tokens: the client's max is the answer's room and the
-  // reasoning budget is added on top of it. Nothing lowers the level -- not a
-  // tight ceiling, not a hard provider cap.
+describe("Anthropic: an imposed effort changes the level, never the ceiling", () => {
+  // A step or stage adding thinking the client never asked for used to reserve
+  // its budget on top of the client's max. Nothing reserves anything now: the
+  // client's ceiling stays theirs and the override contributes only the level.
   const imposed = (params: GenerationParams, providerCap?: number) =>
     AnthropicRequest.construct(base({}).withOverrides(params)).render({ upstreamModel: "m", providerMaxOutputTokens: providerCap });
 
-  it("adds the reasoning budget on top of the client's max", () => {
+  it("leaves the client's max_tokens exactly where it was", () => {
     const out = imposed({ thinking: "high", maxTokens: 1024 }, 131072);
-    expect(out.max_tokens).toBe(1024 + 32000);
+    expect(out.max_tokens).toBe(1024);
     expect(effortOf(out)).toBe("high");
   });
 
-  it("a cap too tight to hold the reservation bounds it, and only it", () => {
-    const out = imposed({ thinking: "max", maxTokens: 1024 }, 2048);
+  it("a provider cap below the client's max still bounds it", () => {
+    const out = imposed({ thinking: "max", maxTokens: 8000 }, 2048);
     expect(out.thinking).toEqual({ type: "adaptive" });
     expect(out.max_tokens).toBe(2048);
     expect(effortOf(out)).toBe("max");

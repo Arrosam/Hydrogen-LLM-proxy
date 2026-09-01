@@ -292,21 +292,21 @@ describe("the proxy never relays provider-side state it does not have", () => {
 describe("Responses reasoning leaves the answer room under max_output_tokens", () => {
   const capped = (upstreamModel: string, providerMaxOutputTokens?: number) => ({ upstreamModel, providerMaxOutputTokens });
 
-  /** The reported bug: a client max applied verbatim is a budget the reasoning
-   * spends in full, and the client gets an empty, billed answer. */
-  it("does not hand the client's whole max to the reasoning", () => {
+  /** An override used to GROW the ceiling, making room for a thought the client
+   * had not budgeted for. That was arithmetic while reasoning was an explicit
+   * token budget; now it just spends tokens the caller never agreed to. */
+  it("an override does not grow the client's ceiling", () => {
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
     const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
     expect(body.reasoning).toEqual({ effort: "high" });
-    // 1024 of answer still available on top of the reasoning budget.
-    expect(body.max_output_tokens).toBe(1024 + 32000);
+    expect(body.max_output_tokens).toBe(1024);
   });
 
-  it("keeps the client's max as answer room at every effort", () => {
-    for (const [effort, budget] of [["minimal", 2048], ["low", 4096], ["medium", 16000], ["max", 128000]] as const) {
+  it("the ceiling is the client's, at every effort", () => {
+    for (const effort of ["minimal", "low", "medium", "max"] as const) {
       const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 500 });
       const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: effort })).render(capped("gpt-5"));
-      expect(body.max_output_tokens).toBe(500 + budget);
+      expect(body.max_output_tokens).toBe(500);
     }
   });
 
@@ -316,12 +316,9 @@ describe("Responses reasoning leaves the answer room under max_output_tokens", (
     expect(body.max_output_tokens as number).toBeLessThanOrEqual(8192);
   });
 
-  it("a tight cap bounds the ceiling and leaves the level alone", () => {
-    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
+  it("a cap only ever bounds the ceiling, never the level", () => {
+    const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 16000 });
     const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5", 8192));
-    // The reservation (1024 + 32000) is cut back to the cap. `high` is what was
-    // asked for, so `high` is what goes out -- effort is a hint the model paces
-    // itself against, and lowering it here would answer a question nobody asked.
     expect(body.reasoning).toEqual({ effort: "high" });
     expect(body.max_output_tokens).toBe(8192);
   });
@@ -351,11 +348,11 @@ describe("Responses reasoning leaves the answer room under max_output_tokens", (
 describe("reasoning budget across families (imposed vs client-requested)", () => {
   const capped = (upstreamModel: string, providerMaxOutputTokens?: number) => ({ upstreamModel, providerMaxOutputTokens });
 
-  it("Chat Completions: a service-imposed effort reserves answer room on top of the client max (finding 3)", () => {
+  it("Chat Completions: a service-imposed effort carries the level, not a new ceiling", () => {
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
     const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
     expect(body.reasoning_effort).toBe("high");
-    expect(body.max_tokens).toBe(1024 + 32000);
+    expect(body.max_tokens).toBe(1024);
   });
 
   it("does NOT inflate a client's own thinking — its max already includes reasoning (finding 8)", () => {
@@ -380,13 +377,20 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
     expect(body.output_config).toEqual({ effort: "high" });
   });
 
-  it("Anthropic: an imposed effort with headroom reserves answer room on top", () => {
-    const req = AnthropicRequest.parse({ model: "svc", max_tokens: 1024, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
-    const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 131072));
-    // The effort budget is still what sizes the ceiling -- it is just no longer
-    // sent as a number, so the reservation shows up only in max_tokens.
-    expect(body.max_tokens).toBe(1024 + 32000);
-    expect(body.thinking).toEqual({ type: "adaptive" });
-    expect(body.output_config).toEqual({ effort: "high" });
+  it("Anthropic: an imposed effort is indistinguishable from a client's own", () => {
+    // The two used to be sized differently. With nothing left to size, an
+    // override and a client request produce the same body.
+    const shape = { model: "svc", max_tokens: 1024, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] };
+    const viaOverride = AnthropicRequest.construct(
+      AnthropicRequest.parse(shape).withOverrides({ thinking: "high" }),
+    ).render(capped("claude", 131072));
+    const viaClient = AnthropicRequest.construct(
+      AnthropicRequest.parse({ ...shape, output_config: { effort: "high" } }),
+    ).render(capped("claude", 131072));
+    expect(viaOverride.max_tokens).toBe(1024);
+    expect(viaOverride.thinking).toEqual({ type: "adaptive" });
+    expect(viaOverride.output_config).toEqual({ effort: "high" });
+    expect(viaClient.max_tokens).toBe(viaOverride.max_tokens);
+    expect(viaClient.output_config).toEqual(viaOverride.output_config);
   });
 });

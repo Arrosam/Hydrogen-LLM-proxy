@@ -441,7 +441,7 @@ export class OpenAIResponsesRequest extends Request {
     if (p.thinking) {
       // The thinking policy owns max_output_tokens when reasoning is on: the
       // reasoning is spent out of that same ceiling, so it has to size it.
-      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens, p.thinkingImposed === true);
+      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
       out.reasoning = { effort: tf.effort };
       if (tf.maxTokens != null) out.max_output_tokens = tf.maxTokens;
     } else {
