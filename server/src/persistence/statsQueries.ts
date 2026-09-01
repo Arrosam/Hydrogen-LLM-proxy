@@ -26,6 +26,20 @@ export interface TimePoint {
   day: string; // YYYY-MM-DD (UTC)
   requests: number;
   totalTokens: number;
+  errors: number;
+  /** Already divided: the chart plots an average, and summing averages is wrong. */
+  avgLatencyMs: number;
+}
+
+/**
+ * A per-day row for the cache seed. Like GroupCount, plus the two counters the
+ * Overview chart plots that no other breakdown needs. Latency is a SUM here, not
+ * an average, so the cache can keep folding rows into it and divide at read time
+ * -- averaging an average would weight a quiet day the same as a busy one.
+ */
+export interface DayCount extends GroupCount {
+  errors: number;
+  latencySumMs: number;
 }
 
 export interface GroupCount {
@@ -37,6 +51,12 @@ export interface GroupCount {
 /** Everything the StatsCache accumulates, aggregated in one pass over the rows
  * above `sinceId`. Latency comes back as a SUM so the cache can keep adding to
  * it and derive the average by division. */
+/** The UTC day bucket every per-day aggregation groups on. One definition, so
+ * the SQL path and the cache seed can never disagree about where a day starts. */
+const DAY_KEY = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
+/** "An error" means the same thing everywhere: a 4xx or 5xx final status. */
+const ERRORS_SUM = sql<number>`coalesce(sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end),0)`;
+
 export interface StatsAccumulators {
   /** Highest row id covered (== sinceId when no rows were above it). */
   maxId: number;
@@ -49,7 +69,7 @@ export interface StatsAccumulators {
   cacheCreationInputTokens: number;
   reasoningTokens: number;
   latencySumMs: number;
-  byDay: GroupCount[];
+  byDay: DayCount[];
   byService: GroupCount[];
   byModel: GroupCount[];
   byProvider: GroupCount[];
@@ -102,12 +122,17 @@ export class StatsQueries {
 
   timeSeries(q: StatsQuery): TimePoint[] {
     const where = this.range(q);
-    const day = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
+    const day = DAY_KEY;
     const base = this.db
       .select({
         day,
         requests: sql<number>`count(*)`,
         totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        errors: ERRORS_SUM,
+        // Rounded in SQL so the wire type is an integer either way -- the cached
+        // path rounds too, and a chart that flips between 12 and 12.4 ms across
+        // the two sources reads as a bug.
+        avgLatencyMs: sql<number>`cast(round(coalesce(avg(${requestLogs.latencyMs}),0)) as integer)`,
       })
       .from(requestLogs);
     return (where ? base.where(where) : base).groupBy(day).orderBy(day).all();
@@ -141,7 +166,6 @@ export class StatsQueries {
       .from(requestLogs)
       .where(above)
       .get();
-    const day = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
     return {
       maxId: Math.max(sinceId, totals?.maxId ?? 0),
       requests: totals?.requests ?? 0,
@@ -153,7 +177,7 @@ export class StatsQueries {
       cacheCreationInputTokens: totals?.cacheCreationInputTokens ?? 0,
       reasoningTokens: totals?.reasoningTokens ?? 0,
       latencySumMs: totals?.latencySumMs ?? 0,
-      byDay: this.groupBy(above, day),
+      byDay: this.groupByDay(above),
       byService: this.groupBy(above, sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`),
       byModel: this.groupBy(and(above, isNotNull(requestLogs.servedModel)), sql<string>`${requestLogs.servedModel}`),
       byProvider: this.groupBy(and(above, isNotNull(requestLogs.servedProvider)), sql<string>`${requestLogs.servedProvider}`),
@@ -169,6 +193,22 @@ export class StatsQueries {
       models: this.groupBy(servedModel, sql<string>`${requestLogs.servedModel}`),
       providers: this.groupBy(servedProvider, sql<string>`${requestLogs.servedProvider}`),
     };
+  }
+
+  /** byDay for the cache seed: the plain grouping plus the chart's two extra
+   * counters. Separate from `groupBy` so the other breakdowns do not carry two
+   * columns they never read. */
+  private groupByDay(where: SQL | undefined): DayCount[] {
+    const base = this.db
+      .select({
+        key: DAY_KEY,
+        requests: sql<number>`count(*)`,
+        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        errors: ERRORS_SUM,
+        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
+      })
+      .from(requestLogs);
+    return (where ? base.where(where) : base).groupBy(DAY_KEY).orderBy(DAY_KEY).all();
   }
 
   private groupBy(where: SQL | undefined, key: SQL<string>): GroupCount[] {

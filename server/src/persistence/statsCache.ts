@@ -12,11 +12,22 @@ const FLUSH_DELAY_MS = 5_000;
 /** Bumped whenever a counter is added, so a cache persisted by an older build --
  * which has no history for the new field -- is discarded and re-seeded from the
  * table instead of being carried forward with a missing counter. */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 interface Bucket {
   requests: number;
   totalTokens: number;
+}
+
+/** The per-day bucket carries two counters the other breakdowns do not: the
+ * Overview chart plots errors and latency over time, and nothing plots them per
+ * service/model/provider. Kept a separate shape so those maps do not persist two
+ * columns that would always read zero. */
+interface DayBucket extends Bucket {
+  errors: number;
+  /** Sum, not average -- divided by `requests` at read time, so folding more
+   * rows in stays correct. */
+  latencySumMs: number;
 }
 
 interface CacheState {
@@ -36,7 +47,7 @@ interface CacheState {
   reasoningTokens: number;
   /** Sum, not average -- the average is a division at read time. */
   latencySumMs: number;
-  byDay: Record<string, Bucket>;
+  byDay: Record<string, DayBucket>;
   byService: Record<string, Bucket>;
   byModel: Record<string, Bucket>;
   byProvider: Record<string, Bucket>;
@@ -135,7 +146,12 @@ export class StatsCache {
     if (r.id > s.lastId) s.lastId = r.id;
 
     const day = new Date().toISOString().slice(0, 10); // UTC, matching the SQL seed
-    bump(s.byDay, day, r.totalTokens);
+    bumpDay(s.byDay, day, {
+      requests: 1,
+      totalTokens: r.totalTokens,
+      errors: r.httpStatus >= 400 ? 1 : 0,
+      latencySumMs: r.latencyMs,
+    });
     bump(s.byService, r.requestedService ?? "(unknown)", r.totalTokens);
     if (r.servedModel != null) bump(s.byModel, r.servedModel, r.totalTokens);
     if (r.servedProvider != null) bump(s.byProvider, r.servedProvider, r.totalTokens);
@@ -145,6 +161,16 @@ export class StatsCache {
   /** A logged 200 was demoted to 499 after the fact: one more error. */
   recordDeliveryFailure(): void {
     this.state.errors += 1;
+    // Also on today's day bucket, so the chart's error curve and the Overview
+    // error card cannot drift apart. The original request is dated by when it
+    // was logged, which for a demotion is today in every realistic case -- a
+    // delivery failure is observed within the same request.
+    bumpDay(this.state.byDay, new Date().toISOString().slice(0, 10), {
+      requests: 0,
+      totalTokens: 0,
+      errors: 1,
+      latencySumMs: 0,
+    });
     this.scheduleFlush();
   }
 
@@ -167,7 +193,13 @@ export class StatsCache {
 
   timeSeries(): TimePoint[] {
     return Object.entries(this.state.byDay)
-      .map(([day, b]) => ({ day, requests: b.requests, totalTokens: b.totalTokens }))
+      .map(([day, b]) => ({
+        day,
+        requests: b.requests,
+        totalTokens: b.totalTokens,
+        errors: b.errors,
+        avgLatencyMs: b.requests > 0 ? Math.round(b.latencySumMs / b.requests) : 0,
+      }))
       .sort((a, b) => (a.day < b.day ? -1 : 1));
   }
 
@@ -238,7 +270,7 @@ export class StatsCache {
     s.cacheCreationInputTokens += acc.cacheCreationInputTokens;
     s.reasoningTokens += acc.reasoningTokens;
     s.latencySumMs += acc.latencySumMs;
-    for (const g of acc.byDay) bump(s.byDay, g.key, g.totalTokens, g.requests);
+    for (const g of acc.byDay) bumpDay(s.byDay, g.key, g);
     for (const g of acc.byService) bump(s.byService, g.key, g.totalTokens, g.requests);
     for (const g of acc.byModel) bump(s.byModel, g.key, g.totalTokens, g.requests);
     for (const g of acc.byProvider) bump(s.byProvider, g.key, g.totalTokens, g.requests);
@@ -250,6 +282,14 @@ function bump(map: Record<string, Bucket>, key: string, totalTokens: number, req
   const b = (map[key] ??= { requests: 0, totalTokens: 0 });
   b.requests += requests;
   b.totalTokens += totalTokens;
+}
+
+function bumpDay(map: Record<string, DayBucket>, day: string, d: Omit<DayBucket, never>): void {
+  const b = (map[day] ??= { requests: 0, totalTokens: 0, errors: 0, latencySumMs: 0 });
+  b.requests += d.requests;
+  b.totalTokens += d.totalTokens;
+  b.errors += d.errors;
+  b.latencySumMs += d.latencySumMs;
 }
 
 function toGroups(map: Record<string, Bucket>): GroupCount[] {

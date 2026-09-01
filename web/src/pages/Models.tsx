@@ -220,7 +220,7 @@ export function Models() {
           <div className="space-y-4">
             <div>
               <label className="label">{t("models.mappingModal.field.provider.label")}</label>
-              <select className="input" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
+              <select className="select" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
                 {data?.providers.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
                 ))}

@@ -176,4 +176,31 @@ describe("StatsCache", () => {
     expectMatchesSql(cache);
     expect(cache.summary().requests).toBe(1);
   });
+
+  it("day points carry errors and an average latency, not just requests", () => {
+    // The Overview chart plots four curves off these points. `expectMatchesSql`
+    // already proves the cache and the SQL path agree; what it cannot prove is
+    // that the two new counters mean anything, since both sides could be zero.
+    logs.insert(row({ httpStatus: 500, latencyMs: 900, error: "boom" }));
+    const cache = new StatsCache(queries, settings);
+    cache.init();
+    expectMatchesSql(cache);
+
+    const points = cache.timeSeries();
+    const summary = cache.summary();
+    expect(points.length).toBeGreaterThan(0);
+    expect(summary.errors).toBeGreaterThan(0);
+
+    // Every row this suite writes is stamped now, so the day points add up to
+    // exactly what the all-time summary reports. This is the invariant that
+    // breaks first if the seed and the live fold disagree about either counter.
+    expect(points.reduce((n, p) => n + p.requests, 0)).toBe(summary.requests);
+    expect(points.reduce((n, p) => n + p.errors, 0)).toBe(summary.errors);
+
+    // Latency is accumulated as a sum and divided per bucket, so re-weighting the
+    // per-day averages by their request counts must land back on the global one
+    // (within the rounding each bucket applies).
+    const weighted = points.reduce((n, p) => n + p.avgLatencyMs * p.requests, 0) / summary.requests;
+    expect(Math.abs(weighted - summary.avgLatencyMs)).toBeLessThanOrEqual(1);
+  });
 });

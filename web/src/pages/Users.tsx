@@ -168,7 +168,7 @@ export function Users() {
             </div>
             <div>
               <label className="label">{t("users.form.role")}</label>
-              <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
+              <select className="select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
                 <option value="manager">{t("users.role.manager")}</option>
                 <option value="admin">{t("users.role.admin")}</option>
               </select>

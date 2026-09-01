@@ -158,7 +158,7 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
       {stages.length > 1 && (
         <div className="mt-3 flex items-center gap-2">
           <label className="label mb-0">{t("stageEditor.returnOutputOf")}</label>
-          <select className="input w-auto" value={output} onChange={(e) => setStages(stages, e.target.value)}>
+          <select className="select w-auto" value={output} onChange={(e) => setStages(stages, e.target.value)}>
             <option value="">{t("stageEditor.defaultOutput")}</option>
             {stages.map((s) => (
               <option key={s.name} value={s.name}>{s.name}</option>
@@ -213,7 +213,7 @@ function StageBody({
       <div>
         <label className="label">{t("stageEditor.runs")}</label>
         <select
-          className="input"
+          className="select"
           value={stage.service ?? (model ? "" : ROUTER)}
           onChange={(e) => {
             const v = e.target.value;
@@ -250,7 +250,7 @@ function StageBody({
             <div className="mb-1.5 flex items-center justify-between">
               <label className="label mb-0">{t("stageEditor.input")} <span className="normal-case text-ink-500">{t("stageEditor.inputHint")}</span></label>
               <select
-                className="input h-7 w-auto py-0 text-xs"
+                className="select h-7 w-auto py-0 text-xs"
                 value=""
                 onChange={(e) => {
                   if (!e.target.value) return;
@@ -293,7 +293,7 @@ function StageBody({
               <div>
                 <label className="label">{t("stageEditor.tools")}</label>
                 <select
-                  className="input"
+                  className="select"
                   value={stage.tools ?? "inherit"}
                   onChange={(e) => onPatch({ tools: e.target.value === "none" ? "none" : undefined })}
                 >
@@ -376,7 +376,7 @@ function TransitionRow({
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="w-12 shrink-0 text-ink-500">{t("stageEditor.when")}</span>
         <select
-          className="input h-8 w-40 py-0 text-xs"
+          className="select h-8 w-40 py-0 text-xs"
           value={c.type}
           onChange={(e) => onChange({ ...transition, when: newCondition(e.target.value as AgentCondition["type"]) })}
         >
@@ -386,7 +386,7 @@ function TransitionRow({
         </select>
         {condIsOutput(c) && (
           <select
-            className="input h-8 w-32 py-0 text-xs"
+            className="select h-8 w-32 py-0 text-xs"
             value={(c as { stage?: string }).stage ?? ""}
             onChange={(e) => onChange({ ...transition, when: { ...c, stage: e.target.value || undefined } as AgentCondition })}
           >
@@ -409,7 +409,7 @@ function TransitionRow({
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="w-12 shrink-0 text-ink-500">{t("stageEditor.goTo")}</span>
         <select
-          className="input h-8 w-32 py-0 text-xs"
+          className="select h-8 w-32 py-0 text-xs"
           value={transition.goto}
           onChange={(e) => {
             const goto = e.target.value;
@@ -425,7 +425,7 @@ function TransitionRow({
           <>
             <span className="text-ink-500">{t("stageEditor.returning")}</span>
             <select
-              className="input h-8 w-32 py-0 text-xs"
+              className="select h-8 w-32 py-0 text-xs"
               value={transition.output ?? ""}
               onChange={(e) => onChange({ ...transition, output: e.target.value || undefined })}
             >
@@ -483,7 +483,7 @@ function ContextBlockRow({
         {block.kind === "stage_output" && (
           <>
             <select
-              className="input h-7 w-28 py-0 text-xs"
+              className="select h-7 w-28 py-0 text-xs"
               value={block.stage}
               onChange={(e) => onChange({ ...block, stage: e.target.value })}
             >
@@ -494,7 +494,7 @@ function ContextBlockRow({
             </select>
             <span className="text-ink-500">{t("stageEditor.as")}</span>
             <select
-              className="input h-7 w-24 py-0 text-xs"
+              className="select h-7 w-24 py-0 text-xs"
               value={block.role}
               onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
             >
@@ -505,7 +505,7 @@ function ContextBlockRow({
         )}
         {block.kind === "message" && (
           <select
-            className="input h-7 w-24 py-0 text-xs"
+            className="select h-7 w-24 py-0 text-xs"
             value={block.role}
             onChange={(e) => onChange({ ...block, role: e.target.value as "user" | "assistant" })}
           >
@@ -689,7 +689,7 @@ export function AsrEditor({
           <div>
             <label className="label">{t("asr.modelRuns")}</label>
             <select
-              className="input"
+              className="select"
               value={asr.service ?? ""}
               onChange={(e) => patch({ service: e.target.value || undefined, steps: undefined })}
             >
@@ -754,7 +754,7 @@ export function OcrEditor({
           <div>
             <label className="label">{t("ocr.modelRuns")}</label>
             <select
-              className="input"
+              className="select"
               value={ocr.service ?? ""}
               onChange={(e) => patch({ service: e.target.value || undefined, steps: undefined })}
             >

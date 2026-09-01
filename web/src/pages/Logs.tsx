@@ -8,7 +8,7 @@ import { useAuth } from "../auth";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
 import { useI18n } from "../lib/i18n";
-import type { LogSummary, ModelService } from "../types";
+import type { LogSummary, ModelService, Token } from "../types";
 
 interface AttemptRecord {
   step: number;
@@ -103,6 +103,8 @@ export function Logs() {
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [serviceId, setServiceId] = useState<number | "">("");
   const [services, setServices] = useState<ModelService[]>([]);
+  const [tokenId, setTokenId] = useState<number | "">("");
+  const [tokens, setTokens] = useState<Token[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<LogDetail | null>(null);
@@ -125,6 +127,9 @@ export function Logs() {
 
   useEffect(() => {
     api.get<{ services: ModelService[] }>("/services").then((r) => setServices(r.services)).catch(() => {});
+    // Only used to label and offer the filter; a caller who cannot list keys
+    // simply gets the "all keys" option, same as the services fetch above.
+    api.get<{ tokens: Token[] }>("/tokens").then((r) => setTokens(r.tokens)).catch(() => {});
   }, []);
 
   const load = useCallback(
@@ -133,6 +138,7 @@ export function Logs() {
       const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
       if (errorsOnly) params.set("errorsOnly", "true");
       if (serviceId !== "") params.set("serviceId", String(serviceId));
+      if (tokenId !== "") params.set("tokenId", String(tokenId));
       api
         .get<{ rows: LogSummary[]; total: number }>(`/logs?${params.toString()}`)
         .then((r) => {
@@ -145,7 +151,7 @@ export function Logs() {
           if (!silent) setLoading(false);
         });
     },
-    [offset, errorsOnly, serviceId],
+    [offset, errorsOnly, serviceId, tokenId],
   );
 
   useEffect(() => {
@@ -192,7 +198,7 @@ export function Logs() {
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
-          className="input w-auto"
+          className="select w-auto"
           value={serviceId}
           onChange={(e) => {
             setOffset(0);
@@ -202,6 +208,19 @@ export function Logs() {
           <option value="">{t("logs.filter.allServices")}</option>
           {services.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+        <select
+          className="select w-auto"
+          value={tokenId}
+          onChange={(e) => {
+            setOffset(0);
+            setTokenId(e.target.value === "" ? "" : Number(e.target.value));
+          }}
+        >
+          <option value="">{t("logs.filter.allKeys")}</option>
+          {tokens.map((k) => (
+            <option key={k.id} value={k.id}>{k.name} · {k.keyPrefix}</option>
           ))}
         </select>
         <label className="flex items-center gap-2 text-sm text-ink-300">

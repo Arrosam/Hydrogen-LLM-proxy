@@ -274,6 +274,9 @@ export interface TimePoint {
   day: string;
   requests: number;
   totalTokens: number;
+  errors: number;
+  /** Already averaged server-side; summing these across days would be wrong. */
+  avgLatencyMs: number;
 }
 
 export interface GroupCount {

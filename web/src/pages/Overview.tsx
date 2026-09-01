@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Area,
   AreaChart,
@@ -120,6 +121,126 @@ function TopList({ title, icon, groups }: { title: string; icon: string; groups:
   );
 }
 
+type SeriesKey = "requests" | "totalTokens" | "errors" | "avgLatencyMs";
+
+/**
+ * The four metrics share an X axis and nothing else: requests are tens, tokens
+ * are hundreds of thousands, latency is hundreds of milliseconds and errors are
+ * single digits. On one Y axis three of them are a flat line on zero, so each
+ * gets its own -- drawn together they compare *shape*, which is what a traffic
+ * chart is read for.
+ *
+ * Absolute values then need somewhere to live, so clicking a legend entry locks
+ * the chart to that metric alone and reveals its axis with real numbers. Click
+ * it again to go back to all four.
+ */
+function TrafficChart({ points }: { points: TimePoint[] }) {
+  const { t } = useI18n();
+  const [locked, setLocked] = useState<SeriesKey | null>(null);
+
+  // Colours match the stat cards above: one metric, one colour, whether you read
+  // it as a number or as a shape.
+  const series: { key: SeriesKey; color: string; label: string; format: (n: number) => string }[] = [
+    { key: "requests", color: "#22d3ee", label: t("overview.chart.series.requests"), format: formatNumber },
+    { key: "totalTokens", color: "#fbbf24", label: t("overview.chart.series.tokens"), format: formatCompact },
+    { key: "errors", color: "#f87171", label: t("overview.chart.series.errors"), format: formatNumber },
+    { key: "avgLatencyMs", color: "#34d399", label: t("overview.chart.series.latency"), format: (n: number) => `${formatNumber(n)} ms` },
+  ];
+  const shown = locked ? series.filter((x) => x.key === locked) : series;
+
+  return (
+    <div className="card card-pad">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-200">
+          <i className="bi bi-graph-up text-brand-400" />
+          {t("overview.chart.title")}
+        </h3>
+        <div className="flex flex-wrap items-center gap-1">
+          {series.map((x) => {
+            const dimmed = locked !== null && locked !== x.key;
+            return (
+              <button
+                key={x.key}
+                type="button"
+                title={t("overview.chart.focusHint")}
+                aria-pressed={locked === x.key}
+                onClick={() => setLocked(locked === x.key ? null : x.key)}
+                className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition ${
+                  locked === x.key
+                    ? "bg-ink-800 font-medium text-ink-100"
+                    : "text-ink-400 hover:bg-ink-800/60 hover:text-ink-200"
+                }`}
+              >
+                <span
+                  className="h-2 w-2 rounded-full transition-opacity"
+                  style={{ background: x.color, opacity: dimmed ? 0.3 : 1 }}
+                />
+                {x.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {points.length === 0 ? (
+        <EmptyState icon="bi-bar-chart-line" title={t("overview.empty.noRequestsTitle")} hint={t("overview.empty.noRequestsHint")} />
+      ) : (
+        <ResponsiveContainer width="100%" height={260}>
+          {/* left margin: a hidden axis takes no width, so pull the plot over
+              when none is labelled and give the ticks room when one is. */}
+          <AreaChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: locked ? 4 : -12 }}>
+            <defs>
+              {series.map((x) => (
+                <linearGradient key={x.key} id={`grad-${x.key}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={x.color} stopOpacity={0.5} />
+                  <stop offset="100%" stopColor={x.color} stopOpacity={0} />
+                </linearGradient>
+              ))}
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1b222d" />
+            <XAxis dataKey="day" stroke="#5b6b80" fontSize={11} tickLine={false} />
+            {series.map((x) => (
+              <YAxis
+                key={x.key}
+                yAxisId={x.key}
+                hide={locked !== x.key}
+                stroke={x.color}
+                fontSize={11}
+                tickLine={false}
+                axisLine={false}
+                allowDecimals={false}
+                tickFormatter={(v: number) => x.format(v)}
+              />
+            ))}
+            <Tooltip
+              contentStyle={{ background: "#151b24", border: "1px solid #273140", borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: "#aab6c6" }}
+              formatter={(value: number | string, name: string) => {
+                const x = series.find((c) => c.label === name);
+                return [x ? x.format(Number(value)) : String(value), name];
+              }}
+            />
+            {shown.map((x) => (
+              <Area
+                key={x.key}
+                yAxisId={x.key}
+                name={x.label}
+                type="monotone"
+                dataKey={x.key}
+                stroke={x.color}
+                strokeWidth={2}
+                // Filled only when it is the single curve on screen: four
+                // translucent areas stacked on top of each other read as mud.
+                fill={locked === x.key ? `url(#grad-${x.key})` : "none"}
+                fillOpacity={locked === x.key ? 1 : 0}
+              />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
 export function Overview() {
   const { t } = useI18n();
   const { data, loading, error } = useAsync<OverviewData>(async () => {
@@ -158,34 +279,7 @@ export function Overview() {
             <StatCard icon="bi-stopwatch" tone="text-emerald-400" label={t("overview.stats.avgLatency")} value={`${formatNumber(data.summary.avgLatencyMs)} ms`} />
           </div>
 
-          <div className="card card-pad">
-            <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink-200">
-              <i className="bi bi-graph-up text-brand-400" />
-              {t("overview.chart.title")}
-            </h3>
-            {data.points.length === 0 ? (
-              <EmptyState icon="bi-bar-chart-line" title={t("overview.empty.noRequestsTitle")} hint={t("overview.empty.noRequestsHint")} />
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <AreaChart data={data.points} margin={{ top: 4, right: 8, bottom: 0, left: -12 }}>
-                  <defs>
-                    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#0891b2" stopOpacity={0.5} />
-                      <stop offset="100%" stopColor="#0891b2" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1b222d" />
-                  <XAxis dataKey="day" stroke="#5b6b80" fontSize={11} tickLine={false} />
-                  <YAxis stroke="#5b6b80" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
-                  <Tooltip
-                    contentStyle={{ background: "#151b24", border: "1px solid #273140", borderRadius: 8, fontSize: 12 }}
-                    labelStyle={{ color: "#aab6c6" }}
-                  />
-                  <Area type="monotone" dataKey="requests" stroke="#22d3ee" strokeWidth={2} fill="url(#g)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+          <TrafficChart points={data.points} />
 
           <div className="grid gap-4 md:grid-cols-3">
             <TopList title={t("overview.topList.topServices")} icon="bi-diagram-3" groups={data.services} />

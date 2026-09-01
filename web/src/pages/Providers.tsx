@@ -293,7 +293,7 @@ export function Providers() {
               </div>
               <div>
                 <label className="label">{t("providers.field.type.label")}</label>
-                <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
+                <select className="select" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
                   <option value="openai_completion">{t("providers.type.openai_completion")}</option>
                   <option value="openai_responses">{t("providers.type.openai_responses")}</option>
                   <option value="anthropic">{t("providers.type.anthropic")}</option>
@@ -317,7 +317,7 @@ export function Providers() {
               {form.altEndpoints.map((ep, i) => (
                 <div key={i} className="mb-2 flex gap-2">
                   <select
-                    className="input w-48"
+                    className="select w-48"
                     value={ep.type}
                     onChange={(e) => setForm({ ...form, altEndpoints: form.altEndpoints.map((x, j) => (j === i ? { ...x, type: e.target.value as ProviderType } : x)) })}
                   >

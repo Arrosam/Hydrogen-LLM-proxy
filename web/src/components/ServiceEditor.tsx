@@ -415,7 +415,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         {kind === "resilience" && (
           <div>
             <label className="label">{t("serviceEditor.categoryLabel")}</label>
-            <select className="input w-auto" value={category} onChange={(e) => setCategory(e.target.value as ServiceCategory)}>
+            <select className="select w-auto" value={category} onChange={(e) => setCategory(e.target.value as ServiceCategory)}>
               {(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"] as const).map((c) => (
                 <option key={c} value={c}>{t(`serviceEditor.category.${c}`)}</option>
               ))}
@@ -528,7 +528,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         <div>
                           <label className="label">{t("serviceEditor.model")}</label>
                           <select
-                            className="input"
+                            className="select"
                             value={step.model}
                             onChange={(e) => {
                               const model = e.target.value;
@@ -543,7 +543,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         </div>
                         <div>
                           <label className="label">{t("serviceEditor.provider")}</label>
-                          <select className="input" value={step.provider} onChange={(e) => patchStep(i, { provider: e.target.value })}>
+                          <select className="select" value={step.provider} onChange={(e) => patchStep(i, { provider: e.target.value })}>
                             {provOptions.length === 0 && <option value="">{t("serviceEditor.noProvidersMapped")}</option>}
                             {provOptions.map((p) => (
                               <option key={p} value={p}>{p}</option>
