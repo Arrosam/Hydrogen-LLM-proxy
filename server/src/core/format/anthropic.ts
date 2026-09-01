@@ -462,7 +462,7 @@ export class AnthropicRequest extends Request {
         out.output_config = { ...base, effort: tf.effort };
       }
     }
-    out.max_tokens = tf.max_tokens;
+    if (tf.max_tokens != null) out.max_tokens = tf.max_tokens;
     applyNonCanonical(out, p, this.family);
     // OpenAI's `user` abuse-tracking id maps to metadata.user_id; a client's own
     // passthrough metadata (same family) wins.

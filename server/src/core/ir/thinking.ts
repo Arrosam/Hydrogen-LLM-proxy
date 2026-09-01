@@ -22,10 +22,15 @@ import type { EffortLevel, ThinkingLevel } from "./params";
  * that refuses a level refuses it out loud and the error reaches the client --
  * and a user who wants degradation configures it, with a Model Services fallback
  * step carrying a `thinking` override.
+ *
+ * The same rule covers the ceiling itself. `max_tokens` is REQUIRED on the
+ * Anthropic wire and optional on the OpenAI ones, so a client that omits it and
+ * lands on an Anthropic upstream produces a request that upstream will reject.
+ * This policy does not paper over that with a number of its own -- an invented
+ * ceiling silently truncates an answer at a length nobody chose, and the caller
+ * has no way to know it happened. The 400 names the missing field; a number
+ * would name nothing.
  */
-
-/** Anthropic requires max_tokens; use this when neither client nor cap gave one. */
-export const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 
 /**
  * Anthropic's own effort scale. Hydrogen carries one extra rung at the bottom --
@@ -76,7 +81,9 @@ export interface AnthropicThinkingFields {
   thinking: { type: "adaptive" } | { type: "disabled" };
   /** How much to think, for `output_config.effort`. Absent when thinking is off. */
   effort?: AnthropicEffort;
-  max_tokens: number;
+  /** The client's own ceiling, bounded by the provider cap. Undefined when the
+   * client named none -- this policy does not invent one. */
+  max_tokens?: number;
 }
 
 /** The shared OpenAI-family rule: Chat Completions and Responses carry the same
@@ -123,10 +130,11 @@ export const ThinkingPolicy = {
     clientMax: number | undefined,
     providerCap: number | undefined,
   ): AnthropicThinkingFields {
-    // max_tokens is required on this wire and 0 is not a valid request, so an
-    // absent client max falls back to the provider's cap and then to a default.
-    const base = clientMax != null && clientMax > 0 ? clientMax : providerCap ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
-    const max_tokens = Math.max(1, providerCap != null ? Math.min(base, providerCap) : base);
+    // Undefined when the client named no ceiling: this wire requires max_tokens,
+    // and the upstream saying so is more useful than a number nobody chose.
+    const max_tokens = clientMax != null && clientMax > 0
+      ? Math.max(1, providerCap != null ? Math.min(clientMax, providerCap) : clientMax)
+      : undefined;
 
     if (thinking === "disabled") return { thinking: { type: "disabled" }, max_tokens };
     return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[resolveEffort(thinking)], max_tokens };

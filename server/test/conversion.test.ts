@@ -197,10 +197,15 @@ describe("F9-F12: parameter adaptation toward Anthropic", () => {
     expect(String(body.system)).toContain("JSON");
   });
 
-  it("F11: a missing max_tokens prefers the provider cap over the tiny default", () => {
+  it("F11: a missing max_tokens is left missing, cap or no cap", () => {
+    // This wire requires max_tokens and the OpenAI one does not, so an OpenAI
+    // client that omitted it produces a request Anthropic will reject. That
+    // rejection names the field; a substituted number would name nothing and
+    // truncate the answer at a length nobody chose -- including the provider
+    // cap, which is the most the upstream allows, not what this caller wanted.
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "q" }] });
-    expect(AnthropicRequest.construct(req).render(target({ providerMaxOutputTokens: 30_000 })).max_tokens).toBe(30_000);
-    expect(AnthropicRequest.construct(req).render(target()).max_tokens).toBe(4096);
+    expect(AnthropicRequest.construct(req).render(target({ providerMaxOutputTokens: 30_000 }))).not.toHaveProperty("max_tokens");
+    expect(AnthropicRequest.construct(req).render(target())).not.toHaveProperty("max_tokens");
   });
 
   it("F12: user maps to metadata.user_id without clobbering client metadata", () => {

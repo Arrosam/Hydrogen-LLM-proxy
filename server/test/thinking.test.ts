@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AnthropicRequest, OpenAICompletionRequest } from "../src/core/format";
 import type { GenerationParams } from "../src/core/ir/params";
-import { DEFAULT_ANTHROPIC_MAX_TOKENS } from "../src/core/ir/thinking";
 
 function base(params: GenerationParams): OpenAICompletionRequest {
   return new OpenAICompletionRequest({
@@ -117,8 +116,8 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
   });
 
   it("a provider's hard cap bounds max_tokens, not the effort", () => {
-    const out = anthropic({ thinking: "max" }, 5000);
-    expect(out.max_tokens as number).toBeLessThanOrEqual(5000);
+    const out = anthropic({ thinking: "max", maxTokens: 64000 }, 5000);
+    expect(out.max_tokens).toBe(5000);
     expect(effortOf(out)).toBe("max");
   });
 });
@@ -157,12 +156,14 @@ describe("Anthropic thinking is omitted unless a level was set", () => {
     expect(anthropic({ maxTokens: 32768 }).thinking).toBeUndefined();
   });
 
-  it("omitting thinking leaves max_tokens exactly as it was", () => {
+  it("max_tokens is the client's own, bounded by the cap, or absent", () => {
     expect(anthropic({ maxTokens: 32768 }).max_tokens).toBe(32768);
-    // No client budget: still prefer the provider's cap over the built-in default.
-    expect(anthropic({}, 8192).max_tokens).toBe(8192);
     expect(anthropic({ maxTokens: 99999 }, 8192).max_tokens).toBe(8192);
-    expect(anthropic({}).max_tokens).toBe(DEFAULT_ANTHROPIC_MAX_TOKENS);
+    // No client ceiling: none is invented, not even from the provider's cap --
+    // a cap is the most the upstream allows, not what this caller asked for.
+    // The upstream rejects the request and says which field is missing.
+    expect(anthropic({}).max_tokens).toBeUndefined();
+    expect(anthropic({}, 8192).max_tokens).toBeUndefined();
   });
 
   it("a real Anthropic request that omits thinking carries no thinking field", () => {

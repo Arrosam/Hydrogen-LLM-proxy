@@ -51,7 +51,7 @@ describe("OpenAI Chat Completions request -> canonical", () => {
 });
 
 describe("canonical -> Anthropic request (cross-family construct + render)", () => {
-  it("lifts system, sets a default max_tokens, maps tools", () => {
+  it("lifts system and maps tools, and invents no max_tokens", () => {
     const req = OpenAICompletionRequest.parse({
       model: "m",
       messages: [
@@ -63,7 +63,7 @@ describe("canonical -> Anthropic request (cross-family construct + render)", () 
     const body = AnthropicRequest.construct(req).render(target("claude-x"));
     expect(body.model).toBe("claude-x");
     expect(body.system).toBe("sys");
-    expect(body.max_tokens).toBe(4096);
+    expect(body).not.toHaveProperty("max_tokens");
     expect((body.tools as unknown[]).length).toBe(1);
     expect((body.messages as { role: string }[])[0].role).toBe("user");
   });

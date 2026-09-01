@@ -351,13 +351,19 @@ async function convert(
 }
 
 /** The question must survive every translation, whatever the wire shape. */
-function expectQuestionForwarded(sent: Record<string, unknown>, egress: Family): void {
+function expectQuestionForwarded(sent: Record<string, unknown>, egress: Family, ingress?: Family): void {
   const wire = JSON.stringify(sent);
   expect(wire).toContain("weather in Beijing?");
   expect(sent.model).toBe("up"); // mapped upstream name, not the service name
   if (egress === "anthropic") {
     expect(sent.messages).toBeDefined();
-    expect(sent.max_tokens).toBeTypeOf("number"); // required by that wire
+    // `max_tokens` mirrors the client; none is invented. An Anthropic client had
+    // to send one (the field is required on that wire), so it is forwarded. An
+    // OpenAI client did not, so nothing goes out -- and the upstream rejects the
+    // request naming the field, which is the caller's signal to send one. A
+    // number chosen here would silently cap an answer nobody sized.
+    if (ingress === "anthropic") expect(sent.max_tokens).toBeTypeOf("number");
+    else if (ingress != null) expect(sent).not.toHaveProperty("max_tokens");
   } else if (egress === "openai_responses") {
     expect(sent.input).toBeDefined();
     expect(sent.store).toBe(false); // the proxy is stateless
@@ -407,7 +413,7 @@ describe("EP: every ingress family x every egress family (buffered)", () => {
       it(`${ingress} -> ${egress} (${label})`, async () => {
         const r = await convert(ingress, egress);
         expect(r.status).toBe(200);
-        expectQuestionForwarded(r.sent, egress);
+        expectQuestionForwarded(r.sent, egress, ingress);
         expectAnswerInIngressShape(ingress, r.payload, false);
       });
     }
@@ -423,7 +429,7 @@ describe("EP: every ingress family x every egress family (streamed)", () => {
         const r = await convert(ingress, egress, { stream: true });
         expect(r.status).toBe(200);
         expect(r.sent.stream).toBe(true); // streaming intent reaches the upstream
-        expectQuestionForwarded(r.sent, egress);
+        expectQuestionForwarded(r.sent, egress, ingress);
         expectAnswerInIngressShape(ingress, r.payload, true);
       });
     }
