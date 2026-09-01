@@ -99,6 +99,6 @@ describe("admin keeps the full surface", () => {
 
     const reveal = await as(adminCookie, { url: `/admin/api/tokens/${tokenId}/secret` });
     expect(reveal.statusCode).toBe(200);
-    expect((reveal.json() as { secret: string }).secret).toMatch(/^sk-hproxy-/);
+    expect((reveal.json() as { secret: string }).secret).toMatch(/^sk-/);
   });
 });

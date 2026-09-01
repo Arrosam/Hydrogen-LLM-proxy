@@ -160,7 +160,7 @@ export function Check() {
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-hproxy-..."
+                placeholder="sk-..."
                 autoFocus
                 autoComplete="off"
               />

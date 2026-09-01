@@ -166,6 +166,15 @@ export function Tokens() {
     setForm(formFromToken(t));
   };
 
+  /** Open the create form pre-filled from an existing key. Everything carries
+   * over except the identity: `editingId` stays null so saving issues a NEW key
+   * with its own secret, and the name is suffixed so the two are tellable apart
+   * in a list where scope and limits now look identical. */
+  const openDuplicate = (t: Token) => {
+    setEditingId(null);
+    setForm({ ...formFromToken(t), name: i18n("tokens.copyOfName", { name: t.name }) });
+  };
+
   const closeForm = () => {
     setForm(null);
     setEditingId(null);
@@ -240,6 +249,12 @@ export function Tokens() {
                         >
                           <i className="bi bi-clipboard" />
                           {i18n("tokens.action.copyKey")}
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button className="btn-ghost btn-xs" onClick={() => openDuplicate(t)}>
+                          <i className="bi bi-files" />
+                          {i18n("tokens.action.duplicate")}
                         </button>
                       )}
                       <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
