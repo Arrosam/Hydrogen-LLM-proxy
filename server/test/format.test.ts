@@ -316,12 +316,14 @@ describe("Responses reasoning leaves the answer room under max_output_tokens", (
     expect(body.max_output_tokens as number).toBeLessThanOrEqual(8192);
   });
 
-  it("thinks less rather than not answering when the cap is tight", () => {
+  it("a tight cap bounds the ceiling and leaves the level alone", () => {
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
     const body = OpenAIResponsesRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5", 8192));
-    // high (32k) cannot fit under 8192 with 1024 of answer; low (4096) can.
-    expect(body.reasoning).toEqual({ effort: "low" });
-    expect(body.max_output_tokens).toBe(1024 + 4096);
+    // The reservation (1024 + 32000) is cut back to the cap. `high` is what was
+    // asked for, so `high` is what goes out -- effort is a hint the model paces
+    // itself against, and lowering it here would answer a question nobody asked.
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.max_output_tokens).toBe(8192);
   });
 
   it("invents no ceiling when the client named no max", () => {
@@ -370,13 +372,12 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
     expect(body.max_tokens).toBe(2000);
   });
 
-  it("Anthropic: a tight provider cap steps the effort down instead of exceeding it (finding 4)", () => {
+  it("Anthropic: a tight provider cap bounds max_tokens without lowering the effort", () => {
     const req = AnthropicRequest.parse({ model: "svc", max_tokens: 4096, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
     const body = AnthropicRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("claude", 1024));
-    expect(body.max_tokens as number).toBeLessThanOrEqual(1024);
-    // Still thinking, just less of it: the cap bounds the ceiling, not the intent.
+    expect(body.max_tokens).toBe(1024);
     expect(body.thinking).toEqual({ type: "adaptive" });
-    expect(body.output_config).toEqual({ effort: "low" });
+    expect(body.output_config).toEqual({ effort: "high" });
   });
 
   it("Anthropic: an imposed effort with headroom reserves answer room on top", () => {

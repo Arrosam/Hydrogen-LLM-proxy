@@ -32,25 +32,27 @@ const EFFORT_BUDGETS: Record<EffortLevel, number> = {
   max: 128000,
 };
 
-/** The efforts cheapest-first -- the order effort steps down under a tight cap.
- * Derived from EFFORT_BUDGETS so the two can never disagree (string keys keep
- * insertion order). */
-const EFFORT_LADDER = Object.keys(EFFORT_BUDGETS) as EffortLevel[];
-
 /**
- * The ladder steps down for ONE reason: a `max_tokens` ceiling too small to hold
- * the reasoning and still answer. That is arithmetic -- a budget bigger than the
- * ceiling returns an empty message.
+ * The effort a caller asked for is the effort that goes out. There is no ladder:
+ * nothing here lowers a level to make it fit a ceiling, and nothing lowers one to
+ * match what an upstream will accept.
  *
- * It deliberately does NOT step down to match what an upstream will accept.
- * Providers take different subsets (measured: `reasoning_effort: "max"` is 422 on
- * one Anthropic-compatible gateway and 400 on another), and clamping to the
- * nearest supported tier would quietly answer a question nobody asked. Hydrogen's
- * job is to maximise the caller's freedom, so an upstream that refuses a level
+ * Both used to happen. Stepping down under a tight `max_tokens` was arithmetic in
+ * the budget era -- `budget_tokens` larger than the ceiling left the answer no
+ * room -- but effort is a hint the model paces itself against, not tokens the API
+ * sets aside, so the arithmetic is gone and only the silent downgrade was left.
+ * Clamping to an upstream's accepted subset was never anything but a downgrade
+ * (measured: `max` is 422 on one Anthropic-compatible gateway and 400 on another).
+ *
+ * Hydrogen maximises the caller's freedom: an upstream that refuses a level
  * refuses it out loud and the error reaches the client. A user who wants
- * degradation configures it: a Model Services fallback step carrying a `thinking`
- * override. This holds even when the level was imposed by an override rather than
- * requested by the client -- that was considered and rejected too.
+ * degradation configures it -- a Model Services fallback step carrying a
+ * `thinking` override. Do not reintroduce either behaviour here.
+ *
+ * What remains is sizing, not lowering: an IMPOSED effort still gets its budget
+ * added on top of the client's max, because the client never budgeted for a
+ * thought they did not ask for. That raises the ceiling; it never touches the
+ * level.
  */
 
 /**
@@ -127,7 +129,7 @@ function reasoningCeiling(
     return { effort: "none", maxTokens: clientMax != null ? Math.max(1, clamp(clientMax)) : undefined };
   }
 
-  let { effort, budget } = resolveEffort(thinking);
+  const { effort, budget } = resolveEffort(thinking);
 
   // No client ceiling to squeeze the answer: send the effort, let the provider's
   // own default bound the response.
@@ -137,20 +139,9 @@ function reasoningCeiling(
   // reasoning; take it as-is.
   if (!imposed) return { effort, maxTokens: Math.max(1, clamp(clientMax)) };
 
-  // Service-imposed: give the reasoning its budget on top of the client's answer.
-  if (providerCap == null) return { effort, maxTokens: clientMax + budget };
-
-  // Under a hard cap, step the effort down until its budget plus the answer's
-  // room fits. Unlike Anthropic, OpenAI's effort is a soft hint with no token
-  // budget, so a light effort self-limits inside a small ceiling -- stepping to
-  // minimal is enough to keep the answer room; no need to disable reasoning.
-  let rung = EFFORT_LADDER.indexOf(effort);
-  while (budget + THINKING_RESPONSE_ROOM > providerCap && rung > 0) {
-    rung--;
-    effort = EFFORT_LADDER[rung];
-    budget = EFFORT_BUDGETS[effort];
-  }
-  return { effort, maxTokens: Math.min(clientMax + budget, providerCap) };
+  // Service-imposed: give the reasoning its budget on top of the client's answer,
+  // bounded by the provider's cap. The level itself is untouched.
+  return { effort, maxTokens: clamp(clientMax + budget) };
 }
 
 export const ThinkingPolicy = {
@@ -199,31 +190,22 @@ export const ThinkingPolicy = {
       return { thinking: { type: "disabled" }, max_tokens: Math.max(1, clamp(base)) };
     }
 
-    let { effort, budget } = resolveEffort(thinking);
+    const { effort, budget } = resolveEffort(thinking);
 
     // The client asked for this level: send it, whatever their ceiling is. Effort
     // is a soft hint the model paces itself against, not a budget the API sets
     // aside, so there is no arithmetic left that would justify lowering it -- and
     // quietly answering at a level below the one asked for is the substitution
-    // this proxy does not make. Same early return the OpenAI policy already does.
+    // this proxy does not make.
     if (!imposed) {
       const ceiling = clientMax != null ? clamp(clientMax) : clamp(budget + THINKING_RESPONSE_ROOM);
       return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[effort], max_tokens: Math.max(1, ceiling) };
     }
 
     // Service-imposed: the client never budgeted for this thought, so their max is
-    // the answer's room and the reasoning is added on top. A hard provider cap can
-    // cut that sum back, and then the effort steps DOWN the ladder until the
-    // reasoning still leaves the answer its room -- never off, which would drop
-    // the step's intent entirely.
+    // the answer's room and the reasoning is added on top, bounded by the cap.
+    // The level itself is untouched, here as everywhere.
     const ceiling = clamp(clientMax != null ? clientMax + budget : budget + THINKING_RESPONSE_ROOM);
-    const answerRoom = clientMax ?? THINKING_RESPONSE_ROOM;
-    let rung = EFFORT_LADDER.indexOf(effort);
-    while (budget + answerRoom > ceiling && rung > 0) {
-      rung--;
-      effort = EFFORT_LADDER[rung];
-      budget = EFFORT_BUDGETS[effort];
-    }
     return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[effort], max_tokens: Math.max(1, ceiling) };
   },
 };
