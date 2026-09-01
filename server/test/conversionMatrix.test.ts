@@ -463,12 +463,12 @@ describe("Decision table: thinking requested x egress family", () => {
     }
   }
 
-  it("a client that says nothing still pins thinking on an Anthropic egress", async () => {
+  it("a client that says nothing sends no thinking field on an Anthropic egress", async () => {
     Object.assign(upstream.opts, { thinking: false });
-    // Absent must not mean "whatever the provider defaults to": the field is
-    // always emitted, disabled, so a fallback chain cannot change the answer.
+    // Absent stays absent: the provider's own default decides, rather than the
+    // proxy silently disabling thinking for a caller who never mentioned it.
     const r = await convert("openai_completion", "anthropic");
-    expect(r.sent.thinking).toEqual({ type: "disabled" });
+    expect(r.sent.thinking).toBeUndefined();
     Object.assign(upstream.opts, { thinking: true });
   });
 

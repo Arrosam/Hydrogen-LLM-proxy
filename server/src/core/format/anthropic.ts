@@ -407,23 +407,34 @@ export class AnthropicRequest extends Request {
       out.system = this.system ? `${this.system}\n\n${jsonNote}` : jsonNote;
     }
 
-    // `thinking` is ALWAYS emitted, never omitted -- the disabled case included.
-    // An absent `thinking` means disabled on this wire, but only for a provider
-    // that honours that: DeepSeek's Anthropic-compatible endpoint defaults V4 to
-    // thinking ON when the field is missing, and then rejects the whole request
-    // with "content[].thinking in the thinking mode must be passed back" (4028),
-    // because the history's assistant turns carry none -- and they never can,
-    // since nothing asked for thinking, so none was ever produced or handed back
-    // to the client to replay. Omitting the field let each provider pick its own
-    // default for the identical request, which is why one conversation succeeded
-    // on the first upstream and 400'd on the next one down the fallback chain.
-    // Pinning it carries the client's intent across the hop.
-    // The policy also owns max_tokens: it fits any budget under the client's
+    // `thinking` is emitted ONLY when a level was actually set -- by the client
+    // or by a step/stage override. A request that said nothing carries no field,
+    // so the provider's own default stands, including a provider that defaults
+    // to thinking ON.
+    //
+    // This reverses an earlier fix, deliberately. DeepSeek's Anthropic-compatible
+    // endpoint defaults V4 to thinking ON when the field is missing, then rejects
+    // the request with "content[].thinking in the thinking mode must be passed
+    // back" (4028) because the assistant turns replayed to it carry no thinking
+    // blocks. Pinning {"type":"disabled"} onto every request silenced that -- by
+    // disabling thinking for every caller who never asked to have it off. That
+    // traded a visible error for an invisible loss of capability, and it breaks
+    // outright against an upstream that rejects the field itself rather than
+    // honouring it (AMD's /v1/messages answers `"thinking" is not supported for
+    // this model. Remove the "thinking" parameter`, so a pinned disable makes
+    // EVERY request through that egress fail, thinking or not).
+    //
+    // The 4028 is the real defect and belongs where it happens: the replayed
+    // assistant turns must carry their thinking blocks. Until that is fixed,
+    // surfacing 4028 is the correct behaviour. Do NOT re-pin the field to make
+    // it go away.
+    //
+    // The policy still owns max_tokens: it fits any budget under the client's
     // requested max and the provider's hard cap, still prefers that cap over the
     // built-in fallback when the client never budgeted, and floors the result at
     // 1 (max_tokens is required here, and 0 is not a valid request).
     const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, p.thinkingImposed === true);
-    out.thinking = tf.thinking;
+    if (p.thinking != null) out.thinking = tf.thinking;
     out.max_tokens = tf.max_tokens;
     applyNonCanonical(out, p, this.family);
     // OpenAI's `user` abuse-tracking id maps to metadata.user_id; a client's own

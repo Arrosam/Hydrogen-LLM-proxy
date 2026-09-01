@@ -96,18 +96,20 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
   });
 });
 
-describe("Anthropic thinking is pinned, never omitted (the 4028 fix)", () => {
-  it("a client that said nothing about thinking gets an explicit disable", () => {
-    // Omitting the field is not neutral. DeepSeek's Anthropic-compatible endpoint
-    // defaults V4 to thinking ON when `thinking` is absent, and then 400s with
-    // "content[].thinking in the thinking mode must be passed back" because the
-    // history's assistant turns carry none -- which they never can, since nothing
-    // asked for thinking. Absent means disabled on this wire, so say it out loud.
-    expect(anthropic({}).thinking).toEqual({ type: "disabled" });
-    expect(anthropic({ maxTokens: 32768 }).thinking).toEqual({ type: "disabled" });
+describe("Anthropic thinking is omitted unless a level was set", () => {
+  it("a client that said nothing about thinking gets no thinking field", () => {
+    // Absent stays absent, so the provider's own default decides. Pinning
+    // {"type":"disabled"} here used to hide DeepSeek's 4028 ("content[].thinking
+    // in the thinking mode must be passed back") -- at the price of disabling
+    // thinking for every caller who never asked to have it off, and of failing
+    // outright on an upstream that rejects the field instead of honouring it.
+    // The 4028 belongs to the replay path (assistant turns must carry their
+    // thinking blocks), not to this renderer.
+    expect(anthropic({}).thinking).toBeUndefined();
+    expect(anthropic({ maxTokens: 32768 }).thinking).toBeUndefined();
   });
 
-  it("pinning thinking off leaves max_tokens exactly as it was", () => {
+  it("omitting thinking leaves max_tokens exactly as it was", () => {
     expect(anthropic({ maxTokens: 32768 }).max_tokens).toBe(32768);
     // No client budget: still prefer the provider's cap over the built-in default.
     expect(anthropic({}, 8192).max_tokens).toBe(8192);
@@ -115,9 +117,10 @@ describe("Anthropic thinking is pinned, never omitted (the 4028 fix)", () => {
     expect(anthropic({}).max_tokens).toBe(DEFAULT_ANTHROPIC_MAX_TOKENS);
   });
 
-  it("renders a disable for a real Anthropic request that omits thinking", () => {
-    // The production shape that failed: POST /v1/messages with no `thinking`, and a
-    // history whose assistant turns hold plain text and no thinking blocks.
+  it("a real Anthropic request that omits thinking carries no thinking field", () => {
+    // The production shape behind the 4028: POST /v1/messages with no `thinking`,
+    // and a history whose assistant turns hold plain text and no thinking blocks.
+    // The field stays absent here; the missing blocks are the replay path's bug.
     const out = AnthropicRequest.parse({
       model: "svc",
       max_tokens: 32768,
@@ -128,7 +131,7 @@ describe("Anthropic thinking is pinned, never omitted (the 4028 fix)", () => {
         { role: "user", content: "and then?" },
       ],
     }).render({ upstreamModel: "deepseek-v4-flash" });
-    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(out.thinking).toBeUndefined();
     expect(out.max_tokens).toBe(32768);
   });
 
