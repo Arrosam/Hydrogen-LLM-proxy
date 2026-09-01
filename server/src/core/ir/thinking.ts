@@ -38,6 +38,22 @@ const EFFORT_BUDGETS: Record<EffortLevel, number> = {
 const EFFORT_LADDER = Object.keys(EFFORT_BUDGETS) as EffortLevel[];
 
 /**
+ * The ladder steps down for ONE reason: a `max_tokens` ceiling too small to hold
+ * the reasoning and still answer. That is arithmetic -- a budget bigger than the
+ * ceiling returns an empty message.
+ *
+ * It deliberately does NOT step down to match what an upstream will accept.
+ * Providers take different subsets (measured: `reasoning_effort: "max"` is 422 on
+ * one Anthropic-compatible gateway and 400 on another), and clamping to the
+ * nearest supported tier would quietly answer a question nobody asked. Hydrogen's
+ * job is to maximise the caller's freedom, so an upstream that refuses a level
+ * refuses it out loud and the error reaches the client. A user who wants
+ * degradation configures it: a Model Services fallback step carrying a `thinking`
+ * override. This holds even when the level was imposed by an override rather than
+ * requested by the client -- that was considered and rejected too.
+ */
+
+/**
  * Tokens kept clear of the reasoning so the answer has somewhere to go. Every
  * provider counts reasoning + response against the one output ceiling, so the
  * effective ceiling must leave at least this much beneath the reasoning budget.
