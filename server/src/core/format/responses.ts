@@ -22,11 +22,13 @@ import {
   imageUrlOf,
   num,
   numOrUndef,
+  openAiCachedTokens,
   parseDataUrl,
   safeJsonParse,
   strOrUndef,
 } from "./wire";
 import { FormatConversionError } from "./errors";
+import type { Usage } from "../ir/usage";
 import { decodeRedacted, encodeRedacted } from "./reasoningBridge";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
@@ -511,7 +513,7 @@ export class OpenAIResponsesResponse extends Response {
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const promptTokens = numOrUndef(usage.input_tokens) ?? 0;
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
-    const cachedInputTokens = numOrUndef(((usage.input_tokens_details ?? {}) as Record<string, unknown>).cached_tokens);
+    const cachedInputTokens = openAiCachedTokens(usage);
     const reasoningTokens = numOrUndef(((usage.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
     const incomplete = body.status === "incomplete";
     return new OpenAIResponsesResponse({
@@ -590,7 +592,7 @@ export class OpenAIResponsesResponse extends Response {
   static async *parseStream(readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent> {
     let started = false;
     let sawToolCall = false;
-    let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
+    let usage: Usage | undefined;
     const toolIndexByItem = new Map<string, number>();
     const reasoningStarted = new Set<string>();
     const reasoningWithText = new Set<string>();
@@ -689,11 +691,11 @@ export class OpenAIResponsesResponse extends Response {
           const r = (data.response ?? {}) as Record<string, unknown>;
           const u = (r.usage ?? {}) as Record<string, unknown>;
           if (u.input_tokens != null || u.output_tokens != null) {
-            const itd = (u.input_tokens_details ?? {}) as Record<string, unknown>;
             const otd = (u.output_tokens_details ?? {}) as Record<string, unknown>;
+            const cached = openAiCachedTokens(u);
             usage = {
               promptTokens: num(u.input_tokens), completionTokens: num(u.output_tokens), totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens),
-              ...(numOrUndef(itd.cached_tokens) != null ? { cachedInputTokens: num(itd.cached_tokens) } : {}),
+              ...(cached != null ? { cachedInputTokens: cached } : {}),
               ...(numOrUndef(otd.reasoning_tokens) != null ? { reasoningTokens: num(otd.reasoning_tokens) } : {}),
             };
           }

@@ -44,9 +44,23 @@ const ANSWER_TEXT = "The weather in Beijing is 20C.";
 const THOUGHT = "Let me check the weather.";
 const TOOL_NAME = "get_weather";
 const TOOL_ARGS = { city: "Beijing" };
+/**
+ * ONE conversation, reported by three wires that do not agree on how to report
+ * it. `PROMPT_TOKENS` is the whole prompt the model read; the two cache
+ * counters are SUBSETS of it (see core/ir/usage.ts).
+ *
+ * OpenAI states it that way directly. Anthropic states the REMAINDER --
+ * `input_tokens` with both cache counters taken out -- so its fixture sends
+ * ANTHROPIC_UNCACHED_TOKENS and the canonical count has to be reassembled from
+ * all three. Every assertion below is written against PROMPT_TOKENS regardless
+ * of which wire answered, which is the property that was broken: the same
+ * conversation must produce the same number whoever served it.
+ */
 const PROMPT_TOKENS = 100;
-const CACHED_TOKENS = 70; // a cache HIT inside the prompt count, never added to it
+const CACHED_TOKENS = 70;
 const CACHE_WRITE_TOKENS = 12;
+/** Anthropic's `input_tokens` for the same prompt: 100 - 70 - 12. */
+const ANTHROPIC_UNCACHED_TOKENS = PROMPT_TOKENS - CACHED_TOKENS - CACHE_WRITE_TOKENS;
 const COMPLETION_TOKENS = 9;
 const REASONING_TOKENS = 4;
 
@@ -80,7 +94,7 @@ function anthropicBody(o: MockProvider["opts"]): Record<string, unknown> {
     stop_reason: o.tool ? "tool_use" : "end_turn",
     usage: o.usage
       ? {
-          input_tokens: PROMPT_TOKENS, output_tokens: COMPLETION_TOKENS,
+          input_tokens: ANTHROPIC_UNCACHED_TOKENS, output_tokens: COMPLETION_TOKENS,
           cache_read_input_tokens: CACHED_TOKENS, cache_creation_input_tokens: CACHE_WRITE_TOKENS,
         }
       : {},
@@ -136,7 +150,7 @@ function anthropicStream(o: MockProvider["opts"]): string {
   let s = sse("message_start", {
     message: {
       id: "msg_1", model: "up",
-      usage: o.usage ? { input_tokens: PROMPT_TOKENS, output_tokens: 0, cache_read_input_tokens: CACHED_TOKENS, cache_creation_input_tokens: CACHE_WRITE_TOKENS } : {},
+      usage: o.usage ? { input_tokens: ANTHROPIC_UNCACHED_TOKENS, output_tokens: 0, cache_read_input_tokens: CACHED_TOKENS, cache_creation_input_tokens: CACHE_WRITE_TOKENS } : {},
     },
   });
   if (o.redacted) {
@@ -605,14 +619,15 @@ describe("BVA: usage counters, including the cached share", () => {
   };
 
   for (const egress of FAMILIES) {
-    it(`${egress} cache hit is recorded, not folded into the prompt count`, async () => {
+    it(`${egress} reports the WHOLE prompt, with the cache hit as a subset of it`, async () => {
       const r = await convert("openai_completion", egress);
       expect(r.status).toBe(200);
       const log = lastLog();
+      // Same number from all three upstreams. Anthropic sends 18 + 70 + 12 and
+      // the other two send 100; a wire that reports the uncached remainder must
+      // not make the conversation look 82 tokens smaller than it was.
       expect(log.promptTokens).toBe(PROMPT_TOKENS);
       expect(log.completionTokens).toBe(COMPLETION_TOKENS);
-      // The cached tokens are a SUBSET of the prompt count: recorded, and the
-      // prompt count unchanged by their presence.
       expect(log.cachedInputTokens).toBe(CACHED_TOKENS);
       expect(log.promptTokens).toBeGreaterThan(log.cachedInputTokens as number);
     });
@@ -621,6 +636,7 @@ describe("BVA: usage counters, including the cached share", () => {
       const r = await convert("openai_completion", egress, { stream: true });
       expect(r.status).toBe(200);
       const log = lastLog();
+      expect(log.promptTokens).toBe(PROMPT_TOKENS);
       expect(log.cachedInputTokens).toBe(CACHED_TOKENS);
     });
   }
@@ -664,6 +680,66 @@ describe("BVA: usage counters, including the cached share", () => {
     // Anthropic's cache_read maps onto this wire's prompt_tokens_details.
     const usage = r.json().usage as { prompt_tokens_details?: { cached_tokens?: number } };
     expect(usage.prompt_tokens_details?.cached_tokens).toBe(CACHED_TOKENS);
+  });
+
+  /**
+   * The reported bug. An OpenAI-speaking client behind an Anthropic upstream
+   * read `prompt_tokens` and got 18 -- the uncached remainder -- for a prompt
+   * of 100. Anything drawing a context-window gauge from that number drew it
+   * near-empty, and a hit rate computed against it was meaningless.
+   */
+  it("an OpenAI client behind an Anthropic upstream sees the whole prompt, not the remainder", async () => {
+    const r = await convert("openai_completion", "anthropic");
+    const usage = r.json().usage as { prompt_tokens: number; total_tokens: number; prompt_tokens_details?: { cached_tokens?: number } };
+    expect(usage.prompt_tokens).toBe(PROMPT_TOKENS);
+    expect(usage.prompt_tokens).not.toBe(ANTHROPIC_UNCACHED_TOKENS);
+    expect(usage.prompt_tokens_details?.cached_tokens).toBe(CACHED_TOKENS);
+    expect(usage.total_tokens).toBe(PROMPT_TOKENS + COMPLETION_TOKENS);
+  });
+
+  it("...and on the streaming path, where the usage arrives in its own chunk", async () => {
+    const r = await convert("openai_completion", "anthropic", { stream: true });
+    const chunk = r.payload.split("\n").filter((l) => l.startsWith("data: ") && l.includes('"usage"')).pop();
+    expect(chunk).toBeDefined();
+    const usage = (JSON.parse(chunk!.slice(6)) as { usage: { prompt_tokens: number; prompt_tokens_details?: { cached_tokens?: number } } }).usage;
+    expect(usage.prompt_tokens).toBe(PROMPT_TOKENS);
+    expect(usage.prompt_tokens_details?.cached_tokens).toBe(CACHED_TOKENS);
+  });
+
+  /** The inverse: this wire's own clients ADD the three counters up, so the
+   * cache share must come back OUT of input_tokens on the way to them. */
+  it("an Anthropic client gets its own exclusive split back, not the inclusive total", async () => {
+    const r = await convert("anthropic", "anthropic");
+    const usage = r.json().usage as { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number };
+    expect(usage.input_tokens).toBe(ANTHROPIC_UNCACHED_TOKENS);
+    expect(usage.cache_read_input_tokens).toBe(CACHED_TOKENS);
+    expect(usage.cache_creation_input_tokens).toBe(CACHE_WRITE_TOKENS);
+    // The round trip is lossless: adding them back up returns the prompt.
+    expect(usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens).toBe(PROMPT_TOKENS);
+  });
+
+  it("...including in message_start, which is where an Anthropic client reads them", async () => {
+    const r = await convert("anthropic", "anthropic", { stream: true });
+    const line = r.payload.split("\n").find((l) => l.startsWith("data: ") && l.includes('"message_start"'));
+    expect(line).toBeDefined();
+    const usage = (JSON.parse(line!.slice(6)) as { message: { usage: Record<string, number> } }).message.usage;
+    expect(usage.input_tokens).toBe(ANTHROPIC_UNCACHED_TOKENS);
+    expect(usage.cache_read_input_tokens).toBe(CACHED_TOKENS);
+    expect(usage.cache_creation_input_tokens).toBe(CACHE_WRITE_TOKENS);
+  });
+
+  /** An OpenAI-compatible upstream that spells the hit its own way. DeepSeek
+   * reports `prompt_cache_hit_tokens`; reading only OpenAI's spelling showed
+   * every such provider as a 0% hit rate on a cache that was working. */
+  it("a vendor-spelled cache hit is read, not ignored", async () => {
+    const { OpenAICompletionResponse } = await import("../src/core/format/completion");
+    const res = OpenAICompletionResponse.parse({
+      id: "x", model: "deepseek-chat",
+      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 9, total_tokens: 109, prompt_cache_hit_tokens: 70, prompt_cache_miss_tokens: 30 },
+    });
+    expect(res.usage.cachedInputTokens).toBe(70);
+    expect(res.usage.promptTokens).toBe(100);
   });
 });
 

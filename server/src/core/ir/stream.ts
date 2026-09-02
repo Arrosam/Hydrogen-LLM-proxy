@@ -13,7 +13,19 @@ import { num, safeJsonParse } from "../format/wire";
  * and the fabricator that turns a complete response back into a paced stream.
  */
 export type StreamEvent =
-  | { type: "start"; id: string; model: string; created: number; inputTokens?: number }
+  /** `inputTokens` is the canonical INCLUSIVE prompt count (see ir/usage.ts).
+   * The two cache counters ride alongside it so a serializer that has to state
+   * the split up front -- Anthropic's `message_start` carries the whole usage
+   * breakdown -- can restore it without waiting for the terminal event. */
+  | {
+      type: "start";
+      id: string;
+      model: string;
+      created: number;
+      inputTokens?: number;
+      cachedInputTokens?: number;
+      cacheCreationInputTokens?: number;
+    }
   | { type: "text_delta"; text: string }
   /** Optional boundaries around reasoning deltas. Responses providers use these
    * to preserve the opaque item id/encrypted payload needed for stateless replay;
@@ -296,7 +308,15 @@ export async function* fabricateStream(
   tokensPerSec: number = DEFAULT_FABRICATE_TOKENS_PER_SEC,
   budgetStartedAt?: number,
 ): AsyncGenerator<StreamEvent> {
-  yield { type: "start", id: data.id, model: data.model, created: data.created, inputTokens: data.usage.promptTokens };
+  yield {
+    type: "start",
+    id: data.id,
+    model: data.model,
+    created: data.created,
+    inputTokens: data.usage.promptTokens,
+    ...(data.usage.cachedInputTokens != null ? { cachedInputTokens: data.usage.cachedInputTokens } : {}),
+    ...(data.usage.cacheCreationInputTokens != null ? { cacheCreationInputTokens: data.usage.cacheCreationInputTokens } : {}),
+  };
 
   const startedAt = budgetStartedAt ?? Date.now();
   let emittedTokens = 0;

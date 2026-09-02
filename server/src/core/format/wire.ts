@@ -3,6 +3,28 @@
 import type { ImagePart } from "../ir/content";
 import type { Family, GenerationParams } from "../ir/params";
 
+/**
+ * The cache-hit count out of an OpenAI-shaped `usage` object, whatever the
+ * provider decided to call it.
+ *
+ * `prompt_tokens_details.cached_tokens` is the spelling OpenAI itself uses and
+ * the one the official-compatible gateways copy. It is not the only one on the
+ * wire: DeepSeek reports `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+ * alongside a `prompt_tokens` that already sums them, and several gateways put
+ * a bare `cached_tokens` at the top level. Reading only the first spelling
+ * means every one of those upstreams reports no cache at all -- which reaches
+ * the client as a flat 0% hit rate on a cache that is in fact working.
+ *
+ * All spellings are the same quantity in the same convention (a SUBSET of the
+ * prompt count), so the first one present wins and nothing is summed.
+ */
+export function openAiCachedTokens(usage: Record<string, unknown>): number | undefined {
+  const details = (usage.prompt_tokens_details ?? usage.input_tokens_details ?? {}) as Record<string, unknown>;
+  return numOrUndef(details.cached_tokens)
+    ?? numOrUndef(usage.prompt_cache_hit_tokens)
+    ?? numOrUndef(usage.cached_tokens);
+}
+
 export function numOrUndef(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }

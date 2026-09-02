@@ -18,6 +18,7 @@ import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from ".
 import { genId, nowSeconds } from "../../util/ids";
 import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire";
 import { FormatConversionError } from "./errors";
+import { foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -495,10 +496,12 @@ export class AnthropicResponse extends Response {
       (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning",
     );
     const usage = (body.usage ?? {}) as Record<string, unknown>;
-    const promptTokens = numOrUndef(usage.input_tokens) ?? 0;
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
     const cachedInputTokens = numOrUndef(usage.cache_read_input_tokens);
     const cacheCreationInputTokens = numOrUndef(usage.cache_creation_input_tokens);
+    // This wire reports `input_tokens` EXCLUSIVE of both cache counters; the
+    // canonical prompt count includes them (ir/usage.ts).
+    const promptTokens = foldCacheIntoPrompt(numOrUndef(usage.input_tokens) ?? 0, cachedInputTokens, cacheCreationInputTokens);
     return new AnthropicResponse({
       id: String(body.id ?? genId("msg")),
       model: String(body.model ?? ""),
@@ -533,7 +536,10 @@ export class AnthropicResponse extends Response {
       stop_reason: stopToAnthropic(this.stopReason),
       stop_sequence: null,
       usage: {
-        input_tokens: this.usage.promptTokens, output_tokens: this.usage.completionTokens,
+        // Back to this wire's exclusive convention: its clients add the three
+        // together, so leaving the cache share inside input_tokens would make
+        // every cached turn count twice.
+        input_tokens: uncachedPromptTokens(this.usage), output_tokens: this.usage.completionTokens,
         ...(this.usage.cachedInputTokens != null ? { cache_read_input_tokens: this.usage.cachedInputTokens } : {}),
         ...(this.usage.cacheCreationInputTokens != null ? { cache_creation_input_tokens: this.usage.cacheCreationInputTokens } : {}),
       },
@@ -542,6 +548,8 @@ export class AnthropicResponse extends Response {
 
   static async *parseStream(readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent> {
     let stopReason: StopReason = null;
+    // The uncached remainder as this wire reports it; folded into the
+    // canonical inclusive count at every point one leaves this parser.
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens: number | undefined;
@@ -568,7 +576,15 @@ export class AnthropicResponse extends Response {
           inputTokens = num(usage.input_tokens);
           if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
           if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
-          yield { type: "start", id: String(message.id ?? genId("msg")), model: String(message.model ?? ""), created: nowSeconds(), inputTokens };
+          yield {
+            type: "start",
+            id: String(message.id ?? genId("msg")),
+            model: String(message.model ?? ""),
+            created: nowSeconds(),
+            inputTokens: foldCacheIntoPrompt(inputTokens, cachedInputTokens, cacheCreationInputTokens),
+            ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+            ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+          };
           break;
         }
         case "content_block_start": {
@@ -628,11 +644,7 @@ export class AnthropicResponse extends Response {
           yield {
             type: "finish",
             stopReason,
-            usage: {
-              promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens,
-              ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
-              ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
-            },
+            usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens),
           };
           return;
         }
@@ -641,13 +653,17 @@ export class AnthropicResponse extends Response {
       }
     }
     // Reached only when the stream ended without a message_stop -- truncated.
-    yield { type: "finish", stopReason, usage: { promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens }, incomplete: true };
+    yield { type: "finish", stopReason, usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens), incomplete: true };
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
     let id = genId("msg");
     const model = ctx.model;
+    // Held in this wire's own exclusive form, so every frame that states them
+    // states the split its clients expect.
     let inputTokens = 0;
+    let cacheReadTokens: number | undefined;
+    let cacheWriteTokens: number | undefined;
     let outputTokens = 0;
     let nextIndex = 0;
     let textOpen = false;
@@ -667,9 +683,17 @@ export class AnthropicResponse extends Response {
       switch (ev.type) {
         case "start":
           id = ev.id || id;
-          inputTokens = ev.inputTokens ?? 0;
+          cacheReadTokens = ev.cachedInputTokens;
+          cacheWriteTokens = ev.cacheCreationInputTokens;
+          inputTokens = uncachedPromptTokens({
+            promptTokens: ev.inputTokens ?? 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cachedInputTokens: cacheReadTokens,
+            cacheCreationInputTokens: cacheWriteTokens,
+          });
           yield frame("message_start", {
-            message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0 } },
+            message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: streamUsage(inputTokens, 0, cacheReadTokens, cacheWriteTokens) },
           });
           break;
         case "text_delta":
@@ -767,15 +791,39 @@ export class AnthropicResponse extends Response {
           for (const idx of toolMap.values()) yield frame("content_block_stop", { index: idx });
           toolMap.clear();
           if (ev.usage) {
-            inputTokens = ev.usage.promptTokens || inputTokens;
+            inputTokens = uncachedPromptTokens(ev.usage) || inputTokens;
             outputTokens = ev.usage.completionTokens || outputTokens;
+            if (ev.usage.cachedInputTokens != null) cacheReadTokens = ev.usage.cachedInputTokens;
+            if (ev.usage.cacheCreationInputTokens != null) cacheWriteTokens = ev.usage.cacheCreationInputTokens;
           }
-          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: { input_tokens: inputTokens, output_tokens: outputTokens } });
+          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: streamUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens) });
           yield frame("message_stop", {});
           break;
       }
     }
   }
+}
+
+/** Canonical usage from this wire's exclusive split. */
+function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number): Usage {
+  const promptTokens = foldCacheIntoPrompt(uncached, cachedRead, cacheWrite);
+  return {
+    promptTokens,
+    completionTokens: output,
+    totalTokens: promptTokens + output,
+    ...(cachedRead != null ? { cachedInputTokens: cachedRead } : {}),
+    ...(cacheWrite != null ? { cacheCreationInputTokens: cacheWrite } : {}),
+  };
+}
+
+/** A streamed `usage` object in this wire's exclusive split. */
+function streamUsage(uncached: number, output: number, cachedRead?: number, cacheWrite?: number): Record<string, unknown> {
+  return {
+    input_tokens: uncached,
+    output_tokens: output,
+    ...(cachedRead != null ? { cache_read_input_tokens: cachedRead } : {}),
+    ...(cacheWrite != null ? { cache_creation_input_tokens: cacheWrite } : {}),
+  };
 }
 
 registerFormat("anthropic", { request: AnthropicRequest, response: AnthropicResponse });

@@ -203,14 +203,20 @@ export const requestLogs = sqliteTable(
     completionTokens: integer("completion_tokens").notNull().default(0),
     totalTokens: integer("total_tokens").notNull().default(0),
     /** Prompt tokens the provider served from its cache. A SUBSET of
-     * promptTokens, not an addition to it: every provider reports the cache hit
-     * inside the prompt count, so summing the two would double-count. Kept
-     * because the cached share is what a prompt-caching setup is judged on, and
-     * it is billed at a fraction of the miss rate. */
+     * promptTokens, not an addition to it -- see the convention in
+     * core/ir/usage.ts. Kept because the cached share is what a prompt-caching
+     * setup is judged on, and it is billed at a fraction of the miss rate.
+     *
+     * NOTE for rows written before v1.7.4: an Anthropic-served request stored
+     * `promptTokens` as that wire's `input_tokens`, which EXCLUDES both cache
+     * counters, so on those rows the subset rule does not hold and the prompt
+     * count is short by the cached share. Newer rows are normalized at the
+     * parse boundary. */
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     /** Anthropic cache_creation_input_tokens: prompt tokens written INTO the
-     * cache on this request (billed at a premium). Reported separately from the
-     * prompt count by that API, so it stands on its own here too. */
+     * cache on this request (billed at a premium). Also a SUBSET of
+     * promptTokens, and reported on its own because the two cache counters are
+     * priced differently. */
     cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
     /** Reasoning tokens inside completionTokens (a subset, same as cached). */
     reasoningTokens: integer("reasoning_tokens").notNull().default(0),

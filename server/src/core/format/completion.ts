@@ -22,6 +22,7 @@ import {
   collectPassthrough,
   num,
   numOrUndef,
+  openAiCachedTokens,
   parseDataUrl,
   parseStop,
   safeJsonParse,
@@ -553,9 +554,8 @@ export class OpenAICompletionResponse extends Response {
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const promptTokens = numOrUndef(usage.prompt_tokens) ?? 0;
     const completionTokens = numOrUndef(usage.completion_tokens) ?? 0;
-    const promptDetails = (usage.prompt_tokens_details ?? {}) as Record<string, unknown>;
     const completionDetails = (usage.completion_tokens_details ?? {}) as Record<string, unknown>;
-    const cachedInputTokens = numOrUndef(promptDetails.cached_tokens);
+    const cachedInputTokens = openAiCachedTokens(usage);
     const reasoningTokens = numOrUndef(completionDetails.reasoning_tokens);
     return new OpenAICompletionResponse({
       id: String(body.id ?? genId("chatcmpl")),
@@ -660,13 +660,13 @@ export class OpenAICompletionResponse extends Response {
       }
       if (chunk.usage && typeof chunk.usage === "object") {
         const u = chunk.usage as Record<string, unknown>;
-        const pd = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
         const cd = (u.completion_tokens_details ?? {}) as Record<string, unknown>;
+        const cached = openAiCachedTokens(u);
         usage = {
           promptTokens: num(u.prompt_tokens),
           completionTokens: num(u.completion_tokens),
           totalTokens: num(u.total_tokens) || num(u.prompt_tokens) + num(u.completion_tokens),
-          ...(numOrUndef(pd.cached_tokens) != null ? { cachedInputTokens: num(pd.cached_tokens) } : {}),
+          ...(cached != null ? { cachedInputTokens: cached } : {}),
           ...(numOrUndef(cd.reasoning_tokens) != null ? { reasoningTokens: num(cd.reasoning_tokens) } : {}),
         };
       }
