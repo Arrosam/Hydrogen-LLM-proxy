@@ -89,6 +89,7 @@ const en: Dict = {
   "bench.params.value": "value",
   "bench.params.add": "Add parameter",
 
+  "bench.body.collapsed": "Collapsed while you type: assembling and pretty-printing the body is real work once a filler or an attachment is on it. Click to see exactly what will be sent.",
   "bench.body.edit": "Edit",
   "bench.body.reset": "Back to generated",
   "bench.body.invalid": "Not valid JSON: {error}",
@@ -951,6 +952,7 @@ const zh: Dict = {
   "bench.params.value": "值",
   "bench.params.add": "添加参数",
 
+  "bench.body.collapsed": "输入时默认折叠：一旦挂上填充文本或附件，组装并格式化请求体就是真实开销。点开即可看到将要发送的原文。",
   "bench.body.edit": "编辑",
   "bench.body.reset": "恢复自动生成",
   "bench.body.invalid": "不是合法的 JSON：{error}",

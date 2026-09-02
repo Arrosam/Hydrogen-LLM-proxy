@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { PageHeader } from "../components/Layout";
 import { ErrorNote, Spinner, StatusBadge, Toggle } from "../components/common";
@@ -62,9 +62,12 @@ interface Attachment {
   mediaType: string;
   /** base64, without the data: prefix. */
   data: string;
+  /** The same bytes as a `data:` URL. Built once, at read time, because three
+   * of the four wire spellings want it and there is no reason to re-derive it
+   * per send. (Not a hot path: a JS engine ropes a concatenation and only
+   * flattens it when the string is consumed, which is at serialization.) */
+  dataUrl: string;
 }
-
-const dataUrlOf = (a: Attachment): string => `data:${a.mediaType};base64,${a.data}`;
 
 async function readAttachment(file: File): Promise<Attachment> {
   const buf = await file.arrayBuffer();
@@ -75,7 +78,9 @@ async function readAttachment(file: File): Promise<Attachment> {
   for (let i = 0; i < bytes.length; i += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   }
-  return { name: file.name, mediaType: file.type || "application/octet-stream", data: btoa(binary) };
+  const mediaType = file.type || "application/octet-stream";
+  const data = btoa(binary);
+  return { name: file.name, mediaType, data, dataUrl: `data:${mediaType};base64,${data}` };
 }
 
 /** One attachment as the content part its wire family spells it with. */
@@ -88,12 +93,12 @@ function attachmentPart(a: Attachment, family: Family): Record<string, unknown> 
   }
   if (family === "openai_responses") {
     return isImage
-      ? { type: "input_image", image_url: dataUrlOf(a) }
-      : { type: "input_file", filename: a.name, file_data: dataUrlOf(a) };
+      ? { type: "input_image", image_url: a.dataUrl }
+      : { type: "input_file", filename: a.name, file_data: a.dataUrl };
   }
   return isImage
-    ? { type: "image_url", image_url: { url: dataUrlOf(a) } }
-    : { type: "file", file: { filename: a.name, file_data: dataUrlOf(a) } };
+    ? { type: "image_url", image_url: { url: a.dataUrl } }
+    : { type: "file", file: { filename: a.name, file_data: a.dataUrl } };
 }
 
 interface ChatInput {
@@ -381,7 +386,17 @@ export function ModelBench() {
 
   const composedText = filler ? `${prompt}\n\n${filler}` : prompt;
 
-  const computedBody = useMemo<Record<string, unknown>>(() => {
+  /**
+   * The request body, built ON DEMAND rather than on every render.
+   *
+   * It used to be a `useMemo`, which meant every keystroke in the message box
+   * reassembled it -- and with a context-window filler attached, or a picture,
+   * "it" is a multi-megabyte object that was then pretty-printed and written
+   * into the DOM for a preview nobody was necessarily looking at. Typing was
+   * unusable. Now nothing builds it until something needs it: opening the
+   * preview, opening the raw editor, or pressing Send.
+   */
+  const buildBody = useCallback((): Record<string, unknown> => {
     if (isChat) {
       return buildChatBody({
         model: modelName,
@@ -393,20 +408,30 @@ export function ModelBench() {
         params: paramObject,
       });
     }
-    const base = defaultMediaBody(category, modelName, composedText);
-    return { ...base, ...paramObject };
+    return { ...defaultMediaBody(category, modelName, composedText), ...paramObject };
   }, [isChat, modelName, ingress, system, composedText, attachments, streaming, paramObject, category]);
 
-  const effectiveBody = useMemo<Record<string, unknown> | { __invalid: string }>(() => {
-    if (bodyOverride == null) return computedBody;
+  /**
+   * Validity of a hand-edited body, from the edited TEXT alone. Deliberately
+   * not derived from the assembled body: whether the Send button is enabled
+   * must not cost a rebuild on every keystroke, and when no override is in play
+   * there is nothing that can be invalid.
+   */
+  const overrideError = useMemo<string | null>(() => {
+    if (bodyOverride == null) return null;
     try {
-      return JSON.parse(bodyOverride) as Record<string, unknown>;
+      JSON.parse(bodyOverride);
+      return null;
     } catch (e) {
-      return { __invalid: (e as Error).message };
+      return (e as Error).message;
     }
-  }, [bodyOverride, computedBody]);
+  }, [bodyOverride]);
 
-  const bodyInvalid = "__invalid" in effectiveBody;
+  /** What will actually be sent: the hand-edited body when there is one. */
+  const currentBody = useCallback((): Record<string, unknown> => {
+    if (bodyOverride == null) return buildBody();
+    return JSON.parse(bodyOverride) as Record<string, unknown>;
+  }, [bodyOverride, buildBody]);
 
   const target = useMemo(
     () =>
@@ -417,7 +442,7 @@ export function ModelBench() {
   );
 
   const ready =
-    !bodyInvalid &&
+    overrideError == null &&
     (targetKind === "raw" ? Boolean(rawModel && rawProvider) : Boolean(serviceId)) &&
     (transport !== "proxy" || Boolean(tokenSecret)) &&
     (category !== "stt" || attachments.length > 0);
@@ -452,10 +477,14 @@ export function ModelBench() {
     setLiveFrames([]);
     const started = Date.now();
     try {
+      // The one place the body is assembled for a send. Inside the try, so a
+      // hand-edited body that will not parse is reported like any other failure
+      // rather than escaping as an unhandled rejection.
+      const body = currentBody();
       const result =
         transport === "proxy"
-          ? await runProxy(controller.signal, started)
-          : await runInternal(controller.signal, started);
+          ? await runProxy(body, controller.signal, started)
+          : await runInternal(body, controller.signal, started);
       setOutcome(result);
     } catch (e) {
       if (controller.signal.aborted) {
@@ -470,7 +499,7 @@ export function ModelBench() {
   };
 
   /** Transport A: a real client request at Hydrogen's own client surface. */
-  const runProxy = async (signal: AbortSignal, started: number): Promise<Outcome> => {
+  const runProxy = async (body: Record<string, unknown>, signal: AbortSignal, started: number): Promise<Outcome> => {
     const url = proxyPath(category, ingress);
     const headers: Record<string, string> = { authorization: `Bearer ${tokenSecret}` };
     if (isChat && ingress === "anthropic") headers["anthropic-version"] = "2023-06-01";
@@ -480,7 +509,6 @@ export function ModelBench() {
     let sentBody: unknown;
     if (category === "stt") {
       const form = new FormData();
-      const body = effectiveBody as Record<string, unknown>;
       for (const [k, v] of Object.entries(body)) {
         if (v == null) continue;
         form.append(k, typeof v === "string" ? v : JSON.stringify(v));
@@ -491,8 +519,8 @@ export function ModelBench() {
       sentBody = { ...body, file: `(${a.name}, ${a.mediaType})` };
     } else {
       headers["content-type"] = "application/json";
-      sentBody = effectiveBody;
-      init = { method: "POST", headers, body: JSON.stringify(effectiveBody), signal, credentials: "omit" };
+      sentBody = body;
+      init = { method: "POST", headers, body: JSON.stringify(body), signal, credentials: "omit" };
     }
 
     const res = await fetch(url, init);
@@ -545,10 +573,10 @@ export function ModelBench() {
   };
 
   /** Transport B: the admin route that drives the executor directly. */
-  const runInternal = async (signal: AbortSignal, started: number): Promise<Outcome> => {
+  const runInternal = async (body: Record<string, unknown>, signal: AbortSignal, started: number): Promise<Outcome> => {
     const timeoutMs = Math.max(1000, timeoutSec * 1000);
     if (!isChat) {
-      const payload: Record<string, unknown> = { target, category, body: effectiveBody, timeoutMs };
+      const payload: Record<string, unknown> = { target, category, body, timeoutMs };
       if (category === "stt") payload.file = attachments[0];
       const r = await api.post<Record<string, unknown>>("/bench/media", payload);
       return {
@@ -560,12 +588,12 @@ export function ModelBench() {
         upstreamRequest: r.upstreamRequest,
         response: r.response,
         audio: r.audio as Outcome["audio"],
-        sentBody: effectiveBody,
+        sentBody: body,
         sentUrl: "/admin/api/bench/media",
       };
     }
 
-    const payload = { target, ingress, body: effectiveBody, timeoutMs };
+    const payload = { target, ingress, body, timeoutMs };
 
     if (streaming) {
       // The admin route answers SSE, with one trailing `event: bench` frame
@@ -600,7 +628,7 @@ export function ModelBench() {
         upstreamRequest: meta.upstreamRequest,
         attemptPath: meta.attemptPath,
         frames,
-        sentBody: effectiveBody,
+        sentBody: body,
         sentUrl: "/admin/api/bench/chat",
       };
     }
@@ -616,7 +644,7 @@ export function ModelBench() {
       response: r.response,
       usage: r.usage,
       attemptPath: r.attemptPath,
-      sentBody: effectiveBody,
+      sentBody: body,
       sentUrl: "/admin/api/bench/chat",
     };
   };
@@ -898,25 +926,12 @@ export function ModelBench() {
             <ParamsEditor rows={params} onChange={setParams} />
           </div>
 
-          <BodyPanel
-            body={effectiveBody}
-            override={bodyOverride}
-            onOverride={setBodyOverride}
-            computed={computedBody}
-            invalid={bodyInvalid ? String((effectiveBody as { __invalid: string }).__invalid) : null}
-          />
+          <BodyPanel build={buildBody} override={bodyOverride} onOverride={setBodyOverride} error={overrideError} />
         </div>
 
         {/* ---------------- result ---------------- */}
         <div className="space-y-4">
-          {running && liveFrames.length > 0 && (
-            <div className="card card-pad">
-              <h3 className="label">{t("bench.section.live")}</h3>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs text-ink-300">
-                {textFromFrames(liveFrames) || t("bench.live.waiting")}
-              </pre>
-            </div>
-          )}
+          {running && liveFrames.length > 0 && <LiveText frames={liveFrames} />}
           {!outcome && !running && (
             <div className="card card-pad text-sm text-ink-500">
               <i className="bi bi-info-circle mr-2" />
@@ -968,6 +983,21 @@ async function drainSse(body: ReadableStream<Uint8Array>, onFrames: (frames: str
   return all;
 }
 
+/** The text so far, during a run. Memoized on the frame list so a keystroke
+ * elsewhere does not re-parse the whole stream. */
+const LiveText = memo(function LiveText({ frames }: { frames: string[] }) {
+  const { t } = useI18n();
+  const text = useMemo(() => textFromFrames(frames), [frames]);
+  return (
+    <div className="card card-pad">
+      <h3 className="label">{t("bench.section.live")}</h3>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs text-ink-300">
+        {text || t("bench.live.waiting")}
+      </pre>
+    </div>
+  );
+});
+
 function ParamsEditor({
   rows,
   onChange,
@@ -1009,35 +1039,61 @@ function ParamsEditor({
   );
 }
 
-/** The exact body that will go out, editable in place. Editing detaches it from
+/**
+ * The exact body that will go out, editable in place. Editing detaches it from
  * the form above until it is reset, which is what makes a hand-crafted probe
- * possible without a second UI for it. */
+ * possible without a second UI for it.
+ *
+ * COLLAPSED BY DEFAULT, and nothing is assembled while it is. Open, it rebuilds
+ * and re-serializes the whole body on every keystroke in the message box, which
+ * with a context-window filler attached is a megabyte of JSON per character.
+ * That measured cheaper than it sounds -- the pane only lays out the visible
+ * slice of a scrolling <pre> -- but it is unbounded work for a preview nobody
+ * is necessarily reading, and opening it is the signal that someone is.
+ */
 function BodyPanel({
-  body,
+  build,
   override,
   onOverride,
-  computed,
-  invalid,
+  error,
 }: {
-  body: unknown;
+  build: () => Record<string, unknown>;
   override: string | null;
   onOverride: (v: string | null) => void;
-  computed: Record<string, unknown>;
-  invalid: string | null;
+  error: string | null;
 }) {
   const { t } = useI18n();
   const toast = useToast();
-  const text = override ?? prettyJson(body);
+  const [open, setOpen] = useState(false);
+  // An edited body is already text, so it costs nothing to show; a generated
+  // one is assembled only while the panel is open.
+  const text = useMemo(
+    () => (override != null || !open ? "" : prettyJson(build())),
+    [override, open, build],
+  );
+  const copy = (): void => {
+    void copyToClipboard(override ?? prettyJson(build())).then(() => toast.success(t("bench.copied")));
+  };
   return (
     <div className="card card-pad">
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="label m-0">{t("bench.section.body")}</h3>
+      <div className="flex items-center justify-between">
+        <button type="button" className="flex items-center gap-1.5 text-left" onClick={() => setOpen((o) => !o)}>
+          <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} text-ink-500`} />
+          <h3 className="label m-0 cursor-pointer select-none">{t("bench.section.body")}</h3>
+        </button>
         <div className="flex gap-1.5">
-          <button className="btn-ghost btn-xs" type="button" onClick={() => void copyToClipboard(prettyJson(body)).then(() => toast.success(t("bench.copied")))}>
+          <button className="btn-ghost btn-xs" type="button" onClick={copy}>
             <i className="bi bi-clipboard" />
           </button>
           {override == null ? (
-            <button className="btn-ghost btn-xs" type="button" onClick={() => onOverride(prettyJson(computed))}>
+            <button
+              className="btn-ghost btn-xs"
+              type="button"
+              onClick={() => {
+                onOverride(prettyJson(build()));
+                setOpen(true);
+              }}
+            >
               <i className="bi bi-pencil" />
               {t("bench.body.edit")}
             </button>
@@ -1049,19 +1105,21 @@ function BodyPanel({
           )}
         </div>
       </div>
-      {override == null ? (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs leading-relaxed text-ink-300">
+      {!open ? (
+        <p className="mt-2 text-xs text-ink-500">{t("bench.body.collapsed")}</p>
+      ) : override == null ? (
+        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs leading-relaxed text-ink-300">
           {text}
         </pre>
       ) : (
         <textarea
-          className="input h-72 font-mono text-xs"
+          className="input mt-2 h-72 font-mono text-xs"
           value={override}
           onChange={(e) => onOverride(e.target.value)}
           spellCheck={false}
         />
       )}
-      {invalid && <p className="mt-2 text-xs text-red-300">{t("bench.body.invalid", { error: invalid })}</p>}
+      {error && <p className="mt-2 text-xs text-red-300">{t("bench.body.invalid", { error })}</p>}
     </div>
   );
 }
@@ -1070,7 +1128,10 @@ function JsonBlock({ title, value }: { title: string; value: unknown }) {
   const { t } = useI18n();
   const toast = useToast();
   const [open, setOpen] = useState(true);
-  const text = prettyJson(value);
+  // Pretty-printing an answer that carries a context-window filler is a
+  // megabyte of work; doing it per render made every keystroke elsewhere on
+  // the page pay for it.
+  const text = useMemo(() => prettyJson(value), [value]);
   if (value === undefined || value === null) return null;
   return (
     <div>
@@ -1138,9 +1199,19 @@ function MediaPreview({ outcome }: { outcome: Outcome }) {
   );
 }
 
-function ResultPanel({ outcome }: { outcome: Outcome }) {
+/**
+ * Memoized on the outcome, which changes only when a run finishes.
+ *
+ * Without that, every keystroke in the message box re-rendered the whole
+ * result: re-parsing each SSE frame to reassemble the text, and re-serializing
+ * every JSON block -- including the body that was sent, which on a
+ * context-window probe is the filler all over again. Typing while a large
+ * result was on screen was the slowest thing this page did, and none of that
+ * work could change until the next run.
+ */
+const ResultPanel = memo(function ResultPanel({ outcome }: { outcome: Outcome }) {
   const { t } = useI18n();
-  const streamedText = outcome.frames ? textFromFrames(outcome.frames) : "";
+  const streamedText = useMemo(() => (outcome.frames ? textFromFrames(outcome.frames) : ""), [outcome.frames]);
   return (
     <div className="card card-pad space-y-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -1184,4 +1255,4 @@ function ResultPanel({ outcome }: { outcome: Outcome }) {
       <JsonBlock title={t("bench.section.sent", { url: outcome.sentUrl ?? "" })} value={outcome.sentBody} />
     </div>
   );
-}
+});
