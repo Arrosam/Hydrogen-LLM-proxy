@@ -18,7 +18,13 @@ interface AttemptRecord {
   status: number;
   kind: string;
   latencyMs: number;
+  /** The proxy's view of the failure ("upstream returned 429"). */
   error?: string;
+  /** The provider's own explanation, lifted out of its error body. Absent on
+   * logs written before v1.7.4, and on failures that never reached a provider. */
+  upstreamError?: string;
+  /** The raw upstream error body. */
+  errorBody?: string;
   // Legacy Micro Agent logs (pre-0.4) tacked stage info onto flat records.
   stage?: string;
   service?: string;
@@ -84,6 +90,50 @@ function attemptBadge(a: AttemptRecord) {
   const { t } = useI18n();
   if (a.kind === "ok") return <StatusBadge status={200} label={t("logs.badge.ok")} />;
   return <StatusBadge status={a.status} label={String(a.status || a.kind)} />;
+}
+
+/** Whether an attempt has anything to say about why it failed. */
+function hasError(a: AttemptRecord): boolean {
+  return Boolean(a.error || a.upstreamError || a.errorBody);
+}
+
+/** The single most informative line about a failed attempt: the provider's own
+ * words when it gave any, the proxy's otherwise. */
+function errorLine(a: AttemptRecord): string {
+  return a.upstreamError || a.error || "";
+}
+
+/**
+ * The full failure of one attempt. The provider's message and the proxy's are
+ * both shown when they differ -- "upstream returned 400" and "this model does
+ * not support tool use" answer different questions, and only the second one
+ * tells you what to change.
+ */
+function AttemptError({ a }: { a: AttemptRecord }) {
+  const { t } = useI18n();
+  const upstream = a.upstreamError && a.upstreamError !== a.error ? a.upstreamError : null;
+  return (
+    <div className="space-y-2">
+      {upstream && (
+        <div>
+          <div className="label m-0">{t("logs.error.upstream")}</div>
+          <p className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-red-900/50 bg-red-950/30 p-2 font-mono text-xs text-red-300">{upstream}</p>
+        </div>
+      )}
+      {a.error && (
+        <div>
+          <div className="label m-0">{t("logs.error.proxy")}</div>
+          <p className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-2 font-mono text-xs text-ink-300">{a.error}</p>
+        </div>
+      )}
+      {a.errorBody && (
+        <div>
+          <div className="label m-0">{t("logs.error.body")}</div>
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-2 font-mono text-xs leading-relaxed text-ink-400">{pretty(a.errorBody)}</pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function pretty(json: string | null): string {
@@ -498,25 +548,59 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
 
 function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
   const { t } = useI18n();
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  const anyError = attempts.some(hasError);
+  const toggle = (i: number): void =>
+    setOpen((s) => {
+      const next = new Set(s);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
   return (
     <div className="card overflow-hidden">
       <table className="table">
         <thead>
           <tr>
             <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
+            {anyError && <th>{t("logs.attemptsTable.error")}</th>}
           </tr>
         </thead>
         <tbody>
-          {attempts.map((a, i) => (
-            <tr key={i}>
-              <td>{a.step}</td>
-              <td>{a.attempt}</td>
-              <td className="font-mono text-xs">{a.model}</td>
-              <td className="font-mono text-xs">{a.provider}</td>
-              <td>{attemptBadge(a)}</td>
-              <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
-            </tr>
-          ))}
+          {attempts.map((a, i) => {
+            const failed = hasError(a);
+            const isOpen = open.has(i);
+            return (
+              <Fragment key={i}>
+                <tr
+                  className={failed ? "cursor-pointer hover:bg-ink-850/50" : ""}
+                  onClick={() => failed && toggle(i)}
+                >
+                  <td>{a.step}</td>
+                  <td>{a.attempt}</td>
+                  <td className="font-mono text-xs">{a.model}</td>
+                  <td className="font-mono text-xs">{a.provider}</td>
+                  <td>{attemptBadge(a)}</td>
+                  <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
+                  {anyError && (
+                    <td className="max-w-md">
+                      {failed && (
+                        <span className="flex items-start gap-1 text-xs text-red-300" title={errorLine(a)}>
+                          <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mt-0.5 text-ink-500`} />
+                          <span className="line-clamp-2 break-words">{errorLine(a)}</span>
+                        </span>
+                      )}
+                    </td>
+                  )}
+                </tr>
+                {isOpen && failed && (
+                  <tr>
+                    <td colSpan={anyError ? 7 : 6} className="bg-ink-950/40 p-3"><AttemptError a={a} /></td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -536,7 +620,8 @@ function AttemptPathTable({
 }) {
   const hasStage = path.some((a) => a.stage);
   const hasService = path.some((a) => a.service);
-  const cols = 6 + (hasStage ? 1 : 0) + (hasService ? 1 : 0);
+  const anyError = path.some(hasError);
+  const cols = 6 + (hasStage ? 1 : 0) + (hasService ? 1 : 0) + (anyError ? 1 : 0);
   const { t } = useI18n();
   return (
     <div className="card overflow-hidden">
@@ -546,11 +631,13 @@ function AttemptPathTable({
             {hasStage && <th>{t("logs.pathTable.stage")}</th>}
             {hasService && <th>{t("logs.pathTable.service")}</th>}
             <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
+            {anyError && <th>{t("logs.attemptsTable.error")}</th>}
           </tr>
         </thead>
         <tbody>
           {path.map((a, i) => {
-            const canExpand = Boolean(a.request || a.response);
+            const failed = hasError(a);
+            const canExpand = Boolean(a.request || a.response) || failed;
             const isOpen = expanded.has(i);
             return (
               <Fragment key={i}>
@@ -565,19 +652,36 @@ function AttemptPathTable({
                     </td>
                   )}
                   {hasService && <td className="font-mono text-xs text-ink-300">{a.service ?? "-"}</td>}
-                  <td>{a.step}</td>
+                  <td>
+                    {!hasStage && canExpand && <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mr-1 text-ink-500`} />}
+                    {a.step}
+                  </td>
                   <td>{a.attempt}</td>
                   <td className="font-mono text-xs">{a.model}</td>
                   <td className="font-mono text-xs">{a.provider}</td>
                   <td>{attemptBadge(a)}</td>
                   <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
+                  {anyError && (
+                    <td className="max-w-md">
+                      {failed && (
+                        <span className="text-xs text-red-300" title={errorLine(a)}>
+                          <span className="line-clamp-2 break-words">{errorLine(a)}</span>
+                        </span>
+                      )}
+                    </td>
+                  )}
                 </tr>
                 {isOpen && canExpand && (
                   <tr>
                     <td colSpan={cols} className="bg-ink-950/40 p-3">
                       <div className="space-y-3">
-                        <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} />
-                        <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
+                        {failed && <AttemptError a={a} />}
+                        {(a.request || a.response) && (
+                          <>
+                            <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} />
+                            <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

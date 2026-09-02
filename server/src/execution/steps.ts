@@ -1,4 +1,6 @@
 import { DEFAULT_IDEMPOTENCY, DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_ON } from "./definition";
+import { extractUpstreamMessage } from "../core/proxy/errors";
+import { serializeForLog } from "../util/logPayload";
 import type { AdvanceTrigger, BackoffConfig, RetryConfig, ServiceStep, ServiceSteps, Trigger } from "./definition";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 
@@ -23,6 +25,16 @@ export interface AttemptFailure {
 }
 export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
 
+/**
+ * An upstream error body is error JSON, not a conversation: a few hundred
+ * characters of `{"error":{"message":...}}`. This bound exists for the
+ * pathological case (an HTML error page, a stack trace), not the normal one,
+ * and is deliberately fixed rather than tied to LOG_PAYLOAD_MAX_CHARS -- an
+ * operator who shrinks the payload budget to keep transcripts small should not
+ * thereby lose the explanation of why a call failed.
+ */
+const ERROR_BODY_MAX_CHARS = 8_000;
+
 /** One recorded attempt, persisted to request_logs.attempt_path_json. */
 export interface AttemptRecord {
   step: number; // 1-based
@@ -32,7 +44,17 @@ export interface AttemptRecord {
   status: number;
   kind: FailureKind | "ok";
   latencyMs: number;
+  /** The proxy's own view: "upstream returned 429", "connection reset", the
+   * mapping that would not resolve. Always present on a failure. */
   error?: string;
+  /** The PROVIDER's view, lifted out of its error body. This is the line that
+   * says "this model does not support tool use" or "your credit balance is too
+   * low" -- the proxy's own message can only ever say which status came back,
+   * and for years that was the only half that reached the log. */
+  upstreamError?: string;
+  /** The raw upstream error body, serialized and bounded, for the shapes
+   * `upstreamError` cannot read (HTML pages, vendor envelopes, bare strings). */
+  errorBody?: string;
   /** Retry context for 499 and other retried failures. */
   retry?: {
     /** Monotonic retry index within this step (0 = first retry). */
@@ -267,6 +289,7 @@ export async function runSteps<T>(
                 : `retrying on ${trigger}`,
       };
 
+      const upstreamError = extractUpstreamMessage(res.errorBody) ?? undefined;
       path.push({
         step: i + 1,
         attempt: a,
@@ -276,6 +299,8 @@ export async function runSteps<T>(
         kind: res.kind,
         latencyMs,
         error: res.message,
+        ...(upstreamError ? { upstreamError } : {}),
+        ...(res.errorBody != null ? { errorBody: serializeForLog(res.errorBody, ERROR_BODY_MAX_CHARS) } : {}),
         retry: retryCtx,
       });
       stepFailure = res;

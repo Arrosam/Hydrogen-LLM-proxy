@@ -21,6 +21,7 @@ import {
 } from "./agentContext";
 import { imageHash, type OcrCacheStore } from "./ocrCache";
 import type { AttemptFailure, AttemptRecord, AttemptResult } from "./steps";
+import { failureMessage } from "../core/proxy/errors";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 
@@ -433,7 +434,7 @@ export class MicroAgent extends ModelService {
       call.usage = inv.result.value.response.usage;
       call.response = this.stageResponsePayload(inv.result.value.response);
     } else {
-      call.error = inv.result.message;
+      call.error = failureMessage(inv.result);
     }
     return { call, result: inv.result };
   }
