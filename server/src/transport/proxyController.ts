@@ -13,7 +13,8 @@ import {
 import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
-import { isChatPipeline, serviceCategory } from "../execution/definition";
+import { isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
+import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import { asMillis } from "../util/time";
@@ -31,6 +32,8 @@ interface RequestCtx {
   http: HttpRequestInfo;
   started: number;
   ingress: Family;
+  /** How this service presents thinking to its client (ir/thinkingFormat.ts). */
+  thinkingFormat: ThinkingFormat;
 }
 
 /**
@@ -290,8 +293,10 @@ export class ProxyController {
 
     // Media passthrough categories (image/tts/embedding/...) have their own
     // endpoints; the chat pipeline serves chat and ocr services.
+    let thinkingFormat: ThinkingFormat = "original";
     try {
-      const category = serviceCategory(this.deps.services.def(service));
+      const def = this.deps.services.def(service);
+      const category = serviceCategory(def);
       if (!isChatPipeline(category)) {
         this.deps.logger.record({
           traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
@@ -299,6 +304,7 @@ export class ProxyController {
         });
         return this.replyError(reply, ingress, 400, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
       }
+      thinkingFormat = serviceThinkingFormat(def);
     } catch { /* an unparsable definition falls through to the 500 below */ }
 
     const started = Date.now();
@@ -315,7 +321,7 @@ export class ProxyController {
       return this.replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
     }
 
-    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress };
+    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
     const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
@@ -374,7 +380,11 @@ export class ProxyController {
     }
 
     const value = outcome.result.value;
-    const clientBody = value.response.render(ingress, serviceName);
+    // Shape the client's copy: lift a `<think>` block out of the answer, inline
+    // it into the answer, or drop it. `original` returns the same object.
+    const clientBody = value.response
+      .withThinkingFormat(thinkingFormat)
+      .render(ingress, serviceName, { thinkingFormat });
     // Deliver first, then log what actually happened: writing the 200 row
     // before send() is how a response nobody received was recorded as success.
     const socket = reply.raw.socket;
@@ -538,7 +548,13 @@ export class ProxyController {
   private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown; committed?: boolean }): void {
     const acc: StreamAccumulator = newAccumulator();
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
-    const outGen = serializeStream(ctx.ingress, tapStream(events, acc), { model: ctx.serviceName });
+    // Shaped BEFORE the tap, so the log records the copy the client actually
+    // received rather than a canonical form it never saw.
+    const shaped = withThinkingFormat(events, ctx.thinkingFormat);
+    const outGen = serializeStream(ctx.ingress, tapStream(shaped, acc), {
+      model: ctx.serviceName,
+      thinkingFormat: ctx.thinkingFormat,
+    });
 
     // Capture the upstream body now and drop it. The log row for a stream is
     // written when the last chunk has been relayed, which can be minutes later;

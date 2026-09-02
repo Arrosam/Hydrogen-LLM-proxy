@@ -25,7 +25,12 @@ import type {
   Provider,
   Trigger,
 } from "../types";
-import { isAgentDef, isChatPipelineCategory } from "../types";
+import {
+  THINKING_FORMATS,
+  type ThinkingFormat,
+  isAgentDef,
+  isChatPipelineCategory,
+} from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
 
@@ -136,6 +141,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
+  const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -179,6 +185,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((service.steps as ServiceSteps)?.category ?? "chat");
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
+      setThinkingFormat(service.steps?.thinkingFormat ?? "original");
     } else {
       const firstModel = models[0]?.name ?? "";
       const firstProvider = providersForModel(firstModel)[0] ?? "";
@@ -193,20 +200,37 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setOcr(undefined);
       setCategory("chat");
       setReliableStreaming(false);
+      setThinkingFormat("original");
     }
     setRaw(false);
     setSummary("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, service]);
 
+  // "original" is the server's default, so it is left out entirely rather than
+  // persisted -- a definition nobody configured stays as short as it was.
+  const thinkingFormatField = () =>
+    isChatPipelineCategory(kind === "chain" ? "chat" : category) && thinkingFormat !== "original"
+      ? { thinkingFormat }
+      : {};
+
   const buildDef = (): ServiceDef =>
     kind === "chain"
-      ? ({ kind: "micro_agent", timeoutMs, stages, ...(output ? { output } : {}), ...(ocr ? { ocr } : {}), ...(asr ? { asr } : {}) } as AgentDef)
+      ? ({
+          kind: "micro_agent",
+          timeoutMs,
+          stages,
+          ...(output ? { output } : {}),
+          ...(ocr ? { ocr } : {}),
+          ...(asr ? { asr } : {}),
+          ...thinkingFormatField(),
+        } as AgentDef)
       : ({
           timeoutMs,
           steps,
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
+          ...thinkingFormatField(),
         } as ServiceSteps);
 
   const patchStep = (i: number, patch: Partial<ServiceStep>) =>
@@ -282,6 +306,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((parsed as ServiceSteps).category ?? "chat");
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
+      setThinkingFormat(parsed.thinkingFormat ?? "original");
       return parsed;
     } catch {
       toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
@@ -442,6 +467,22 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           <p className="-mt-2 text-xs text-ink-500">
             {t("serviceEditor.reliableStreamingDescription")}
           </p>
+        )}
+
+        {isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
+          <div>
+            <label className="label">{t("serviceEditor.thinkingFormat")}</label>
+            <select
+              className="select w-auto"
+              value={thinkingFormat}
+              onChange={(e) => setThinkingFormat(e.target.value as ThinkingFormat)}
+            >
+              {THINKING_FORMATS.map((f) => (
+                <option key={f} value={f}>{t(`serviceEditor.thinkingFormat.${f}`)}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
+          </div>
         )}
 
         {!raw && (

@@ -124,11 +124,20 @@ export function isChatPipelineCategory(c: ServiceCategory): boolean {
   return c === "chat" || c === "ocr";
 }
 
+/**
+ * How a service presents the model's thinking to its client. Mirrors the
+ * server's ThinkingFormatSchema; "original" (and absence) is a strict no-op.
+ */
+export type ThinkingFormat = "original" | "reasoning_content" | "reasoning" | "think_tags" | "none";
+
+export const THINKING_FORMATS: ThinkingFormat[] = ["original", "reasoning_content", "reasoning", "think_tags", "none"];
+
 export interface ServiceSteps {
   category?: ServiceCategory;
   timeoutMs: number;
   steps: ServiceStep[];
   reliableStreaming?: boolean;
+  thinkingFormat?: ThinkingFormat;
 }
 
 // --- Agent (compositional Micro Agent) ---
@@ -196,6 +205,7 @@ export interface AgentDef {
   ocr?: AgentOcr; // optional image-to-text pre-pass run before the first stage
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
+  thinkingFormat?: ThinkingFormat;
 }
 
 /** A service definition is either the resilience workflow or an agent. */

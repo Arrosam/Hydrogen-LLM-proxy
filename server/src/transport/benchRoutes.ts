@@ -20,10 +20,12 @@ import {
   isChatPipeline,
   parseService,
   serviceCategory,
+  serviceThinkingFormat,
   ServiceCategorySchema,
   type ServiceCategory,
   type ServiceDef,
 } from "../execution/definition";
+import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { classifyError, type AttemptRecord, type AttemptResult } from "../execution/steps";
 import type { Request as CanonicalRequest } from "../core/ir/request";
 import { serializeForLog } from "../util/logPayload";
@@ -198,6 +200,10 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
     // The service name a client would have sent. Echoed back as the response's
     // `model` so the rendered body looks like the one a client would receive.
     let label = "(bench)";
+    // A saved service shapes its client's thinking the way it always does, so
+    // the bench shows the real answer rather than a canonical one. A raw tuple
+    // belongs to no service and therefore has no format to apply.
+    let thinkingFormat: ThinkingFormat = "original";
     if (target.kind === "service") {
       const loaded = loadService(c, target.serviceId);
       if (!loaded.ok) return reply.code(loaded.status).send({ error: loaded.message });
@@ -207,11 +213,12 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
           .send({ error: `"${loaded.name}" is a ${serviceCategory(loaded.def)} service; bench it from the media panel` });
       }
       label = loaded.name;
+      thinkingFormat = serviceThinkingFormat(loaded.def);
     } else {
       label = `${target.model}@${target.provider}`;
     }
 
-    if (streaming) return runChatStream(c, reply, target, ingress, request, label, timeoutMs);
+    if (streaming) return runChatStream(c, reply, target, ingress, request, label, thinkingFormat, timeoutMs);
 
     // A slow chain can outlive an intermediary's idle timeout (Cloudflare 524s
     // a silent origin at ~100s); failures travel in-body, so committing 200
@@ -237,7 +244,8 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
         latencyMs,
         served: v.served,
         upstreamRequest: v.upstreamRequest,
-        response: v.response.render(ingress, label),
+        response: v.response.withThinkingFormat(thinkingFormat).render(ingress, label, { thinkingFormat }),
+        thinkingFormat,
         usage: v.response.usage,
         attemptPath: run.attemptPath,
       };
@@ -415,6 +423,7 @@ async function runChatStream(
   ingress: Family,
   request: CanonicalRequest,
   label: string,
+  thinkingFormat: ThinkingFormat,
   timeoutMs: number | undefined,
 ): Promise<void> {
   const started = Date.now();
@@ -446,7 +455,8 @@ async function runChatStream(
       return;
       }
       const v = inv.result.value;
-      for await (const frame of serializeStream(ingress, v.events, { model: label })) reply.raw.write(frame);
+      const shaped = withThinkingFormat(v.events, thinkingFormat);
+      for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) reply.raw.write(frame);
       meta({
         ok: true,
         status: 200,
@@ -491,7 +501,9 @@ async function runChatStream(
       reply.raw.end();
       return;
     }
-    for await (const frame of serializeStream(ingress, relayed.events, { model: label })) reply.raw.write(frame);
+    for await (const frame of serializeStream(ingress, withThinkingFormat(relayed.events, thinkingFormat), { model: label, thinkingFormat })) {
+      reply.raw.write(frame);
+    }
     meta({
       ok: true,
       status: relayed.status,

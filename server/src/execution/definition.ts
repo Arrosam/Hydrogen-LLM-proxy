@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
+import type { ThinkingFormat } from "../core/ir/thinkingFormat";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -94,6 +95,18 @@ export const ThinkingLevelSchema = z.union([
   z.literal("max"),
   z.object({ budget: z.number().int().min(1024).max(200_000) }),
 ]);
+
+/**
+ * How the service presents the model's thinking to ITS client -- see
+ * core/ir/thinkingFormat.ts for what each value means and why `original` (the
+ * default) is a strict no-op.
+ *
+ * This is a service-level setting rather than a per-step override on purpose:
+ * it describes the answer the caller receives, and a fallback chain that
+ * answered differently depending on which step happened to win would be a
+ * worse contract than any of the individual formats.
+ */
+export const ThinkingFormatSchema = z.enum(["original", "reasoning_content", "reasoning", "think_tags", "none"]);
 
 export const ResponseFormatSchema = z.union([
   z.object({ type: z.literal("text") }),
@@ -190,6 +203,8 @@ export const ServiceStepsSchema = z.object({
    * retried once headers commit).
    */
   reliableStreaming: z.boolean().optional(),
+  /** How thinking reaches this service's client. Omitted = "original". */
+  thinkingFormat: ThinkingFormatSchema.optional(),
 });
 
 // --- Micro Agent (stage orchestration) ------------------------------------
@@ -290,6 +305,8 @@ export const AgentSchema = z.object({
   asr: AgentAsrSchema.optional(),
   /** Reliable streaming for the agent as a whole (see ServiceStepsSchema). */
   reliableStreaming: z.boolean().optional(),
+  /** How thinking reaches this agent's client (see ServiceStepsSchema). */
+  thinkingFormat: ThinkingFormatSchema.optional(),
 });
 
 export type Trigger = z.infer<typeof TriggerSchema>;
@@ -312,6 +329,15 @@ export type ServiceDef = AgentDef | ServiceSteps;
 export function isAgent(def: ServiceDef): def is AgentDef {
   const kind = (def as AgentDef).kind;
   return kind === "micro_agent" || kind === "agent";
+}
+
+/**
+ * How a definition presents thinking to its client. Absent means "original",
+ * which is a no-op -- the return type is the canonical union, so the persisted
+ * enum cannot drift from it without failing to compile.
+ */
+export function serviceThinkingFormat(def: ServiceDef): ThinkingFormat {
+  return def.thinkingFormat ?? "original";
 }
 
 /** The effective category of a definition. Agents are always "chat". */

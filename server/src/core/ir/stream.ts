@@ -1,6 +1,7 @@
 import { StringDecoder } from "node:string_decoder";
 import type { ContentPart, ReasoningPart, StopReason } from "./content";
 import type { Usage } from "./usage";
+import type { ThinkingFormat } from "./thinkingFormat";
 import { genId, nowSeconds } from "../../util/ids";
 import { num, safeJsonParse } from "../format/wire";
 
@@ -50,6 +51,10 @@ export type StreamEvent =
 export interface StreamContext {
   /** Model name echoed to the client (the service name). */
   model: string;
+  /** How this service presents thinking to its client. Only the Chat
+   * Completions serializer has a choice to make (see ir/thinkingFormat.ts);
+   * the other two have exactly one native shape each. */
+  thinkingFormat?: ThinkingFormat;
 }
 
 // --- generic SSE frame parser -------------------------------------------

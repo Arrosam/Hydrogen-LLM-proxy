@@ -1,5 +1,5 @@
 import { Request, type RenderTarget } from "../ir/request";
-import { Response } from "../ir/response";
+import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
   stripStaleReasoning,
@@ -530,7 +530,9 @@ export class OpenAIResponsesResponse extends Response {
     });
   }
 
-  renderSelf(model: string): Record<string, unknown> {
+  /** See the note on AnthropicResponse.renderSelf: this wire has one native
+   * reasoning item and no field name to choose. */
+  renderSelf(model: string, _opts?: RenderOptions): Record<string, unknown> {
     const output: Record<string, unknown>[] = [];
 
     for (const p of this.content) {

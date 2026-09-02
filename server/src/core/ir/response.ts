@@ -2,9 +2,17 @@ import type { Family } from "./params";
 import { reasoningOf, textOf, toolCallsOf, type ContentPart } from "./content";
 import type { Usage } from "./usage";
 import { fabricateStream, type ResponseData, type StreamContext } from "./stream";
+import { applyThinkingFormat, type ThinkingFormat } from "./thinkingFormat";
 import { buildResponse, serializeStream } from "../format/registry";
 
 export type { ResponseData };
+
+/** Per-render choices a service makes about the client's copy of the answer. */
+export interface RenderOptions {
+  /** Which wire spelling reasoning goes out under. Meaningful on the Chat
+   * Completions wire only; the other two have one native shape each. */
+  thinkingFormat?: ThinkingFormat;
+}
 
 /**
  * Base class for a model response in canonical form -- a complete, multi-purpose
@@ -37,7 +45,7 @@ export abstract class Response implements ResponseData {
   abstract readonly family: Family;
 
   /** Render this response into its own wire family. `model` is echoed to the client. */
-  abstract renderSelf(model: string): Record<string, unknown>;
+  abstract renderSelf(model: string, opts?: RenderOptions): Record<string, unknown>;
 
   /** A shallow structural copy of the canonical fields. */
   data(): ResponseData {
@@ -74,9 +82,20 @@ export abstract class Response implements ResponseData {
     return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
   }
 
+  /**
+   * A copy whose thinking is shaped the way this service presents it: lifted
+   * out of `<think>` tags, inlined into the answer, or dropped. `original`
+   * (and absence) returns `this` untouched -- see ir/thinkingFormat.ts.
+   */
+  withThinkingFormat(format: ThinkingFormat | undefined): this {
+    const content = applyThinkingFormat(this.content, format);
+    if (content === this.content) return this;
+    return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
+  }
+
   /** Render into any client wire family (dispatched to that family's subclass). */
-  render(family: Family, model: string): Record<string, unknown> {
-    return buildResponse(family, this.data()).renderSelf(model);
+  render(family: Family, model: string, opts?: RenderOptions): Record<string, unknown> {
+    return buildResponse(family, this.data()).renderSelf(model, opts);
   }
 
   /** A paced client SSE stream (in `family`) fabricated from this complete response. */

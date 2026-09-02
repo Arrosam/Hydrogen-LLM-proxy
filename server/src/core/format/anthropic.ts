@@ -1,5 +1,5 @@
 import { Request, type RenderTarget } from "../ir/request";
-import { Response } from "../ir/response";
+import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
   orderReasoningFirst,
@@ -516,7 +516,10 @@ export class AnthropicResponse extends Response {
     });
   }
 
-  renderSelf(model: string): Record<string, unknown> {
+  /** `opts.thinkingFormat` names a Chat Completions field; this wire has one
+   * native thinking block and no field to choose between. The content-level
+   * formats (`think_tags`, `none`) were already applied before rendering. */
+  renderSelf(model: string, _opts?: RenderOptions): Record<string, unknown> {
     const content: unknown[] = [];
     for (const p of this.content) {
       if (p.type === "reasoning") {

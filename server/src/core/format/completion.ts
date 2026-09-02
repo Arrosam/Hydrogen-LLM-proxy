@@ -1,5 +1,5 @@
 import { Request, type RenderTarget } from "../ir/request";
-import { Response } from "../ir/response";
+import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
   stripStaleReasoning,
@@ -571,7 +571,7 @@ export class OpenAICompletionResponse extends Response {
     });
   }
 
-  renderSelf(model: string): Record<string, unknown> {
+  renderSelf(model: string, opts?: RenderOptions): Record<string, unknown> {
     const text = this.text();
     // Redacted blocks belong to the Anthropic wire only (see render()).
     const reasoningParts = this.content.filter((p) => p.type === "reasoning" && !p.redacted);
@@ -579,12 +579,17 @@ export class OpenAICompletionResponse extends Response {
     const message: Record<string, unknown> = { role: "assistant", content: text || null };
     if (reasoningParts.length) {
       const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
-      // Both dialect spellings, so a DeepSeek-convention client sees the
-      // reasoning AND replays it — its absence is what broke the next turn
+      // BOTH dialect spellings by default, so a DeepSeek-convention client sees
+      // the reasoning AND replays it — its absence is what broke the next turn
       // against an Anthropic-family upstream (4028: thinking must be passed
       // back), because the client had nothing to send.
-      message.reasoning = reasoning;
-      message.reasoning_content = reasoning;
+      //
+      // A service that names one spelling gets exactly that one and not the
+      // other: a client strict about its own dialect can reject the extra key,
+      // and one that reads both would count the thinking twice.
+      const fmt = opts?.thinkingFormat;
+      if (fmt !== "reasoning_content") message.reasoning = reasoning;
+      if (fmt !== "reasoning") message.reasoning_content = reasoning;
     }
     if (toolUses.length) {
       message.tool_calls = toolUses.map((tu) => ({
@@ -697,10 +702,14 @@ export class OpenAICompletionResponse extends Response {
         case "text_delta":
           yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });
           break;
-        case "reasoning_delta":
-          // Both dialect spellings (see renderSelf).
-          yield chunk({ choices: [{ index: 0, delta: { reasoning: ev.text, reasoning_content: ev.text }, finish_reason: null }] });
+        case "reasoning_delta": {
+          // Both dialect spellings unless the service named one (see renderSelf).
+          const delta: Record<string, unknown> = {};
+          if (ctx.thinkingFormat !== "reasoning_content") delta.reasoning = ev.text;
+          if (ctx.thinkingFormat !== "reasoning") delta.reasoning_content = ev.text;
+          yield chunk({ choices: [{ index: 0, delta, finish_reason: null }] });
           break;
+        }
         case "tool_start":
           yield chunk({
             choices: [{ index: 0, delta: { tool_calls: [{ index: ev.index, id: ev.id, type: "function", function: { name: ev.name, arguments: "" } }] }, finish_reason: null }],
