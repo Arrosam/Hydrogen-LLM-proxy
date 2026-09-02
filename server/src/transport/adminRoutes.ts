@@ -17,6 +17,7 @@ import { failureMessage } from "../core/proxy/errors";
 import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../catalog/modelDiscovery";
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
 import { withJsonHeartbeat } from "./jsonKeepalive";
+import { benchRoutes } from "./benchRoutes";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
@@ -44,6 +45,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     await scoped.register((s) => settingsRoutes(s, c), { prefix: "/settings" });
     await scoped.register((s) => backupRoutes(s, c), { prefix: "/backup" });
     await scoped.register((s) => updateRoutes(s, c), { prefix: "/update" });
+    await scoped.register((s) => benchRoutes(s, c), { prefix: "/bench" });
   });
 }
 

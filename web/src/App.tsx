@@ -10,6 +10,7 @@ import { ModelServices } from "./pages/ModelServices";
 import { Tokens } from "./pages/Tokens";
 import { Users } from "./pages/Users";
 import { Logs } from "./pages/Logs";
+import { ModelBench } from "./pages/ModelBench";
 import { ActiveRequests } from "./pages/ActiveRequests";
 import { Settings } from "./pages/Settings";
 import { Check } from "./pages/Check";
@@ -51,6 +52,7 @@ export default function App() {
         <Route path="services" element={<ModelServices kind="resilience" />} />
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
+        <Route path="bench" element={<ModelBench />} />
         <Route path="logs" element={<Logs />} />
         <Route path="active-requests" element={<ActiveRequests />} />
         {/* Users and Settings are admin-only. Hiding the nav link is presentation;

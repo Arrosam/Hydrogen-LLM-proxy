@@ -1,4 +1,6 @@
 export type Role = "admin" | "manager";
+/** A wire format. Same three the server calls a Family. */
+export type Family = "openai_completion" | "anthropic" | "openai_responses";
 export type ProviderType = "openai_completion" | "openai_responses" | "anthropic";
 
 export interface User {
@@ -283,4 +285,33 @@ export interface GroupCount {
   key: string;
   requests: number;
   totalTokens: number;
+}
+// --- Model Bench ----------------------------------------------------------
+
+/** One saved service as the bench's target picker sees it. `valid` is false
+ * when the stored definition no longer parses -- it is still listed, because
+ * "this service is broken" is exactly what a bench should be able to show. */
+export interface BenchServiceInfo {
+  id: number;
+  name: string;
+  enabled: boolean;
+  category: ServiceCategory;
+  kind: "model_service" | "micro_agent";
+  valid: boolean;
+}
+
+/** One model x provider mapping, with the endpoint families it can reach. */
+export interface BenchMapping {
+  modelId: number;
+  model: string;
+  providerId: number;
+  provider: string;
+  upstreamModel: string;
+  families: Family[];
+  enabled: boolean;
+}
+
+export interface BenchTargets {
+  services: BenchServiceInfo[];
+  mappings: BenchMapping[];
 }
