@@ -135,6 +135,13 @@ export class RequestLogRepo {
         promptTokens: requestLogs.promptTokens,
         completionTokens: requestLogs.completionTokens,
         totalTokens: requestLogs.totalTokens,
+        // Subsets of the two counts above, not additions to them (see
+        // core/ir/usage.ts). Selected for the LIST, not just the detail: the
+        // cached share is the number a prompt-caching setup is judged on and
+        // reading it one row at a time is no way to judge anything.
+        cachedInputTokens: requestLogs.cachedInputTokens,
+        cacheCreationInputTokens: requestLogs.cacheCreationInputTokens,
+        reasoningTokens: requestLogs.reasoningTokens,
         latencyMs: requestLogs.latencyMs,
         attempts: requestLogs.attempts,
         error: requestLogs.error,

@@ -39,7 +39,14 @@ interface ServiceCallEntry {
   kind: "service" | "agent" | "router";
   status: number;
   latencyMs: number;
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    reasoningTokens?: number;
+  };
   attempts: AttemptRecord[];
   request?: string;
   response?: string;
@@ -49,13 +56,6 @@ interface ServiceCallEntry {
 }
 
 interface LogDetail extends LogSummary {
-  /** Prompt tokens served from the provider's cache (a SUBSET of promptTokens,
-   * so the two must never be added together). */
-  cachedInputTokens: number;
-  /** Prompt tokens written into an Anthropic cache on this request. */
-  cacheCreationInputTokens: number;
-  /** Reasoning tokens inside completionTokens (also a subset). */
-  reasoningTokens: number;
   attemptPath: unknown;
   requestPayload: string | null;
   upstreamRequestPayload: string | null;
@@ -90,6 +90,68 @@ function attemptBadge(a: AttemptRecord) {
   const { t } = useI18n();
   if (a.kind === "ok") return <StatusBadge status={200} label={t("logs.badge.ok")} />;
   return <StatusBadge status={a.status} label={String(a.status || a.kind)} />;
+}
+
+/** The four counters a row carries, of which three are subsets of the other. */
+interface TokenCounts {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  reasoningTokens?: number;
+}
+
+/**
+ * Input and output side by side, each with the share of itself that was
+ * something else: how much of the input the cache supplied, and how much of the
+ * output was thinking rather than answer.
+ *
+ * Both parentheticals are SUBSETS and never addends (see the convention in
+ * core/ir/usage.ts) -- which is exactly why they are written inside the number
+ * they belong to rather than in a column of their own, where they read as a
+ * total waiting to be summed. The compact form shows the cache HIT only,
+ * because that is the number a caching setup is judged on; the tooltip and the
+ * detail panel carry the cache write too.
+ */
+function TokenSplit({ usage }: { usage: TokenCounts }) {
+  const { t } = useI18n();
+  const cached = usage.cachedInputTokens ?? 0;
+  const written = usage.cacheCreationInputTokens ?? 0;
+  const thinking = usage.reasoningTokens ?? 0;
+  const title = t("logs.tokens.title", {
+    input: formatNumber(usage.promptTokens),
+    cached: formatNumber(cached),
+    written: formatNumber(written),
+    output: formatNumber(usage.completionTokens),
+    thinking: formatNumber(thinking),
+  });
+  return (
+    <span className="whitespace-nowrap text-xs text-ink-300" title={title}>
+      {formatNumber(usage.promptTokens)}
+      {cached > 0 && <span className="text-ink-500"> ({formatNumber(cached)})</span>}
+      <i className="bi bi-arrow-right mx-1 text-ink-600" />
+      {formatNumber(usage.completionTokens)}
+      {thinking > 0 && <span className="text-ink-500"> ({formatNumber(thinking)})</span>}
+    </span>
+  );
+}
+
+/** The input line for the detail panel: every input token, and what the cache
+ * accounted for. */
+function inputSummary(u: TokenCounts, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const parts: string[] = [];
+  if ((u.cachedInputTokens ?? 0) > 0) parts.push(t("logs.tokens.cached", { n: formatNumber(u.cachedInputTokens ?? 0) }));
+  if ((u.cacheCreationInputTokens ?? 0) > 0) parts.push(t("logs.tokens.written", { n: formatNumber(u.cacheCreationInputTokens ?? 0) }));
+  return parts.length ? `${formatNumber(u.promptTokens)} (${parts.join(" · ")})` : formatNumber(u.promptTokens);
+}
+
+/** The output line: every output token, and how much of it was thinking. */
+function outputSummary(u: TokenCounts, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const thinking = u.reasoningTokens ?? 0;
+  return thinking > 0
+    ? `${formatNumber(u.completionTokens)} (${t("logs.tokens.thinking", { n: formatNumber(thinking) })})`
+    : formatNumber(u.completionTokens);
 }
 
 /** Whether an attempt has anything to say about why it failed. */
@@ -329,7 +391,7 @@ export function Logs() {
                     {r.streaming && <i className="bi bi-broadcast ml-2 text-brand-400" title={t("logs.streamingTitle")} />}
                   </td>
                   <td><StatusBadge status={r.httpStatus} /></td>
-                  <td className="text-xs text-ink-300">{formatNumber(r.totalTokens)}</td>
+                  <td><TokenSplit usage={r} /></td>
                   <td className="text-xs text-ink-400">{r.latencyMs} {t("common.ms")}</td>
                   <td className="text-xs text-ink-400">{r.attempts}</td>
                   <td className="text-right"><i className="bi bi-chevron-right text-ink-600" /></td>
@@ -369,14 +431,12 @@ export function Logs() {
               <Meta label={t("logs.meta.latency")} value={`${detail.latencyMs} ${t("common.ms")}`} />
               <Meta label={t("logs.meta.route")} value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
               <Meta label={t("logs.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
-              <Meta label={t("logs.meta.tokens")} value={`${detail.promptTokens} + ${detail.completionTokens} = ${detail.totalTokens}`} />
-              {/* The cached share is part of the prompt count, never added to
-                  it -- shown as "of" so the two are not read as a sum. */}
-              <Meta
-                label={t("logs.meta.cachedTokens")}
-                value={t("logs.meta.cachedOf", { cached: detail.cachedInputTokens ?? 0, prompt: detail.promptTokens })}
-              />
-              <Meta label={t("logs.meta.cacheWrite")} value={String(detail.cacheCreationInputTokens ?? 0)} />
+              {/* The cache and thinking shares are written inside the count
+                  they belong to: each is a subset of it, and a cell of its own
+                  invites adding them up. */}
+              <Meta label={t("logs.meta.input")} value={inputSummary(detail, t)} />
+              <Meta label={t("logs.meta.output")} value={outputSummary(detail, t)} />
+              <Meta label={t("logs.meta.totalTokens")} value={formatNumber(detail.totalTokens)} />
               <Meta label={t("logs.meta.servedModel")} value={detail.servedModel ?? "-"} />
               <Meta label={t("logs.meta.servedProvider")} value={detail.servedProvider ?? "-"} />
               <Meta label={t("logs.meta.trace")} value={detail.traceId ?? "-"} />
@@ -519,7 +579,7 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
         </span>
         {call.streamed && <i className="bi bi-broadcast text-brand-400" title={t("logs.streamedTitle")} />}
         <div className="flex-1" />
-        {call.usage && <span className="text-xs text-ink-400">{formatNumber(call.usage.totalTokens)} {t("common.tok")}</span>}
+        {call.usage && <TokenSplit usage={call.usage} />}
         {call.kind !== "router" && <span className="text-xs text-ink-400">{call.latencyMs} {t("common.ms")}</span>}
         {callStatusBadge(call)}
       </div>

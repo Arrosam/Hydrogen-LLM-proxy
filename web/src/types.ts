@@ -259,9 +259,16 @@ export interface LogSummary {
   egressFormat: string | null;
   streaming: boolean;
   httpStatus: number;
+  /** EVERY input token, cache reads and writes included. */
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Input tokens served from the provider's cache. A SUBSET of promptTokens. */
+  cachedInputTokens: number;
+  /** Input tokens written INTO the cache. Also a subset of promptTokens. */
+  cacheCreationInputTokens: number;
+  /** Thinking tokens inside completionTokens. Also a subset. */
+  reasoningTokens: number;
   latencyMs: number;
   attempts: number;
   error: string | null;
