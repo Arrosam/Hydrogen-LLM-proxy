@@ -56,6 +56,24 @@ function startUpstream(): Promise<void> {
           return;
         }
 
+        // A streamed answer, with the usage riding the terminal chunk exactly
+        // as a real provider sends it: last, and after the finish_reason.
+        if (body.stream === true) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const chunk = (d: Record<string, unknown>): void => {
+            res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "up", ...d })}\n\n`);
+          };
+          chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+          chunk({ choices: [{ index: 0, delta: { content: "pong" }, finish_reason: null }] });
+          chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+          chunk({
+            choices: [],
+            usage: { prompt_tokens: 100, completion_tokens: 9, total_tokens: 109, prompt_tokens_details: { cached_tokens: 70 } },
+          });
+          res.write("data: [DONE]\n\n");
+          return res.end();
+        }
+
         res.writeHead(200, { "content-type": "application/json" });
         if (url.includes("/messages")) {
           res.end(JSON.stringify({
@@ -69,7 +87,7 @@ function startUpstream(): Promise<void> {
           res.end(JSON.stringify({
             id: "chatcmpl_1", object: "chat.completion", created: 1, model: "up",
             choices: [{ index: 0, message: { role: "assistant", content: "pong" }, finish_reason: "stop" }],
-            usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+            usage: { prompt_tokens: 100, completion_tokens: 9, total_tokens: 109, prompt_tokens_details: { cached_tokens: 70 } },
           }));
         }
       });
@@ -301,6 +319,45 @@ describe("media categories reach their own endpoint", () => {
     });
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: string }).error).toContain("audio");
+  });
+});
+
+describe("a streamed run reports its tokens, like a buffered one", () => {
+  /**
+   * Usage rides the terminal event, which the serializer consumes on its way to
+   * the client -- so unless it is tapped in passing, a streamed bench run shows
+   * no counts at all. Beside a buffered run that shows all of them, that reads
+   * as the proxy having lost them somewhere.
+   */
+  it("the trailing bench frame carries usage, cached share included", async () => {
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "raw", model: "m1", provider: "dual", providerFormat: "openai_completion" },
+      ingress: "openai_completion",
+      body: { ...CHAT_BODY, stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const metaLine = res.payload
+      .split("\n\n")
+      .find((f) => f.startsWith("event: bench"))!
+      .split("\n")
+      .find((l) => l.startsWith("data:"))!;
+    const meta = JSON.parse(metaLine.slice(5)) as { ok: boolean; usage?: Record<string, number> };
+    expect(meta.ok).toBe(true);
+    expect(meta.usage).toBeDefined();
+    expect(meta.usage!.promptTokens).toBe(100);
+    expect(meta.usage!.completionTokens).toBe(9);
+    expect(meta.usage!.cachedInputTokens).toBe(70);
+  });
+
+  it("a buffered run of the same request reports the same numbers", async () => {
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "raw", model: "m1", provider: "dual", providerFormat: "openai_completion" },
+      ingress: "openai_completion",
+      body: CHAT_BODY,
+    });
+    const out = res.json() as { usage: Record<string, number> };
+    expect(out.usage.promptTokens).toBe(100);
+    expect(out.usage.cachedInputTokens).toBe(70);
   });
 });
 

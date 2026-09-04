@@ -245,6 +245,48 @@ function textFromFrames(frames: string[]): string {
   return out;
 }
 
+/**
+ * The usage a streamed run reported, dug out of the frames.
+ *
+ * Every wire puts it somewhere different and all of them put it at the END,
+ * which is precisely where a reader watching the text stop has stopped looking.
+ * Without this the bench showed a streamed run with no token counts at all --
+ * no cached share, no thinking tokens -- beside a buffered run that showed all
+ * three, which reads as the proxy having lost them.
+ */
+function usageFromFrames(frames: string[]): Record<string, unknown> | undefined {
+  let found: Record<string, unknown> | undefined;
+  // Anthropic splits it in two: the input side and both cache counters arrive
+  // on message_start, the output side on message_delta. Merge, do not replace.
+  let anthropic: Record<string, unknown> | undefined;
+  for (const frame of frames) {
+    for (const line of frame.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(payload) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const type = String(data.type ?? "");
+      if (type === "message_start") {
+        const u = (data.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined;
+        if (u) anthropic = { ...anthropic, ...u };
+      } else if (type === "message_delta" && data.usage) {
+        anthropic = { ...anthropic, ...(data.usage as Record<string, unknown>) };
+      } else if (type.startsWith("response.") && data.response) {
+        const u = (data.response as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+        if (u) found = u;
+      } else if (data.usage) {
+        found = data.usage as Record<string, unknown>;
+      }
+    }
+  }
+  return found ?? anthropic;
+}
+
 /** Split an SSE body into frames, keeping each one whole. */
 function splitFrames(buffer: string): { frames: string[]; rest: string } {
   const frames: string[] = [];
@@ -533,6 +575,7 @@ export function ModelBench() {
         status: res.status,
         latencyMs: Date.now() - started,
         frames,
+        usage: usageFromFrames(frames),
         sentBody,
         sentUrl: url,
       };
@@ -626,6 +669,9 @@ export function ModelBench() {
         message: typeof meta.message === "string" ? meta.message : undefined,
         served: meta.served as Served | undefined,
         upstreamRequest: meta.upstreamRequest,
+        // The server taps it off the terminal event; reading the frames is the
+        // fallback when talking to a build that did not send it.
+        usage: meta.usage ?? usageFromFrames(frames),
         attemptPath: meta.attemptPath,
         frames,
         sentBody: body,

@@ -445,10 +445,10 @@ export class AnthropicRequest extends Request {
     // surfacing 4028 is the correct behaviour. Do NOT re-pin the field to make
     // it go away.
     //
-    // The policy still owns max_tokens: it fits any budget under the client's
-    // requested max and the provider's hard cap, still prefers that cap over the
-    // built-in fallback when the client never budgeted, and floors the result at
-    // 1 (max_tokens is required here, and 0 is not a valid request).
+    // The policy still owns max_tokens: it bounds the client's own ceiling by
+    // the provider's hard cap. It does NOT substitute one when the client named
+    // none -- there is no built-in fallback any more, and this wire's own 400 is
+    // what says so (see ir/thinkingFormat.ts's sibling note in ir/thinking.ts).
     const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap);
     if (p.thinking != null) {
       out.thinking = tf.thinking;

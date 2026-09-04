@@ -28,6 +28,7 @@ import {
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { classifyError, type AttemptRecord, type AttemptResult } from "../execution/steps";
 import type { Request as CanonicalRequest } from "../core/ir/request";
+import { newAccumulator, tapStream } from "../core/ir/stream";
 import { serializeForLog } from "../util/logPayload";
 import { withJsonHeartbeat } from "./jsonKeepalive";
 
@@ -455,7 +456,13 @@ async function runChatStream(
       return;
       }
       const v = inv.result.value;
-      const shaped = withThinkingFormat(v.events, thinkingFormat);
+      // Usage only exists on the terminal event, which is consumed by the
+      // serializer on its way to the client. Tap it in passing, or the bench
+      // reports no tokens at all for a streamed run -- no counts, no cached
+      // share, no thinking tokens -- while the buffered run beside it shows
+      // all three.
+      const acc = newAccumulator();
+      const shaped = tapStream(withThinkingFormat(v.events, thinkingFormat), acc);
       for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) reply.raw.write(frame);
       meta({
         ok: true,
@@ -463,6 +470,7 @@ async function runChatStream(
         latencyMs: Date.now() - started,
         served: { model: v.modelName, provider: v.providerName, family: v.family, upstreamModel: v.upstreamModel, url: "" },
         upstreamRequest: v.upstreamRequest,
+        usage: acc.usage,
         attemptPath: inv.attemptPath,
       });
       reply.raw.end();
@@ -501,7 +509,9 @@ async function runChatStream(
       reply.raw.end();
       return;
     }
-    for await (const frame of serializeStream(ingress, withThinkingFormat(relayed.events, thinkingFormat), { model: label, thinkingFormat })) {
+    const acc = newAccumulator();
+    const shaped = tapStream(withThinkingFormat(relayed.events, thinkingFormat), acc);
+    for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) {
       reply.raw.write(frame);
     }
     meta({
@@ -510,6 +520,7 @@ async function runChatStream(
       latencyMs: Date.now() - started,
       served: served(t, t.url),
       upstreamRequest: relayed.sentBody,
+      usage: acc.usage,
       attemptPath: [rawAttempt(target, 200, Date.now() - started, "ok")],
     });
     reply.raw.end();
