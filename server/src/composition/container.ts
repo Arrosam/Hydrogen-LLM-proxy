@@ -29,6 +29,8 @@ import { RequestLogger } from "../observability/requestLogger";
 import { UsageMeter } from "../observability/usageMeter";
 import { ActiveRequestRegistry } from "../observability/activeRequests";
 import { UpdateService } from "../update/updateService";
+import { ProxyRepo } from "../persistence/proxyRepo";
+import { EgressProxyPool } from "../core/upstream/egress/pool";
 
 /**
  * The composition root: owns every long-lived instance and wires the dependency
@@ -41,6 +43,10 @@ export interface Container {
   sqlite: Database.Database;
   db: DB;
   providers: ProviderRepo;
+  /** Egress proxy profiles; a provider may route its traffic through one. */
+  proxies: ProxyRepo;
+  /** Dispatchers for those proxies. Owned here so they are shut down once. */
+  egressPool: EgressProxyPool;
   providerModels: ProviderModelRepo;
   models: ModelRepo;
   mappings: MappingRepo;
@@ -75,7 +81,10 @@ export async function boot(): Promise<Container> {
   const seed = await seedAdminIfEmpty(db, config.admin);
   if (seed.created) printInitialAdmin(seed);
 
-  const providers = new ProviderRepo(db, config.masterKey);
+  // The proxy repo is built before the provider repo because a materialized
+  // provider carries its egress proxy: toUpstream() asks this for it.
+  const proxies = new ProxyRepo(db, config.masterKey);
+  const providers = new ProviderRepo(db, config.masterKey, proxies);
   const providerModels = new ProviderModelRepo(db);
   const models = new ModelRepo(db);
   const mappings = new MappingRepo(db);
@@ -101,7 +110,8 @@ export async function boot(): Promise<Container> {
 
   const catalog = new Catalog(models, providers, mappings);
   const ssrf = new SsrfGuard({ allowPrivate: () => settings.allowPrivate(), allowlist: () => settings.allowlist() });
-  const transport = new UpstreamClient(ssrf);
+  const egressPool = new EgressProxyPool();
+  const transport = new UpstreamClient(ssrf, egressPool);
   const validator = new ServiceValidator(catalog, services);
   const activeRequests = new ActiveRequestRegistry();
   const factory = new ServiceFactory(
@@ -116,7 +126,7 @@ export async function boot(): Promise<Container> {
 
   return {
     config, sqlite, db,
-    providers, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
+    providers, proxies, egressPool, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates,
   };
 }

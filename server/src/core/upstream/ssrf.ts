@@ -101,7 +101,14 @@ function isBlockedV6(ip: string, allowPrivate: boolean): boolean {
   return false;
 }
 
-function isBlockedAddress(addr: string, allowPrivate: boolean): boolean {
+/**
+ * Exported for the egress proxy-host guard (core/upstream/egress/proxyHost.ts),
+ * which permits loopback and RFC1918 for an operator-configured proxy but must
+ * keep the tier this refuses even when `allowPrivate` is true -- "this host",
+ * link-local (cloud metadata) and broadcast. Sharing the function is what stops
+ * that tier from drifting between the two callers.
+ */
+export function isBlockedAddress(addr: string, allowPrivate: boolean): boolean {
   const v = net.isIP(addr);
   if (v === 4) return isBlockedV4(addr, allowPrivate);
   if (v === 6) return isBlockedV6(addr, allowPrivate);

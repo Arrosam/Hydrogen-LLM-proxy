@@ -25,6 +25,35 @@ export const users = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Egress proxies — an outbound network hop a provider's traffic is sent
+// through. Purely a transport concern: a proxy changes HOW Hydrogen reaches a
+// provider, never what is sent or how the answer is read.
+//
+// The password is AES-256-GCM encrypted under the master key, the same scheme
+// as provider API keys and client tokens.
+// ---------------------------------------------------------------------------
+export const proxies = sqliteTable(
+  "proxies",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    /** Only the schemes undici's ProxyAgent speaks. SOCKS would need a
+     * hand-written connector and is deliberately not offered yet. */
+    scheme: text("scheme", { enum: ["http", "https"] }).notNull().default("http"),
+    host: text("host").notNull(),
+    port: integer("port").notNull(),
+    username: text("username"),
+    /** Master-key-encrypted proxy password (same columns as providers/tokens). */
+    passwordCiphertext: text("password_ciphertext"),
+    passwordIv: text("password_iv"),
+    passwordTag: text("password_tag"),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => ({ nameIdx: uniqueIndex("proxies_name_idx").on(t.name) }),
+);
+
+// ---------------------------------------------------------------------------
 // Providers — upstream API endpoints. The API key is AES-256-GCM encrypted.
 // ---------------------------------------------------------------------------
 export const providers = sqliteTable(
@@ -46,6 +75,12 @@ export const providers = sqliteTable(
     /** Optional hard cap on the max output tokens this provider accepts; the
      * thinking policy fits budgets under it so a request is never rejected. */
     maxOutputTokens: integer("max_output_tokens"),
+    /** Send this provider's upstream traffic through a proxy. Null = connect
+     * directly, which is what every provider did before proxies existed and
+     * what every provider still does until one is chosen. `set null` on delete
+     * so removing a proxy degrades to a direct connection rather than
+     * orphaning the provider. */
+    proxyId: integer("proxy_id").references(() => proxies.id, { onDelete: "set null" }),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: createdAt(),
   },
@@ -274,6 +309,7 @@ export const settings = sqliteTable("settings", {
 
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
+export type ProxyRow = typeof proxies.$inferSelect;
 export type ProviderAvailableModel = typeof providerAvailableModels.$inferSelect;
 export type Model = typeof models.$inferSelect;
 export type ModelProvider = typeof modelProviders.$inferSelect;

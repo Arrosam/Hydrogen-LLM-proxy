@@ -18,6 +18,7 @@ import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../c
 import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
 import { withJsonHeartbeat } from "./jsonKeepalive";
 import { benchRoutes } from "./benchRoutes";
+import { proxyRoutes } from "./proxyRoutes";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
@@ -37,6 +38,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     scoped.addHook("preHandler", sessionGuard);
     await scoped.register((s) => userRoutes(s, c), { prefix: "/users" });
     await scoped.register((s) => providerRoutes(s, c), { prefix: "/providers" });
+    await scoped.register((s) => proxyRoutes(s, c), { prefix: "/proxies" });
     await scoped.register((s) => catalogRoutes(s, c));
     await scoped.register((s) => serviceRoutes(s, c), { prefix: "/services" });
     await scoped.register((s) => tokenRoutes(s, c), { prefix: "/tokens" });
@@ -228,6 +230,8 @@ const ProviderCreate = z.object({
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
+  /** Route this provider's upstream traffic through a saved proxy. null = direct. */
+  proxyId: z.number().int().positive().nullable().optional(),
   enabled: z.boolean().optional(),
   availableModels: AvailableModelsSchema,
 });
@@ -239,6 +243,8 @@ const ProviderUpdate = z.object({
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
   maxOutputTokens: z.number().int().positive().nullable().optional(),
+  /** Route this provider's upstream traffic through a saved proxy. null = direct. */
+  proxyId: z.number().int().positive().nullable().optional(),
   enabled: z.boolean().optional(),
   availableModels: AvailableModelsSchema,
 });
@@ -255,6 +261,10 @@ const ProviderTest = z.object({
   baseUrl: BaseUrlSchema,
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
+  /** Test through this saved proxy. Omitted on an existing provider = the one
+   * it is already attached to. An id, never a host: nothing a caller writes can
+   * become a proxy address, only select an existing row. */
+  proxyId: z.number().int().positive().nullable().optional(),
 });
 
 /**
@@ -308,15 +318,22 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
   app.post("/test", async (req, reply) => {
     const parsed = parse(ProviderTest, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const { id, type, baseUrl, apiKey, extraHeaders } = parsed.data;
+    const { id, type, baseUrl, apiKey, extraHeaders, proxyId } = parsed.data;
     let key = apiKey ?? null;
+    const stored = id !== undefined ? c.providers.get(id) : undefined;
     if (apiKey === undefined && id !== undefined) {
       if (!requireAdmin(req, reply, "test a provider with its stored key")) return reply;
-      const stored = c.providers.get(id);
       if (!stored) return reply.code(404).send({ error: "not found" });
       key = c.providers.toUpstream(stored).apiKey;
     }
-    return discoverModels(c.transport, { type, baseUrl, apiKey: key, extraHeaders: extraHeaders ?? null });
+    // The test has to take the SAME route a real call would, for two reasons:
+    // a provider reachable only through its proxy would otherwise always report
+    // "connection failed", and the stored credential would be sent out on the
+    // direct path the operator attached a proxy specifically to avoid.
+    // The editor sends the proxy currently selected in the form, so testing an
+    // unsaved change works; falling back to the stored one covers a bare id.
+    const proxy = c.proxies.forProvider(proxyId !== undefined ? proxyId : stored?.proxyId ?? null);
+    return discoverModels(c.transport, { type, baseUrl, apiKey: key, extraHeaders: extraHeaders ?? null, proxy });
   });
 
   /** The stored list for one provider. */

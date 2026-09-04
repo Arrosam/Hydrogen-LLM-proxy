@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { useAuth } from "../auth";
@@ -8,7 +8,7 @@ import { Modal } from "../components/Modal";
 import { ModelList } from "../components/ModelList";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Provider, ProviderModels, ProviderTestResult, ProviderType } from "../types";
+import type { Provider, ProviderModels, ProviderTestResult, ProviderType, Proxy } from "../types";
 
 interface Data {
   providers: Provider[];
@@ -34,6 +34,8 @@ interface FormState {
   apiKey: string;
   extraHeaders: string;
   maxOutputTokens: string;
+  /** "" = direct connection; otherwise the id of a saved proxy. */
+  proxyId: string;
   enabled: boolean;
   /** The list already stored for this provider (edit only), shown until a test
    * replaces it. */
@@ -51,6 +53,7 @@ const EMPTY: FormState = {
   apiKey: "",
   extraHeaders: "",
   maxOutputTokens: "",
+  proxyId: "",
   enabled: true,
   storedModels: [],
   test: null,
@@ -79,6 +82,16 @@ export function Providers() {
   const { confirm, confirmEl } = useConfirm();
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
+  // Only for the egress-proxy dropdown. Never gates anything: a provider with
+  // no proxy is the default and every existing provider stays that way.
+  const [proxies, setProxies] = useState<Proxy[]>([]);
+
+  useEffect(() => {
+    api
+      .get<{ proxies: Proxy[] }>("/proxies")
+      .then((r) => setProxies(r.proxies))
+      .catch(() => setProxies([]));
+  }, []);
   const [testing, setTesting] = useState(false);
 
   const storedFor = (providerId: number) => data?.providerModels.find((x) => x.providerId === providerId)?.models ?? [];
@@ -94,6 +107,7 @@ export function Providers() {
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
       maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
+      proxyId: p.proxyId != null ? String(p.proxyId) : "",
       enabled: p.enabled,
       storedModels: storedFor(p.id),
       test: null,
@@ -127,6 +141,9 @@ export function Providers() {
       if (form.apiKey) payload.apiKey = form.apiKey;
       else if (form.id) payload.id = form.id;
       else payload.apiKey = null;
+      // The proxy selected in the form, so a test proves the route a real
+      // request would take -- including a proxy chosen but not yet saved.
+      payload.proxyId = form.proxyId ? Number(form.proxyId) : null;
       const r = await api.post<ProviderTestResult>("/providers/test", payload);
       setForm((f) => (f ? { ...f, test: { ok: r.ok, message: r.message, models: r.models } } : f));
       if (!r.ok) toast.error(r.message);
@@ -158,6 +175,7 @@ export function Providers() {
         baseUrl: form.baseUrl,
         extraHeaders,
         maxOutputTokens: motRaw ? Number(motRaw) : null,
+        proxyId: form.proxyId ? Number(form.proxyId) : null,
         altEndpoints: form.altEndpoints.filter((e) => e.baseUrl.trim()).length
           ? form.altEndpoints.filter((e) => e.baseUrl.trim())
           : null,
@@ -383,6 +401,23 @@ export function Providers() {
                 />
                 <p className="mt-1 text-xs text-ink-500">{t("providers.field.maxOutputTokens.hint")}</p>
               </div>
+            </div>
+            <div>
+              <label className="label">{t("providers.field.proxy.label")}</label>
+              <select
+                className="select"
+                value={form.proxyId}
+                onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
+              >
+                <option value="">{t("providers.field.proxy.direct")}</option>
+                {proxies.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} — {p.scheme}://{p.host}:{p.port}
+                    {p.enabled ? "" : ` (${t("common.disabled")})`}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-ink-500">{t("providers.field.proxy.hint")}</p>
             </div>
             <div>
               <label className="label">{t("providers.field.extraHeaders.label")}</label>

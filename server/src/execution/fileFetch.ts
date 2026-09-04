@@ -78,6 +78,11 @@ async function download(
   transport: Transport,
   opts: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<{ data: string; mediaType: string }> {
+  // Deliberately no `proxy` in `opts`: this is the ONE transport caller whose
+  // URL comes out of a client's request body rather than a provider row.
+  // Leaving it unset keeps it on the direct, DNS-pinned path -- so nothing an
+  // API-token holder can write into a request can select a proxy, and with it
+  // opt out of the address validation that path performs.
   if (!transport.getStream) {
     throw new FormatConversionError(`cannot inline the file at ${url}: this transport cannot fetch URLs`);
   }

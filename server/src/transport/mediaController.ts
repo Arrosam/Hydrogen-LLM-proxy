@@ -274,7 +274,7 @@ export class MediaController {
       const upstreamBody = { ...body, ...stepParams(step), model: target.upstreamModel };
       lastSent = upstreamBody;
       const r = await this.deps.transport.postJson(mediaUrl(category, target.upstream), buildHeaders(target.upstream), upstreamBody, {
-        timeoutMs: def.timeoutMs, signal,
+        timeoutMs: def.timeoutMs, signal, proxy: target.upstream.proxy,
       });
       if (r.status >= 200 && r.status < 300) {
         return { ok: true, value: { status: r.status, json: r.json, text: r.text, target, sentBody: upstreamBody } };
@@ -320,7 +320,7 @@ export class MediaController {
       const upstreamBody = { ...body, ...stepParams(step), model: target.upstreamModel };
       lastSent = upstreamBody;
       const r = await this.deps.transport.postStream(speechUrl(target.upstream), buildHeaders(target.upstream), upstreamBody, {
-        timeoutMs: def.timeoutMs, signal,
+        timeoutMs: def.timeoutMs, signal, proxy: target.upstream.proxy,
       });
       if (r.status >= 200 && r.status < 300) {
         stream = r.body;
@@ -393,7 +393,7 @@ export class MediaController {
       const headers = buildHeaders(target.upstream);
       headers["content-type"] = String(contentType);
       const r = await this.deps.transport.postRaw(transcriptionsUrl(target.upstream), headers, rewritten, {
-        timeoutMs: def.timeoutMs, signal,
+        timeoutMs: def.timeoutMs, signal, proxy: target.upstream.proxy,
       });
       if (r.status >= 200 && r.status < 300) {
         return { ok: true, value: { status: r.status, json: r.json, text: r.text, target, sentBody: `(multipart ${rewritten.length} bytes)` } };
@@ -465,12 +465,12 @@ export class MediaController {
     const headers = buildHeaders(upstream);
 
     if (content) {
-      const r = await this.deps.transport.getStream(url, headers, { timeoutMs, signal: this.abortOnClientClose(reply) });
+      const r = await this.deps.transport.getStream(url, headers, { timeoutMs, signal: this.abortOnClientClose(reply), proxy: upstream.proxy });
       const contentType = r.headers["content-type"];
       if (typeof contentType === "string") reply.header("content-type", contentType);
       return reply.code(r.status).send(r.body);
     }
-    const r = await this.deps.transport.getJson(url, headers, { timeoutMs });
+    const r = await this.deps.transport.getJson(url, headers, { timeoutMs, proxy: upstream.proxy });
     let json = r.json as Record<string, unknown> | undefined;
     if (r.status < 400 && json && typeof json.id === "string") {
       json = { ...json, id: suffixVideoId(json.id, service.id, provider.id, endpoint.index) };

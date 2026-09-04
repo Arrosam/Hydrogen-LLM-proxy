@@ -315,7 +315,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
         if (category === "tts") return await runSpeech(c, t, url, body, timeout, started);
 
         const upstreamRequest = { ...body, model: t.upstreamModel };
-        const r = await c.transport.postJson(url, buildHeaders(t.upstream), upstreamRequest, { timeoutMs: timeout });
+        const r = await c.transport.postJson(url, buildHeaders(t.upstream), upstreamRequest, { timeoutMs: timeout, proxy: t.upstream.proxy });
         const latencyMs = Date.now() - started;
         if (r.status >= 200 && r.status < 300) {
           return { ok: true, status: r.status, latencyMs, served: served(t, url), upstreamRequest, response: r.json ?? r.text };
@@ -395,6 +395,7 @@ async function runChat(
     headers: t.headers,
     providerMaxOutputTokens: t.providerMaxOutputTokens,
     timeoutMs: timeoutMs ?? 300_000,
+    proxy: t.upstream.proxy,
   });
   const latencyMs = Date.now() - started;
   if (!sent.ok) {
@@ -496,6 +497,7 @@ async function runChatStream(
       headers: t.headers,
       providerMaxOutputTokens: t.providerMaxOutputTokens,
       timeoutMs: timeoutMs ?? 300_000,
+      proxy: t.upstream.proxy,
     });
     if (!relayed.ok) {
       meta({
@@ -585,7 +587,7 @@ async function runSpeech(
   started: number,
 ): Promise<Record<string, unknown>> {
   const upstreamRequest = { ...body, model: t.upstreamModel };
-  const r = await c.transport.postStream(url, buildHeaders(t.upstream), upstreamRequest, { timeoutMs });
+  const r = await c.transport.postStream(url, buildHeaders(t.upstream), upstreamRequest, { timeoutMs, proxy: t.upstream.proxy });
   const chunks: Buffer[] = [];
   for await (const chunk of r.body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   const buf = Buffer.concat(chunks);
@@ -659,7 +661,7 @@ async function runTranscription(
   if (!c.transport.postRaw) {
     return { ok: false, status: 0, latencyMs: 0, message: "this transport cannot post a multipart form" };
   }
-  const r = await c.transport.postRaw(url, headers, form.body, { timeoutMs });
+  const r = await c.transport.postRaw(url, headers, form.body, { timeoutMs, proxy: t.upstream.proxy });
   const latencyMs = Date.now() - started;
   const upstreamRequest = { ...fields, file: `(${file.name}, ${file.mediaType}, ${Buffer.from(file.data, "base64").length} bytes)` };
   if (r.status >= 200 && r.status < 300) {

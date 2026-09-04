@@ -1,4 +1,5 @@
 import { familyForProviderType, type ProviderType } from "../format/family";
+import type { EgressProxy } from "./egress/types";
 
 /** A materialized provider (decrypted key) ready to be called upstream. */
 export interface UpstreamProvider {
@@ -6,6 +7,18 @@ export interface UpstreamProvider {
   baseUrl: string;
   apiKey: string | null;
   extraHeaders?: Record<string, string> | null;
+  /**
+   * Send this provider's traffic through a proxy instead of connecting
+   * directly. Absent/null = direct, which is what every provider does unless
+   * an admin attached one.
+   *
+   * It lives here because this interface is already "the provider, resolved
+   * for making a call" -- the same object that carries the decrypted key and
+   * the extra headers. Every path that reaches an upstream already carries one,
+   * so the proxy reaches the socket by the route provider identity already
+   * travels rather than by a second one threaded alongside it.
+   */
+  proxy?: EgressProxy | null;
 }
 
 export const ANTHROPIC_VERSION = "2023-06-01";

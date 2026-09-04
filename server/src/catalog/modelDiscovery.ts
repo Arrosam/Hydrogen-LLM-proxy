@@ -79,7 +79,7 @@ export async function discoverModels(
 ): Promise<ModelDiscovery> {
   const family = familyForProviderType(provider.type);
   try {
-    const res = await transport.getJson(modelsUrl(provider), buildHeaders(provider), { timeoutMs });
+    const res = await transport.getJson(modelsUrl(provider), buildHeaders(provider), { timeoutMs, proxy: provider.proxy });
     if (res.status < 200 || res.status >= 300) {
       const text = (res.text ?? "").trim();
       const short = text.length > 200 ? `${text.slice(0, 200)}...` : text;

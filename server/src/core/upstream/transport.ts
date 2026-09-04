@@ -1,4 +1,5 @@
 import type { Readable } from "node:stream";
+import type { EgressProxy } from "./egress/types";
 
 /**
  * The HTTP transport a Request subclass uses to reach an upstream. The concrete
@@ -41,6 +42,16 @@ export interface Transport {
 export interface TransportOptions {
   timeoutMs: number;
   signal?: AbortSignal;
+  /**
+   * Open this request's connection through a proxy instead of directly.
+   *
+   * Optional and absent by default, so a request that does not set it behaves
+   * exactly as it did before proxies existed -- which is what every
+   * client-supplied URL (the file pre-pass) relies on: nothing reachable from
+   * a request body can select a proxy, so nothing client-supplied can opt out
+   * of the direct path's DNS pinning.
+   */
+  proxy?: EgressProxy | null;
 }
 
 export interface TransportJsonResult {
@@ -69,4 +80,6 @@ export interface SendTarget {
   providerMaxOutputTokens?: number;
   timeoutMs: number;
   signal?: AbortSignal;
+  /** The provider's egress proxy, resolved with the rest of the target. */
+  proxy?: EgressProxy | null;
 }

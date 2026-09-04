@@ -39,6 +39,10 @@ export const BACKUP_FORMAT = "hydrogen-backup";
  */
 const TABLES = [
   "users",
+  // Before `providers`, which references it. The ordering comment above is not
+  // decorative: restore inserts in this order with foreign keys ON, so a
+  // provider carrying a proxy_id would fail to insert if its proxy came later.
+  "proxies",
   "providers",
   "provider_available_models",
   "models",
@@ -79,17 +83,32 @@ const DERIVED_TABLES: ReadonlySet<string> = new Set(["provider_available_models"
  */
 const CACHE_TABLES: ReadonlySet<string> = new Set(["image_cache"]);
 
+/**
+ * Configuration tables that did not exist when BACKUP_VERSION 1 shipped. A
+ * package written before them has no key for them, which is a normal old
+ * package rather than a truncated one -- so they are exported and restored like
+ * any other configuration, but their absence is not an error. Without this,
+ * adding a table would reject every backup anyone had already taken.
+ */
+const POST_V1_TABLES: ReadonlySet<string> = new Set(["proxies"]);
+
 /** The configuration tables a valid package must carry (everything but history
  * and re-fetchable caches). A package missing any of these is rejected, so a
  * truncated or hand-edited file can never delete the target's accounts and
  * leave nothing to log back in with. */
 const REQUIRED_TABLES: readonly TableName[] = TABLES.filter(
-  (t) => !LOG_TABLES.has(t) && !DERIVED_TABLES.has(t) && !CACHE_TABLES.has(t),
+  (t) => !LOG_TABLES.has(t) && !DERIVED_TABLES.has(t) && !CACHE_TABLES.has(t) && !POST_V1_TABLES.has(t),
 );
 
 /** The provider columns that hold master-key-encrypted material. Never exported:
  * they are replaced by the sealed plaintext and rebuilt on restore. */
 const PROVIDER_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
+
+/** And for egress proxy passwords, added after BACKUP_VERSION 1: sealed as
+ * plaintext under the passphrase, re-encrypted under the target's master key on
+ * restore, exactly like a provider key. A proxy restored without this would
+ * carry ciphertext no key on the target can open. */
+const PROXY_PASSWORD_COLUMNS = ["password_ciphertext", "password_iv", "password_tag"] as const;
 
 /** Same treatment for client-token secrets (stored since v1.5.2 so issued keys
  * can be copied again): sealed as plaintext, re-encrypted under the target's
@@ -132,6 +151,8 @@ interface SecretPayload {
   providerKeys: { id: number; apiKey: string }[];
   /** Absent in packages written before v1.5.2. */
   tokenKeys?: { id: number; secret: string }[];
+  /** Absent in packages written before egress proxies existed. */
+  proxyPasswords?: { id: number; password: string }[];
 }
 
 export class BackupError extends Error {
@@ -155,6 +176,7 @@ export async function exportBackup(
   const counts: Record<string, number> = {};
   const providerKeys: SecretPayload["providerKeys"] = [];
   const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
+  const proxyPasswords: NonNullable<SecretPayload["proxyPasswords"]> = [];
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
@@ -173,6 +195,18 @@ export async function exportBackup(
         );
         if (apiKey != null) providerKeys.push({ id: row.id as number, apiKey });
         for (const col of PROVIDER_KEY_COLUMNS) delete row[col];
+      }
+    }
+
+    if (table === "proxies") {
+      for (const row of rows) {
+        const ciphertext = (row.password_ciphertext as string | null) ?? null;
+        const iv = (row.password_iv as string | null) ?? null;
+        const tag = (row.password_tag as string | null) ?? null;
+        if (ciphertext && iv && tag) {
+          proxyPasswords.push({ id: row.id as number, password: decryptSecret({ ciphertext, iv, tag }, masterKey) });
+        }
+        for (const col of PROXY_PASSWORD_COLUMNS) delete row[col];
       }
     }
 
@@ -200,7 +234,7 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords } satisfies SecretPayload), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -267,6 +301,10 @@ export async function restoreBackup(
   // they were on the instance that wrote the package.
   const tokenKeyById = new Map<number, string>();
   for (const { id, secret } of secrets.tokenKeys ?? []) tokenKeyById.set(id, secret);
+  // Absent in packages written before egress proxies: those restore their
+  // proxies password-less, which is exactly what the source instance had.
+  const proxyPasswordById = new Map<number, string>();
+  for (const { id, password } of secrets.proxyPasswords ?? []) proxyPasswordById.set(id, password);
 
   const restored: Record<string, number> = {};
 
@@ -307,6 +345,15 @@ export async function restoreBackup(
           values.key_ciphertext = cols.keyCiphertext;
           values.key_iv = cols.keyIv;
           values.key_tag = cols.keyTag;
+        }
+
+        if (table === "proxies") {
+          // Same rebuild for proxy passwords.
+          const password = proxyPasswordById.get(values.id as number);
+          const blob = password != null ? encryptSecret(password, masterKey) : null;
+          values.password_ciphertext = blob?.ciphertext ?? null;
+          values.password_iv = blob?.iv ?? null;
+          values.password_tag = blob?.tag ?? null;
         }
 
         if (table === "tokens") {

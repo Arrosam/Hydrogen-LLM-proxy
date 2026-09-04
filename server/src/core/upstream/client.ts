@@ -1,8 +1,10 @@
-import { Agent, request } from "undici";
+import { Agent, request, type Dispatcher } from "undici";
 import type { LookupAddress, LookupOptions } from "node:dns";
 import type { Readable } from "node:stream";
 import type { SsrfGuard, ResolvedAddress } from "./ssrf";
 import type { Transport, TransportJsonResult, TransportOptions, TransportStreamResult } from "./transport";
+import type { EgressProxyPool } from "./egress/pool";
+import { UpstreamUrlError } from "./ssrf";
 
 /**
  * How long a pinned resolution stays fresh. Pinning happens immediately
@@ -42,7 +44,52 @@ export class UpstreamClient implements Transport {
   /** hostname -> validated addresses + expiry, refreshed per request. */
   private readonly pinned = new Map<string, { addresses: ResolvedAddress[]; expiresAt: number }>();
 
-  constructor(private readonly ssrf: SsrfGuard) {}
+  constructor(
+    private readonly ssrf: SsrfGuard,
+    /**
+     * Dispatchers for providers routed through an egress proxy. Omitted = no
+     * proxying is possible and every request takes the direct, DNS-pinned
+     * path, which is what the test fakes and any caller that predates proxies
+     * gets for free.
+     */
+    private readonly egressPool?: EgressProxyPool,
+  ) {}
+
+  /**
+   * Pick the dispatcher for one request, and do the address validation that
+   * goes with it.
+   *
+   * DIRECT (the default, and every client-supplied URL): the target is
+   * resolved, address-checked and pinned, and the shared DNS-pinned Agent is
+   * used -- byte for byte what happened before proxies existed.
+   *
+   * PROXIED (only when a caller passed a provider's `opts.proxy`): the socket
+   * goes to the proxy, so it is the PROXY host that is resolved, checked and
+   * pinned; the target's address is resolved on the far side by the proxy and
+   * cannot be pinned here. Pinning it locally would also defeat the purpose --
+   * the usual reason to configure a proxy is that local resolution is the
+   * thing that does not work. The target still has to be a well-formed
+   * http/https URL, which is checked here rather than left to undici.
+   */
+  private async egress(url: string, opts: TransportOptions): Promise<Dispatcher> {
+    if (!opts.proxy) {
+      await this.pin(url);
+      return this.dispatcher;
+    }
+    if (!this.egressPool) {
+      throw new UpstreamUrlError("this provider is configured to use a proxy, but no proxy pool is available");
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new UpstreamUrlError(`invalid upstream URL: ${url}`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new UpstreamUrlError(`unsupported upstream URL scheme "${parsed.protocol}" (use http/https)`);
+    }
+    return this.egressPool.dispatcherFor(opts.proxy);
+  }
 
   /** Validate the URL and remember the addresses it was approved on. */
   private async pin(url: string): Promise<void> {
@@ -112,12 +159,12 @@ export class UpstreamClient implements Transport {
     body: unknown,
     opts: TransportOptions,
   ): Promise<TransportJsonResult> {
-    await this.pin(url);
+    const dispatcher = await this.egress(url, opts);
     const res = await request(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      dispatcher: this.dispatcher,
+      dispatcher,
       signal: this.combineSignals(opts.timeoutMs, opts.signal),
       // undici defaults BOTH of these to 5 minutes when omitted. A non-streaming
       // upstream (a local model especially) sends its headers only after the
@@ -150,12 +197,12 @@ export class UpstreamClient implements Transport {
     body: unknown,
     opts: TransportOptions,
   ): Promise<TransportStreamResult> {
-    await this.pin(url);
+    const dispatcher = await this.egress(url, opts);
     const res = await request(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      dispatcher: this.dispatcher,
+      dispatcher,
       signal: opts.signal,
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
@@ -171,12 +218,12 @@ export class UpstreamClient implements Transport {
     body: Buffer | string,
     opts: TransportOptions,
   ): Promise<TransportJsonResult> {
-    await this.pin(url);
+    const dispatcher = await this.egress(url, opts);
     const res = await request(url, {
       method: "POST",
       headers,
       body,
-      dispatcher: this.dispatcher,
+      dispatcher,
       signal: this.combineSignals(opts.timeoutMs, opts.signal),
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
@@ -193,11 +240,11 @@ export class UpstreamClient implements Transport {
 
   /** GET returning the raw response stream (binary downloads, e.g. video content). */
   async getStream(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportStreamResult> {
-    await this.pin(url);
+    const dispatcher = await this.egress(url, opts);
     const res = await request(url, {
       method: "GET",
       headers,
-      dispatcher: this.dispatcher,
+      dispatcher,
       signal: opts.signal,
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
@@ -207,11 +254,11 @@ export class UpstreamClient implements Transport {
 
   /** GET request returning JSON (provider connection tests / model lists). */
   async getJson(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportJsonResult> {
-    await this.pin(url);
+    const dispatcher = await this.egress(url, opts);
     const res = await request(url, {
       method: "GET",
       headers,
-      dispatcher: this.dispatcher,
+      dispatcher,
       signal: this.combineSignals(opts.timeoutMs, opts.signal),
       // Same as postJson: keep undici's silent 5-minute defaults out of the way.
       headersTimeout: opts.timeoutMs,

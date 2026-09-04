@@ -48,7 +48,7 @@ async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown
 export async function sendBuffered(req: Request, transport: Transport, target: SendTarget): Promise<SendResult> {
   if (req.stream) {
     const sentBody = req.render(target);
-    const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal });
+    const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure upstream.
       const { data, incomplete } = await collectStream(parseStream(req.family, r.body));
@@ -63,7 +63,7 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
   }
   // Non-streaming path: send stream=false, get a complete JSON response.
   const sentBody = req.render(target);
-  const r = await transport.postJson(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal });
+  const r = await transport.postJson(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
   if (r.status >= 200 && r.status < 300) {
     const body = r.json as Record<string, unknown> | undefined;
     if (!body || typeof body !== "object") {
@@ -78,7 +78,7 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
 /** Return the committed live event stream for a streaming client relay. */
 export async function relayStream(req: Request, transport: Transport, target: SendTarget): Promise<RelayResult> {
   const sentBody = req.withStream(true).render(target);
-  const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal });
+  const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
   if (r.status >= 200 && r.status < 300) {
     return { ok: true, status: r.status, events: parseStream(req.family, r.body), sentBody };
   }

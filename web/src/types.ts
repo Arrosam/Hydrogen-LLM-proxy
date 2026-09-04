@@ -23,6 +23,34 @@ export interface Provider {
   maxOutputTokens: number | null;
   enabled: boolean;
   createdAt: number;  altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
+  /** Egress proxy this provider's upstream traffic is routed through. */
+  proxyId?: number | null;
+}
+
+/**
+ * An egress proxy profile: the optional network hop between Hydrogen and a
+ * provider. Purely a transport concern -- it changes how a provider is reached,
+ * never what is sent or how the answer is read.
+ */
+export interface Proxy {
+  id: number;
+  name: string;
+  scheme: "http" | "https";
+  host: string;
+  port: number;
+  username: string | null;
+  hasPassword: boolean;
+  enabled: boolean;
+  createdAt: number;
+}
+
+/** The result of proving a proxy can actually reach something. */
+export interface ProxyTestResult {
+  ok: boolean;
+  status: number;
+  latencyMs: number;
+  url: string;
+  message: string;
 }
 
 /** The model ids a provider reported from its own /models endpoint. */

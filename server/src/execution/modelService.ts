@@ -125,6 +125,7 @@ export class ModelService {
         providerMaxOutputTokens: t.providerMaxOutputTokens,
         timeoutMs,
         signal: opts.signal,
+        proxy: t.upstream.proxy,
       };
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
@@ -217,6 +218,7 @@ export class ModelService {
         providerMaxOutputTokens: t.providerMaxOutputTokens,
         timeoutMs,
         signal: opts.signal,
+        proxy: t.upstream.proxy,
       };
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `stream request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });

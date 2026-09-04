@@ -86,6 +86,7 @@ export async function transcribeAudio(
     const r = await deps.transport.postRaw(transcriptionsUrl(res.target.upstream), headers, body, {
       timeoutMs: opts.timeoutMs ?? def.timeoutMs,
       signal: opts.signal,
+      proxy: res.target.upstream.proxy,
     });
     if (r.status >= 200 && r.status < 300) {
       const json = r.json as { text?: unknown } | undefined;
