@@ -17,6 +17,16 @@ export interface PublicUser {
 
 export type ChangePasswordResult = "ok" | "not_found" | "wrong_current";
 
+/**
+ * A constant dummy password used to equalize login timing. When the username
+ * does not exist, argon2 would otherwise be skipped and the missing account
+ * answered measurably faster than the present-but-wrong one -- a free
+ * username-enumeration oracle for anyone who can reach /login. Verifying
+ * against a lazily-created dummy hash makes both paths pay the same cost.
+ */
+const DUMMY_PASSWORD = "hydrogen-timing-equalizer";
+let dummyHash: string | null = null;
+
 /** Dashboard accounts + password verification (argon2id). */
 export class UserRepo {
   constructor(private readonly db: DB) {}
@@ -102,11 +112,14 @@ export class UserRepo {
     this.db.delete(users).where(eq(users.id, id)).run();
   }
 
-  /** Verify a username/password login. Returns the user on success. */
+  /** Verify a username/password login. Returns the user on success, null on
+   * any failure. An unknown or disabled account still runs one argon2
+   * verification against the dummy hash so response timing cannot be used to
+   * distinguish "no such user" from "wrong password". */
   async verifyLogin(username: string, password: string): Promise<User | null> {
     const user = this.getByUsername(username);
-    if (!user || !user.enabled) return null;
-    const ok = await verifyPassword(user.passwordHash, password);
-    return ok ? user : null;
+    const hash = user?.passwordHash ?? (dummyHash ??= await hashPassword(DUMMY_PASSWORD));
+    const ok = await verifyPassword(hash, password);
+    return ok && user && user.enabled ? user : null;
   }
 }

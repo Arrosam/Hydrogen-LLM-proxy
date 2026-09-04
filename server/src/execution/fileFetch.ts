@@ -15,12 +15,14 @@ import type { Transport } from "../core/upstream/transport";
  * pre-pass downloads it once here and hands the upstream real bytes -- the same
  * shape the OCR and ASR pre-passes use to make an attachment expressible.
  *
- * The proxy imposes no size, MIME or content limits of its own: it is a relay,
- * and the provider is the one that knows (and enforces) what it accepts. What it
- * DOES enforce is its own egress safety -- every hop, redirects included, goes
- * through the SSRF guard, because a URL that arrives in a request body is
- * attacker-controlled input and this process can reach networks the client
- * cannot.
+ * The proxy imposes no MIME or content limits of its own: it is a relay, and
+ * the provider is the one that knows (and enforces) what it accepts. Size it
+ * DOES bound: a download is capped at {@link MAX_DOWNLOAD_BYTES} so the
+ * buffering below cannot be turned into a memory-exhaustion primitive. What it
+ * enforces beyond that is its own egress safety -- every hop, redirects
+ * included, goes through the SSRF guard, because a URL that arrives in a
+ * request body is attacker-controlled input and this process can reach
+ * networks the client cannot.
  */
 
 /** Egress families whose wire format can carry a file by URL as-is. */
@@ -28,6 +30,14 @@ const URL_CAPABLE: ReadonlySet<Family> = new Set<Family>(["anthropic", "openai_r
 
 /** Redirect hops followed before giving up. Each hop is re-checked by the guard. */
 const MAX_REDIRECTS = 5;
+
+/**
+ * Byte budget for one downloaded attachment. The client-facing `bodyLimit`
+ * does not apply to this server-side fetch, so without a cap any API-key
+ * holder could point the proxy at a huge (or endless) response and OOM the
+ * process: the bytes are fully buffered, then base64-inflated by a third.
+ */
+export const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 const isUrlFile = (p: ContentPart): p is FilePart & { source: { kind: "url"; url: string } } =>
   p.type === "file" && p.source.kind === "url";
@@ -88,7 +98,20 @@ async function download(
       throw new FormatConversionError(`cannot inline the file at ${url}: the file server returned ${res.status}`);
     }
     const chunks: Buffer[] = [];
-    for await (const chunk of res.body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+    let received = 0;
+    for await (const chunk of res.body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      received += buf.length;
+      if (received > MAX_DOWNLOAD_BYTES) {
+        // Stop reading before buffering more: destroy the stream so the
+        // connection does not drain a huge body nobody will use.
+        res.body?.destroy?.();
+        throw new FormatConversionError(
+          `cannot inline the file at ${url}: it exceeds the ${MAX_DOWNLOAD_BYTES}-byte download limit`,
+        );
+      }
+      chunks.push(buf);
+    }
     return { data: Buffer.concat(chunks).toString("base64"), mediaType: mediaTypeOf(res.headers) };
   }
   throw new FormatConversionError(`cannot inline the file at ${url}: more than ${MAX_REDIRECTS} redirects`);

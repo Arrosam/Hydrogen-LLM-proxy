@@ -333,12 +333,31 @@ export function translateImagesInRequest(request: Request, results: string[]): R
 
 // --- routing conditions -----------------------------------------------------
 
+/**
+ * Bounds on router-condition regexes, so a (malicious or accidentally
+ * catastrophic) pattern cannot pin the event loop: patterns are short by
+ * decree (the validator rejects longer ones, and old saved definitions
+ * degrade to never-match), and only this many characters of the tested
+ * string are ever handed to the engine. Router conditions classify a
+ * conversation; 10 KB is far past any honest classification need. (Full
+ * immunity to backtracking blowup would need re2 or a worker timeout; this
+ * makes the practical window negligible instead.)
+ */
+const MAX_CONDITION_PATTERN = 200;
+const MAX_REGEX_TEXT = 10_000;
+
 function safeRegex(pattern: string): RegExp {
+  if (pattern.length > MAX_CONDITION_PATTERN) return /(?!)/; // never match
   try {
     return new RegExp(pattern);
   } catch {
     return /(?!)/;
   }
+}
+
+/** The slice of `text` a condition regex is allowed to see. */
+function boundedRegexText(text: string): string {
+  return text.length > MAX_REGEX_TEXT ? text.slice(0, MAX_REGEX_TEXT) : text;
 }
 
 export interface InputCtx {
@@ -366,11 +385,11 @@ export function conditionHolds(
     case "input_contains":
       return input.text.includes(cond.value);
     case "input_matches":
-      return safeRegex(cond.value).test(input.text);
+      return safeRegex(cond.value).test(boundedRegexText(input.text));
     case "output_contains":
       return (outputs.get(cond.stage ?? currentStage) ?? "").includes(cond.value);
     case "output_matches":
-      return safeRegex(cond.value).test(outputs.get(cond.stage ?? currentStage) ?? "");
+      return safeRegex(cond.value).test(boundedRegexText(outputs.get(cond.stage ?? currentStage) ?? ""));
   }
 }
 

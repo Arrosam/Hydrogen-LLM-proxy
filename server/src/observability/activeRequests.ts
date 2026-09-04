@@ -66,6 +66,15 @@ export const BLOCK_THRESHOLD_MS = 30_000;
 const DEFAULT_RETENTION = 256;
 
 /**
+ * Cap on progress events per request. A long retry chain or a Micro Agent
+ * with many stages can emit events without end, and each finished entry
+ * (retained in the ring) would otherwise carry them all in memory. The
+ * terminal "done" event is always recorded even past the cap, so the panel
+ * never loses sight of a request's outcome.
+ */
+const MAX_EVENTS_PER_REQUEST = 500;
+
+/**
  * The active-request registry. Injected into the proxy controller, executors,
  * and transport layer to record progress events. Queried by the admin API.
  */
@@ -107,10 +116,13 @@ export class ActiveRequestRegistry {
     this.active.set(req.traceId, entry);
   }
 
-  /** Append a progress event to an in-flight request. No-op if not registered. */
+  /** Append a progress event to an in-flight request. No-op if not registered,
+   * or once the per-request event cap is reached (except the final "done"
+   * event, which is always kept). */
   record(traceId: string, phase: ProgressPhase, node: string, message: string, detail?: Record<string, unknown>): void {
     const entry = this.active.get(traceId);
     if (!entry) return; // not tracked (e.g. embeddings or pre-registration errors)
+    if (entry.events.length >= MAX_EVENTS_PER_REQUEST && phase !== "done") return;
     const ev: ProgressEvent = { ts: Date.now(), phase, node, message, detail };
     entry.events.push(ev);
     entry.updatedAt = ev.ts;

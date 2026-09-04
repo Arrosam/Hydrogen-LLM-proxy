@@ -27,7 +27,7 @@ const NAV: NavItem[] = [
   { to: "/providers", labelKey: "nav.providers", icon: "bi-hdd-network" },
   { to: "/tokens", labelKey: "nav.tokens", icon: "bi-key" },
   { to: "/bench", labelKey: "nav.bench", icon: "bi-clipboard-pulse" },
-  { to: "/logs", labelKey: "nav.logs", icon: "bi-journal-text" },
+  { to: "/logs", labelKey: "nav.logs", icon: "bi-journal-text", adminOnly: true },
   { to: "/active-requests", labelKey: "nav.activeRequests", icon: "bi-activity" },
   { to: "/users", labelKey: "nav.users", icon: "bi-people", adminOnly: true },
   { to: "/check", labelKey: "nav.check", icon: "bi-search", external: true },

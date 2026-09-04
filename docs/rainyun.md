@@ -79,6 +79,7 @@ deployers to choose them.
 | `DATA_DIR` | `/data` | Must match the volume mount below |
 | `NODE_ENV` | `production` | |
 | `COOKIE_SECURE` | `auto` | Session cookie is Secure only on HTTPS. Set `true` if Rainyun always fronts the app with HTTPS; `false` for plain HTTP |
+| `TRUST_PROXY` | `false` | Leave `false` when the external port maps straight to the container (a spoofed `X-Forwarded-For` would bypass the login rate limit). Set `true` or a hop count only when an HTTP proxy you control sits in front |
 | `ADMIN_USERNAME` | `admin` | |
 | `ADMIN_PASSWORD` | *(leave empty)* | Empty → first login is `admin` / `password`, and the user is forced to set a new password. Or expose as an Option |
 | `PROXY_MASTER_KEY` | *(leave empty)* | Auto-generated and persisted in `/data`. **Do not** use Rainyun's random generator — it won't be a valid 32-byte key |

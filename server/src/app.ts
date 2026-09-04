@@ -1,4 +1,4 @@
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import fastifyRateLimit from "@fastify/rate-limit";
@@ -18,7 +18,12 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   const cfg = c.config;
   const app = Fastify({
     bodyLimit: MAX_BODY_BYTES,
-    trustProxy: true,
+    // Honour X-Forwarded-* only as far as the operator declared (TRUST_PROXY).
+    // Trusting unconditionally would let a directly exposed instance rotate
+    // its rate-limit key with a spoofed X-Forwarded-For. proxy-addr accepts a
+    // numeric hop count at runtime, but Fastify 5.12's ServerOptions type
+    // narrowed the union to boolean/string -- hence the cast.
+    trustProxy: cfg.trustProxy as FastifyServerOptions["trustProxy"],
     logger: { level: cfg.isProduction ? "info" : "debug" },
     // Fuzzy endpoint adapter: forgive doubled slashes, a missing /v1, or a
     // bare base URL by rewriting onto the canonical route before routing.

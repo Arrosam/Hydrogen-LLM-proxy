@@ -22,11 +22,40 @@ function parseDuration(input: string): number {
   return value * factor[unit];
 }
 
+/**
+ * Parse the TRUST_PROXY setting into Fastify's `trustProxy` value.
+ * "true"/"1"/"yes"/"on" -> true (trust every hop: safe ONLY behind a reverse
+ * proxy the operator controls). "false"/"0"/"no"/"off"/"" -> false (trust
+ * nothing: req.ip is the socket address). A positive integer -> that many
+ * trusted proxy hops. Anything else is a boot-stopping configuration error:
+ * a silent fallback would hide a misconfiguration with security impact.
+ */
+function parseTrustProxy(raw: string): boolean | number {
+  const s = raw.trim().toLowerCase();
+  if (/^(1|true|yes|on)$/.test(s)) return true;
+  if (/^(|0|false|no|off)$/.test(s)) return false;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    if (n >= 1 && Number.isInteger(n)) return n;
+  }
+  throw new Error(
+    `Invalid TRUST_PROXY: "${raw}". Use "false" when the port is exposed directly (default), ` +
+      `"true" or a hop count (e.g. "1") when behind a reverse proxy you control.`,
+  );
+}
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("production"),
   PORT: z.coerce.number().int().positive().default(8080),
   HOST: z.string().default("0.0.0.0"),
   DATA_DIR: z.string().default("./data"),
+
+  // Whether (and how far) to honour X-Forwarded-* headers. "false" (default)
+  // trusts nothing, which is the safe setting when the port is exposed
+  // directly (the default docker-compose flow): a spoofed X-Forwarded-For
+  // would otherwise rotate the rate-limit key and defeat the login limiter.
+  // Behind a reverse proxy, set "true" or a hop count.
+  TRUST_PROXY: z.string().optional().default("false"),
 
   // Both may be left blank: they are auto-generated and persisted on first boot.
   PROXY_MASTER_KEY: z.string().optional().default(""),
@@ -110,6 +139,8 @@ export interface AppConfig {
   logPayloadMaxChars: number;
   cookieSecure: "auto" | "true" | "false";
   allowPrivateUpstreams: boolean;
+  /** Fastify trustProxy: false (direct exposure), true (every hop), or a hop count. */
+  trustProxy: boolean | number;
   simulatedStreamingTokenRate: number;
   streamCommitGraceMs: number;
   streamPingIntervalMs: number;
@@ -148,6 +179,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     logPayloadMaxChars: e.LOG_PAYLOAD_MAX_CHARS,
     cookieSecure: e.COOKIE_SECURE,
     allowPrivateUpstreams: e.ALLOW_PRIVATE_UPSTREAMS,
+    trustProxy: parseTrustProxy(e.TRUST_PROXY),
     simulatedStreamingTokenRate: e.SIMULATED_STREAMING_TOKEN_RATE,
     streamCommitGraceMs: e.STREAM_COMMIT_GRACE_MS,
     streamPingIntervalMs: e.STREAM_PING_INTERVAL_MS,

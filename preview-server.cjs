@@ -10,6 +10,9 @@ process.env.ADMIN_USERNAME ||= "admin";
 process.env.ADMIN_PASSWORD ||= "admin12345";
 process.env.NODE_ENV ||= "development";
 process.env.PORT ||= "8094";
+// Local preview only: bind loopback so the demo credentials and the
+// private-upstream exemption below are never reachable from the network.
+process.env.HOST ||= "127.0.0.1";
 // Local preview only: allow localhost upstreams so mock providers work.
 process.env.ALLOW_PRIVATE_UPSTREAMS ||= "true";
 

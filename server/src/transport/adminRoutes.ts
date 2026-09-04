@@ -257,10 +257,19 @@ const ProviderTest = z.object({
   extraHeaders: HeadersSchema,
 });
 
+/**
+ * Provider management is admin-only on its write side. A provider row holds
+ * upstream credentials, and two mutations in particular are secrets, not
+ * configuration: rewriting a keyed provider's baseUrl, or "testing" it with
+ * the saved key, both hand the decrypted key to whatever host the caller
+ * named. Managers keep the read side (the catalog and service editors need
+ * it) but cannot touch credentials.
+ */
 async function providerRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/", async () => ({ providers: c.providers.list().map((p) => c.providers.toPublic(p)) }));
 
   app.post("/", async (req, reply) => {
+    if (!requireAdmin(req, reply, "create providers")) return reply;
     const parsed = parse(ProviderCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { availableModels, ...input } = parsed.data;
@@ -270,6 +279,7 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
   });
 
   app.patch("/:id", async (req, reply) => {
+    if (!requireAdmin(req, reply, "modify providers")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
@@ -282,6 +292,7 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
   });
 
   app.delete("/:id", async (req, reply) => {
+    if (!requireAdmin(req, reply, "delete providers")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
@@ -291,13 +302,16 @@ async function providerRoutes(app: FastifyInstance, c: Container): Promise<void>
 
   /** Reach the provider's models endpoint and report what it serves. Read-only:
    * the list is stored when the provider itself is saved, not here, so a test
-   * on a form the user then abandons changes nothing. */
+   * on a form the user then abandons changes nothing. Testing with the form's
+   * own key is open to any dashboard user; re-using a STORED key is admin-only,
+   * because it sends that decrypted credential to the caller's baseUrl. */
   app.post("/test", async (req, reply) => {
     const parsed = parse(ProviderTest, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { id, type, baseUrl, apiKey, extraHeaders } = parsed.data;
     let key = apiKey ?? null;
     if (apiKey === undefined && id !== undefined) {
+      if (!requireAdmin(req, reply, "test a provider with its stored key")) return reply;
       const stored = c.providers.get(id);
       if (!stored) return reply.code(404).send({ error: "not found" });
       key = c.providers.toUpstream(stored).apiKey;
@@ -632,8 +646,9 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
   });
 
   // Re-reveal an issued key. Admin-gated like issuing; tokens from before the
-  // secret was stored (hash-only) have nothing to reveal.
-  app.get("/:id/secret", async (req, reply) => {
+  // secret was stored (hash-only) have nothing to reveal. A POST rather than a
+  // GET so the secret cannot be collected from an intermediate's access log.
+  app.post("/:id/secret", async (req, reply) => {
     if (!requireAdmin(req, reply, "reveal API keys")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
@@ -643,7 +658,11 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
     return { secret };
   });
 
+  // Mutations are admin-gated like issuing and revealing: a token's scope and
+  // enabled flag decide who can spend which provider, so altering or revoking
+  // someone else's key is not a manager-level action.
   app.patch("/:id", async (req, reply) => {
+    if (!requireAdmin(req, reply, "modify API keys")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!c.tokens.get(id)) return reply.code(404).send({ error: "not found" });
@@ -654,6 +673,7 @@ async function tokenRoutes(app: FastifyInstance, c: Container): Promise<void> {
   });
 
   app.delete("/:id", async (req, reply) => {
+    if (!requireAdmin(req, reply, "delete API keys")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     if (!c.tokens.get(id)) return reply.code(404).send({ error: "not found" });
@@ -675,8 +695,12 @@ function boolParam(v: unknown): boolean | undefined {
   return undefined;
 }
 
+// Request logs carry every caller's full conversation payload, so reading them
+// is an admin capability. Stats and active-request progress stay visible to
+// every dashboard user: they hold counters and metadata, not content.
 async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
-  app.get("/logs", async (req) => {
+  app.get("/logs", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view request logs")) return reply;
     const q = req.query as Record<string, string>;
     return c.logs.query({
       tokenId: numParam(q.tokenId),
@@ -691,6 +715,7 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
   });
 
   app.get("/logs/:id", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view request logs")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const log = c.logs.get(id);
@@ -874,6 +899,7 @@ async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void>
         dataDir: c.config.dataDir,
         adminUsername: c.config.admin.username,
         cookieSecure: c.config.cookieSecure,
+        trustProxy: c.config.trustProxy,
       },
     };
   });

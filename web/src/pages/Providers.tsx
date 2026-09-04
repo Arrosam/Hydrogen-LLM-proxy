@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
+import { useAuth } from "../auth";
 import { PageHeader } from "../components/Layout";
 import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { Modal } from "../components/Modal";
@@ -57,6 +58,11 @@ const EMPTY: FormState = {
 
 export function Providers() {
   const { t } = useI18n();
+  const { user } = useAuth();
+  // Provider rows carry upstream credentials; every mutation (including
+  // "test with the stored key") is admin-only on the server. Managers get the
+  // read-only view the catalog and service editors need.
+  const isAdmin = user?.role === "admin";
   const TYPE_LABELS: Record<ProviderType, string> = {
     openai_completion: t("providers.type.openai_completion"),
     openai_responses: t("providers.type.openai_responses"),
@@ -198,16 +204,30 @@ export function Providers() {
         subtitle={t("providers.subtitle")}
         icon="bi-hdd-network"
         action={
-          <button className="btn-primary" onClick={openNew}>
-            <i className="bi bi-plus-lg" />
-            {t("providers.action.new")}
-          </button>
+          isAdmin ? (
+            <button className="btn-primary" onClick={openNew}>
+              <i className="bi bi-plus-lg" />
+              {t("providers.action.new")}
+            </button>
+          ) : undefined
         }
       />
       {loading && <Spinner />}
       {error && <ErrorNote message={error} />}
       {data && data.providers.length === 0 && (
-        <EmptyState icon="bi-hdd-network" title={t("providers.empty.title")} hint={t("providers.empty.hint")} action={<button className="btn-primary" onClick={openNew}><i className="bi bi-plus-lg" />{t("providers.action.new")}</button>} />
+        <EmptyState
+          icon="bi-hdd-network"
+          title={t("providers.empty.title")}
+          hint={t("providers.empty.hint")}
+          action={
+            isAdmin ? (
+              <button className="btn-primary" onClick={openNew}>
+                <i className="bi bi-plus-lg" />
+                {t("providers.action.new")}
+              </button>
+            ) : undefined
+          }
+        />
       )}
       {data && data.providers.length > 0 && (
         <div className="card overflow-hidden">
@@ -249,14 +269,18 @@ export function Providers() {
                       {p.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
                     </td>
                     <td>
-                      <div className="flex justify-end gap-1.5">
-                        <button className="btn-ghost btn-xs" onClick={() => openEdit(p)}>
-                          <i className="bi bi-pencil" />
-                        </button>
-                        <button className="btn-danger btn-xs" onClick={() => remove(p)}>
-                          <i className="bi bi-trash3" />
-                        </button>
-                      </div>
+                      {isAdmin ? (
+                        <div className="flex justify-end gap-1.5">
+                          <button className="btn-ghost btn-xs" onClick={() => openEdit(p)}>
+                            <i className="bi bi-pencil" />
+                          </button>
+                          <button className="btn-danger btn-xs" onClick={() => remove(p)}>
+                            <i className="bi bi-trash3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-ink-500">{t("common.readOnly")}</span>
+                      )}
                     </td>
                   </tr>
                 );

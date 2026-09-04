@@ -91,6 +91,13 @@ export class ServiceValidator {
           }
           const c = t.when;
           if (c.type === "input_matches" || c.type === "output_matches") {
+            // Length-capped: these patterns run synchronously against
+            // client-influenced text on the event loop, so a huge pattern is a
+            // DoS hazard the compile check below cannot see. agentContext.ts
+            // also refuses (never matches) anything longer at run time.
+            if (c.value.length > 200) {
+              bad(`condition regex is too long (${c.value.length} chars, max 200)`);
+            }
             try {
               new RegExp(c.value);
             } catch {

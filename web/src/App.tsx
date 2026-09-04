@@ -53,10 +53,12 @@ export default function App() {
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
         <Route path="bench" element={<ModelBench />} />
-        <Route path="logs" element={<Logs />} />
         <Route path="active-requests" element={<ActiveRequests />} />
-        {/* Users and Settings are admin-only. Hiding the nav link is presentation;
-            this is what makes typing the URL not work. The server enforces it too. */}
+        {/* Users, Settings, and Logs are admin-only. Hiding the nav link is
+            presentation; this is what makes typing the URL not work. The server
+            enforces it too. (Logs carry every caller's full conversation
+            payload, so reading them is an admin capability.) */}
+        {user?.role === "admin" && <Route path="logs" element={<Logs />} />}
         {user?.role === "admin" && <Route path="users" element={<Users />} />}
         {user?.role === "admin" && <Route path="settings" element={<Settings />} />}
         <Route path="*" element={<Navigate to="/" replace />} />

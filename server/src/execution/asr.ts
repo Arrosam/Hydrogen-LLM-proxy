@@ -29,14 +29,28 @@ export function audioHash(a: AudioInput): string {
   return "a:" + crypto.createHash("sha256").update(a.format).update(":").update(a.data).digest("hex");
 }
 
+/**
+ * A container-format hint safe to frame into a multipart header line. The
+ * value arrives from the client (`input_audio.format`) and is spliced verbatim
+ * into `filename="audio.<format>"` and `Content-Type: audio/<format>`, so
+ * anything outside a short alphanumeric token (quotes, CRLF) would be a
+ * header/framing injection into the request sent upstream. Unknown or
+ * hostile values fall back to the generic "wav".
+ */
+export function safeAudioFormat(raw: string): string {
+  const v = raw.trim().toLowerCase();
+  return /^[a-z0-9]{1,12}$/.test(v) ? v : "wav";
+}
+
 /** Frame a minimal multipart/form-data body: the model field + one audio file. */
 export function buildTranscriptionForm(model: string, audio: AudioInput): { body: Buffer; contentType: string } {
   const boundary = "hydrogen-asr-" + crypto.randomBytes(12).toString("hex");
+  const format = safeAudioFormat(audio.format || "wav");
   const nl = "\r\n";
   const head =
     `--${boundary}${nl}Content-Disposition: form-data; name="model"${nl}${nl}${model}${nl}` +
-    `--${boundary}${nl}Content-Disposition: form-data; name="file"; filename="audio.${audio.format || "wav"}"${nl}` +
-    `Content-Type: audio/${audio.format || "wav"}${nl}${nl}`;
+    `--${boundary}${nl}Content-Disposition: form-data; name="file"; filename="audio.${format}"${nl}` +
+    `Content-Type: audio/${format}${nl}${nl}`;
   const tail = `${nl}--${boundary}--${nl}`;
   return {
     body: Buffer.concat([Buffer.from(head, "utf8"), Buffer.from(audio.data, "base64"), Buffer.from(tail, "utf8")]),

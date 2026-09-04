@@ -494,7 +494,7 @@ export function ModelBench() {
       setTokenId(id);
       if (user?.role !== "admin") return;
       try {
-        const r = await api.get<{ secret: string }>(`/tokens/${id}/secret`);
+        const r = await api.post<{ secret: string }>(`/tokens/${id}/secret`);
         setTokenSecret(r.secret);
       } catch (e) {
         setTokenSecret("");

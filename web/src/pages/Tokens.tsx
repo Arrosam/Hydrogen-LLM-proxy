@@ -152,7 +152,7 @@ export function Tokens() {
 
   const copyKey = async (t: Token) => {
     try {
-      const r = await api.get<{ secret: string }>(`/tokens/${t.id}/secret`);
+      const r = await api.post<{ secret: string }>(`/tokens/${t.id}/secret`);
       const ok = await copyToClipboard(r.secret);
       if (ok) toast.success(i18n("tokens.toast.copied"));
       else toast.error(i18n("tokens.toast.copyFailed"));
@@ -237,7 +237,15 @@ export function Tokens() {
                     {formatNumber(t.usedTokens)}{t.maxTokens ? ` / ${formatNumber(t.maxTokens)}` : ""}
                   </td>
                   <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")}</td>
-                  <td><Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} /></td>
+                  <td>
+                    {isAdmin ? (
+                      <Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} />
+                    ) : t.enabled ? (
+                      <span className="badge-green">{i18n("common.enabled")}</span>
+                    ) : (
+                      <span className="badge-red">{i18n("common.disabled")}</span>
+                    )}
+                  </td>
                   <td>
                     <div className="flex justify-end gap-1.5">
                       {isAdmin && (
@@ -257,14 +265,20 @@ export function Tokens() {
                           {i18n("tokens.action.duplicate")}
                         </button>
                       )}
-                      <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
-                        <i className="bi bi-pencil" />
-                        {i18n("tokens.action.edit")}
-                      </button>
-                      <button className="btn-danger btn-xs" onClick={() => remove(t)}>
-                        <i className="bi bi-x-circle" />
-                        {i18n("tokens.action.revoke")}
-                      </button>
+                      {isAdmin && (
+                        <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
+                          <i className="bi bi-pencil" />
+                          {i18n("tokens.action.edit")}
+                        </button>
+                      )}
+                      {isAdmin ? (
+                        <button className="btn-danger btn-xs" onClick={() => remove(t)}>
+                          <i className="bi bi-x-circle" />
+                          {i18n("tokens.action.revoke")}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-ink-500">{i18n("common.readOnly")}</span>
+                      )}
                     </div>
                   </td>
                 </tr>

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
+import crypto from "node:crypto";
 import { z } from "zod";
 import { parse } from "../util/validate";
 import type { Container } from "../composition/container";
@@ -606,32 +607,40 @@ async function runSpeech(
   };
 }
 
-const MULTIPART_BOUNDARY = "----HydrogenBench";
-
-/** Build the multipart form an OpenAI-shaped transcriptions endpoint expects.
+/**
+ * Build the multipart form an OpenAI-shaped transcriptions endpoint expects.
  * The bench page posts JSON with the recording base64-encoded, so the browser
- * side stays one plain fetch and the framing lives here. */
+ * side stays one plain fetch and the framing lives here.
+ *
+ * The boundary is randomized per form: with a fixed, guessable boundary, a
+ * client-supplied field VALUE containing the boundary could forge additional
+ * parts in the request sent upstream. Field names are framed verbatim into a
+ * Content-Disposition line, so quotes and CRLF are stripped from them too.
+ */
 function transcriptionForm(
   fields: Record<string, unknown>,
   file: { name: string; mediaType: string; data: string },
-): Buffer {
+): { body: Buffer; contentType: string } {
+  const boundary = `----HydrogenBench-${crypto.randomBytes(12).toString("hex")}`;
+  const delimiter = `--${boundary}`;
   const parts: Buffer[] = [];
-  const boundary = `--${MULTIPART_BOUNDARY}`;
-  for (const [k, v] of Object.entries(fields)) {
+  for (const [rawKey, v] of Object.entries(fields)) {
     if (v == null) continue;
+    const k = rawKey.replace(/["\r\n]/g, "");
+    if (!k) continue;
     const value = typeof v === "string" ? v : typeof v === "object" ? JSON.stringify(v) : String(v);
-    parts.push(Buffer.from(`${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${value}\r\n`, "utf8"));
+    parts.push(Buffer.from(`${delimiter}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${value}\r\n`, "utf8"));
   }
   parts.push(
     Buffer.from(
-      `${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name.replace(/["\r\n]/g, "")}"\r\n` +
+      `${delimiter}\r\nContent-Disposition: form-data; name="file"; filename="${file.name.replace(/["\r\n]/g, "")}"\r\n` +
         `Content-Type: ${file.mediaType}\r\n\r\n`,
       "utf8",
     ),
   );
   parts.push(Buffer.from(file.data, "base64"));
-  parts.push(Buffer.from(`\r\n${boundary}--\r\n`, "utf8"));
-  return Buffer.concat(parts);
+  parts.push(Buffer.from(`\r\n${delimiter}--\r\n`, "utf8"));
+  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
 async function runTranscription(
@@ -646,11 +655,11 @@ async function runTranscription(
   const fields = { ...body, model: t.upstreamModel };
   const form = transcriptionForm(fields, file);
   const headers = buildHeaders(t.upstream);
-  headers["content-type"] = `multipart/form-data; boundary=${MULTIPART_BOUNDARY}`;
+  headers["content-type"] = form.contentType;
   if (!c.transport.postRaw) {
     return { ok: false, status: 0, latencyMs: 0, message: "this transport cannot post a multipart form" };
   }
-  const r = await c.transport.postRaw(url, headers, form, { timeoutMs });
+  const r = await c.transport.postRaw(url, headers, form.body, { timeoutMs });
   const latencyMs = Date.now() - started;
   const upstreamRequest = { ...fields, file: `(${file.name}, ${file.mediaType}, ${Buffer.from(file.data, "base64").length} bytes)` };
   if (r.status >= 200 && r.status < 300) {

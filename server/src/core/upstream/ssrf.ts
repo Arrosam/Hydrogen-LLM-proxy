@@ -145,11 +145,32 @@ export interface SsrfGuardConfig {
   allowlist: () => string[];
 }
 
+/** One validated address an upstream may be connected on. */
+export interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+/** What {@link SsrfGuard.resolveAllowed} hands back to the transport. */
+export interface UpstreamResolution {
+  /** The URL's hostname: lowercase, IPv6 brackets stripped. */
+  host: string;
+  /** Every address the URL resolved to, all of which passed the checks. */
+  addresses: ResolvedAddress[];
+}
+
 /**
  * Rejects an upstream URL that uses a non-HTTP scheme or resolves to a
  * private/loopback/link-local address, preventing the proxy from becoming an
  * SSRF pivot. An explicit admin allowlist entry overrides the block. Injected
  * (allowPrivate + a live allowlist getter) instead of reading globals.
+ *
+ * The checks also RETURN the validated addresses: the transport pins the
+ * connection to exactly those (a custom DNS `lookup` in its connection
+ * options), so the address that was checked is the address that is connected.
+ * Without that, the HTTP client's own resolution would be a second lookup the
+ * attacker controls -- the classic DNS-rebinding window this guard exists to
+ * close.
  */
 export class SsrfGuard {
   constructor(private readonly cfg: SsrfGuardConfig) {}
@@ -160,7 +181,16 @@ export class SsrfGuard {
     return typeof v === "function" ? v() : v;
   }
 
+  /** Assert-only variant, for callers that do not need the pinned addresses. */
   async assertAllowed(rawUrl: string): Promise<void> {
+    await this.resolveAllowed(rawUrl);
+  }
+
+  /**
+   * Validate a URL as {@link assertAllowed} does, and return the hostname plus
+   * the addresses it is allowed to be connected on.
+   */
+  async resolveAllowed(rawUrl: string): Promise<UpstreamResolution> {
     let url: URL;
     try {
       url = new URL(rawUrl);
@@ -171,9 +201,20 @@ export class SsrfGuard {
       throw new UpstreamUrlError(`unsupported upstream URL scheme "${url.protocol}" (use http/https)`);
     }
 
-    let host = url.hostname;
+    let host = url.hostname.toLowerCase();
     if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1); // IPv6 literal
 
+    const addresses = await this.validateHost(host);
+    return { host, addresses };
+  }
+
+  /**
+   * Resolve a bare hostname and run the same address checks on it. The
+   * transport's fail-closed lookup path calls this when it is asked to connect
+   * somewhere the per-request pin did not cover -- so even that path resolves
+   * and validates, never falling back to the OS resolver unchecked.
+   */
+  async validateHost(host: string): Promise<ResolvedAddress[]> {
     let addrs: string[];
     if (net.isIP(host)) {
       addrs = [host];
@@ -187,16 +228,18 @@ export class SsrfGuard {
     }
 
     const allowlist = this.cfg.allowlist();
-    if (allowlist.length && hostAllowed(host, addrs, allowlist)) return;
-
-    for (const addr of addrs) {
-      if (isBlockedAddress(addr, this.allowPrivate())) {
-        throw new UpstreamUrlError(
-          `upstream host "${host}" resolves to a disallowed address (${addr}). ` +
-            `Private, loopback, and link-local upstreams are blocked; ` +
-            `set ALLOW_PRIVATE_UPSTREAMS=true to permit local upstreams.`,
-        );
+    if (!(allowlist.length && hostAllowed(host, addrs, allowlist))) {
+      for (const addr of addrs) {
+        if (isBlockedAddress(addr, this.allowPrivate())) {
+          throw new UpstreamUrlError(
+            `upstream host "${host}" resolves to a disallowed address (${addr}). ` +
+              `Private, loopback, and link-local upstreams are blocked; ` +
+              `set ALLOW_PRIVATE_UPSTREAMS=true to permit local upstreams.`,
+          );
+        }
       }
     }
+
+    return addrs.map((address) => ({ address, family: net.isIP(address) === 6 ? 6 : 4 }));
   }
 }

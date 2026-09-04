@@ -39,9 +39,25 @@ services:
       # boot on a master-key sentinel mismatch. It lives in ./data; back it up.
     volumes:
       - ./data:/data
+    # Ollama runs in a 1Panel-managed container whose port is published only on
+    # the host's 127.0.0.1, so it is unreachable from here via the bridge
+    # gateway. Joining 1panel-network instead lets Hydrogen dial the container
+    # directly on its own port: http://1Panel-ollama-YjVk:11434/v1
+    # `default` must be listed explicitly — naming any network here replaces the
+    # implicit one rather than adding to it.
+    networks:
+      - default
+      - onepanel
     # The image already declares a /healthz HEALTHCHECK; `docker ps` shows it.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+# Created and owned by 1Panel, not by this compose project — declared external so
+# `docker compose down` never tries to remove it out from under the other apps.
+networks:
+  onepanel:
+    name: 1panel-network
+    external: true
