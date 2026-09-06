@@ -239,3 +239,26 @@ body is logged. `request_logs` rows 9–20, ingress `openai_responses`, 68 KB.
 alongside `web_search`, and they matter more (they carry MCP and sub-agent
 tooling). Whether Hydrogen translates, passes through, or keeps dropping them is
 not decided by anything above.
+
+## Behavior 9 — namespace flattening (decided 2026-09-06, after M2)
+
+Codex's `type: "namespace"` tools are **flattened into ordinary function tools**
+when the resolved provider is not Responses-family, and folded back on the way
+home. Same-family egress replays them verbatim as today.
+
+Measured facts this rests on:
+
+- Namespace members are complete function tools — `type`, `name`, `description`,
+  `strict`, `parameters`. Nothing has to be invented to flatten them.
+- Flattening 3 namespaces expands 14 declared tools into **20**.
+- **Bare member names collide**: `mcp__cua_repl/js` and `mcp__node_repl/js`, and
+  likewise `js_reset`. A naive flatten silently merges two different tools, so
+  the flattened name must be qualified — `mcp__node_repl__js` — and the mapping
+  kept for the return trip.
+
+**Open:** the return trip is unverified. We have Codex's request but never a
+successful reply, so what Codex accepts back for a namespaced call — a
+`function_call` named `js` in namespace context, or the qualified name — is
+unknown. Resolve by pointing Codex at a working Model Service and capturing a
+completed turn. Getting this wrong breaks every namespaced tool call, so it is a
+gate on shipping the flattening, not on designing it.
