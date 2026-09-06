@@ -394,3 +394,71 @@ Union at every level, subtraction nowhere — so a tool can be scoped to a singl
 stage (`web_search` on `critique` but not `draft`) without any mechanism that
 could take a tool away from a caller who asked for it. The cost, accepted: the
 Micro Agent editor needs a tool picker on every stage row, not one on the agent.
+
+## The Responses API tool surface (investigated 2026-09-06)
+
+### Built-in tool types
+
+| `type` | What it is | Notable fields |
+|---|---|---|
+| `web_search` | provider-run web search | Codex sends `external_web_access` |
+| `file_search` | retrieval over vector stores | `vector_store_ids` |
+| `code_interpreter` | provider-run sandbox | container config |
+| `image_generation` | `gpt-image-1` as a tool | streaming, multi-turn edits |
+| `computer_use` | UI interaction | display/environment |
+| `mcp` | remote MCP server | `server_label`, `server_url`, `require_approval` |
+| `tool_search` | loads deferred tools at runtime | `execution: "server" \| "client"` |
+| `namespace` | groups function tools under one name | `tools[]`, members may set `defer_loading` |
+| `function` | the ordinary client-executed tool | — |
+
+### `namespace` is a documented Responses feature, not a Codex extension
+
+This **corrects M2 finding 4**, which called it undocumented. `namespace` +
+`tool_search` + `defer_loading` is the Responses *tool search* feature
+(gpt-5.4+): declare a namespace, mark members `defer_loading: true`, add
+`{"type":"tool_search"}`, and the model loads member definitions only when it
+needs them — appended at the end of context so the prompt cache survives.
+
+Three item types come with it that Hydrogen models nowhere:
+
+- `tool_search_call` — `{execution, call_id, status, arguments:{paths:[...]}}`
+- `tool_search_output` — `{execution, call_id, status, tools:[...]}`
+- `additional_tools` — a `role: "developer"` input item carrying `tools[]`
+
+**Codex 0.144.5 does not use any of them.** Its three namespaces declare
+`defer_loading` on zero members and it sends no `tool_search` tool, so it uses
+`namespace` purely as grouping and every member is immediately callable. That is
+what makes Behavior 9's flatten complete for the measured case — there is no
+deferred-loading round trip to preserve.
+
+### Measured defect: Hydrogen drops `namespace` off a replayed `function_call`
+
+Parsing a Responses body and rendering it straight back to a Responses upstream:
+
+```
+in:  {"type":"function_call","name":"js","namespace":"mcp__node_repl","call_id":"call_stub_1",...}
+out: {"type":"function_call","call_id":"call_stub_1","name":"js","arguments":"{\"code\":\"1+1\"}"}
+```
+
+The tool *declarations* survive verbatim (they ride `Tool.raw`), but
+`responses.ts:313` parses a `function_call` into a `tool_use` part that has
+nowhere to keep `namespace`, and `responses.ts:395` renders it back without one.
+`responses.ts:507`/`568` lose it the same way on the response leg.
+
+Per the API docs a namespaced call **requires** the field; omitting it on replay
+yields `Missing namespace for function_call`. So a Codex conversation proxied to
+a genuine Responses upstream breaks on the second turn the moment a namespaced
+tool is used.
+
+**This is a bug in Hydrogen today, not a gap in this feature.** It needs
+`ToolUsePart` to carry `namespace`, and the parse/render pairs on both legs to
+keep it. Cross-family rendering confirms the other half — every non-function
+tool becomes `null`, taking the namespace's ten member tools with it:
+
+```
+Responses -> anthropic          tools: null
+Responses -> openai_completion  tools: null
+```
+
+Fixing the same-family replay is smaller than Behavior 9 and independent of it;
+it should land first, because it is a live break rather than a missing feature.
