@@ -1,6 +1,7 @@
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
+  flatToolChoice,
   flatToolName,
   normalizeMessages,
   orderReasoningFirst,
@@ -365,7 +366,14 @@ export class AnthropicRequest extends Request {
     // "content[].thinking in the thinking mode must be passed back" (4028).
     // They also have to lead their message, which is not the order an OpenAI
     // ingress produces.
-    const messages = orderReasoningFirst(this.messages).map((m) => ({ role: m.role, content: partsToBlocks(m.content) }));
+    // A message whose every part is unrepresentable here -- a Responses-only
+    // opaque item, say -- renders to zero blocks, and Anthropic rejects an empty
+    // content array. Drop the message rather than send it: this wire dropping
+    // what it cannot carry is exactly what it did before such parts were kept
+    // canonically. `normalizeMessages` has already removed genuinely empty ones.
+    const messages = orderReasoningFirst(this.messages)
+      .map((m) => ({ role: m.role, content: partsToBlocks(m.content) }))
+      .filter((m) => m.content.length > 0);
     const p = this.params;
     // An OpenAI-family client that signalled caching intent gets the breakpoint
     // planted for it: on the last cacheable block of the last message, so each
@@ -405,7 +413,7 @@ export class AnthropicRequest extends Request {
         .map((t) => (t.raw ? t.raw.value : { name: flatToolName(t.name, t.namespace), description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
       if (rendered.length) out.tools = rendered;
     }
-    if (this.toolChoice) out.tool_choice = toolChoiceToAnthropic(this.toolChoice);
+    if (this.toolChoice) out.tool_choice = toolChoiceToAnthropic(flatToolChoice(this.toolChoice, this.tools));
     // OpenAI's parallel_tool_calls=false translates to this wire's
     // tool_choice.disable_parallel_tool_use (tool_choice defaults to auto).
     if (p.parallelToolCalls === false) {

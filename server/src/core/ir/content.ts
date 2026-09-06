@@ -295,3 +295,18 @@ export function withToolNamespace(part: ToolUsePart, namespace: string): ToolUse
   const fields = { ...(part.extra?.family === "openai_responses" ? part.extra.fields : {}), namespace };
   return { ...part, extra: { family: "openai_responses", fields } };
 }
+
+/**
+ * A tool choice as it must appear on a wire without namespaces.
+ *
+ * The declaration is flattened by {@link flatToolName}, so a choice naming the
+ * bare member would force a tool the provider was never given. Resolved from the
+ * declared tools rather than guessed; when two namespaces share a member name
+ * the first declared wins, which is the same tool the model would have picked
+ * from an ambiguous bare name anyway.
+ */
+export function flatToolChoice(choice: ToolChoice, tools?: Tool[]): ToolChoice {
+  if (choice.type !== "tool") return choice;
+  const ns = tools?.find((t) => t.name === choice.name && t.namespace)?.namespace;
+  return ns ? { ...choice, name: flatToolName(choice.name, ns) } : choice;
+}

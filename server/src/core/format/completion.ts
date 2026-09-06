@@ -1,6 +1,7 @@
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
+  flatToolChoice,
   flatToolName,
   normalizeMessages,
   stripStaleReasoning,
@@ -462,7 +463,13 @@ export class OpenAICompletionRequest extends Request {
             function: { name: flatToolName((tu as { name: string }).name, toolNamespaceOf(tu as never)), arguments: JSON.stringify((tu as { input: unknown }).input ?? {}) },
           }));
         }
-        messages.push(entry);
+        // An assistant turn whose every part is unrepresentable here -- a
+        // Responses-only opaque item, say -- would otherwise go out as
+        // `{role:"assistant", content:null}` with no tool_calls, which most
+        // OpenAI-compatible providers reject. Drop the turn instead: dropping
+        // what this wire cannot carry is what it already did before the part
+        // was kept canonically.
+        if (entry.content != null || entry.tool_calls || entry.reasoning_content) messages.push(entry);
         continue;
       }
       const toolResults = m.content.filter((p) => p.type === "tool_result");
@@ -488,7 +495,7 @@ export class OpenAICompletionRequest extends Request {
         .map((t) => (t.raw ? t.raw.value : { type: "function", function: { name: flatToolName(t.name, t.namespace), description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }));
       if (rendered.length) out.tools = rendered;
     }
-    if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);
+    if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(flatToolChoice(this.toolChoice, this.tools));
     const cap = target.providerMaxOutputTokens;
     const p = this.params;
     applyParams(out, p);

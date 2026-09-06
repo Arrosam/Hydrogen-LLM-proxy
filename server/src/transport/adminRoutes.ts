@@ -764,7 +764,11 @@ async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/logs/export", async (req, reply) => {
     if (!requireAdmin(req, reply, "export request logs")) return reply;
     const q = req.query as Record<string, string>;
-    const ids = (q.ids ?? "")
+    // `?ids=1&ids=2` is a natural way to send a list, and what most HTTP clients
+    // produce from an array -- Fastify parses a repeated key into an array, so
+    // assuming a string here turned that request into a 500.
+    const rawIds = (req.query as Record<string, unknown>).ids;
+    const ids = (Array.isArray(rawIds) ? rawIds.join(",") : typeof rawIds === "string" ? rawIds : "")
       .split(",")
       .map((v) => Number(v.trim()))
       .filter((n) => Number.isInteger(n) && n > 0);

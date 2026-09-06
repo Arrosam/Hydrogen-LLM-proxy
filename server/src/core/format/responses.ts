@@ -652,13 +652,24 @@ export class OpenAIResponsesResponse extends Response {
       });
     }
 
+    // One pass in content order, so an item the upstream emitted BEFORE the
+    // answer stays before it. Emitting the message first used to reorder a
+    // tool_search_call/tool_search_output pair after the function_call they
+    // enabled, and left a replayed history whose answer preceded its own tool
+    // calls. The message lands where the first text part was; all text is
+    // concatenated into that one item, as this wire has a single message item.
     const text = textOf(this.content);
-    if (text) {
+    let messageEmitted = false;
+    const emitMessage = (): void => {
+      if (messageEmitted || !text) return;
+      messageEmitted = true;
       output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
-    }
+    };
 
     for (const p of this.content) {
-      if (p.type === "tool_use") {
+      if (p.type === "text") {
+        emitMessage();
+      } else if (p.type === "tool_use") {
         output.push({
           type: "function_call",
           id: genId("fc"),
@@ -672,6 +683,9 @@ export class OpenAIResponsesResponse extends Response {
         output.push(p.value as Record<string, unknown>);
       }
     }
+    // Text that came from somewhere other than a text part (none today, but the
+    // guard keeps the answer from vanishing if that ever changes).
+    emitMessage();
 
     if (output.length === 0) {
       output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text: "", annotations: [] }] });
