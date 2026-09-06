@@ -984,3 +984,54 @@ string `mcp__node_repl` never reaches the Anthropic wire, which slice 1
 deliberately makes false. Tightened to the invariant that actually matters: the
 `namespace` *field* never leaves the Responses wire, while the namespace inside
 a flattened *name* is the mechanism.
+
+---
+
+# Stage A — the dispatch loop, done 2026-09-07 (`13d55f1`, fixes `1658762`)
+
+Ask, dispatch what the model called, ask again. The loop wraps the step chain
+rather than living inside it, which is what makes S12 true: each round runs the
+whole chain against the conversation so far, so a step that dies mid-loop hands
+the accumulated history to the fallback instead of restarting, and a result
+already in the conversation is never re-derived.
+
+Resolution is per step, against that provider's capabilities. Usage aggregates
+over rounds and reports `toolDispatches` beside the tokens. A Micro Agent shares
+one budget across its stages (E5), and each stage's grants are the agent's plus
+its own.
+
+Reviewed at max effort; seven findings fixed, two deliberately not. Eight of the
+new tests fail against the pre-fix code.
+
+## Open, from the Stage A review
+
+### A-1. A mixed turn can hand back a granted tool the client cannot answer
+
+`shouldContinue` returns the turn untouched when the model calls one of ours
+alongside one of the client's. That is right for a tool the CLIENT declared —
+Anthropic does the same, and the client can answer both. It is wrong for a
+**granted** tool, which the client has never seen: it receives a `tool_use` with
+no handler and no schema, and the turn dies with the tool unrun.
+
+Every alternative depends on something unmeasured: whether a real client, handed
+an assistant turn containing a `tool_result` it did not produce, replays it
+intact on the next request. Dispatching ours and returning the client's call
+requires exactly that. **Not guessed — this needs a decision, and the capture
+that would inform it is the same class as the Stage D ones.**
+
+### A-2. `toolDispatches` is counted but goes nowhere
+
+S14 says the dispatch counter sits beside the token counts so an operator can
+bill on it. The loop computes it correctly, but nothing persists it: no renderer
+emits it, `requestLogger` copies only the three token subsets, and `request_logs`
+has no column. Half of S14 is therefore unimplemented.
+
+Deliberately deferred rather than half-built: persisting it needs a migration and
+a Logs column, which belong with the admin API and console work, not wedged into
+the execution layer.
+
+### A-3. S13's live tool events are still buffered
+
+The loop buffers and replays. Streaming the call and its result live needs a
+client-visible shape for a server-executed tool, which is Path A emission and is
+unmeasured. Noted in `modelService.stream` rather than guessed.
