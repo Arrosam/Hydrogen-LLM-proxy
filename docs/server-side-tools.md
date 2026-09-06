@@ -399,17 +399,62 @@ Micro Agent editor needs a tool picker on every stage row, not one on the agent.
 
 ### Built-in tool types
 
-| `type` | What it is | Notable fields |
-|---|---|---|
-| `web_search` | provider-run web search | Codex sends `external_web_access` |
-| `file_search` | retrieval over vector stores | `vector_store_ids` |
-| `code_interpreter` | provider-run sandbox | container config |
-| `image_generation` | `gpt-image-1` as a tool | streaming, multi-turn edits |
-| `computer_use` | UI interaction | display/environment |
-| `mcp` | remote MCP server | `server_label`, `server_url`, `require_approval` |
-| `tool_search` | loads deferred tools at runtime | `execution: "server" \| "client"` |
-| `namespace` | groups function tools under one name | `tools[]`, members may set `defer_loading` |
-| `function` | the ordinary client-executed tool | — |
+**Corrected 2026-09-06.** An earlier draft of this section listed nine types,
+taken from the tools *guide*. The API *reference* union has **eighteen**. The
+difference matters: Hydrogen's `parseTools` keeps anything that is not
+`type: "function"` as an opaque `Tool.raw`, so **seventeen of the eighteen** are
+same-family-replay-only and vanish the moment a step resolves to an Anthropic or
+Chat Completions provider.
+
+| `type` | What it is |
+|---|---|
+| `function` | the ordinary client-executed tool — the only one Hydrogen models natively |
+| `custom` | freeform text/grammar-constrained tool, supports async |
+| `namespace` | groups function/custom tools under one name; members may set `defer_loading` |
+| `tool_search` | deferred tool discovery, `execution: "server" \| "client"` |
+| `programmatic_tool_calling` | model writes JavaScript that orchestrates other tools |
+| `apply_patch` | create/delete/update files via unified diffs |
+| `shell` | shell commands in a container or local environment, with skills |
+| `local_shell` | shell commands in the local environment |
+| `code_interpreter` | hosted Python, with container memory and network policy |
+| `web_search` | hosted web search, domain filtering and location context |
+| `web_search_2025_08_26` | dated variant |
+| `web_search_preview` | preview variant, content type and context size |
+| `web_search_preview_2025_03_11` | dated preview variant |
+| `file_search` | vector-store retrieval with ranking and filters |
+| `image_generation` | GPT image models, quality/size controls |
+| `computer` | virtual computer control |
+| `computer_use_preview` | preview variant across Win/Mac/Linux/browser |
+| `mcp` | remote MCP server, OAuth and service connectors |
+
+Config fields observed in the Codex binary's field tables, useful for knowing
+what must survive a round trip: `allowed_domains`, `blocked_domains`,
+`search_context_size`, `user_location`, `filters`, `image_settings`,
+`allowed_callers`, `external_web_access`, `max_output_tokens`, `commands`,
+`settings`, `ref_id`.
+
+### Output item types Hydrogen models nowhere
+
+From the same binary tables, the item union a Responses reply can contain:
+
+`message`, `reasoning`, `function_call`, `function_call_output`,
+`custom_tool_call`, `custom_tool_call_output`, `local_shell_call`,
+`web_search_call`, `image_generation_call`, `tool_search_call`,
+`tool_search_output`, `additional_tools`, `compaction`, `compaction_trigger`,
+`context_compaction` — plus `program` and `program_output` for programmatic tool
+calling.
+
+Hydrogen's Responses parse handles `message`, `function_call`,
+`function_call_output` and `reasoning`. Everything else is unhandled.
+
+### Correlation fields are the sharp edge
+
+Programmatic tool calling puts a `caller` field on a `function_call` (matching a
+`program`'s `call_id`), exactly as tool search puts `namespace` on one. Hydrogen
+rebuilds a `function_call` from three fields — `call_id`, `name`, `arguments` —
+so **every** such correlation field is dropped on replay, not just the one
+measured below. Whatever fix carries `namespace` should be shaped to carry the
+others rather than special-casing a single field.
 
 ### `namespace` is a documented Responses feature, not a Codex extension
 
