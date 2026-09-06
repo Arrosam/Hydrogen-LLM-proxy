@@ -718,3 +718,19 @@ Two costs, accepted:
 
 What Hydrogen should *do* in that case — drop it silently as today, or refuse
 the request loudly — is decided in S10.
+
+## S10. An unservable tool is dropped and logged, never fatal
+
+When neither the resolved provider nor any configured entry can serve a declared
+tool, Hydrogen strips it and proceeds. The request log records which tools were
+dropped and why.
+
+This is a deliberate exception to "surface the error" (Behavior 4), and the
+reason is measured: **Codex declares `web_search` on every single request**
+(M2), whether or not the turn needs it. Refusing an unservable tool would take
+the entire service down for a capability most turns never use. Dropping keeps
+the turn working when the model can answer without it.
+
+The log is what stops this being the silent-degradation failure the feature
+exists to fix — the loss becomes visible to the operator, just not fatal to the
+caller.
