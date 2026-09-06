@@ -1,4 +1,4 @@
-# Hydrogen on a plain VPS: pull the pre-built GHCR image, keep /data on a bind
+# Hydro AI station on a plain VPS: pull the pre-built GHCR image, keep /data on a bind
 # mount next to this file so `tar czf backup.tgz data/` is a complete backup.
 #
 # Phase 1 (this file alone) publishes plain HTTP on the host, so the box is
@@ -41,7 +41,7 @@ services:
       - ./data:/data
     # Ollama runs in a 1Panel-managed container whose port is published only on
     # the host's 127.0.0.1, so it is unreachable from here via the bridge
-    # gateway. Joining 1panel-network instead lets Hydrogen dial the container
+    # gateway. Joining 1panel-network instead lets Hydro AI station dial the container
     # directly on its own port: http://1Panel-ollama-YjVk:11434/v1
     # `default` must be listed explicitly — naming any network here replaces the
     # implicit one rather than adding to it.

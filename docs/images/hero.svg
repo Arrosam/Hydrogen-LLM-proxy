@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" width="1280" height="440" role="img" aria-label="Hydro AI station — a self-hosted LLM proxy speaking both the OpenAI and Anthropic wire formats">
-  <title>Hydro AI station</title>
+  <title>Hydro AI station — LLM Proxy</title>
   <!-- Hydrogen's emission-line spectrum, the same artwork the brand mark is cut
        from (web/src/components/Logo.tsx, web/public/favicon.svg). Self-contained:
        no external fonts, images or scripts, so it renders anywhere. -->
@@ -93,8 +93,8 @@
     <text x="132" y="86" font-size="13" font-weight="600" letter-spacing="3.2" fill="#5eead4">SELF-HOSTED LLM PROXY</text>
 
     <!-- Wordmark -->
-    <text x="80" y="204" font-size="84" font-weight="700" letter-spacing="-2" fill="#e8eef4">Hydro</text>
-    <text x="80" y="286" font-size="84" font-weight="700" letter-spacing="-2" fill="url(#wordmark)">AI station</text>
+    <text x="80" y="204" font-size="62" font-weight="700" letter-spacing="-1" fill="#e8eef4">Hydro AI station</text>
+    <text x="80" y="286" font-size="84" font-weight="700" letter-spacing="-2" fill="url(#wordmark)">LLM Proxy</text>
 
     <rect x="80" y="312" width="360" height="2" fill="url(#rule)"/>
 

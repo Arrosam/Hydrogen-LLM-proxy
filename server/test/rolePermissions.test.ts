@@ -136,15 +136,7 @@ describe("manager restrictions", () => {
     expect(res.statusCode).toBe(403);
   });
 
-    // libuv's threadpool serves BOTH `dns.lookup` and bcrypt, and defaults to
-    // four threads, so a file hashing passwords starves the DNS lookups in
-    // whichever files run beside it. Measured: this takes ~11s under the default
-    // pool and under 2s with UV_THREADPOOL_SIZE=32, so vitest's 5s default failed
-    // it on scheduling luck rather than on anything under test. The bound is
-    // raised rather than the pool because the pool can only be set BEFORE the
-    // process starts -- config-module env, `test.env` and `globalSetup` were all
-    // tried and are all too late. Nothing here asserts latency.
-  it("can still test a provider with the form's own key (no stored key involved)", { timeout: 30000 }, async () => {
+  it("can still test a provider with the form's own key (no stored key involved)", async () => {
     const res = await as(managerCookie, {
       method: "POST",
       url: "/admin/api/providers/test",
@@ -184,7 +176,7 @@ describe("admin keeps the full surface", () => {
     expect((await as(adminCookie, { url: "/admin/api/logs" })).statusCode).toBe(200);
   });
 
-  it("tests a provider with its stored key", { timeout: 30000 }, async () => {
+  it("tests a provider with its stored key", async () => {
     const res = await as(adminCookie, {
       method: "POST",
       url: "/admin/api/providers/test",

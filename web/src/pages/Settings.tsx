@@ -46,14 +46,15 @@ export function Settings() {
 /** The running server's release, reported by the server itself so a stale
  * cached bundle can never claim a version the server isn't running. */
 function AboutFooter() {
+  const { t } = useI18n();
   const { data } = useAsync(() => api.get<{ version: string }>("/settings/version"));
   return (
     <div className="mt-10 flex items-center justify-center gap-2 pb-2 text-xs text-ink-500">
       <HydrogenLogo className="h-4 w-4" />
-      <span className="font-medium text-ink-400">Hydrogen</span>
+      <span className="font-medium text-ink-400">{t("brand.name")}</span>
       {data && <span className="font-mono">v{data.version}</span>}
       <span className="text-ink-600">·</span>
-      <span>LLM Proxy</span>
+      <span>{t("brand.subtitle")}</span>
     </div>
   );
 }

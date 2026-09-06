@@ -122,6 +122,24 @@ describe("UpdateService.check", () => {
     expect(s.prerelease).toBe(false);
   });
 
+  it("never offers a pre-release TAG that GitHub was not marked as one", async () => {
+    // The publisher ticks "set as a pre-release" by hand, so it can be missed.
+    // Gating on that flag alone would then push v2.0.0-b at every stable
+    // deployment -- and restart them onto it wherever UPDATE_RESTART_ENABLED is
+    // set. The tag says what the release is; the checkbox only says what someone
+    // remembered.
+    const fetchImpl = vi.fn(async () => feed(rel("v2.0.0-b", { prerelease: false }), rel("v1.7.0")));
+    const stable = await svc("1.7.0", fetchImpl).check();
+    expect(stable.latest).toBe("1.7.0");
+    expect(stable.updateAvailable).toBe(false);
+
+    // A deployment already on a pre-release still gets it: the gate narrows who
+    // is offered a beta, it does not hide the beta from its own channel.
+    const beta = await svc("2.0.0-b", vi.fn(async () => feed(rel("v2.0.0-b.2", { prerelease: false })))).check();
+    expect(beta.latest).toBe("2.0.0-b.2");
+    expect(beta.updateAvailable).toBe(true);
+  });
+
   it("picks by version precedence, not by publish order", async () => {
     // A patch to an older line, published after the newer minor: first in the
     // list, but not the newest version.

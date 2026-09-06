@@ -99,15 +99,7 @@ describe("DT: the tier that stays refused even for a proxy", () => {
     await expect(resolveProxyHost(proxy({ port: 70_000 }))).rejects.toThrow(/invalid port/);
   });
 
-    // libuv's threadpool serves BOTH `dns.lookup` and bcrypt, and defaults to
-    // four threads, so a file hashing passwords starves the DNS lookups in
-    // whichever files run beside it. Measured: this takes ~11s under the default
-    // pool and under 2s with UV_THREADPOOL_SIZE=32, so vitest's 5s default failed
-    // it on scheduling luck rather than on anything under test. The bound is
-    // raised rather than the pool because the pool can only be set BEFORE the
-    // process starts -- config-module env, `test.env` and `globalSetup` were all
-    // tried and are all too late. Nothing here asserts latency.
-  it("a host that does not resolve is an error, not a silent direct connection", { timeout: 30000 }, async () => {
+  it("a host that does not resolve is an error, not a silent direct connection", async () => {
     await expect(
       resolveProxyHost(proxy({ host: "no-such-host.invalid" })),
     ).rejects.toThrow(UpstreamUrlError);

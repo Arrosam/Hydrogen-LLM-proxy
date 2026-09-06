@@ -2,7 +2,7 @@
   "name": "hydrogen-llm-proxy",
   "version": "2.0.0-b",
   "private": true,
-  "description": "Hydrogen - a lightweight, self-hosted personal LLM proxy",
+  "description": "Hydro AI station - a lightweight, self-hosted personal LLM proxy",
   "license": "MIT",
   "type": "module",
   "workspaces": [

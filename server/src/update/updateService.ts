@@ -266,7 +266,13 @@ export class UpdateService {
       // Drafts are invisible to an unauthenticated read anyway; skipped so an
       // authenticated one cannot be offered something unpublished.
       if (r.draft === true) continue;
-      if (r.prerelease === true && !allowPrerelease) continue;
+      // Two independent signals, and the TAG is the one that cannot be
+      // forgotten: publishing v2.0.0-b without ticking GitHub's
+      // "set as a pre-release" box would otherwise offer a beta to every
+      // stable deployment -- and restart them onto it where
+      // UPDATE_RESTART_ENABLED is set.
+      const candidateIsPre = r.prerelease === true || isPrerelease(String(r.tag_name ?? ""));
+      if (candidateIsPre && !allowPrerelease) continue;
       if (typeof r.tag_name !== "string" || !parseVersion(r.tag_name)) continue;
       if (!best || isNewerVersion(r.tag_name, String(best.tag_name))) best = r;
     }
