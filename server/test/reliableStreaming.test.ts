@@ -7,7 +7,7 @@
  *  5. Non-streaming requests fully buffer upstream response before returning
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { Readable, Writable } from "node:stream";
 import "../src/core/format"; // register wire formats
 import { OpenAICompletionRequest } from "../src/core/format";
@@ -49,6 +49,33 @@ const readableOf = (frames: string[]): Readable =>
   );
 
 /** A readable that emits frames slowly (simulating upstream latency), then completes. */
+/**
+ * Run `body` under fake timers and return the VIRTUAL milliseconds it consumed.
+ *
+ * The pacing assertions below are about the pacer's schedule, not the machine's.
+ * Measuring `performance.now()` around a paced drain measured whatever else the
+ * runner happened to be doing: under full-suite load the "fast" leg of a ratio
+ * could take longer than the slow one, and this file failed roughly one run in
+ * four for reasons unrelated to the code under test.
+ *
+ * `pace()` sleeps on `setTimeout` and reads `Date.now()`, and `slowStream`
+ * sleeps the same way, so faking both makes the clock advance by exactly what
+ * the code asked for. The numbers below are then the schedule itself, and exact.
+ */
+async function virtualMs(body: () => Promise<void>): Promise<number> {
+  vi.useFakeTimers();
+  try {
+    const startedAt = Date.now();
+    const done = body();
+    // Drives the pacer's chained timers (and the transport's) to completion.
+    await vi.runAllTimersAsync();
+    await done;
+    return Date.now() - startedAt;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 function slowStream(frames: string[], delayMs: number): Readable {
   return Readable.from(
     (async function* () {
@@ -331,15 +358,12 @@ describe("3. Configurable token rate", () => {
       usage: { promptTokens: 0, completionTokens: 11, totalTokens: 11 },
     };
 
-    // Fast rate
-    const t0 = performance.now();
-    for await (const _ of fabricateStream(data, 10000)) { /* drain */ }
-    const fastMs = performance.now() - t0;
-
-    // Slow rate
-    const t1 = performance.now();
-    for await (const _ of fabricateStream(data, 100)) { /* drain */ }
-    const slowMs = performance.now() - t1;
+    const fastMs = await virtualMs(async () => {
+      for await (const _ of fabricateStream(data, 10000)) { /* drain */ }
+    });
+    const slowMs = await virtualMs(async () => {
+      for await (const _ of fabricateStream(data, 100)) { /* drain */ }
+    });
 
     // The slow rate should be significantly slower than the fast rate
     expect(slowMs).toBeGreaterThan(fastMs * 5);
@@ -360,9 +384,10 @@ describe("3. Configurable token rate", () => {
     expect(streamInv.result.ok).toBe(true);
     if (streamInv.result.ok) {
       // The fabricated stream should be paced at 100 tok/s
-      const t0 = performance.now();
-      const { output } = await relayToRaw(streamInv.result.value.events, "svc");
-      const elapsed = performance.now() - t0;
+      let output = "";
+      const elapsed = await virtualMs(async () => {
+        ({ output } = await relayToRaw(streamInv.result.value.events, "svc"));
+      });
 
       // "hello world this is a test" = 25 chars ~6 tokens, at 100 tok/s = ~60ms
       expect(output).toContain("hello world this is a te");
@@ -392,24 +417,26 @@ describe("3b. Pacing budget spans the whole request", () => {
     // The run began 30s ago (slow upstream + retries). The response is already
     // buffered in full, so it must be handed over immediately — not dribbled out
     // for another 10s, which would push a client with a request deadline past it.
-    const startedAt = Date.now() - 30_000;
-
-    const t0 = performance.now();
     let chars = 0;
-    for await (const ev of fabricateStream(bigData, 2000, startedAt)) {
-      if (ev.type === "text_delta") chars += ev.text.length;
-    }
-    const elapsed = performance.now() - t0;
+    const elapsed = await virtualMs(async () => {
+      // Computed inside, so the 30s offset is measured against the faked clock.
+      const startedAt = Date.now() - 30_000;
+      for await (const ev of fabricateStream(bigData, 2000, startedAt)) {
+        if (ev.type === "text_delta") chars += ev.text.length;
+      }
+    });
 
     expect(chars).toBe(80_000);
-    expect(elapsed).toBeLessThan(1_000); // no artificial delay left to pay
+    // Exactly zero, not merely "under a second": every wait is already negative,
+    // so the pacer never sleeps and the clock never moves.
+    expect(elapsed).toBe(0);
   });
 
   it("3b.2 a fast request is still paced at the configured rate", async () => {
     // Nothing has been spent yet, so the full pacing budget applies.
-    const t0 = performance.now();
-    for await (const _ of fabricateStream(bigData, 20_000, Date.now())) { /* drain */ }
-    const elapsed = performance.now() - t0;
+    const elapsed = await virtualMs(async () => {
+      for await (const _ of fabricateStream(bigData, 20_000, Date.now())) { /* drain */ }
+    });
 
     // 20_000 tokens / 20_000 tok/s = ~1s. Assert it is paced, not instant.
     expect(elapsed).toBeGreaterThan(300);
@@ -424,16 +451,21 @@ describe("3b. Pacing budget spans the whole request", () => {
       makeDeps(transport, 20), // 20 tok/s: "hello world this is a test" (~6 tokens) => ~300ms notionally
     );
 
-    const t0 = performance.now();
-    const inv = await svc.stream(baseReq(true));
-    expect(inv.result.ok).toBe(true);
-    if (!inv.result.ok) return;
-    for await (const _ of inv.result.value.events) { /* drain */ }
-    const total = performance.now() - t0;
+    let ok = false;
+    const total = await virtualMs(async () => {
+      const inv = await svc.stream(baseReq(true));
+      ok = inv.result.ok;
+      if (!inv.result.ok) return;
+      for await (const _ of inv.result.value.events) { /* drain */ }
+    });
+    expect(ok).toBe(true);
 
     // Upstream alone was ~250ms and already covers the ~300ms pacing budget,
     // so the total must stay close to the upstream time, not upstream + 300ms.
     expect(total).toBeLessThan(500);
+    // ...and it cannot be below what the upstream itself took. Virtual time can
+    // state that lower bound; a wall clock could only ever assert the ceiling.
+    expect(total).toBeGreaterThanOrEqual(250);
   });
 });
 
@@ -450,15 +482,16 @@ describe("4. Buffer-exhaustion stall fix", () => {
     };
 
     const events: any[] = [];
-    const t0 = performance.now();
-    for await (const ev of fabricateStream(data, 2000)) {
-      events.push(ev);
-    }
-    const elapsed = performance.now() - t0;
+    const elapsed = await virtualMs(async () => {
+      for await (const ev of fabricateStream(data, 2000)) {
+        events.push(ev);
+      }
+    });
 
-    // Should complete in roughly 125ms (250 tokens / 2000 tok/s)
-    // but MUST complete — never stall forever.
-    expect(elapsed).toBeLessThan(5000); // generous upper bound
+    // Roughly 125ms of schedule (250 tokens / 2000 tok/s), and it MUST finish --
+    // a permanent stall now shows up as the drain never completing rather than
+    // as a wall-clock number that depends on the machine.
+    expect(elapsed).toBeLessThan(5000);
     expect(events.length).toBeGreaterThan(0);
     const finish = events[events.length - 1];
     expect(finish.type).toBe("finish");
@@ -484,9 +517,10 @@ describe("4. Buffer-exhaustion stall fix", () => {
     expect(streamInv.result.ok).toBe(true);
     if (streamInv.result.ok) {
       // The fabricated stream should complete without stalling
-      const t0 = performance.now();
-      const { output } = await relayToRaw(streamInv.result.value.events, "svc");
-      const elapsed = performance.now() - t0;
+      let output = "";
+      const elapsed = await virtualMs(async () => {
+        ({ output } = await relayToRaw(streamInv.result.value.events, "svc"));
+      });
 
       expect(output).toContain("hello world this is a te");
       expect(output).toContain("[DONE]");
@@ -508,12 +542,12 @@ describe("4. Buffer-exhaustion stall fix", () => {
 
     // At 1000 tok/s, 120 tokens should take ~120ms.
     // Even with jitter, the self-correcting pacer should not take > 5x that.
-    const t0 = performance.now();
     let eventCount = 0;
-    for await (const _ of fabricateStream(data, 1000)) {
-      eventCount++;
-    }
-    const elapsed = performance.now() - t0;
+    const elapsed = await virtualMs(async () => {
+      for await (const _ of fabricateStream(data, 1000)) {
+        eventCount++;
+      }
+    });
 
     expect(eventCount).toBeGreaterThan(2); // start + deltas + finish
     // Must complete in reasonable time — no permanent stall
