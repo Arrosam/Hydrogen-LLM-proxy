@@ -776,3 +776,33 @@ discards the partial answer and re-attempts, as today — the client never sees 
 half answer. The asymmetry is deliberate: partial text is cheap to regenerate
 and meaningless on its own, whereas a completed tool result was paid for and may
 have already changed something in the world.
+
+## S13. Tool events stream live; text stays buffered (amends D9)
+
+A `server_tool_use` block is emitted the moment the call is made, and its result
+the moment the endpoint returns, so a streaming client shows activity for the
+whole dispatch instead of sitting in silence. Ordinary text keeps its current
+buffered behaviour.
+
+The split follows S12's own asymmetry: a dispatched tool is **committed** — it
+has been paid for and may have changed something — so announcing it early costs
+nothing that was not already spent. Text is **not** committed, and keeping it
+buffered preserves the retry safety Hydrogen has today, where a mid-stream
+failure re-attempts cleanly and no half answer ever reaches the client.
+
+It also removes the idle-timeout risk a fully buffered loop would create on a
+long tool chain.
+
+## Behavior 10 restated for the new design
+
+Behavior 10's contents were written when Hydrogen implemented the tools. Under
+S1 they are void. The **Tools** tab now owns one thing: the list of tool entries.
+
+Each entry: the exact tool type string or free-form name (S9), a description and
+parameter schema, the endpoint URL, its credential, and the
+prefer-provider-or-override switch (S3).
+
+Unchanged from Behavior 10: writes are admin-only, reads are not (the Model
+Services and Micro Agent editors must list tools to render their grant pickers),
+provider capability still lives on **Providers** and is mapped per model in
+**Model Mapping** (S4), and grants still live in the service and agent editors.
