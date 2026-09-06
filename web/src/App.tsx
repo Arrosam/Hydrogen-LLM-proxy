@@ -6,6 +6,7 @@ import { SetPassword } from "./pages/SetPassword";
 import { Overview } from "./pages/Overview";
 import { Providers } from "./pages/Providers";
 import { Proxies } from "./pages/Proxies";
+import { Tools } from "./pages/Tools";
 import { Models } from "./pages/Models";
 import { ModelServices } from "./pages/ModelServices";
 import { Tokens } from "./pages/Tokens";
@@ -41,6 +42,7 @@ export default function App() {
         <Route index element={<Overview />} />
         <Route path="providers" element={<Providers />} />
         <Route path="proxies" element={<Proxies />} />
+        <Route path="tools" element={<Tools />} />
         {/* Singular, and it must stay singular: the fuzzy endpoint adapter rewrites
             any path ending "/models" onto the proxy's /v1/models, so a SPA route
             spelled "/models" never survives a hard load (refresh, bookmark, pasted

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
-import { Toggle } from "./common";
+import { Toggle, ToolGrantPicker } from "./common";
 import { useToast } from "./Toast";
 import { AsrEditor, OcrEditor, StageEditor } from "./StageEditor";
 import { OverridesEditor } from "./OverridesEditor";
@@ -23,6 +23,7 @@ import type {
   ServiceStep,
   ServiceSteps,
   Provider,
+  Tool,
   Trigger,
 } from "../types";
 import {
@@ -84,6 +85,7 @@ interface Props {
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
+  tools: Tool[]; // every configured tool; only the free-form ones are grantable
   defaultKind?: "resilience" | "chain"; // kind for a NEW service (fixed by the page)
   onClose: () => void;
   onSaved: () => void;
@@ -125,7 +127,7 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
 }
 
-export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
+export function ServiceEditor({ open, service, services, models, providers, mappings, tools, defaultKind = "resilience", onClose, onSaved }: Props) {
   const toast = useToast();
   const { t } = useI18n();
   const [name, setName] = useState("");
@@ -141,6 +143,10 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
+  /** Tools this service offers even to a client that declared none. Only a
+   * free-form tool can be granted: a vocabulary one exists to answer a client
+   * that asked for that hosted type by name, so granting it reaches nobody. */
+  const [grantTools, setGrantTools] = useState<string[]>([]);
   const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
@@ -185,6 +191,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((service.steps as ServiceSteps)?.category ?? "chat");
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
+      setGrantTools(service.steps?.grantTools ?? []);
       setThinkingFormat(service.steps?.thinkingFormat ?? "original");
     } else {
       const firstModel = models[0]?.name ?? "";
@@ -200,6 +207,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setOcr(undefined);
       setCategory("chat");
       setReliableStreaming(false);
+      setGrantTools([]);
       setThinkingFormat("original");
     }
     setRaw(false);
@@ -223,6 +231,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           ...(output ? { output } : {}),
           ...(ocr ? { ocr } : {}),
           ...(asr ? { asr } : {}),
+          ...(grantTools.length ? { grantTools } : {}),
           ...thinkingFormatField(),
         } as AgentDef)
       : ({
@@ -230,6 +239,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           steps,
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
+          ...(grantTools.length ? { grantTools } : {}),
           ...thinkingFormatField(),
         } as ServiceSteps);
 
@@ -306,6 +316,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((parsed as ServiceSteps).category ?? "chat");
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
+      setGrantTools(parsed.grantTools ?? []);
       setThinkingFormat(parsed.thinkingFormat ?? "original");
       return parsed;
     } catch {
@@ -485,6 +496,16 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           </div>
         )}
 
+        {isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
+          <ToolGrantPicker
+            label={t(kind === "chain" ? "agents.field.grantTools" : "services.field.grantTools")}
+            hint={t("services.field.grantTools.hint")}
+            tools={tools}
+            value={grantTools}
+            onChange={setGrantTools}
+          />
+        )}
+
         {!raw && (
           <p className="text-xs text-ink-500">
             {kind === "resilience"
@@ -517,6 +538,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                 setOutput(o);
               }}
               services={services.filter((m) => m.id !== service?.id)}
+              tools={tools}
             />
           </div>
         ) : (

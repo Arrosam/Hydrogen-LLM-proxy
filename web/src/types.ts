@@ -85,6 +85,9 @@ export interface Mapping {
   modelId: number;
   providerId: number;
   upstreamModel: string;
+  /** Wire families of the provider's endpoints this mapping may use.
+   * Null = every family the provider offers. */
+  families?: string[] | null;
   /** Narrows the provider's declared tool capabilities to THIS model. Null =
    * inherit the provider's list, as `families` inherits its endpoints. */
   toolCapabilities?: string[] | null;

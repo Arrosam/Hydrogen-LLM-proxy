@@ -6,7 +6,7 @@ import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common
 import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
+import type { Mapping, Model, ModelService, ServiceSteps, Provider, Tool } from "../types";
 import { isAgentDef, serviceCategoryOf } from "../types";
 
 interface Data {
@@ -14,6 +14,7 @@ interface Data {
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
+  tools: Tool[];
 }
 
 type Kind = "resilience" | "chain";
@@ -39,13 +40,20 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
     },
   };
   const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [services, models, providers, mappings] = await Promise.all([
+    const [services, models, providers, mappings, tools] = await Promise.all([
       api.get<{ services: ModelService[] }>("/services"),
       api.get<{ models: Model[] }>("/models"),
       api.get<{ providers: Provider[] }>("/providers"),
       api.get<{ mappings: Mapping[] }>("/mappings"),
+      api.get<{ tools: Tool[] }>("/tools"),
     ]);
-    return { services: services.services, models: models.models, providers: providers.providers, mappings: mappings.mappings };
+    return {
+      services: services.services,
+      models: models.models,
+      providers: providers.providers,
+      mappings: mappings.mappings,
+      tools: tools.tools,
+    };
   });
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
@@ -157,6 +165,7 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
           models={data.models}
           providers={data.providers}
           mappings={data.mappings}
+          tools={data.tools}
           defaultKind={kind}
           onClose={() => {
             setCreating(false);

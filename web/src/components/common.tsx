@@ -126,3 +126,78 @@ export function useConfirm(): {
 
   return { confirm, confirmEl };
 }
+
+/**
+ * Pick which free-form tools a service, agent or stage grants.
+ *
+ * A grant reaches a client that declared no tools at all, so only a FREE-FORM
+ * tool can be granted -- a vocabulary one exists to answer a client that asked
+ * for that hosted type by name, and granting it would reach nobody.
+ *
+ * A DISABLED tool is still listed, because a grant on one is valid and simply
+ * inert until it is re-enabled; hiding it would make an existing grant look
+ * like it had vanished. A name in `value` that matches no free-form tool at all
+ * is shown in red rather than dropped -- that is how an operator sees a grant
+ * left dangling, and the only place they can clear it.
+ */
+export function ToolGrantPicker({
+  label,
+  hint,
+  tools,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  /** Every configured tool; the picker filters to the grantable ones itself. */
+  tools: { id: number; name: string; kind: string; enabled: boolean }[];
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const { t } = useI18n();
+  const grantable = tools.filter((tool) => tool.kind === "freeform");
+  const dangling = value.filter((name) => !grantable.some((tool) => tool.name === name));
+  const toggle = (name: string) =>
+    onChange(value.includes(name) ? value.filter((n) => n !== name) : [...value, name]);
+
+  return (
+    <div>
+      <label className="label">{label}</label>
+      {grantable.length === 0 && dangling.length === 0 ? (
+        <p className="text-xs text-ink-500">{t("tools.grant.none")}</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {grantable.map((tool) => {
+            const on = value.includes(tool.name);
+            return (
+              <button
+                key={tool.id}
+                type="button"
+                className={`${on ? "badge-blue" : "badge-gray"}${tool.enabled ? "" : " opacity-60"}`}
+                title={tool.enabled ? undefined : t("tools.grant.disabled")}
+                onClick={() => toggle(tool.name)}
+              >
+                <i className={`bi ${on ? "bi-check-lg" : "bi-plus-lg"}`} />
+                {tool.name}
+                {!tool.enabled && <i className="bi bi-slash-circle" />}
+              </button>
+            );
+          })}
+          {dangling.map((name) => (
+            <button
+              key={`missing:${name}`}
+              type="button"
+              className="badge-red"
+              title={t("tools.grant.missing")}
+              onClick={() => toggle(name)}
+            >
+              <i className="bi bi-exclamation-triangle" />
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+      {hint && <p className="mt-1 text-xs text-ink-500">{hint}</p>}
+    </div>
+  );
+}

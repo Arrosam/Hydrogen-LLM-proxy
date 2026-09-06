@@ -34,6 +34,10 @@ interface FormState {
   apiKey: string;
   extraHeaders: string;
   maxOutputTokens: string;
+  /** Hosted tool types this provider serves itself, one per line. BLANK MEANS
+   * UNDECLARED, not "none": an undeclared provider is assumed able to serve
+   * what the client asked for, so nothing is stripped or re-billed on a guess. */
+  toolCapabilities: string;
   /** "" = direct connection; otherwise the id of a saved proxy. */
   proxyId: string;
   enabled: boolean;
@@ -53,6 +57,7 @@ const EMPTY: FormState = {
   apiKey: "",
   extraHeaders: "",
   maxOutputTokens: "",
+  toolCapabilities: "",
   proxyId: "",
   enabled: true,
   storedModels: [],
@@ -107,6 +112,7 @@ export function Providers() {
       apiKey: "",
       extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
       maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
+      toolCapabilities: (p.toolCapabilities ?? []).join("\n"),
       proxyId: p.proxyId != null ? String(p.proxyId) : "",
       enabled: p.enabled,
       storedModels: storedFor(p.id),
@@ -162,6 +168,10 @@ export function Providers() {
     if (!form) return;
     const extraHeaders = parseHeaders(form.extraHeaders);
     if (extraHeaders === "invalid") return;
+    const capsRaw = form.toolCapabilities
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
     const motRaw = form.maxOutputTokens.trim();
     if (motRaw && !/^[1-9]\d*$/.test(motRaw)) {
       toast.error(t("providers.toast.maxOutputTokensNotPositive"));
@@ -175,6 +185,9 @@ export function Providers() {
         baseUrl: form.baseUrl,
         extraHeaders,
         maxOutputTokens: motRaw ? Number(motRaw) : null,
+        // Blank sends null, which the server reads as "not declared". An empty
+        // ARRAY would mean "serves none", which is a different claim.
+        toolCapabilities: capsRaw.length ? capsRaw : null,
         proxyId: form.proxyId ? Number(form.proxyId) : null,
         altEndpoints: form.altEndpoints.filter((e) => e.baseUrl.trim()).length
           ? form.altEndpoints.filter((e) => e.baseUrl.trim())
@@ -401,6 +414,19 @@ export function Providers() {
                 />
                 <p className="mt-1 text-xs text-ink-500">{t("providers.field.maxOutputTokens.hint")}</p>
               </div>
+            </div>
+            <div>
+              <label className="label">
+                {t("providers.field.toolCapabilities")}{" "}
+                <span className="normal-case text-ink-500">{t("common.optional")}</span>
+              </label>
+              <textarea
+                className="input h-20 font-mono text-xs"
+                value={form.toolCapabilities}
+                onChange={(e) => setForm({ ...form, toolCapabilities: e.target.value })}
+                placeholder={"web_search_20250305\ncode_execution_20250522"}
+              />
+              <p className="mt-1 text-xs text-ink-500">{t("providers.field.toolCapabilities.hint")}</p>
             </div>
             <div>
               <label className="label">{t("providers.field.proxy.label")}</label>

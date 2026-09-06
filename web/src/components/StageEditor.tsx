@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import type { AgentAsr, AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService } from "../types";
+import type { AgentAsr, AgentContextBlock, AgentCondition, AgentOcr, AgentStage, AgentTransition, ModelService, Tool } from "../types";
 import { isAgentDef, isChatPipelineCategory, serviceCategoryOf } from "../types";
 import { api, ApiError } from "../api";
-import { Toggle } from "./common";
+import { Toggle, ToolGrantPicker } from "./common";
 import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
@@ -50,9 +50,10 @@ interface Props {
   output: string;
   onChange: (stages: AgentStage[], output: string) => void;
   services: ModelService[]; // resilience services available to reference
+  tools: Tool[]; // every configured tool; a stage may grant the free-form ones
 }
 
-export function StageEditor({ stages, output, onChange, services }: Props) {
+export function StageEditor({ stages, output, onChange, services, tools }: Props) {
   const { t } = useI18n();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
@@ -146,6 +147,7 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
             <StageBody
               stage={stage}
               services={services}
+              tools={tools}
               earlier={stages.slice(0, i).map((s) => s.name).filter(Boolean)}
               earlierModel={stages.slice(0, i).filter(isModelStage).map((s) => s.name).filter(Boolean)}
               later={stages.slice(i + 1).map((s) => s.name).filter(Boolean)}
@@ -173,6 +175,7 @@ export function StageEditor({ stages, output, onChange, services }: Props) {
 function StageBody({
   stage,
   services,
+  tools,
   earlier,
   earlierModel,
   later,
@@ -180,6 +183,7 @@ function StageBody({
 }: {
   stage: AgentStage;
   services: ModelService[];
+  tools: Tool[];
   earlier: string[];
   earlierModel: string[];
   later: string[];
@@ -304,6 +308,13 @@ function StageBody({
                   {t("stageEditor.toolsHint")}
                 </p>
               </div>
+              <ToolGrantPicker
+                label={t("agents.stage.grantTools")}
+                hint={t("agents.stage.grantTools.hint")}
+                tools={tools}
+                value={stage.grantTools ?? []}
+                onChange={(next) => onPatch({ grantTools: next.length ? next : undefined })}
+              />
               <div className="grid grid-cols-3 gap-3">
                 <NumOverride label={t("stageEditor.timeoutMs")} value={stage.timeoutMs} onChange={(v) => onPatch({ timeoutMs: v })} />
               </div>

@@ -31,7 +31,17 @@ export function Models() {
   const { confirm, confirmEl } = useConfirm();
 
   const [modelForm, setModelForm] = useState<{ id?: number; name: string; description: string; enabled: boolean } | null>(null);
-  const [mapForm, setMapForm] = useState<{ modelId: number; providerId: number; upstreamModel: string; families: string[] } | null>(null);
+  const [mapForm, setMapForm] = useState<{
+    /** Set = editing that mapping; absent = creating a new one. */
+    id?: number;
+    modelId: number;
+    providerId: number;
+    upstreamModel: string;
+    families: string[];
+    /** NULL inherits the provider's list; a list narrows it to these,
+     * and an EMPTY list is the real claim that this model serves none. */
+    toolCapabilities: string[] | null;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
 
   const providerName = (id: number) => data?.providers.find((p) => p.id === id)?.name ?? `#${id}`;
@@ -70,8 +80,13 @@ export function Models() {
     if (!mapForm) return;
     setSaving(true);
     try {
-      await api.post("/mappings", { ...mapForm, families: mapForm.families.length ? mapForm.families : null });
-      toast.success(t("models.toast.mappingCreated"));
+      const payload = {
+        ...mapForm,
+        families: mapForm.families.length ? mapForm.families : null,
+      };
+      if (mapForm.id) await api.patch(`/mappings/${mapForm.id}`, payload);
+      else await api.post("/mappings", payload);
+      toast.success(t(mapForm.id ? "models.toast.mappingUpdated" : "models.toast.mappingCreated"));
       setMapForm(null);
       reload();
     } catch (e) {
@@ -96,7 +111,7 @@ export function Models() {
       toast.error(t("models.toast.createProviderFirst"));
       return;
     }
-    setMapForm({ modelId, providerId: firstProvider, upstreamModel: "", families: [] });
+    setMapForm({ modelId, providerId: firstProvider, upstreamModel: "", families: [], toolCapabilities: null });
   };
 
   return (
@@ -155,10 +170,28 @@ export function Models() {
                   <div className="flex flex-wrap gap-2">
                     {maps.map((mp) => (
                       <span key={mp.id} className="inline-flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 text-xs">
-                        <i className="bi bi-hdd-network text-brand-400" />
-                        <span className="text-ink-200">{providerName(mp.providerId)}</span>
-                        <i className="bi bi-arrow-right text-ink-600" />
-                        <span className="font-mono text-ink-400">{mp.upstreamModel}</span>
+                        <button
+                          className="inline-flex items-center gap-2 text-left hover:text-brand-400"
+                          title={t("models.action.editMapping")}
+                          onClick={() =>
+                            setMapForm({
+                              id: mp.id,
+                              modelId: mp.modelId,
+                              providerId: mp.providerId,
+                              upstreamModel: mp.upstreamModel,
+                              families: mp.families ?? [],
+                              toolCapabilities: mp.toolCapabilities ?? null,
+                            })
+                          }
+                        >
+                          <i className="bi bi-hdd-network text-brand-400" />
+                          <span className="text-ink-200">{providerName(mp.providerId)}</span>
+                          <i className="bi bi-arrow-right text-ink-600" />
+                          <span className="font-mono text-ink-400">{mp.upstreamModel}</span>
+                          {mp.toolCapabilities != null && (
+                            <i className="bi bi-tools text-ink-500" title={t("mapping.field.toolCapabilities")} />
+                          )}
+                        </button>
                         <button className="text-ink-600 hover:text-red-400" onClick={() => removeMapping(mp)}>
                           <i className="bi bi-x-lg" />
                         </button>
@@ -204,14 +237,14 @@ export function Models() {
       <Modal
         open={mapForm !== null}
         size="lg"
-        title={t("models.mappingModal.title")}
+        title={t(mapForm?.id ? "models.mappingModal.editTitle" : "models.mappingModal.title")}
         icon="bi-diagram-2"
         onClose={() => setMapForm(null)}
         footer={
           <>
             <button className="btn-ghost" onClick={() => setMapForm(null)}>{t("common.cancel")}</button>
             <button className="btn-primary" onClick={saveMapping} disabled={saving || !mapForm?.upstreamModel}>
-              <i className="bi bi-check-lg" />{t("common.add")}
+              <i className="bi bi-check-lg" />{t(mapForm?.id ? "common.save" : "common.add")}
             </button>
           </>
         }
@@ -220,7 +253,15 @@ export function Models() {
           <div className="space-y-4">
             <div>
               <label className="label">{t("models.mappingModal.field.provider.label")}</label>
-              <select className="select" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
+              {/* The pair (model, provider) IS the mapping's identity, and PATCH
+                  cannot move it -- so an existing mapping shows its provider
+                  without offering to change it. */}
+              <select
+                className="select"
+                value={mapForm.providerId}
+                disabled={mapForm.id != null}
+                onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value), toolCapabilities: null })}
+              >
                 {data?.providers.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
                 ))}
@@ -280,6 +321,53 @@ export function Models() {
                 />
               </div>
             </div>
+            {(() => {
+              // A mapping can only take capabilities AWAY. When the provider has
+              // declared none, `effectiveCapabilities` returns null whatever the
+              // mapping says, so offering the control here would be a lie.
+              const providerCaps = data?.providers.find((p) => p.id === mapForm.providerId)?.toolCapabilities ?? null;
+              const narrowed = mapForm.toolCapabilities;
+              return (
+                <div>
+                  <label className="label">{t("mapping.field.toolCapabilities")}</label>
+                  {providerCaps == null || providerCaps.length === 0 ? (
+                    <p className="text-xs text-ink-500">{t("mapping.field.toolCapabilities.undeclared")}</p>
+                  ) : (
+                    <>
+                      <Toggle
+                        checked={narrowed != null}
+                        onChange={(on) => setMapForm({ ...mapForm, toolCapabilities: on ? [...providerCaps] : null })}
+                        label={t("mapping.field.toolCapabilities.narrow")}
+                      />
+                      {narrowed != null && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {providerCaps.map((cap) => {
+                            const on = narrowed.includes(cap);
+                            return (
+                              <button
+                                key={cap}
+                                type="button"
+                                className={on ? "badge-blue" : "badge-gray"}
+                                onClick={() =>
+                                  setMapForm({
+                                    ...mapForm,
+                                    toolCapabilities: on ? narrowed.filter((x) => x !== cap) : [...narrowed, cap],
+                                  })
+                                }
+                              >
+                                <i className={`bi ${on ? "bi-check-lg" : "bi-plus-lg"}`} />
+                                <code>{cap}</code>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <p className="mt-1 text-xs text-ink-500">{t("mapping.field.toolCapabilities.hint")}</p>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
       </Modal>

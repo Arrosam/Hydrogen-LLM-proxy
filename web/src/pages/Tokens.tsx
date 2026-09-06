@@ -9,17 +9,23 @@ import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { copyToClipboard } from "../lib/clipboard";
 import { formatDate, formatNumber } from "../lib/format";
-import type { ModelService, Token } from "../types";
+import type { ModelService, Token, Tool } from "../types";
 
 interface Data {
   tokens: Token[];
   services: ModelService[];
+  tools: Tool[];
 }
 
 interface FormState {
   name: string;
   scopeServices: number[];
   scopeAll: boolean;
+  /** Tool ids this key may cause to be dispatched. */
+  scopeTools: number[];
+  /** No tool restriction. Distinct from an EMPTY scopeTools, which the
+   * server would read as a list that matches nothing. */
+  scopeToolsAll: boolean;
   maxRequests: string;
   maxTokens: string;
   expiresAt: string;
@@ -30,6 +36,8 @@ const EMPTY: FormState = {
   name: "",
   scopeServices: [],
   scopeAll: true,
+  scopeTools: [],
+  scopeToolsAll: true,
   maxRequests: "",
   maxTokens: "",
   expiresAt: "",
@@ -49,6 +57,8 @@ function formFromToken(t: Token): FormState {
     name: t.name,
     scopeServices: t.scopeServices ?? [],
     scopeAll: !t.scopeServices || t.scopeServices.length === 0,
+    scopeTools: t.scopeTools ?? [],
+    scopeToolsAll: !t.scopeTools || t.scopeTools.length === 0,
     maxRequests: t.maxRequests != null ? String(t.maxRequests) : "",
     maxTokens: t.maxTokens != null ? String(t.maxTokens) : "",
     expiresAt: msToLocalInput(t.expiresAt),
@@ -61,11 +71,12 @@ export function Tokens() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [t, s] = await Promise.all([
+    const [t, s, tl] = await Promise.all([
       api.get<{ tokens: Token[] }>("/tokens"),
       api.get<{ services: ModelService[] }>("/services"),
+      api.get<{ tools: Tool[] }>("/tools"),
     ]);
-    return { tokens: t.tokens, services: s.services };
+    return { tokens: t.tokens, services: s.services, tools: tl.tools };
   });
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
@@ -83,6 +94,7 @@ export function Tokens() {
       const payload: Record<string, unknown> = {
         name: form.name,
         scopeServices: form.scopeAll ? null : form.scopeServices,
+        scopeTools: form.scopeToolsAll ? null : form.scopeTools,
         maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
         maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
         expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
@@ -106,6 +118,7 @@ export function Tokens() {
       const payload: Record<string, unknown> = {
         name: form.name,
         scopeServices: form.scopeAll ? null : form.scopeServices,
+        scopeTools: form.scopeToolsAll ? null : form.scopeTools,
         maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
         maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
         expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
@@ -337,6 +350,42 @@ export function Tokens() {
                 </div>
               )}
             </div>
+            {(data?.tools.length ?? 0) > 0 && (
+              <div>
+                <label className="label">{i18n("tokens.field.scopeTools")}</label>
+                <label className="mb-2 flex items-center gap-2 text-sm text-ink-300">
+                  <input
+                    type="checkbox"
+                    checked={form.scopeToolsAll}
+                    onChange={(e) => setForm({ ...form, scopeToolsAll: e.target.checked })}
+                  />
+                  {i18n("tokens.form.scopeToolsAll")}
+                </label>
+                {!form.scopeToolsAll && (
+                  <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-ink-800 p-2">
+                    {data?.tools.map((tool) => (
+                      <label key={tool.id} className="flex items-center gap-2 text-sm text-ink-300">
+                        <input
+                          type="checkbox"
+                          checked={form.scopeTools.includes(tool.id)}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              scopeTools: e.target.checked
+                                ? [...form.scopeTools, tool.id]
+                                : form.scopeTools.filter((x) => x !== tool.id),
+                            })
+                          }
+                        />
+                        <span className="font-mono text-xs">{tool.name}</span>
+                        <span className="badge-gray">{i18n(`tools.kind.${tool.kind}`)}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-1 text-xs text-ink-500">{i18n("tokens.field.scopeTools.hint")}</p>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="label">{i18n("tokens.form.maxRequests")}</label>
