@@ -370,7 +370,8 @@ migration — a service definition is a JSON blob validated by zod in
 | Tool config: backend, key, MCP servers, sandbox, round cap | **Tools** tab | new tables |
 | Which providers serve which tool natively | **Providers** tab | migration `0008` |
 | Which tools a Model Service grants | **Model Services** editor | zod schema, no migration |
-| Which tools a Micro Agent grants | **Micro Agent** editor | zod schema, no migration |
+| Which tools a Micro Agent grants (agent-wide) | **Micro Agent** editor | zod schema, no migration |
+| Which tools one Micro Agent *stage* adds | that stage's row in the Micro Agent editor | zod schema, no migration |
 
 `ServiceDef = AgentDef | ServiceSteps` (`execution/definition.ts:327`), so both
 service kinds are JSON-blob definitions validated by zod. Adding a grant to each
@@ -379,3 +380,17 @@ is the same symmetric schema change, and neither needs a migration.
 Grants **union**, never subtract, at every level — client-declared ∪ agent ∪
 service — consistent with D2. Nothing anywhere can remove a tool the caller
 asked for.
+
+**Micro Agent grants attach at both levels (decided 2026-09-06).** An agent
+declares a baseline tool set, and any stage may add to it. The tools visible to
+one stage are:
+
+```
+client-declared  ∪  agent-wide grant  ∪  that stage's grant  ∪  grants of the
+                                          Model Service the stage invokes
+```
+
+Union at every level, subtraction nowhere — so a tool can be scoped to a single
+stage (`web_search` on `critique` but not `draft`) without any mechanism that
+could take a tool away from a caller who asked for it. The cost, accepted: the
+Micro Agent editor needs a tool picker on every stage row, not one on the agent.
