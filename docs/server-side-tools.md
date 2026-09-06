@@ -806,3 +806,54 @@ Unchanged from Behavior 10: writes are admin-only, reads are not (the Model
 Services and Micro Agent editors must list tools to render their grant pickers),
 provider capability still lives on **Providers** and is mapped per model in
 **Model Mapping** (S4), and grants still live in the service and agent editors.
+
+## S14. Usage accounting follows what a real provider does
+
+Researched rather than invented, from Anthropic's web search tool docs:
+
+- The whole loop is **one request** — "this process can repeat multiple times
+  throughout a single request".
+- `usage.input_tokens` / `output_tokens` are **aggregate over every internal
+  iteration**, not just the final turn.
+- Tool invocations are counted **separately** from tokens:
+  `usage.server_tool_use.web_search_requests`, billed at $10/1,000 on top of
+  token cost. Failed searches are not billed.
+- The cap is **per tool** (`max_uses`), not global, and exceeding it yields an
+  errored result block (`max_uses_exceeded`) rather than a failed request.
+
+Hydrogen therefore:
+
+- counts **every round** against the client key's token quota, reported as one
+  request's aggregate usage (confirms D7, and answers the quota question);
+- adds a **dispatch counter** alongside tokens, so an operator can see and bill
+  tool invocations separately from tokens;
+- replaces D5's global 16-round cap with a **per-tool `max_uses`**, and on
+  exhaustion feeds the model an errored tool result instead of failing the turn.
+
+Quota stays checked once per request, as today. A single loop can therefore
+overshoot a nearly-exhausted key, bounded by `max_uses`; the key is correctly
+exhausted afterwards.
+
+### Three earlier decisions independently confirmed
+
+- **Behavior 6** (a failing tool is reported to the model, not the client):
+  Anthropic returns HTTP 200 with a `web_search_tool_result_error` inside the
+  result block. Same shape, same reasoning.
+- **S13** (stream tool events live): Anthropic's own streaming example emits the
+  `server_tool_use` block, then shows an explicit "pause while search executes",
+  then the result block.
+- **S10** (drop and log rather than fail): Anthropic likewise degrades inside the
+  turn rather than failing the request.
+
+### New problem this surfaced: `encrypted_content`
+
+A `web_search_tool_result` carries `encrypted_content` per result, and the caller
+**must send it back unchanged** on later turns — "if `encrypted_content` is
+missing or modified, the request fails with a 400 validation error". Citations
+carry an `encrypted_index` with the same rule.
+
+Hydrogen synthesizing this block (Path A) must therefore put *something* there.
+That is fine while Hydrogen keeps serving the tool, since it is also the one
+reading the value back. It breaks when a later turn falls back to a **real**
+Anthropic provider with native web search: that provider is handed a value it
+never issued and rejects the request. See S15.
