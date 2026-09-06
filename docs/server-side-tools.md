@@ -104,6 +104,12 @@ any of them in one line.
    search failed.
 6. A client-supplied MCP `server_url` → 400 naming the reason.
 
+**Status as of 2026-09-07:** stages A, B and C are shipped; D is parked. Items 1,
+4 and 5 depend on Path A emission and are blocked on two unmeasured client
+shapes; item 6 has become a decision to revisit rather than a task. Item-by-item
+status is at the end of this document, under
+[Stage D — Path A native emission. PARKED](#stage-d--path-a-native-emission-parked-2026-09-07-not-built).
+
 ## Repositioning
 
 The release carrying this feature is **v2.0.0b**, under the name
@@ -1035,3 +1041,153 @@ the execution layer.
 The loop buffers and replays. Streaming the call and its result live needs a
 client-visible shape for a server-executed tool, which is Path A emission and is
 unmeasured. Noted in `modelService.stream` rather than guessed.
+
+---
+
+# Stage B — the admin API, done 2026-09-07 (`9777212`, fixes `2ba003e`)
+
+`toolRoutes` under the session guard: admin-only writes, because a tool row
+carries a credential and decides where this server's traffic goes; reads open to
+a manager, because the grant pickers need the list. Provider `toolCapabilities`
+on create *and* update, per-model narrowing on the mapping, `grantTools`
+validated against the configured free-form tools at save time, and a tool scope
+on every API key.
+
+Reviewed at max effort. Six findings fixed: tools were missing from the backup
+package entirely (a restore brought back services granting tools that no longer
+existed), `ProviderUpdate` silently dropped `toolCapabilities`, a rename walked
+around the delete guard, that guard ignored `kind` and so refused to delete an
+unused hosted tool, deleting a tool left keys scoped to a dangling id, and the
+endpoint URL — which can itself be the credential — was visible to a manager.
+One reported finding was refuted: `[]` is truthy in JavaScript, so a mapping's
+empty capability list never collapsed into "inherit".
+
+# Stage C — the web console, done 2026-09-07 (`752d207`, fixes `21dadb6`)
+
+Every knob the feature has now has a control: the Tools tab, a provider
+capability declaration, per-model narrowing, grant pickers agent-wide and per
+stage, and the key tool scope. Every string in en and zh.
+
+Two of the controls shipped inverted and were caught in review. A key whose
+"Any tool" box was unticked with nothing selected stored `scopeTools: []`, which
+`scopeAllows` reads as **every** tool — so the save now refuses that state and
+says Hydrogen cannot record "may dispatch nothing", rather than rewriting the
+request into one of the two states that do exist. And the provider editor
+collapsed `[]` into `null`, so the console could not declare "serves no hosted
+tool types" — the one declaration a `prefer_provider` tool needs to fire — and
+destroyed an API-set `[]` on any unrelated edit.
+
+A third finding was a real privilege gap rather than a UI bug: `POST` and
+`PATCH /services` carry no admin check, so a manager could attach a
+credential-bearing tool to a service — the same capability `toolRoutes`
+refuses to even show them. A grant *change* is now admin-only; everything else
+about the service stays a manager's to edit.
+
+Twelve findings fixed in all, one refuted, two deferred as refactors of code the
+stage never touched. 997 tests / 61 files.
+
+---
+
+# Stage D — Path A native emission. PARKED 2026-09-07, not built.
+
+Hydrogen dispatches a hosted tool and feeds the result back **upstream**
+correctly today. What is not built is the client-facing half: emitting that
+result to the caller in each wire format's own native shape, so a client that
+declared `{"type":"web_search"}` sees the blocks it expects rather than a
+function-call round trip it never asked for.
+
+This is parked, not deferred by preference. Two shapes decide the whole design
+and neither has been measured, and S8's rule — measure rather than guess what an
+external client sends — makes guessing them out of bounds.
+
+## The gap, precisely
+
+### M5 — what Codex accepts as a hosted-tool RESULT. NOT MEASURED.
+
+M4 measured the return leg for a **function** tool: `function_call` out,
+`function_call_output` back, correlated by `call_id` alone. That is Path B, and
+it is settled.
+
+Path A is a different item type. A client that declared `{"type":"web_search"}`
+expects the Responses API's own hosted-search items, and nothing in this repo
+has observed Codex consume one. Unknown, and each one changes the emitter:
+
+- which item `type` string carries the result, and whether the call and the
+  result are separate items or one item that gains fields as it completes;
+- whether the sources/citations are structured items or text annotations on the
+  message, and what identifies each one;
+- whether Codex requires anything opaque round-tripped on later turns, as the
+  Anthropic wire requires for `encrypted_content`;
+- what a **failed** hosted call looks like, which Behavior 5 needs in order to
+  report "the search failed" without ending the turn.
+
+### M6 — what Claude Code sends and accepts on the Anthropic wire. NOT MEASURED.
+
+M1 measured a different harness and came back negative: it declared no
+server-side tools at all. It therefore says nothing about Claude Code, which is
+the client "Done when" item 1 is written against.
+
+`web_search_tool_result` carries `encrypted_content` per result and the caller
+**must** send it back unchanged or the request 400s (S15). Synthesizing that
+field is the single riskiest thing in this stage: get it wrong and the failure
+is not a wrong answer but a hard 400 on the *next* turn, after the user has
+already seen a good one.
+
+## Why guessing is worse than parking
+
+A wrong result shape does not fail loudly. Codex ignores an item type it does
+not recognise, so the model answers without the search it asked for and nobody
+sees an error — the exact silent degradation S15 exists to prevent. On the
+Anthropic side a wrong `encrypted_content` fails on a later turn, far from the
+change that caused it. Both are the failure mode this document has refused
+everywhere else.
+
+## What is blocked behind this
+
+- **A-3** — S13's live tool events. The loop still buffers and replays, because
+  streaming a call and its result needs the client-visible shape defined here.
+- **A-1** — a granted tool called alongside a client tool in one parallel block.
+  Every candidate answer depends on whether a real client replays an assistant
+  turn containing a `tool_result` it did not produce. Same class of capture.
+- **"Done when" items 1, 2 and 4**, which are all written from the client's side
+  of the wire.
+
+## The capture that clears it
+
+The harness the earlier measurements used, `scratchpad/stub-responses.cjs`, was
+never tracked in git and no longer exists on disk. Rebuilding it is the first
+step, not a prerequisite the operator supplies.
+
+1. Rebuild the stub Responses upstream: it asserts a hosted `web_search` call,
+   then serves a candidate result shape.
+2. Point Codex at it with `-c model_providers` overrides and run one turn whose
+   prompt forces a search.
+3. Record what Codex renders, and what it replays in the next turn's `input`.
+4. Repeat for Claude Code against a stub Anthropic upstream for M6.
+
+Steps 2 and 4 need a signed-in client on the operator's machine and a real model
+choosing to search; they cannot be run from here.
+
+## Done when — status at the park
+
+1. Claude Code → Hydrogen → DeepSeek-only, citations render — **blocked on M6.**
+2. Anthropic ticked capable, native path taken — **reachable now**: capability
+   declaration, narrowing and the "pass through untouched" path are all built
+   and configurable. Untested end to end against a live Anthropic key.
+3. A Responses client gets an image through an image Model Service — **unaffected
+   by this stage**, unchanged since slice 0.
+4. `chat/completions` client, links in the answer text — **blocked on M5**, since
+   what the client sees is Path A emission.
+5. Search backend 500 → the answer completes saying the search failed —
+   **partly built.** `dispatchTool` never throws and the failure reaches the
+   model, so the turn completes; how the failure is *shown* to the client is
+   Path A emission.
+6. Client-supplied MCP `server_url` → 400 naming the reason — **not built, and
+   worth re-deciding.** Today an `{"type":"mcp","server_url":...}` declaration is
+   passed through to the upstream untouched, which slice 0 pins with a test
+   (`responsesPassthrough.test.ts`, "replays all 18 types unchanged"). That is
+   arguably the better behaviour under the never-rewrite rule: if the upstream
+   can serve it, refusing on the client's behalf is Hydrogen inventing a limit.
+   A 400 would be right only if Hydrogen is claiming to *be* the provider. The
+   item is left unbuilt rather than quietly dropped, because it now reads as a
+   decision to revisit rather than a task to finish.
