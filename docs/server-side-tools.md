@@ -952,3 +952,35 @@ onto the Anthropic or Chat Completions wire. Full suite 892/892.
 **Done-when 3 remains unverified**: proving a real Codex conversation survives
 turn 2 needs a genuine gpt-5.4+ Responses endpoint, which no configured provider
 is. Done-when 1 and 2 are covered by the tests above.
+
+# Slice 1 — done 2026-09-06 (`823e744`)
+
+Namespaced tools now reach providers that have no namespaces.
+
+- **Members are parsed as tools too**, carrying `Tool.namespace`, alongside the
+  namespace's own `raw` entry. The raw one replays verbatim to a Responses
+  upstream; members are skipped there so nothing is declared twice.
+- **Declared to a foreign provider as `namespace__member`.** Qualification is
+  required rather than tidy: Codex ships `mcp__cua_repl/js` *and*
+  `mcp__node_repl/js`, plus two `js_reset`, so a bare-name flatten silently
+  merges two different tools.
+- **Calls re-flatten on every request** (a client replays them each turn) and
+  **split back before the client sees them** — buffered via
+  `Response.withNamespaces`, streaming via the `withNamespaces` transform,
+  mirroring the two shapes `withThinkingFormat` already has.
+- **The split matches the declared namespace list**, not the last separator: a
+  plain function tool may contain `__` in its own name and guessing would rename
+  it. Being derived from the client's own tools array each turn, it needs no
+  server-side state and survives retries and fallback steps.
+
+Verified: 13 new tests in `test/namespaceFlatten.test.ts` — declarations across
+both foreign families, the real collision staying distinct, descriptions and
+schemas carried, same-family replay not duplicating members, prior-turn calls
+re-flattened, both split paths, and `splitToolName`'s refusal to split on an
+undeclared prefix. Full suite 905/905.
+
+Worth recording: the slice 0 suite **caught this change** — it asserted the
+string `mcp__node_repl` never reaches the Anthropic wire, which slice 1
+deliberately makes false. Tightened to the invariant that actually matters: the
+`namespace` *field* never leaves the Responses wire, while the namespace inside
+a flattened *name* is the mechanism.
