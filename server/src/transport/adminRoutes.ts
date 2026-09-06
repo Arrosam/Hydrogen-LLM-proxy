@@ -20,6 +20,7 @@ import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
 import { withJsonHeartbeat } from "./jsonKeepalive";
 import { benchRoutes } from "./benchRoutes";
 import { proxyRoutes } from "./proxyRoutes";
+import { toolRoutes } from "./toolRoutes";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
@@ -41,6 +42,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     await scoped.register((s) => userRoutes(s, c), { prefix: "/users" });
     await scoped.register((s) => providerRoutes(s, c), { prefix: "/providers" });
     await scoped.register((s) => proxyRoutes(s, c), { prefix: "/proxies" });
+    await scoped.register((s) => toolRoutes(s, c), { prefix: "/tools" });
     await scoped.register((s) => catalogRoutes(s, c));
     await scoped.register((s) => serviceRoutes(s, c), { prefix: "/services" });
     await scoped.register((s) => tokenRoutes(s, c), { prefix: "/tokens" });
@@ -224,6 +226,16 @@ const AvailableModelsSchema = z
   .optional();
 
 const AltEndpointsSchema = z.array(z.object({ type: TypeSchema, baseUrl: BaseUrlSchema })).max(4).nullable().optional();
+/**
+ * Hosted tool types a provider serves natively, e.g. ["web_search"].
+ *
+ * Null and absent are DIFFERENT and both meaningful: null means "not declared",
+ * and an undeclared provider is assumed able to serve what the client asked for
+ * so nothing is stripped or re-billed on a guess. An empty array means "serves
+ * none", which is a real declaration.
+ */
+const ToolCapabilitiesSchema = z.array(z.string().min(1).max(120)).nullable().optional();
+
 const ProviderCreate = z.object({
   name: z.string().min(1).max(120),
   type: TypeSchema,
@@ -234,6 +246,7 @@ const ProviderCreate = z.object({
   maxOutputTokens: z.number().int().positive().nullable().optional(),
   /** Route this provider's upstream traffic through a saved proxy. null = direct. */
   proxyId: z.number().int().positive().nullable().optional(),
+  toolCapabilities: ToolCapabilitiesSchema,
   enabled: z.boolean().optional(),
   availableModels: AvailableModelsSchema,
 });
@@ -357,10 +370,13 @@ const MappingCreate = z.object({
   providerId: z.number().int().positive(),
   upstreamModel: z.string().min(1),
   families: FamiliesSchema,
+  /** Narrows the provider's declared capabilities to this MODEL. Null =
+   * inherit, exactly as `families` inherits the provider's endpoints. */
+  toolCapabilities: ToolCapabilitiesSchema,
   priority: z.number().int().optional(),
   enabled: z.boolean().optional(),
 });
-const MappingUpdate = z.object({ upstreamModel: z.string().min(1).optional(), families: FamiliesSchema, priority: z.number().int().optional(), enabled: z.boolean().optional() });
+const MappingUpdate = z.object({ upstreamModel: z.string().min(1).optional(), families: FamiliesSchema, toolCapabilities: ToolCapabilitiesSchema, priority: z.number().int().optional(), enabled: z.boolean().optional() });
 
 async function catalogRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/models", async () => ({ models: c.models.list() }));
@@ -646,6 +662,9 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
 const TokenCreate = z.object({
   name: z.string().min(1).max(120),
   scopeServices: z.array(z.number().int().positive()).nullable().optional(),
+  /** Tool ids this key may cause to be dispatched; null/empty = all. A
+   * dispatch spends the operator's money at their own endpoint. */
+  scopeTools: z.array(z.number().int().positive()).nullable().optional(),
   maxRequests: z.number().int().positive().nullable().optional(),
   maxTokens: z.number().int().positive().nullable().optional(),
   expiresAt: z.number().int().positive().nullable().optional(),

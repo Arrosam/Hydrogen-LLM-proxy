@@ -9,6 +9,9 @@ export interface TokenInput {
   name: string;
   ownerUserId?: number | null;
   scopeServices?: number[] | null; // null/empty = all services
+  /** Tool ids this key may cause to be dispatched; null/empty = all. A dispatch
+   * spends the operator's money at their own endpoint. */
+  scopeTools?: number[] | null;
   maxRequests?: number | null;
   maxTokens?: number | null;
   expiresAt?: number | null; // epoch ms
@@ -21,6 +24,7 @@ export interface PublicToken {
   keyPrefix: string;
   ownerUserId: number | null;
   scopeServices: number[] | null;
+  scopeTools: number[] | null;
   maxRequests: number | null;
   maxTokens: number | null;
   usedRequests: number;
@@ -48,6 +52,7 @@ export class TokenRepo {
       keyPrefix: t.keyPrefix,
       ownerUserId: t.ownerUserId ?? null,
       scopeServices: t.scopeServices ?? null,
+      scopeTools: t.scopeTools ?? null,
       maxRequests: t.maxRequests ?? null,
       maxTokens: t.maxTokens ?? null,
       usedRequests: t.usedRequests,
@@ -82,6 +87,7 @@ export class TokenRepo {
         keyTag: blob.tag,
         ownerUserId: input.ownerUserId ?? null,
         scopeServices: input.scopeServices ?? null,
+        scopeTools: input.scopeTools ?? null,
         maxRequests: input.maxRequests ?? null,
         maxTokens: input.maxTokens ?? null,
         expiresAt: input.expiresAt != null ? new Date(input.expiresAt) : null,
@@ -96,6 +102,7 @@ export class TokenRepo {
     const patch: Record<string, unknown> = {};
     if (input.name !== undefined) patch.name = input.name;
     if (input.scopeServices !== undefined) patch.scopeServices = input.scopeServices;
+    if (input.scopeTools !== undefined) patch.scopeTools = input.scopeTools;
     if (input.maxRequests !== undefined) patch.maxRequests = input.maxRequests;
     if (input.maxTokens !== undefined) patch.maxTokens = input.maxTokens;
     if (input.expiresAt !== undefined) patch.expiresAt = input.expiresAt != null ? new Date(input.expiresAt) : null;

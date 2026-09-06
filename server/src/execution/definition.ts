@@ -488,3 +488,21 @@ export function summarizeService(def: ServiceDef): string {
   });
   return `${category}${parts.length ? `try ${parts.join("; else ")}; else fail` : "(no steps)"}${reliable}`;
 }
+
+/**
+ * Every free-form tool name a definition grants, from the service or agent
+ * itself and from each of its stages.
+ *
+ * Used to answer "is this tool still in use?" before deleting it. Read from the
+ * parsed shape rather than by searching the raw JSON: a substring match would
+ * also hit a step whose MODEL happened to share the tool's name, and refuse a
+ * deletion for a grant that does not exist.
+ */
+export function grantedToolNames(def: ServiceDef): string[] {
+  const names = new Set<string>();
+  for (const n of def.grantTools ?? []) names.add(n);
+  if (isAgent(def)) {
+    for (const stage of def.stages) for (const n of stage.grantTools ?? []) names.add(n);
+  }
+  return [...names];
+}

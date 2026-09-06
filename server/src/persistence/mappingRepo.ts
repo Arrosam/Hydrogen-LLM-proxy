@@ -9,6 +9,9 @@ export interface MappingInput {
   /** Wire families this mapping may use (of the provider's endpoints).
    * Null/empty = the provider's primary type only. */
   families?: string[] | null;
+  /** Which of the provider's declared tool capabilities THIS model has. Null =
+   * inherit the provider's list, exactly as `families` inherits its endpoints. */
+  toolCapabilities?: string[] | null;
   priority?: number;
   enabled?: boolean;
 }
@@ -45,6 +48,7 @@ export class MappingRepo {
         providerId: input.providerId,
         upstreamModel: input.upstreamModel,
         families: input.families ?? null,
+        toolCapabilities: input.toolCapabilities ?? null,
         priority: input.priority ?? 0,
         enabled: input.enabled ?? true,
       })
@@ -56,6 +60,7 @@ export class MappingRepo {
     const patch: Record<string, unknown> = {};
     if (input.upstreamModel !== undefined) patch.upstreamModel = input.upstreamModel;
     if (input.families !== undefined) patch.families = input.families;
+    if (input.toolCapabilities !== undefined) patch.toolCapabilities = input.toolCapabilities;
     if (input.priority !== undefined) patch.priority = input.priority;
     if (input.enabled !== undefined) patch.enabled = input.enabled;
     if (Object.keys(patch).length === 0) return this.get(id);

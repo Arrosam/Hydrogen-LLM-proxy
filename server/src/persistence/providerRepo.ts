@@ -20,6 +20,10 @@ export interface ProviderInput {
   altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
   /** Egress proxy to route this provider's traffic through. null = direct. */
   proxyId?: number | null;
+  /** Hosted tool types this provider serves NATIVELY. Null = undeclared, which
+   * is not the same as none: an undeclared provider is assumed able to serve
+   * what the client asked for, so nothing is stripped or re-billed on a guess. */
+  toolCapabilities?: string[] | null;
   enabled?: boolean;
 }
 
@@ -34,6 +38,7 @@ export interface PublicProvider {
   maxOutputTokens: number | null;
   altEndpoints: Array<{ type: ProviderType; baseUrl: string }> | null;
   proxyId: number | null;
+  toolCapabilities: string[] | null;
   enabled: boolean;
   createdAt: number;
 }
@@ -75,6 +80,7 @@ export class ProviderRepo {
         maxOutputTokens: input.maxOutputTokens ?? null,
         altEndpoints: input.altEndpoints ?? null,
         proxyId: input.proxyId ?? null,
+        toolCapabilities: input.toolCapabilities ?? null,
         enabled: input.enabled ?? true,
       })
       .returning()
@@ -90,6 +96,7 @@ export class ProviderRepo {
     if (input.maxOutputTokens !== undefined) patch.maxOutputTokens = input.maxOutputTokens;
     if (input.altEndpoints !== undefined) patch.altEndpoints = input.altEndpoints;
     if (input.proxyId !== undefined) patch.proxyId = input.proxyId;
+    if (input.toolCapabilities !== undefined) patch.toolCapabilities = input.toolCapabilities;
     if (input.enabled !== undefined) patch.enabled = input.enabled;
     if (input.apiKey !== undefined) {
       if (input.apiKey === null || input.apiKey === "") {
@@ -117,6 +124,7 @@ export class ProviderRepo {
       maxOutputTokens: p.maxOutputTokens ?? null,
       altEndpoints: p.altEndpoints ?? null,
       proxyId: p.proxyId ?? null,
+      toolCapabilities: p.toolCapabilities ?? null,
       enabled: p.enabled,
       createdAt: asMillis(p.createdAt),
     };

@@ -118,7 +118,9 @@ export async function boot(): Promise<Container> {
   const ssrf = new SsrfGuard({ allowPrivate: () => settings.allowPrivate(), allowlist: () => settings.allowlist() });
   const egressPool = new EgressProxyPool();
   const transport = new UpstreamClient(ssrf, egressPool);
-  const validator = new ServiceValidator(catalog, services);
+  const validator = new ServiceValidator(catalog, services, {
+    hasFreeform: (name) => Boolean(toolDefs.getByName(name, "freeform")),
+  });
   const activeRequests = new ActiveRequestRegistry();
   // The tool runtime is looked up per call rather than snapshotted, so adding or
   // editing a tool in the console takes effect on the next request instead of

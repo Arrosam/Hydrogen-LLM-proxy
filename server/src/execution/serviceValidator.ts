@@ -1,6 +1,6 @@
 import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
 import type { ServiceRepo } from "../persistence/serviceRepo";
-import { isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
+import { grantedToolNames, isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
 
 /**
  * Thrown when a definition is structurally valid (passes the zod schema) but
@@ -22,11 +22,29 @@ export class ServiceValidator {
   constructor(
     private readonly catalog: Catalog,
     private readonly services: ServiceRepo,
+    /** Optional so every existing construction site (and every test) keeps
+     * working unchanged; absent = grants are not checked. */
+    private readonly tools?: { hasFreeform(name: string): boolean },
   ) {}
 
   validate(raw: unknown): { def: ServiceDef; summary: string } {
     const def = parseService(raw); // throws ZodError on shape problems
     const invalidPairs: string[] = [];
+
+    // A grant naming no configured tool is inert at runtime (S2: nothing that
+    // cannot be served is ever offered), which is exactly why a typo has to be
+    // caught HERE. Left to run, it produces a service that silently grants
+    // nothing, and the only symptom is a capability the model never had. Same
+    // treatment as an unmapped (model, provider) pair below.
+    if (this.tools) {
+      const unknown = grantedToolNames(def).filter((n) => !this.tools!.hasFreeform(n));
+      if (unknown.length) {
+        throw new ServiceValidationError(
+          `unknown tool grant: ${unknown.map((n) => `"${n}"`).join(", ")}. A grant names a free-form tool configured in the Tools tab.`,
+          unknown,
+        );
+      }
+    }
 
     if (isAgent(def)) {
       const names = def.stages.map((s) => s.name);
