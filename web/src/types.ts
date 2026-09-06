@@ -283,6 +283,10 @@ export interface LogSummary {
   tokenId: number | null;
   serviceId: number | null;
   serviceName: string | null;
+  /** The model that actually answered. A different question from which service
+   * was requested, and the one asked first when one model misbehaves. */
+  servedModel: string | null;
+  servedProvider: string | null;
   ingressFormat: string;
   egressFormat: string | null;
   streaming: boolean;

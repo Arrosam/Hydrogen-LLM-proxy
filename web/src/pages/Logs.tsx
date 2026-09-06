@@ -217,6 +217,17 @@ export function Logs() {
   const [services, setServices] = useState<ModelService[]>([]);
   const [tokenId, setTokenId] = useState<number | "">("");
   const [tokens, setTokens] = useState<Token[]>([]);
+  const [servedModel, setServedModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  // `errorText` is what is being typed; `errorContains` is what the query uses.
+  // Kept apart so every keystroke does not re-run the query, and so the
+  // 5s auto-refresh cannot fire against a half-typed word.
+  const [errorText, setErrorText] = useState("");
+  const [errorContains, setErrorContains] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  /** Rows the operator ticked, held by log id so a selection survives paging. */
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<LogDetail | null>(null);
@@ -242,15 +253,33 @@ export function Logs() {
     // Only used to label and offer the filter; a caller who cannot list keys
     // simply gets the "all keys" option, same as the services fetch above.
     api.get<{ tokens: Token[] }>("/tokens").then((r) => setTokens(r.tokens)).catch(() => {});
+    api.get<{ models: string[] }>("/logs/models").then((r) => setModels(r.models)).catch(() => {});
   }, []);
+
+  /** Every filter, as query params. One builder so the export cannot select a
+   * different set of rows than the list it was launched from. */
+  const filterParams = useCallback(() => {
+    const params = new URLSearchParams();
+    if (errorsOnly) params.set("errorsOnly", "true");
+    if (serviceId !== "") params.set("serviceId", String(serviceId));
+    if (tokenId !== "") params.set("tokenId", String(tokenId));
+    if (servedModel) params.set("servedModel", servedModel);
+    if (errorContains) params.set("errorContains", errorContains);
+    // datetime-local has no zone; Date.parse reads it as local time, which is
+    // what the operator meant when they typed it.
+    const fromMs = from ? Date.parse(from) : NaN;
+    const toMs = to ? Date.parse(to) : NaN;
+    if (Number.isFinite(fromMs)) params.set("from", String(fromMs));
+    if (Number.isFinite(toMs)) params.set("to", String(toMs));
+    return params;
+  }, [errorsOnly, serviceId, tokenId, servedModel, errorContains, from, to]);
 
   const load = useCallback(
     (silent = false) => {
       if (!silent) setLoading(true);
-      const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
-      if (errorsOnly) params.set("errorsOnly", "true");
-      if (serviceId !== "") params.set("serviceId", String(serviceId));
-      if (tokenId !== "") params.set("tokenId", String(tokenId));
+      const params = filterParams();
+      params.set("limit", String(PAGE));
+      params.set("offset", String(offset));
       api
         .get<{ rows: LogSummary[]; total: number }>(`/logs?${params.toString()}`)
         .then((r) => {
@@ -263,8 +292,41 @@ export function Logs() {
           if (!silent) setLoading(false);
         });
     },
-    [offset, errorsOnly, serviceId, tokenId],
+    [offset, filterParams],
   );
+
+  /** Download the export. Chosen rows win over the filter when any are ticked;
+   * the button says which it will do. A plain navigation rather than a fetch:
+   * the response is a stream that can run to hundreds of MB, and handing it to
+   * the browser keeps it out of the tab's memory entirely. */
+  const exportLogs = () => {
+    const params = filterParams();
+    if (selected.size) params.set("ids", [...selected].join(","));
+    const a = document.createElement("a");
+    a.href = `/admin/api/logs/export?${params.toString()}`;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const toggleSelected = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const pageIds = rows.map((r) => r.id);
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const togglePage = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) for (const id of pageIds) next.delete(id);
+      else for (const id of pageIds) next.add(id);
+      return next;
+    });
 
   useEffect(() => {
     load();
@@ -335,6 +397,44 @@ export function Logs() {
             <option key={k.id} value={k.id}>{k.name} · {k.keyPrefix}</option>
           ))}
         </select>
+        <select
+          className="select w-auto"
+          value={servedModel}
+          onChange={(e) => {
+            setOffset(0);
+            setServedModel(e.target.value);
+          }}
+        >
+          <option value="">{t("logs.filter.allModels")}</option>
+          {models.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <input
+          className="input w-auto"
+          type="search"
+          placeholder={t("logs.filter.errorContains")}
+          value={errorText}
+          onChange={(e) => setErrorText(e.target.value)}
+          onBlur={() => { setOffset(0); setErrorContains(errorText); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { setOffset(0); setErrorContains(errorText); }
+          }}
+        />
+        <input
+          className="input w-auto"
+          type="datetime-local"
+          title={t("logs.filter.from")}
+          value={from}
+          onChange={(e) => { setOffset(0); setFrom(e.target.value); }}
+        />
+        <input
+          className="input w-auto"
+          type="datetime-local"
+          title={t("logs.filter.to")}
+          value={to}
+          onChange={(e) => { setOffset(0); setTo(e.target.value); }}
+        />
         <label className="flex items-center gap-2 text-sm text-ink-300">
           <input type="checkbox" checked={errorsOnly} onChange={(e) => { setOffset(0); setErrorsOnly(e.target.checked); }} />
           {t("logs.filter.errorsOnly")}
@@ -352,6 +452,25 @@ export function Logs() {
         )}
         <div className="flex-1" />
         <span className="text-xs text-ink-500">{formatNumber(total)} {t("logs.totalCount")}</span>
+        {selected.size > 0 && (
+          <button className="btn-ghost btn-xs" onClick={() => setSelected(new Set())}>
+            <i className="bi bi-x-circle" />
+            {t("logs.action.clearSelection", { n: formatNumber(selected.size) })}
+          </button>
+        )}
+        {user?.role === "admin" && (
+          <button
+            className="btn-ghost btn-xs"
+            onClick={exportLogs}
+            disabled={selected.size === 0 && total === 0}
+            title={t("logs.action.exportTitle")}
+          >
+            <i className="bi bi-download" />
+            {selected.size > 0
+              ? t("logs.action.exportSelected", { n: formatNumber(selected.size) })
+              : t("logs.action.exportMatching", { n: formatNumber(total) })}
+          </button>
+        )}
         {user?.role === "admin" && (
           <button className="btn-danger btn-xs" onClick={clearAll} disabled={clearing || total === 0} title={t("logs.action.clearAllTitle")}>
             <i className={`bi ${clearing ? "bi-arrow-repeat animate-spin" : "bi-trash3"}`} />
@@ -369,8 +488,19 @@ export function Logs() {
           <table className="table">
             <thead>
               <tr>
+                {user?.role === "admin" && (
+                  <th className="w-8">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      onChange={togglePage}
+                      title={t("logs.action.selectPage")}
+                    />
+                  </th>
+                )}
                 <th>{t("logs.table.time")}</th>
                 <th>{t("logs.table.service")}</th>
+                <th>{t("logs.table.model")}</th>
                 <th>{t("logs.table.route")}</th>
                 <th>{t("logs.table.status")}</th>
                 <th>{t("logs.table.tokens")}</th>
@@ -382,8 +512,15 @@ export function Logs() {
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="cursor-pointer" onClick={() => openDetail(r.id)}>
+                  {user?.role === "admin" && (
+                    // Ticking a row must not also open its detail panel.
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleSelected(r.id)} />
+                    </td>
+                  )}
                   <td className="whitespace-nowrap text-xs text-ink-400">{relativeTime(r.createdAt)}</td>
                   <td className="font-mono text-xs text-ink-200">{r.serviceName ?? serviceName(r.serviceId)}</td>
+                  <td className="font-mono text-xs text-ink-400">{r.servedModel ?? "-"}</td>
                   <td className="text-xs">
                     <span className="text-ink-300">{r.ingressFormat}</span>
                     <i className="bi bi-arrow-right mx-1 text-ink-600" />

@@ -4,8 +4,19 @@
     {
       "name": "hydrogen-preview",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["preview-server.cjs"],
+      "runtimeArgs": [
+        "preview-server.cjs"
+      ],
       "port": 8094
+    },
+    {
+      "name": "hydrogen-api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev:server"
+      ],
+      "port": 8080
     }
   ]
 }

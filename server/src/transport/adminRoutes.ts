@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import net from "node:net";
+import { Readable } from "node:stream";
 import { z, ZodError } from "zod";
 import { idParam, parse } from "../util/validate";
 import { asMillis } from "../util/time";
@@ -22,6 +23,7 @@ import { proxyRoutes } from "./proxyRoutes";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
+import type { LogQuery } from "../persistence/requestLogRepo";
 import type { ModelServiceRow } from "../db/schema";
 
 /** Registered by the app under the /admin/api prefix. */
@@ -716,19 +718,85 @@ function boolParam(v: unknown): boolean | undefined {
 // is an admin capability. Stats and active-request progress stay visible to
 // every dashboard user: they hold counters and metadata, not content.
 async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  /** The filter set the list and the export share, so an export cannot select a
+   * different set of rows than the list it was launched from. */
+  const filters = (q: Record<string, string>): LogQuery => ({
+    tokenId: numParam(q.tokenId),
+    serviceId: numParam(q.serviceId),
+    status: numParam(q.status),
+    errorsOnly: boolParam(q.errorsOnly),
+    from: numParam(q.from),
+    to: numParam(q.to),
+    servedModel: q.servedModel || undefined,
+    errorContains: q.errorContains || undefined,
+  });
+
   app.get("/logs", async (req, reply) => {
     if (!requireAdmin(req, reply, "view request logs")) return reply;
     const q = req.query as Record<string, string>;
-    return c.logs.query({
-      tokenId: numParam(q.tokenId),
-      serviceId: numParam(q.serviceId),
-      status: numParam(q.status),
-      errorsOnly: boolParam(q.errorsOnly),
-      from: numParam(q.from),
-      to: numParam(q.to),
-      limit: numParam(q.limit),
-      offset: numParam(q.offset),
-    });
+    return c.logs.query({ ...filters(q), limit: numParam(q.limit), offset: numParam(q.offset) });
+  });
+
+  /** Distinct models that have actually served a request — the served-model
+   * filter's dropdown. Registered before /logs/:id; Fastify prefers a static
+   * segment over a parametric one, so the order is clarity, not necessity. */
+  app.get("/logs/models", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view request logs")) return reply;
+    return { models: c.logs.distinctServedModels() };
+  });
+
+  /**
+   * Export matching logs as one downloaded JSON file, payloads included.
+   *
+   * Two ways to choose the rows, and they compose: the current filters, and an
+   * explicit `ids` list when the operator hand-picked rows in the list.
+   *
+   * The body is STREAMED. The envelope is opened by hand so `logs` can be
+   * written row by row instead of materialized as one array, which is what lets
+   * this have no row cap at all: memory stays flat at one page regardless of
+   * whether the filter matches six rows or sixty thousand. Capping would be the
+   * proxy overruling the operator; streaming removes the reason to.
+   *
+   * Nothing extra is redacted here. `serializeForLog` already replaced
+   * credential-named keys before the payload was ever stored, so an export
+   * cannot leak a key the log viewer would not already show.
+   */
+  app.get("/logs/export", async (req, reply) => {
+    if (!requireAdmin(req, reply, "export request logs")) return reply;
+    const q = req.query as Record<string, string>;
+    const ids = (q.ids ?? "")
+      .split(",")
+      .map((v) => Number(v.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    const query: LogQuery = { ...filters(q), ...(ids.length ? { ids } : {}) };
+    const count = c.logs.countMatching(query);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+    function* chunks(): Generator<string> {
+      const head = JSON.stringify(
+        {
+          exportedAt: new Date().toISOString(),
+          hydrogenVersion: APP_VERSION,
+          selection: { mode: ids.length ? "ids" : "filter", filters: query },
+          count,
+        },
+        null,
+        2,
+      );
+      // Drop the closing "\n}" so the array can stream in after it.
+      yield `${head.slice(0, -2)},\n  "logs": [`;
+      let first = true;
+      for (const row of c.logs.exportRows(query)) {
+        yield `${first ? "\n    " : ",\n    "}${JSON.stringify(row)}`;
+        first = false;
+      }
+      yield "\n  ]\n}\n";
+    }
+
+    return reply
+      .header("content-disposition", `attachment; filename="hydrogen-logs-${stamp}.json"`)
+      .type("application/json")
+      .send(Readable.from(chunks()));
   });
 
   app.get("/logs/:id", async (req, reply) => {

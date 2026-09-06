@@ -102,7 +102,6 @@ filter on the model that actually served the request, and no search on error tex
 
 ## Open
 
-- Does "select by dedicated entries" mean per-row checkboxes in the list, as
-  specified above, or entering log ids directly? Assumed checkboxes.
-- Should selection survive paging (tick rows on page 1, page to 2, export both)?
-  Assumed yes — selection is held by id, not by row position.
+None. Both prior questions were confirmed 2026-09-06: selection is **per-row
+checkboxes** in the list, and selection **survives paging** because it is held by
+log id rather than row position.
