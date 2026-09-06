@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { ContentPart, ReasoningPart, StopReason } from "./content";
+import type { ContentPart, ReasoningPart, StopReason, ToolUsePart } from "./content";
 import type { Usage } from "./usage";
 import type { ThinkingFormat } from "./thinkingFormat";
 import { genId, nowSeconds } from "../../util/ids";
@@ -41,7 +41,10 @@ export type StreamEvent =
   | { type: "reasoning_start"; id?: string; signature?: string; redacted?: boolean }
   | { type: "reasoning_delta"; text: string }
   | { type: "reasoning_stop"; id?: string; signature?: string; redacted?: boolean }
-  | { type: "tool_start"; index: number; id: string; name: string }
+  /** `extra` carries the wire fields the canonical tool call does not model
+   * (Responses `namespace`, `caller`); see ToolUsePart.extra. Optional, so a
+   * family with nothing to carry is unaffected. */
+  | { type: "tool_start"; index: number; id: string; name: string; extra?: ToolUsePart["extra"] }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -203,7 +206,7 @@ export async function collectStream(
   let stopReason: StopReason = null;
   let usage: Usage | undefined;
   let incomplete = false;
-  const toolByIndex = new Map<number, { id: string; name: string; args: string }>();
+  const toolByIndex = new Map<number, { id: string; name: string; args: string; extra?: ToolUsePart["extra"] }>();
   const toolOrder: number[] = [];
 
   for await (const ev of events) {
@@ -242,7 +245,7 @@ export async function collectStream(
         currentReasoning = null;
         break;
       case "tool_start":
-        toolByIndex.set(ev.index, { id: ev.id, name: ev.name, args: "" });
+        toolByIndex.set(ev.index, { id: ev.id, name: ev.name, args: "", extra: ev.extra });
         toolOrder.push(ev.index);
         break;
       case "tool_args_delta": {
@@ -266,7 +269,7 @@ export async function collectStream(
   if (text) content.push({ type: "text", text });
   for (const index of toolOrder) {
     const tc = toolByIndex.get(index)!;
-    content.push({ type: "tool_use", id: tc.id, name: tc.name, input: safeJsonParse(tc.args || "{}") });
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input: safeJsonParse(tc.args || "{}"), ...(tc.extra ? { extra: tc.extra } : {}) });
   }
 
   return {
@@ -360,7 +363,7 @@ export async function* fabricateStream(
       }
       yield { type: "reasoning_stop", id: p.itemId, signature: p.signature, ...(redacted ? { redacted: true } : {}) };
     } else if (p.type === "tool_use") {
-      yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
+      yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name, ...(p.extra ? { extra: p.extra } : {}) };
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };
       yield { type: "tool_stop", index: toolIndex };
       toolIndex++;

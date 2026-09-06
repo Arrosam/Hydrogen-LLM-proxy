@@ -115,6 +115,32 @@ function outputText(output: unknown): string {
   return textOf(contentToParts(output));
 }
 
+/** Everything a canonical `tool_use` part already models on a `function_call`
+ * item. Anything else the item carries is kept in {@link ToolUsePart.extra}. */
+const FUNCTION_CALL_MODELLED = new Set(["type", "id", "call_id", "name", "arguments", "status"]);
+
+/**
+ * The fields of `item` that `modelled` does not account for, or undefined when
+ * there are none.
+ *
+ * Deliberately a subtraction rather than an allowlist: `namespace` and `caller`
+ * are the two that exist today, but the point is that a field invented after
+ * this was written still survives a same-family round trip without anyone
+ * editing this file.
+ */
+function unmodelledFields(item: Record<string, unknown>, modelled: Set<string>): Record<string, unknown> | undefined {
+  let out: Record<string, unknown> | undefined;
+  for (const [k, v] of Object.entries(item)) {
+    if (modelled.has(k) || v === undefined) continue;
+    (out ??= {})[k] = v;
+  }
+  return out;
+}
+
+/** Item types this family parses into canonical parts. Anything else is kept
+ * whole as an opaque part so a same-family replay reproduces it exactly. */
+const MODELLED_ITEM_TYPES = new Set(["message", "function_call", "function_call_output", "reasoning"]);
+
 // --- tools ---------------------------------------------------------------
 
 function parseTools(raw: unknown): Tool[] | undefined {
@@ -311,9 +337,19 @@ export class OpenAIResponsesRequest extends Request {
             messages.push({ role: role === "assistant" ? "assistant" : "user", content: parts });
           }
         } else if (type === "function_call") {
+          // `namespace` (tool search) and `caller` (programmatic tool calling)
+          // ride in `extra`. Replaying a namespaced call without its namespace
+          // is a 400 -- "Missing namespace for function_call".
+          const extra = unmodelledFields(item, FUNCTION_CALL_MODELLED);
           messages.push({
             role: "assistant",
-            content: [{ type: "tool_use", id: String(item.call_id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) }],
+            content: [{
+              type: "tool_use",
+              id: String(item.call_id ?? genId("call")),
+              name: String(item.name ?? ""),
+              input: safeJsonParse(item.arguments),
+              ...(extra ? { extra: { family: "openai_responses" as const, fields: extra } } : {}),
+            }],
           });
         } else if (type === "function_call_output") {
           messages.push({
@@ -349,6 +385,16 @@ export class OpenAIResponsesRequest extends Request {
               }],
             });
           }
+        } else if (!MODELLED_ITEM_TYPES.has(String(type))) {
+          // Everything else this family can carry -- tool_search_call,
+          // tool_search_output, custom_tool_call, local_shell_call,
+          // image_generation_call, web_search_call, additional_tools,
+          // compaction, program, ... -- kept whole rather than dropped, so a
+          // same-family replay reproduces the conversation the client sent.
+          // Assistant-side by convention: normalizeMessages keeps it adjacent
+          // to the turn it belongs to, and the family gate on render means no
+          // other wire ever sees it.
+          messages.push({ role: "assistant", content: [{ type: "opaque", family: "openai_responses", value: item }] });
         }
       }
     }
@@ -389,10 +435,23 @@ export class OpenAIResponsesRequest extends Request {
         } else if (p.type === "file") {
           parts.push({ type: "input_file", ...(p.name ? { filename: p.name } : {}), ...inputFileRef(p.source) });
         } else if (p.type === "opaque") {
-          if (p.family === "openai_responses") parts.push(p.value as Record<string, unknown>);
+          // A Responses opaque part is a whole top-level INPUT ITEM, not a
+          // content part: this family only ever produces them for items it does
+          // not model (see MODELLED_ITEM_TYPES). Flush first so it lands in the
+          // conversation at the position it was parsed from.
+          if (p.family === "openai_responses") {
+            flushParts();
+            input.push(p.value as Record<string, unknown>);
+          }
         } else if (p.type === "tool_use") {
           flushParts();
-          input.push({ type: "function_call", call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
+          input.push({
+            type: "function_call",
+            call_id: p.id,
+            name: p.name,
+            arguments: JSON.stringify(p.input ?? {}),
+            ...(p.extra?.family === "openai_responses" ? p.extra.fields : {}),
+          });
         } else if (p.type === "tool_result") {
           flushParts();
           input.push({ type: "function_call_output", call_id: p.toolUseId, output: textOf(p.content) });
@@ -506,7 +565,20 @@ export class OpenAIResponsesResponse extends Response {
         if (text) content.push({ type: "text", text });
       } else if (item.type === "function_call") {
         sawToolCall = true;
-        content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) });
+        const extra = unmodelledFields(item, FUNCTION_CALL_MODELLED);
+        content.push({
+          type: "tool_use",
+          id: String(item.call_id ?? item.id ?? genId("call")),
+          name: String(item.name ?? ""),
+          input: safeJsonParse(item.arguments),
+          ...(extra ? { extra: { family: "openai_responses" as const, fields: extra } } : {}),
+        });
+      } else if (!MODELLED_ITEM_TYPES.has(String(item.type))) {
+        // web_search_call, image_generation_call, tool_search_call/_output,
+        // custom_tool_call, local_shell_call, program, ... — an upstream that
+        // ran a hosted tool reported it here, and a same-family client is
+        // entitled to see exactly what the upstream said.
+        content.push({ type: "opaque", family: "openai_responses", value: item });
       }
     }
 
@@ -565,7 +637,17 @@ export class OpenAIResponsesResponse extends Response {
 
     for (const p of this.content) {
       if (p.type === "tool_use") {
-        output.push({ type: "function_call", id: genId("fc"), call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}), status: "completed" });
+        output.push({
+          type: "function_call",
+          id: genId("fc"),
+          call_id: p.id,
+          name: p.name,
+          arguments: JSON.stringify(p.input ?? {}),
+          status: "completed",
+          ...(p.extra?.family === "openai_responses" ? p.extra.fields : {}),
+        });
+      } else if (p.type === "opaque" && p.family === "openai_responses") {
+        output.push(p.value as Record<string, unknown>);
       }
     }
 
@@ -643,7 +725,17 @@ export class OpenAIResponsesResponse extends Response {
             sawToolCall = true;
             const index = nextToolIndex++;
             toolIndexByItem.set(String(item.id ?? index), index);
-            yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
+            // `arguments` arrives via deltas, not on the opening item, so it is
+            // excluded here along with the rest of the modelled keys; what is
+            // left is `namespace` / `caller` and friends.
+            const extra = unmodelledFields(item, FUNCTION_CALL_MODELLED);
+            yield {
+              type: "tool_start",
+              index,
+              id: String(item.call_id ?? item.id ?? genId("call")),
+              name: String(item.name ?? ""),
+              ...(extra ? { extra: { family: "openai_responses" as const, fields: extra } } : {}),
+            };
           }
           break;
         }
@@ -742,7 +834,7 @@ export class OpenAIResponsesResponse extends Response {
     let reasoningId = "";
     let reasoningText: string | null = null;
     let reasoningSignature: string | undefined;
-    const tools = new Map<number, { itemId: string; callId: string; name: string; args: string; index: number }>();
+    const tools = new Map<number, { itemId: string; callId: string; name: string; args: string; index: number; extra?: Record<string, unknown> }>();
 
     function* openReasoning(itemId?: string): Generator<string> {
       reasoningId = itemId || genId("rs");
@@ -862,10 +954,13 @@ export class OpenAIResponsesResponse extends Response {
         case "tool_start": {
           yield* closeReasoning();
           yield* closeMessage();
-          const tc = { itemId: genId("fc"), callId: ev.id, name: ev.name, args: "", index: outputIndex };
+          // Same-family only: a `namespace` means nothing on another wire, and
+          // a client that sent one is owed it back on every item that carries it.
+          const tcExtra = ev.extra?.family === "openai_responses" ? ev.extra.fields : undefined;
+          const tc = { itemId: genId("fc"), callId: ev.id, name: ev.name, args: "", index: outputIndex, extra: tcExtra };
           tools.set(ev.index, tc);
           outputIndex++;
-          yield frame("response.output_item.added", { output_index: tc.index, item: { id: tc.itemId, type: "function_call", status: "in_progress", call_id: tc.callId, name: tc.name, arguments: "" } });
+          yield frame("response.output_item.added", { output_index: tc.index, item: { id: tc.itemId, type: "function_call", status: "in_progress", call_id: tc.callId, name: tc.name, arguments: "", ...(tc.extra ?? {}) } });
           break;
         }
         case "tool_args_delta": {
@@ -880,7 +975,7 @@ export class OpenAIResponsesResponse extends Response {
           const tc = tools.get(ev.index);
           if (tc) {
             tools.delete(ev.index);
-            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
+            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args, ...(tc.extra ?? {}) };
             yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
             yield frame("response.output_item.done", { output_index: tc.index, item });
             output.push(item);
@@ -894,7 +989,7 @@ export class OpenAIResponsesResponse extends Response {
           yield* closeReasoning();
           yield* closeMessage();
           for (const tc of tools.values()) {
-            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
+            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args, ...(tc.extra ?? {}) };
             yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
             yield frame("response.output_item.done", { output_index: tc.index, item });
             output.push(item);

@@ -56,6 +56,21 @@ export interface ToolUsePart {
   name: string;
   input: unknown;
   cacheControl?: unknown;
+  /**
+   * Wire fields this call carries that the canonical shape has nowhere to keep:
+   * `namespace` (Responses tool search), `caller` (programmatic tool calling),
+   * and whatever a vendor adds next.
+   *
+   * Dropping them is not cosmetic. A namespaced call replayed without its
+   * `namespace` is rejected with "Missing namespace for function_call", so a
+   * conversation that used one broke on its second turn.
+   *
+   * Family-tagged, like {@link Tool.raw}: a field that means something on one
+   * wire is never rendered onto another. Collected as "everything the canonical
+   * part does not already model", so a field invented after this was written
+   * survives a same-family round trip without a code change.
+   */
+  extra?: { family: "openai_completion" | "anthropic" | "openai_responses"; fields: Record<string, unknown> };
 }
 
 export interface ToolResultPart {
