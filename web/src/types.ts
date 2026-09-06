@@ -25,6 +25,9 @@ export interface Provider {
   createdAt: number;  altEndpoints?: Array<{ type: ProviderType; baseUrl: string }> | null;
   /** Egress proxy this provider's upstream traffic is routed through. */
   proxyId?: number | null;
+  /** Hosted tool types this provider serves NATIVELY. Null = undeclared, which
+   * is not the same as an empty list: undeclared means nothing is assumed. */
+  toolCapabilities?: string[] | null;
 }
 
 /**
@@ -82,6 +85,9 @@ export interface Mapping {
   modelId: number;
   providerId: number;
   upstreamModel: string;
+  /** Narrows the provider's declared tool capabilities to THIS model. Null =
+   * inherit the provider's list, as `families` inherits its endpoints. */
+  toolCapabilities?: string[] | null;
   priority: number;
   enabled: boolean;
 }
@@ -166,6 +172,9 @@ export interface ServiceSteps {
   steps: ServiceStep[];
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Free-form tools this grants, by name. A grant reaches a client that never
+   * asked for tools, so it can only name a free-form tool. */
+  grantTools?: string[];
 }
 
 // --- Agent (compositional Micro Agent) ---
@@ -206,6 +215,9 @@ export interface AgentStage {
   overrides?: Overrides;
   timeoutMs?: number;
   transitions?: AgentTransition[];
+  /** Free-form tools this grants, by name. A grant reaches a client that never
+   * asked for tools, so it can only name a free-form tool. */
+  grantTools?: string[];
 }
 
 export interface AgentAsr {
@@ -234,6 +246,9 @@ export interface AgentDef {
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Free-form tools this grants, by name. A grant reaches a client that never
+   * asked for tools, so it can only name a free-form tool. */
+  grantTools?: string[];
 }
 
 /** A service definition is either the resilience workflow or an agent. */
@@ -266,6 +281,8 @@ export interface Token {
   keyPrefix: string;
   ownerUserId: number | null;
   scopeServices: number[] | null;
+  /** Tool ids this key may cause to be dispatched; null/empty = all. */
+  scopeTools?: number[] | null;
   maxRequests: number | null;
   maxTokens: number | null;
   usedRequests: number;
@@ -363,4 +380,31 @@ export interface BenchMapping {
 export interface BenchTargets {
   services: BenchServiceInfo[];
   mappings: BenchMapping[];
+}
+
+/**
+ * A server-side tool: a pointer at an operator's own HTTP endpoint. Hydrogen
+ * implements none of them -- it declares the tool upstream, receives the model's
+ * call, POSTs it here, and feeds the result back.
+ */
+export interface Tool {
+  id: number;
+  name: string;
+  /** `vocabulary` answers a client that declared that hosted tool type;
+   * `freeform` is any name, declared as an ordinary function tool. Both may
+   * exist under one name -- the client's declaration shape picks between them. */
+  kind: "vocabulary" | "freeform";
+  description: string | null;
+  parameters: Record<string, unknown> | null;
+  /** Null for a non-admin: an endpoint URL can itself be the credential (a
+   * webhook path, or a key in the query string), so only an admin sees it. */
+  endpointUrl: string | null;
+  /** Header NAMES only; the values never leave the server. */
+  headerNames: string[];
+  policy: "prefer_provider" | "override";
+  maxUses: number;
+  timeoutMs: number;
+  proxyId: number | null;
+  enabled: boolean;
+  createdAt: number;
 }

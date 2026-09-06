@@ -43,8 +43,44 @@ const ToolCreate = z.object({
 
 const ToolUpdate = ToolCreate.partial();
 
+/**
+ * Services still granting `tool`, by name.
+ *
+ * Only a FREE-FORM tool can be granted (a grant reaches a client that asked for
+ * no tools, and a hosted one exists to answer a client that declared it), so a
+ * vocabulary row is never in use this way -- checking the name alone would
+ * refuse to delete a hosted `web_search` because an unrelated free-form tool of
+ * the same name happens to be granted.
+ */
+function grantHolders(c: Container, tool: { name: string; kind: string }): string[] {
+  if (tool.kind !== "freeform") return [];
+  return c.services
+    .list()
+    .filter((svc) => {
+      // A definition that no longer parses cannot be granting anything, and
+      // must not block an unrelated deletion.
+      try {
+        return grantedToolNames(parseService(svc.definition)).includes(tool.name);
+      } catch {
+        return false;
+      }
+    })
+    .map((svc) => svc.name);
+}
+
 export async function toolRoutes(app: FastifyInstance, c: Container): Promise<void> {
-  app.get("/", async () => ({ tools: c.toolDefs.list().map((t) => c.toolDefs.toPublic(t)) }));
+  app.get("/", async (req) => {
+    // A manager needs the list to render a grant picker, but an endpoint URL can
+    // itself be the credential (a webhook path, or a key in the query string).
+    // They get everything except where it points.
+    const admin = req.user?.role === "admin";
+    return {
+      tools: c.toolDefs.list().map((t) => {
+        const pub = c.toolDefs.toPublic(t);
+        return admin ? pub : { ...pub, endpointUrl: null };
+      }),
+    };
+  });
 
   app.post("/", async (req, reply) => {
     if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can create tools" });
@@ -73,6 +109,19 @@ export async function toolRoutes(app: FastifyInstance, c: Container): Promise<vo
     if (clash && clash.id !== id) {
       return reply.code(409).send({ error: `a ${kind} tool named "${name}" already exists` });
     }
+    // Renaming or re-kinding a granted tool walks around the delete guard: the
+    // grant still names the old string, resolves to nothing, and the model
+    // quietly loses the capability. Refuse it for the same reason deletion is
+    // refused, and name who still grants it.
+    if (name !== before.name || kind !== before.kind) {
+      const holders = grantHolders(c, before);
+      if (holders.length) {
+        return reply.code(409).send({
+          error: `tool "${before.name}" is still granted by ${holders.length} service(s): ${holders.join(", ")}. Remove the grant there first.`,
+          services: holders,
+        });
+      }
+    }
     const row = c.toolDefs.update(id, parsed.data);
     return { tool: row ? c.toolDefs.toPublic(row) : null };
   });
@@ -88,18 +137,7 @@ export async function toolRoutes(app: FastifyInstance, c: Container): Promise<vo
     // removing a tool that services still grant would turn "the model has this
     // capability" into "it quietly does not", which is the exact failure this
     // whole feature exists to stop. Name who still grants it instead.
-    const grantedBy = c.services
-      .list()
-      .filter((svc) => {
-        // A definition that no longer parses cannot be granting anything, and
-        // must not block an unrelated deletion.
-        try {
-          return grantedToolNames(parseService(svc.definition)).includes(row.name);
-        } catch {
-          return false;
-        }
-      })
-      .map((svc) => svc.name);
+    const grantedBy = grantHolders(c, row);
     if (grantedBy.length) {
       return reply.code(409).send({
         error: `tool "${row.name}" is still granted by ${grantedBy.length} service(s): ${grantedBy.join(", ")}. Remove the grant there first.`,
@@ -107,6 +145,10 @@ export async function toolRoutes(app: FastifyInstance, c: Container): Promise<vo
       });
     }
     c.toolDefs.delete(id);
+    // Drop the id from every key that scoped itself to it. A dangling id leaves
+    // a NON-EMPTY scope matching nothing, which denies every tool on that key
+    // silently -- the opposite of what the admin who scoped it intended.
+    c.tokens.dropToolFromScopes(id);
     return { ok: true };
   });
 }

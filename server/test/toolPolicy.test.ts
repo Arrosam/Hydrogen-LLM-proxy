@@ -289,3 +289,23 @@ describe("regressions", () => {
     expect(r.granted[0]!.tool.parameters).toEqual({});
   });
 });
+
+describe("mapping capability narrowing", () => {
+  it("treats an EMPTY mapping list as 'this model serves none', not as inherit", () => {
+    // null inherits the provider's list; [] is a real declaration. Treating both
+    // as falsy would hand a model the provider's whole list immediately after an
+    // operator declared that this particular model serves nothing.
+    expect(effectiveCapabilities(["web_search"], [])).toEqual([]);
+    expect(effectiveCapabilities(["web_search"], null)).toEqual(["web_search"]);
+  });
+
+  it("passes a hosted tool to the endpoint when the model was declared incapable", () => {
+    const r = resolveTools({
+      declared: RESPONSES_TOOLS,
+      capabilities: effectiveCapabilities(["web_search"], []),
+      lookup: lookupOf(entry({ id: 1, name: "web_search", kind: "vocabulary" })),
+    });
+    // Inheriting instead would have sent it upstream to a model that 400s on it.
+    expect(r.decisions.find((d) => d.tool.name === "web_search")!.outcome).toBe("dispatch");
+  });
+});

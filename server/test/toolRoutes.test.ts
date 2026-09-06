@@ -50,6 +50,12 @@ beforeAll(async () => {
   const { buildApp } = await import("../src/app");
   const c = await boot();
   await c.users.create({ username: "mgr", password: MANAGER_PASSWORD, role: "manager", enabled: true });
+  // A service is only saveable when its (model, provider) pair is mapped, and
+  // the grant guards below only mean anything once a service really grants a
+  // tool -- so the catalog is seeded rather than left empty.
+  const provider = c.providers.create({ name: "p", type: "openai_completion", baseUrl: "https://api.invalid/v1" });
+  const model = c.models.create({ name: "m" });
+  c.mappings.create({ modelId: model.id, providerId: provider.id, upstreamModel: "up-m" });
   sqlite = c.sqlite;
   app = await buildApp(c);
   adminCookie = await login("admin", ADMIN_PASSWORD);
@@ -124,18 +130,14 @@ describe("tool routes — deletion is refused while a service grants it", () => 
       name: "granting-service",
       steps: { kind: "model_service", timeoutMs: 30_000, steps: [{ model: "m", provider: "p" }], grantTools: ["check_inventory"] },
     });
-    // The step's (model, provider) pair is unmapped, so the service is rejected
-    // for that reason -- which still proves grant validation ran and passed.
-    expect([200, 201, 400]).toContain(svc.statusCode);
+    expect([200, 201]).toContain(svc.statusCode);
 
     const id = (JSON.parse((await req("GET", "/admin/api/tools", adminCookie)).body) as { tools: Array<{ id: number; name: string; kind: string }> })
       .tools.find((t) => t.name === "check_inventory")!.id;
 
-    if (svc.statusCode === 200 || svc.statusCode === 201) {
-      const refused = await req("DELETE", `/admin/api/tools/${id}`, adminCookie);
-      expect(refused.statusCode).toBe(409);
-      expect(refused.body).toContain("granting-service");
-    }
+    const refused = await req("DELETE", `/admin/api/tools/${id}`, adminCookie);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.body).toContain("granting-service");
   });
 
   it("rejects a service whose grant names no configured tool", async () => {
@@ -173,5 +175,69 @@ describe("provider capabilities and key tool scope round-trip", () => {
     const created = await req("POST", "/admin/api/tokens", adminCookie, { name: "scoped-key", scopeTools: [1, 2] });
     expect(created.statusCode).toBe(201);
     expect(JSON.parse(created.body).token.scopeTools).toEqual([1, 2]);
+  });
+});
+
+describe("tool routes — review regressions", () => {
+  it("refuses to rename a granted tool, not just to delete it", async () => {
+    // Renaming walks around the delete guard: the grant still names the old
+    // string, resolves to nothing, and the model quietly loses the capability.
+    const tools = (JSON.parse((await req("GET", "/admin/api/tools", adminCookie)).body) as { tools: Array<{ id: number; name: string; kind: string }> }).tools;
+    const granted = tools.find((t) => t.name === "check_inventory")!;
+    const renamed = await req("PATCH", `/admin/api/tools/${granted.id}`, adminCookie, { name: "check_stock" });
+    expect(renamed.statusCode).toBe(409);
+    expect(renamed.body).toContain("granting-service");
+
+    // Changing its kind does the same damage: grants only ever resolve freeform.
+    const rekinded = await req("PATCH", `/admin/api/tools/${granted.id}`, adminCookie, { kind: "vocabulary" });
+    expect(rekinded.statusCode).toBe(409);
+  });
+
+  it("lets an unrelated field on a granted tool still be edited", async () => {
+    const tools = (JSON.parse((await req("GET", "/admin/api/tools", adminCookie)).body) as { tools: Array<{ id: number; name: string }> }).tools;
+    const granted = tools.find((t) => t.name === "check_inventory")!;
+    expect((await req("PATCH", `/admin/api/tools/${granted.id}`, adminCookie, { maxUses: 3 })).statusCode).toBe(200);
+  });
+
+  it("does not block deleting a hosted tool because a free-form one shares its name", async () => {
+    // Only a free-form tool can be granted, so a vocabulary row of the same
+    // name is never in use that way.
+    await req("POST", "/admin/api/tools", adminCookie, { name: "shared_name", kind: "freeform", endpointUrl: "https://tools.invalid/a" });
+    await req("POST", "/admin/api/tools", adminCookie, { name: "shared_name", kind: "vocabulary", endpointUrl: "https://tools.invalid/b" });
+    const tools = (JSON.parse((await req("GET", "/admin/api/tools", adminCookie)).body) as { tools: Array<{ id: number; name: string; kind: string }> }).tools;
+    const hosted = tools.find((t) => t.name === "shared_name" && t.kind === "vocabulary")!;
+    expect((await req("DELETE", `/admin/api/tools/${hosted.id}`, adminCookie)).statusCode).toBe(200);
+  });
+
+  it("hides the endpoint URL from a manager, who still gets the rest", async () => {
+    // An endpoint URL can itself be the credential: a webhook path, or a key in
+    // the query string.
+    const listed = JSON.parse((await req("GET", "/admin/api/tools", managerCookie)).body) as { tools: Array<{ name: string; endpointUrl: string | null }> };
+    expect(listed.tools.length).toBeGreaterThan(0);
+    expect(listed.tools.every((t) => t.endpointUrl === null)).toBe(true);
+    expect(listed.tools.some((t) => t.name === "check_inventory")).toBe(true);
+  });
+
+  it("declares provider capabilities on UPDATE, not only on create", async () => {
+    const created = await req("POST", "/admin/api/providers", adminCookie, { name: "later-caps", type: "anthropic", baseUrl: "https://api3.invalid" });
+    const id = JSON.parse(created.body).provider.id as number;
+    const patched = await req("PATCH", `/admin/api/providers/${id}`, adminCookie, { toolCapabilities: ["web_search"] });
+    expect(patched.statusCode).toBe(200);
+    expect(JSON.parse(patched.body).provider.toolCapabilities).toEqual(["web_search"]);
+  });
+
+  it("prunes a deleted tool's id from every key that scoped itself to it", async () => {
+    const made = await req("POST", "/admin/api/tools", adminCookie, { name: "scoped_tool", endpointUrl: "https://tools.invalid/s" });
+    const toolId = JSON.parse(made.body).tool.id as number;
+    const key = await req("POST", "/admin/api/tokens", adminCookie, { name: "scoped-to-one", scopeTools: [toolId] });
+    const keyId = JSON.parse(key.body).token.id as number;
+
+    expect((await req("DELETE", `/admin/api/tools/${toolId}`, adminCookie)).statusCode).toBe(200);
+
+    // A dangling id would leave a NON-EMPTY scope matching nothing, which denies
+    // every tool on that key -- the opposite of what scoping to it meant.
+    const after = (JSON.parse((await req("GET", "/admin/api/tokens", adminCookie)).body) as { tokens: Array<{ id: number; scopeTools: number[] | null }> })
+      .tokens.find((t) => t.id === keyId)!;
+    expect(after.scopeTools).toBeNull();
   });
 });

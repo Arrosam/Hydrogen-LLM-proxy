@@ -21,10 +21,12 @@ import { SettingsRepo } from "../src/persistence/settingsRepo";
 import { RequestLogRepo, type LogInsert } from "../src/persistence/requestLogRepo";
 import { entrySize, ImageCacheRepo } from "../src/persistence/imageCacheRepo";
 import { BackupError, exportBackup, restoreBackup, type BackupPackage } from "../src/backup/archive";
+import { ToolRepo } from "../src/persistence/toolRepo";
 import { PassphraseError, openWithPassphrase, sealWithPassphrase } from "../src/security/passphrase";
 
 const KEY_A = Buffer.alloc(32, 7); // the instance that takes the backup
 const KEY_B = Buffer.alloc(32, 9); // a fresh install with its own master key
+const TOOL_HEADER = "Bearer tool-header-secret";
 const PASSPHRASE = "correct horse battery staple";
 const API_KEY = "sk-super-secret-provider-key";
 
@@ -70,6 +72,11 @@ function seed(i: Instance, masterKey: Buffer): void {
     name: "testG5",
     description: null,
     definition: { timeoutMs: 20_000, steps: [{ model: "qwen3.5", provider: "siliconflow" }] },
+  });
+  new ToolRepo(i.db, masterKey).create({
+    name: "check_inventory",
+    endpointUrl: "https://tools.invalid/inv",
+    headers: { Authorization: TOOL_HEADER },
   });
   settings.writeAllowlist(["10.0.0.0/8"]);
   settings.setUiLanguage("zh");
@@ -207,6 +214,24 @@ describe("restore onto a DIFFERENT master key", () => {
     const providers = new ProviderRepo(b.db, KEY_B);
     const restored = providers.getByName("siliconflow")!;
     expect(providers.toUpstream(restored).apiKey).toBe(API_KEY);
+  });
+
+  it("carries tools across, re-encrypting their headers under the new key", async () => {
+    // Without this the package restores a service whose grantTools names a tool
+    // that no longer exists: the grant is silently inert and the model loses the
+    // capability, which is exactly what the delete guard exists to prevent.
+    const pkg = await takeBackup(a, KEY_A);
+    await restoreBackup(b.sqlite, KEY_B, overTheWire(pkg), PASSPHRASE);
+
+    const tools = new ToolRepo(b.db, KEY_B);
+    const restored = tools.getByName("check_inventory", "freeform");
+    expect(restored, "the tool did not survive the backup").toBeDefined();
+    expect(tools.materialize(restored!).headers).toEqual({ Authorization: TOOL_HEADER });
+  });
+
+  it("never writes a tool header in the clear, even inside the package", async () => {
+    const pkg = await takeBackup(a, KEY_A);
+    expect(JSON.stringify(pkg.tables)).not.toContain(TOOL_HEADER);
   });
 
   it("keeps a keyless provider keyless", async () => {

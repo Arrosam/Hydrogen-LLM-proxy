@@ -260,6 +260,7 @@ const ProviderUpdate = z.object({
   maxOutputTokens: z.number().int().positive().nullable().optional(),
   /** Route this provider's upstream traffic through a saved proxy. null = direct. */
   proxyId: z.number().int().positive().nullable().optional(),
+  toolCapabilities: ToolCapabilitiesSchema,
   enabled: z.boolean().optional(),
   availableModels: AvailableModelsSchema,
 });

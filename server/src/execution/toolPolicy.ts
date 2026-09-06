@@ -46,7 +46,10 @@ export function effectiveCapabilities(
   // providers that serve them perfectly well -- a silent capability loss caused
   // by an unrelated setting.
   if (providerCaps == null) return null;
-  if (!mappingCaps) return [...providerCaps];
+  // `null` inherits; `[]` is a real declaration that this model serves none.
+  // Treating both as falsy would silently hand a model the provider's whole
+  // list right after an operator declared it serves nothing.
+  if (mappingCaps == null) return [...providerCaps];
   const narrow = new Set(mappingCaps);
   return providerCaps.filter((c) => narrow.has(c));
 }

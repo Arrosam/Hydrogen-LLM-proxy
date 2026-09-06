@@ -45,6 +45,22 @@ export class TokenRepo {
     private readonly masterKey: Buffer,
   ) {}
 
+  /**
+   * Remove a deleted tool's id from every key's scope.
+   *
+   * A scope is "all tools" only when it is empty, so a dangling id leaves a
+   * non-empty list that matches nothing and silently denies every tool on that
+   * key. Pruning keeps "scoped to exactly these" true as tools come and go.
+   */
+  dropToolFromScopes(toolId: number): void {
+    for (const t of this.list()) {
+      const scope = t.scopeTools;
+      if (!scope?.includes(toolId)) continue;
+      const next = scope.filter((id) => id !== toolId);
+      this.db.update(tokens).set({ scopeTools: next.length ? next : null }).where(eq(tokens.id, t.id)).run();
+    }
+  }
+
   toPublic(t: Token): PublicToken {
     return {
       id: t.id,

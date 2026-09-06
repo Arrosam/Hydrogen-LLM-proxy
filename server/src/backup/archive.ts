@@ -43,6 +43,9 @@ const TABLES = [
   // decorative: restore inserts in this order with foreign keys ON, so a
   // provider carrying a proxy_id would fail to insert if its proxy came later.
   "proxies",
+  // After `proxies`, which it references: restore inserts in this order with
+  // foreign keys ON, so a tool carrying a proxy_id needs its proxy first.
+  "tools",
   "providers",
   "provider_available_models",
   "models",
@@ -90,7 +93,9 @@ const CACHE_TABLES: ReadonlySet<string> = new Set(["image_cache"]);
  * any other configuration, but their absence is not an error. Without this,
  * adding a table would reject every backup anyone had already taken.
  */
-const POST_V1_TABLES: ReadonlySet<string> = new Set(["proxies"]);
+// `tools` joins them: a package written before the tools feature existed is
+// still valid, and must not be rejected for missing a table it never had.
+const POST_V1_TABLES: ReadonlySet<string> = new Set(["proxies", "tools"]);
 
 /** The configuration tables a valid package must carry (everything but history
  * and re-fetchable caches). A package missing any of these is rejected, so a
@@ -114,6 +119,10 @@ const PROXY_PASSWORD_COLUMNS = ["password_ciphertext", "password_iv", "password_
  * can be copied again): sealed as plaintext, re-encrypted under the target's
  * master key on restore. Hash-only tokens simply have nothing to seal. */
 const TOKEN_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
+
+/** And for a tool endpoint's request headers: same seal-and-rebuild, because
+ * ciphertext written under one master key is unreadable under the target's. */
+const TOOL_HEADER_COLUMNS = ["headers_ciphertext", "headers_iv", "headers_tag"] as const;
 
 /**
  * Settings keys that describe *this* database rather than its configuration, so
@@ -153,6 +162,8 @@ interface SecretPayload {
   tokenKeys?: { id: number; secret: string }[];
   /** Absent in packages written before egress proxies existed. */
   proxyPasswords?: { id: number; password: string }[];
+  /** A tool's request headers, as the JSON string they are stored as. */
+  toolHeaders?: { id: number; headers: string }[];
 }
 
 export class BackupError extends Error {
@@ -177,6 +188,7 @@ export async function exportBackup(
   const providerKeys: SecretPayload["providerKeys"] = [];
   const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
   const proxyPasswords: NonNullable<SecretPayload["proxyPasswords"]> = [];
+  const toolHeaders: NonNullable<SecretPayload["toolHeaders"]> = [];
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
@@ -210,6 +222,18 @@ export async function exportBackup(
       }
     }
 
+    if (table === "tools") {
+      for (const row of rows) {
+        const ciphertext = (row.headers_ciphertext as string | null) ?? null;
+        const iv = (row.headers_iv as string | null) ?? null;
+        const tag = (row.headers_tag as string | null) ?? null;
+        if (ciphertext && iv && tag) {
+          toolHeaders.push({ id: row.id as number, headers: decryptSecret({ ciphertext, iv, tag }, masterKey) });
+        }
+        for (const col of TOOL_HEADER_COLUMNS) delete row[col];
+      }
+    }
+
     if (table === "tokens") {
       for (const row of rows) {
         const ciphertext = (row.key_ciphertext as string | null) ?? null;
@@ -234,7 +258,7 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -305,6 +329,8 @@ export async function restoreBackup(
   // proxies password-less, which is exactly what the source instance had.
   const proxyPasswordById = new Map<number, string>();
   for (const { id, password } of secrets.proxyPasswords ?? []) proxyPasswordById.set(id, password);
+  const toolHeadersById = new Map<number, string>();
+  for (const { id, headers } of secrets.toolHeaders ?? []) toolHeadersById.set(id, headers);
 
   const restored: Record<string, number> = {};
 
@@ -354,6 +380,15 @@ export async function restoreBackup(
           values.password_ciphertext = blob?.ciphertext ?? null;
           values.password_iv = blob?.iv ?? null;
           values.password_tag = blob?.tag ?? null;
+        }
+
+        if (table === "tools") {
+          // Rebuild the endpoint headers under THIS instance's master key.
+          const headers = toolHeadersById.get(values.id as number);
+          const blob = headers != null ? encryptSecret(headers, masterKey) : null;
+          values.headers_ciphertext = blob?.ciphertext ?? null;
+          values.headers_iv = blob?.iv ?? null;
+          values.headers_tag = blob?.tag ?? null;
         }
 
         if (table === "tokens") {
