@@ -906,3 +906,24 @@ case of it. **Hydrogen touches a tool in exactly two situations:**
 In every other case the tool passes through untouched and the provider owns it.
 A tool that is neither servable by the provider nor configured is dropped and
 logged (S10).
+
+## S17. A client key scopes tools as well as services
+
+A key carries a tool allow/deny list alongside `scope_services_json`. An
+expensive tool can be withheld from one key that otherwise shares a Model Service
+with trusted callers, without duplicating the service.
+
+Cost, accepted: a tool can now be blocked in two places — the service grant and
+the key scope — so "why isn't this tool offered?" has two answers to check. The
+request log records which of the two dropped it (S10).
+
+## Remaining defaults — override any in one line
+
+| # | Default |
+|---|---|
+| E1 | **Endpoint credential**: an optional set of static headers per tool entry, encrypted under the master key like provider keys, and included in the sealed export. No OAuth, no refresh. |
+| E2 | **Endpoint timeout**: per entry, default 30s. On expiry the model gets an errored tool result (Behavior 6), not a failed turn. |
+| E3 | **Egress proxy**: a tool entry may be attached to a configured proxy, the same way a provider can. Default is a direct connection. |
+| E4 | **SSRF**: tool endpoint URLs go through the existing `ssrf.ts` guard, since the URL is operator-supplied but the request is caller-triggered. |
+| E5 | **Micro Agents**: each stage runs its own tool loop, with the tools visible to that stage (client ∪ agent ∪ stage ∪ invoked service). |
+| E6 | **Retries**: a failing endpoint is not retried. One dispatch, then the model is told. Retrying a possibly-non-idempotent operator endpoint is not Hydrogen's call to make. |
