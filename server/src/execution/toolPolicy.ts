@@ -39,11 +39,16 @@ export function hostedToolType(tool: Tool): string | undefined {
 export function effectiveCapabilities(
   providerCaps: string[] | null | undefined,
   mappingCaps: string[] | null | undefined,
-): string[] {
-  const declared = providerCaps ?? [];
-  if (!mappingCaps) return [...declared];
+): string[] | null {
+  // NULL means "the operator has not said", which is NOT the same as "serves
+  // nothing". Every provider row starts undeclared, so collapsing the two would
+  // make the first grant added to any service start stripping hosted tools from
+  // providers that serve them perfectly well -- a silent capability loss caused
+  // by an unrelated setting.
+  if (providerCaps == null) return null;
+  if (!mappingCaps) return [...providerCaps];
   const narrow = new Set(mappingCaps);
-  return declared.filter((c) => narrow.has(c));
+  return providerCaps.filter((c) => narrow.has(c));
 }
 
 export interface ToolLookup {
@@ -64,8 +69,9 @@ export interface ResolveToolsInput {
   declared?: Tool[];
   /** Free-form tool names granted by the service, agent and stage, unioned. */
   grants?: string[];
-  /** Hosted type strings the resolved provider serves for this model. */
-  capabilities?: string[];
+  /** Hosted type strings the resolved provider serves for this model. Null or
+   * absent = undeclared, so nothing is known and nothing is assumed. */
+  capabilities?: string[] | null;
   /** Configured entries. */
   lookup: ToolLookup;
   /** Tool ids this client key may cause to be dispatched. Null = no limit. */
@@ -101,6 +107,11 @@ function scopeAllows(entry: DispatchableTool, allowed: number[] | null | undefin
  * own endpoint to answer instead.
  */
 export function resolveTools(input: ResolveToolsInput): ResolvedTools {
+  // Undeclared capabilities: we cannot know whether the provider serves a hosted
+  // tool, so we do not act as if it does not. Passing through is what happened
+  // before this feature existed, and a wrong guess either strips a working tool
+  // or bills the operator for one the provider would have served free.
+  const unknownCapabilities = input.capabilities == null;
   const capabilities = new Set(input.capabilities ?? []);
   const decisions: ToolDecision[] = [];
   const dispatchable = new Map<string, DispatchableTool>();
@@ -123,7 +134,8 @@ export function resolveTools(input: ResolveToolsInput): ResolvedTools {
 
     const entry = input.lookup.find(hosted, "vocabulary");
     const allowed = entry ? scopeAllows(entry, input.allowedToolIds) : false;
-    const providerServes = capabilities.has(hosted);
+    // An undeclared provider is treated as serving it: see above.
+    const providerServes = unknownCapabilities || capabilities.has(hosted);
 
     if (entry && allowed && entry.policy === "override") {
       dispatch(tool, entry);
@@ -151,7 +163,12 @@ export function resolveTools(input: ResolveToolsInput): ResolvedTools {
     if (seen.has(name) || dispatchable.has(name)) continue;
     const entry = input.lookup.find(name, "freeform");
     if (!entry || !scopeAllows(entry, input.allowedToolIds)) continue;
-    const tool: Tool = { name, parameters: { type: "object", properties: {} } };
+    // Empty on purpose: no client declared this tool, so it has no schema of its
+    // own and the operator's entry is authoritative. A placeholder
+    // `{type:"object",properties:{}}` here has keys, so it would look like a real
+    // declaration and shadow the entry's schema, offering the model a tool it
+    // cannot call.
+    const tool: Tool = { name, parameters: {} };
     granted.push({ tool, entry });
     dispatchable.set(name, entry);
     seen.add(name);
@@ -160,14 +177,29 @@ export function resolveTools(input: ResolveToolsInput): ResolvedTools {
   return { decisions, granted, dispatchable };
 }
 
-/** The tools that actually go upstream: passed-through ones untouched, and
- * dispatched or granted ones as plain function declarations the model can call. */
-export function toolsForUpstream(resolved: ResolvedTools, describe: (entry: DispatchableTool) => Tool): Tool[] {
+/**
+ * The tools that actually go upstream: passed-through ones untouched, and
+ * dispatched or granted ones as plain function declarations the model can call.
+ *
+ * `describe` is handed the DECLARED tool as well as the entry, and the name it
+ * returns must be the one `dispatchable` is keyed by -- the model calls what it
+ * was shown, and the loop recognises the call by that name. Those two disagreed
+ * once: an Anthropic hosted tool is
+ * `{"type":"web_search_20250305","name":"web_search"}`, so the entry is keyed by
+ * the type string while the declared tool is named `web_search`. Declaring the
+ * entry's name while keying dispatch on the declared one meant the model called
+ * a tool the loop did not recognise, and every Anthropic hosted tool was handed
+ * to a client that had never asked for a function by that name.
+ */
+export function toolsForUpstream(
+  resolved: ResolvedTools,
+  describe: (entry: DispatchableTool, declared?: Tool) => Tool,
+): Tool[] {
   const out: Tool[] = [];
   for (const d of resolved.decisions) {
     if (d.outcome === "provider") out.push(d.tool);
-    else if (d.outcome === "dispatch") out.push(describe(d.entry));
+    else if (d.outcome === "dispatch") out.push(describe(d.entry, d.tool));
   }
-  for (const g of resolved.granted) out.push(describe(g.entry));
+  for (const g of resolved.granted) out.push(describe(g.entry, g.tool));
   return out;
 }

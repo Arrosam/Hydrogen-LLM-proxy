@@ -29,6 +29,17 @@ function mergeForwardHeaders(
   return { ...fwd.headers, ...base };
 }
 
+/**
+ * How many times the tool loop may ask the upstream again.
+ *
+ * Bounded separately from the per-tool `max_uses` and the budget's overall
+ * dispatch cap: those stop a tool RUNNING again, but a model that keeps calling
+ * an exhausted tool is told "out of uses" and calls again, and every refusal
+ * still costs a real upstream round trip. Measured at 200+ round trips for one
+ * client request before this existed.
+ */
+const MAX_TOOL_ROUNDS = 16;
+
 /** Resolve a possibly-live token rate (number | getter). Default 2000. */
 function resolveRate(r: number | (() => number) | undefined): number {
   if (r == null) return 2000;
@@ -150,7 +161,6 @@ export class ModelService {
       // Who serves each tool, against THIS provider's capabilities.
       let dispatchable: Map<string, DispatchableTool> | undefined;
       if (tools) {
-        const declaredByName = new Map((merged.tools ?? []).map((tool) => [tool.name, tool]));
         const resolved = resolveTools({
           declared: merged.tools,
           grants: tools.grants,
@@ -161,8 +171,21 @@ export class ModelService {
         for (const d of resolved.decisions) {
           if (d.outcome === "drop") prog?.record("llm", "tool.drop", `tool "${d.tool.name}" dropped: ${d.reason}`, { tool: d.tool.name });
         }
-        const upstreamTools = toolsForUpstream(resolved, (entry) => describeTool(entry, declaredByName.get(entry.name)));
+        const upstreamTools = toolsForUpstream(resolved, describeTool);
         merged = merged.withTools(upstreamTools.length ? upstreamTools : undefined);
+        // A tool_choice that names a tool we just dropped -- or any choice at all
+        // once nothing is left -- is a guaranteed upstream 400. Clearing it is
+        // part of the same drop, not a second rewrite: the caller's instruction
+        // became unsatisfiable when its subject went away, and it is logged.
+        const choice = merged.toolChoice;
+        const gone =
+          choice != null &&
+          ((upstreamTools.length === 0 && choice.type !== "none") ||
+            (choice.type === "tool" && !upstreamTools.some((tool) => tool.name === choice.name)));
+        if (gone) {
+          prog?.record("llm", "tool.choice", `tool_choice dropped: the tool it required is not available on ${t.providerName}`);
+          merged = merged.withToolChoice(undefined);
+        }
         dispatchable = resolved.dispatchable;
       }
 
@@ -243,8 +266,13 @@ export class ModelService {
     const path: unknown[] = [];
     let convo = request;
     let usage: Usage = ZERO_USAGE;
+    // The budget is shared across a Micro Agent's stages, so its running total is
+    // not this invocation's count. Reporting the total on every stage and then
+    // letting the agent SUM the stages counted 3 real dispatches as 6.
+    const dispatchesBefore = budget.dispatches;
+    const spent = (): number => budget.dispatches - dispatchesBefore;
 
-    for (;;) {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const inv = await this.runChain(convo, overrides, opts, tools);
       path.push(...(Array.isArray(inv.attemptPath) ? inv.attemptPath : [inv.attemptPath]));
       if (!inv.result.ok) return { result: inv.result, attemptPath: path, attempts: path.length };
@@ -256,7 +284,7 @@ export class ModelService {
       if (!shouldContinue(split)) {
         // Done. The client's copy reports what the WHOLE turn cost, the way a
         // provider running its own tool loop inside one request does (S14).
-        const total: Usage = { ...usage, ...(budget.dispatches ? { toolDispatches: budget.dispatches } : {}) };
+        const total: Usage = { ...usage, ...(spent() ? { toolDispatches: spent() } : {}) };
         const response = buildResponse(v.response.family, { ...v.response.data(), usage: total });
         return {
           result: { ok: true, value: { ...v, response } },
@@ -283,6 +311,21 @@ export class ModelService {
       }
       convo = appendToolTurn(convo, v.response, results);
     }
+
+    // Out of rounds with the model still calling tools. One last pass with
+    // nothing dispatchable, so it answers with what it has rather than the
+    // client receiving a tool call it never asked for and cannot run.
+    prog?.record("llm", "tool.rounds", `tool loop stopped after ${MAX_TOOL_ROUNDS} rounds`);
+    const final = await this.runChain(convo, overrides, opts, null);
+    path.push(...(Array.isArray(final.attemptPath) ? final.attemptPath : [final.attemptPath]));
+    if (!final.result.ok) return { result: final.result, attemptPath: path, attempts: path.length };
+    const fv = final.result.value;
+    const finalUsage: Usage = { ...addUsage(usage, fv.response.usage), ...(spent() ? { toolDispatches: spent() } : {}) };
+    return {
+      result: { ok: true, value: { ...fv, response: buildResponse(fv.response.family, { ...fv.response.data(), usage: finalUsage }) } },
+      attemptPath: path,
+      attempts: path.length,
+    };
   }
 
   /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by

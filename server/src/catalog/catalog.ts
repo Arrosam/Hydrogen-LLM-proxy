@@ -32,8 +32,9 @@ export interface ResolvedTarget {
   upstream: UpstreamProvider;
   /** Hosted tool types this provider serves natively FOR THIS MODEL: the
    * provider's declaration, narrowed by the mapping's. Resolved here because it
-   * is a property of the (model, provider) pair, exactly like upstreamModel. */
-  toolCapabilities: string[];
+   * is a property of the (model, provider) pair, exactly like upstreamModel.
+   * Null = the operator has not declared any, which is not the same as none. */
+  toolCapabilities: string[] | null;
 }
 
 export type MappingResolutionError =

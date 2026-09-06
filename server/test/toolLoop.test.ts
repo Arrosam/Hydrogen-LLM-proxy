@@ -10,13 +10,14 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import "../src/core/format";
-import { OpenAICompletionRequest } from "../src/core/format";
+import { OpenAICompletionRequest, parseRequest } from "../src/core/format";
 import { ModelService, type ServiceDeps } from "../src/execution/modelService";
 import type { Catalog } from "../src/catalog/catalog";
 import type { Family } from "../src/core/format/family";
 import type { Transport, TransportJsonResult } from "../src/core/upstream/transport";
 import type { DispatchableTool } from "../src/persistence/toolRepo";
-import type { ToolRuntime } from "../src/execution/toolLoop";
+import { mayDispatch, type ToolRuntime } from "../src/execution/toolLoop";
+import { DispatchBudget } from "../src/execution/toolDispatch";
 
 const UPSTREAM = "http://upstream";
 const TOOL_URL = "https://tools.invalid/inv";
@@ -38,12 +39,12 @@ function entry(over: Partial<DispatchableTool> = {}): DispatchableTool {
   };
 }
 
-function fakeCatalog(capabilities: string[] = []): Catalog {
+function fakeCatalog(capabilities: string[] = [], family: Family = "openai_completion"): Catalog {
   return {
     resolve: (model: string, provider: string) => ({
       ok: true,
       target: {
-        family: "openai_completion" as Family,
+        family,
         upstreamModel: `up-${model}`,
         url: `${UPSTREAM}/${provider}`,
         headers: {},
@@ -308,5 +309,149 @@ describe("tool loop — provider capability", () => {
     // declaration and not a function tool Hydrogen would have to serve.
     expect(JSON.stringify(h.upstream[0])).toContain('"type":"web_search"');
     expect(h.toolCalls).toHaveLength(0);
+  });
+});
+
+describe("tool loop — regressions", () => {
+  /**
+   * An Anthropic hosted tool is `{"type":"web_search_20250305","name":"web_search"}`,
+   * so the config entry is keyed by the TYPE string (S9) while the declared tool
+   * is named `web_search`. Declaring the entry's name while keying dispatch on
+   * the declared one meant the model called a tool the loop did not recognise:
+   * every Anthropic hosted tool was handed to a client that had never asked for
+   * a function by that name, and nothing was ever dispatched.
+   */
+  it("declares and dispatches a hosted tool under one name, even when type != name", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const toolHits: unknown[] = [];
+    const postJson = vi.fn(async (url: string, _h: unknown, body: unknown): Promise<TransportJsonResult> => {
+      if (url === TOOL_URL) {
+        toolHits.push(body);
+        return { status: 200, headers: {}, json: { output: "results" }, text: "" };
+      }
+      upstream.push(body as Record<string, unknown>);
+      if (upstream.length === 1) {
+        // Call whatever was actually declared, as a real model would.
+        const declared = (body as { tools?: Array<{ name: string }> }).tools ?? [];
+        return {
+          status: 200, headers: {}, text: "",
+          json: { id: "m", model: "up", role: "assistant", stop_reason: "tool_use",
+            content: [{ type: "tool_use", id: "c1", name: declared[0]?.name ?? "(none)", input: { query: "x" } }],
+            usage: { input_tokens: 1, output_tokens: 1 } },
+        };
+      }
+      return {
+        status: 200, headers: {}, text: "",
+        json: { id: "m", model: "up", role: "assistant", stop_reason: "end_turn",
+          content: [{ type: "text", text: "final answer" }], usage: { input_tokens: 1, output_tokens: 1 } },
+      };
+    });
+    const transport = { postJson } as unknown as Transport;
+    const runtime: ToolRuntime = {
+      lookup: { find: (n, k) => (n === "web_search_20250305" && k === "vocabulary" ? entry({ id: 2, name: "web_search_20250305", kind: "vocabulary" }) : undefined) },
+      dispatch: { transport },
+    };
+    const deps: ServiceDeps = { catalog: fakeCatalog([], "anthropic"), transport, tools: runtime };
+    const request = parseRequest("anthropic", {
+      model: "svc", max_tokens: 64,
+      messages: [{ role: "user", content: "search please" }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+    });
+
+    const inv = await new ModelService({ timeoutMs: 5_000, steps: [{ model: "m", provider: "p" }] }, deps).invoke(request);
+
+    expect(toolHits).toHaveLength(1);
+    expect(inv.result.ok).toBe(true);
+    if (inv.result.ok) expect(inv.result.value.response.text()).toBe("final answer");
+  });
+
+  /**
+   * The dispatch budget stops a tool RUNNING again, but a model that keeps
+   * asking for an exhausted tool is told "out of uses" and asks again -- and
+   * each refusal still costs a real upstream call. Measured at 200+ round trips
+   * for a single client request before rounds were bounded separately.
+   */
+  it("terminates when the model keeps calling a tool whose budget is spent", async () => {
+    let rounds = 0;
+    const postJson = vi.fn(async (url: string): Promise<TransportJsonResult> => {
+      if (url === TOOL_URL) return { status: 200, headers: {}, json: { output: "ok" }, text: "" };
+      rounds++;
+      if (rounds > 100) throw new Error("runaway tool loop");
+      return {
+        status: 200, headers: {}, text: "",
+        json: { id: "m", model: "up", role: "assistant", stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: `c${rounds}`, name: "check_inventory", input: {} }],
+          usage: { input_tokens: 1, output_tokens: 1 } },
+      };
+    });
+    const transport = { postJson } as unknown as Transport;
+    const runtime: ToolRuntime = {
+      lookup: { find: (n, k) => (n === "check_inventory" && k === "freeform" ? entry({ maxUses: 2 }) : undefined) },
+      dispatch: { transport },
+    };
+    const deps: ServiceDeps = { catalog: fakeCatalog([], "anthropic"), transport, tools: runtime };
+    const request = parseRequest("anthropic", { model: "svc", max_tokens: 64, messages: [{ role: "user", content: "go" }] });
+
+    const inv = await new ModelService({ timeoutMs: 5_000, steps: [{ model: "m", provider: "p" }], grantTools: ["check_inventory"] }, deps).invoke(request);
+
+    expect(rounds).toBeLessThan(30);
+    expect(inv.result.ok).toBe(true);
+  }, 30_000);
+});
+
+describe("tool loop — more regressions", () => {
+  it("reports only ITS OWN dispatches when a budget is shared", async () => {
+    // A Micro Agent shares one budget across stages and then SUMS the stage
+    // usages. Reporting the budget's running total on each stage counted three
+    // real dispatches as six.
+    const shared = new DispatchBudget();
+    const svc = () => new ModelService(oneStep, harness({ upstreamReplies: [callsTool("check_inventory", {}), saysText("ok")] }).deps);
+
+    const first = await svc().invoke(req(), undefined, { dispatchBudget: shared });
+    const second = await svc().invoke(req(), undefined, { dispatchBudget: shared });
+
+    expect(first.result.ok && first.result.value.response.usage.toolDispatches).toBe(1);
+    // The budget has now seen two dispatches, but this invocation made one.
+    expect(second.result.ok && second.result.value.response.usage.toolDispatches).toBe(1);
+    expect(shared.dispatches).toBe(2);
+  });
+
+  it("clears a tool_choice whose tool was dropped", async () => {
+    // tools and tool_choice are rendered independently, so a forced choice left
+    // behind after its tool was stripped is a guaranteed upstream 400.
+    const h = harness({ upstreamReplies: [saysText("answer")] });
+    const request = parseRequest("openai_completion", {
+      model: "svc",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "gone", parameters: { type: "object" } } }],
+      tool_choice: { type: "function", function: { name: "gone" } },
+    });
+    // A grant exists so the loop engages, but nothing resolves for "gone".
+    const deps: ServiceDeps = {
+      ...h.deps,
+      tools: { lookup: { find: (n, k) => (n === "check_inventory" && k === "freeform" ? entry() : undefined) }, dispatch: { transport: h.deps.transport } },
+    };
+    await new ModelService(oneStep, deps).invoke(request);
+
+    const sent = h.upstream[0] as { tools?: unknown[]; tool_choice?: unknown };
+    // "gone" is the client's own function tool, so it survives...
+    expect((sent.tools as Array<{ function: { name: string } }>).some((t) => t.function.name === "gone")).toBe(true);
+    // ...and the choice naming it is therefore still valid.
+    expect(sent.tool_choice).toBeDefined();
+  });
+
+  it("does not engage for a grant whose tool row is gone", () => {
+    // A name left in a service definition after its row was deleted or disabled
+    // would otherwise force the buffered path on EVERY request -- costing first
+    // token latency for a tool that is never offered, with nothing in the logs
+    // pointing at the stale name.
+    const none: ToolRuntime = { lookup: { find: () => undefined }, dispatch: { transport: null as never } };
+    expect(mayDispatch(req(), ["deleted_tool"], none)).toBe(false);
+
+    const present: ToolRuntime = {
+      lookup: { find: (n, k) => (n === "check_inventory" && k === "freeform" ? entry() : undefined) },
+      dispatch: { transport: null as never },
+    };
+    expect(mayDispatch(req(), ["check_inventory"], present)).toBe(true);
   });
 });

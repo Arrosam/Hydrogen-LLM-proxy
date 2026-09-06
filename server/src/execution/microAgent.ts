@@ -218,7 +218,7 @@ export class MicroAgent extends ModelService {
           const byHash = new Map(known);
           if (pending.length > 0) {
             const ocrReq = buildOcrRequest(request, pending.map((p) => p.image), ocr);
-            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog);
+            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, stageToolOpts({}));
             calls.push(call);
             if (!result.ok) {
               prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);

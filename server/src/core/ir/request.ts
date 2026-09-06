@@ -135,6 +135,12 @@ export abstract class Request implements RequestData {
     return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), tools });
   }
 
+  /** A copy with a different (or no) tool choice. Used when the tool a forced
+   * choice named is no longer on the request. */
+  withToolChoice(toolChoice: ToolChoice | undefined): this {
+    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), toolChoice });
+  }
+
   /** Force the transport mode (a Micro Agent sets stream:false for internal calls). */
   withStream(stream: boolean): this {
     if (stream === this.stream) return this;

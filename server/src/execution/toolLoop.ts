@@ -39,7 +39,11 @@ export function describeTool(entry: DispatchableTool, declared?: Tool): Tool {
 /** True when this request could dispatch anything, so the loop is worth running. */
 export function mayDispatch(request: Request, grants: readonly string[], runtime: ToolRuntime | null | undefined): boolean {
   if (!runtime) return false;
-  if (grants.length > 0) return true;
+  // Each grant is checked against the configured entries rather than trusted on
+  // name alone: a name left in a service definition after its tool row was
+  // deleted or disabled would otherwise keep forcing the buffered path, costing
+  // every request its first-token latency for a tool that is never offered.
+  for (const name of grants) if (runtime.lookup.find(name, "freeform")) return true;
   for (const tool of request.tools ?? []) {
     const hosted = hostedToolType(tool);
     if (hosted ? runtime.lookup.find(hosted, "vocabulary") : runtime.lookup.find(tool.name, "freeform")) return true;

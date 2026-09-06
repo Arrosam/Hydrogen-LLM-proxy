@@ -81,8 +81,14 @@ describe("effectiveCapabilities", () => {
     expect(effectiveCapabilities(["web_search"], ["web_search", "code_interpreter"])).toEqual(["web_search"]);
   });
 
-  it("treats an undeclared provider as serving nothing", () => {
-    expect(effectiveCapabilities(null, null)).toEqual([]);
+  it("reports an undeclared provider as UNKNOWN, not as serving nothing", () => {
+    // Every provider row starts undeclared. Collapsing "not said" into "none"
+    // would make the first grant added to any service start stripping hosted
+    // tools from providers that serve them perfectly well.
+    expect(effectiveCapabilities(null, null)).toBeNull();
+    expect(effectiveCapabilities(undefined, ["web_search"])).toBeNull();
+    // An explicit empty list still means "serves none".
+    expect(effectiveCapabilities([], null)).toEqual([]);
   });
 });
 
@@ -243,5 +249,43 @@ describe("client key tool scope", () => {
       allowedToolIds: [1],
     });
     expect(r.granted).toEqual([]);
+  });
+});
+
+describe("regressions", () => {
+  it("passes a hosted tool through when capabilities were never declared", () => {
+    // Undeclared is not "serves nothing". Before this, adding an unrelated grant
+    // to a service made every request through it strip the client's hosted tool
+    // from a provider that would have served it.
+    const r = resolveTools({ declared: RESPONSES_TOOLS, capabilities: null, lookup: NO_TOOLS });
+    expect(r.decisions.find((d) => d.tool.name === "web_search")!.outcome).toBe("provider");
+  });
+
+  it("does not bill the operator for a tool the provider might serve", () => {
+    // With capabilities unknown and a prefer_provider entry configured, the
+    // provider keeps the tool: dispatching would spend money on a capability
+    // that may already be included.
+    const r = resolveTools({
+      declared: RESPONSES_TOOLS,
+      capabilities: null,
+      lookup: lookupOf(entry({ id: 1, name: "web_search", kind: "vocabulary" })),
+    });
+    expect(r.decisions.find((d) => d.tool.name === "web_search")!.outcome).toBe("provider");
+  });
+
+  it("still honours an explicit override when capabilities are unknown", () => {
+    const r = resolveTools({
+      declared: RESPONSES_TOOLS,
+      capabilities: null,
+      lookup: lookupOf(entry({ id: 1, name: "web_search", kind: "vocabulary", policy: "override" })),
+    });
+    expect(r.decisions.find((d) => d.tool.name === "web_search")!.outcome).toBe("dispatch");
+  });
+
+  it("gives a granted tool no schema of its own, so the entry's is used", () => {
+    // A placeholder {type:"object",properties:{}} has keys, so it would look
+    // like a real client declaration and shadow the operator's real schema.
+    const r = resolveTools({ grants: ["check_inventory"], lookup: lookupOf(entry({ id: 7, name: "check_inventory" })) });
+    expect(r.granted[0]!.tool.parameters).toEqual({});
   });
 });
