@@ -697,3 +697,24 @@ client executes them, so they are out of scope entirely.
 - What a client sees for a **Path B** tool. Path A is settled (native shape);
   Path B is not.
 - What happens when an operator names a free-form tool `web_search`.
+
+## S9. One config entry per exact tool type string
+
+No alias table, no canonical identity. An operator configures
+`web_search_20250305` and `web_search_20260209` and `web_search` as separate
+entries, each with its own endpoint. Explicit, inspectable, and version-specific
+behaviour is expressible — the `_20260209` Anthropic variants carry built-in
+dynamic filtering the older ones do not, so treating them as one tool would be a
+lie.
+
+Two costs, accepted:
+
+- The same endpoint is pasted once per type string an operator wants to serve.
+- **A client declaring a type string nobody configured is served by nobody.**
+  Hydrogen has no entry, so it cannot execute the tool; if the provider cannot
+  serve it either, the tool is lost and the agent hits the exact error this
+  feature exists to prevent. A new provider tool version therefore needs an
+  operator to add an entry, not just a Hydrogen release.
+
+What Hydrogen should *do* in that case — drop it silently as today, or refuse
+the request loudly — is decided in S10.
