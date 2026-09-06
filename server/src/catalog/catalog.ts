@@ -10,6 +10,7 @@ import type { ModelRepo } from "../persistence/modelRepo";
 import type { ProviderRepo } from "../persistence/providerRepo";
 import type { MappingRepo } from "../persistence/mappingRepo";
 import type { Model, ModelProvider as Mapping, Provider } from "../db/schema";
+import { effectiveCapabilities } from "../execution/toolPolicy";
 
 /** A resolved upstream target: everything a send needs to reach one provider. */
 export interface ResolvedTarget {
@@ -29,6 +30,10 @@ export interface ResolvedTarget {
   endpointIndex: number;
   /** The materialized provider (for media passthrough / model listing). */
   upstream: UpstreamProvider;
+  /** Hosted tool types this provider serves natively FOR THIS MODEL: the
+   * provider's declaration, narrowed by the mapping's. Resolved here because it
+   * is a property of the (model, provider) pair, exactly like upstreamModel. */
+  toolCapabilities: string[];
 }
 
 export type MappingResolutionError =
@@ -182,6 +187,7 @@ export class Catalog {
       providerId: provider.id,
       endpointIndex: chosen.index,
       upstream,
+      toolCapabilities: effectiveCapabilities(provider.toolCapabilities, mapping.toolCapabilities),
     };
   }
 }

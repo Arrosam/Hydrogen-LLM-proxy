@@ -30,6 +30,7 @@ import { UsageMeter } from "../observability/usageMeter";
 import { ActiveRequestRegistry } from "../observability/activeRequests";
 import { UpdateService } from "../update/updateService";
 import { ToolRepo } from "../persistence/toolRepo";
+import type { ToolRuntime } from "../execution/toolLoop";
 import { ProxyRepo } from "../persistence/proxyRepo";
 import { EgressProxyPool } from "../core/upstream/egress/pool";
 
@@ -119,9 +120,28 @@ export async function boot(): Promise<Container> {
   const transport = new UpstreamClient(ssrf, egressPool);
   const validator = new ServiceValidator(catalog, services);
   const activeRequests = new ActiveRequestRegistry();
+  // The tool runtime is looked up per call rather than snapshotted, so adding or
+  // editing a tool in the console takes effect on the next request instead of
+  // whenever the process happens to restart. Disabled rows are invisible, which
+  // is how a tool stops being offered without being deleted (S2).
+  const toolRuntime: ToolRuntime = {
+    lookup: {
+      find: (name, kind) => {
+        const row = toolDefs.getByName(name, kind);
+        return row?.enabled ? toolDefs.materialize(row) : undefined;
+      },
+    },
+    dispatch: {
+      transport,
+      resolveProxy: (id) => {
+        const row = proxies.get(id);
+        return row?.enabled ? proxies.toEgress(row) : null;
+      },
+    },
+  };
   const factory = new ServiceFactory(
     services,
-    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes() },
+    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes(), tools: toolRuntime },
     () => settings.logPayloadMaxChars(),
     new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
   );

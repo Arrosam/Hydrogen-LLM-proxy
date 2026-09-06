@@ -46,6 +46,9 @@ export interface DispatchableTool {
   id: number;
   name: string;
   kind: ToolKind;
+  /** Shown to the model when this tool is declared upstream. */
+  description: string | null;
+  parameters: Record<string, unknown> | null;
   endpointUrl: string;
   headers: Record<string, string>;
   policy: ToolPolicy;
@@ -170,6 +173,8 @@ export class ToolRepo {
       id: row.id,
       name: row.name,
       kind: row.kind,
+      description: row.description,
+      parameters: row.parameters,
       endpointUrl: row.endpointUrl,
       headers: decryptToolHeaders(row, this.masterKey),
       policy: row.policy,

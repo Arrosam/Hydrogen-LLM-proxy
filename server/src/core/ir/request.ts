@@ -122,6 +122,19 @@ export abstract class Request implements RequestData {
     return new (this.constructor as new (d: RequestData) => this)(next);
   }
 
+  /** A copy carrying a different conversation, same family and params. Used by
+   * the tool loop to append the assistant turn and its tool results before
+   * asking again. */
+  withMessages(messages: Message[]): this {
+    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), messages });
+  }
+
+  /** A copy whose declared tools are the upstream-facing set: passed-through
+   * ones untouched, dispatched and granted ones as plain functions. */
+  withTools(tools: Tool[] | undefined): this {
+    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), tools });
+  }
+
   /** Force the transport mode (a Micro Agent sets stream:false for internal calls). */
   withStream(stream: boolean): this {
     if (stream === this.stream) return this;

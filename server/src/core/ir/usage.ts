@@ -35,6 +35,16 @@ export interface Usage {
   cacheCreationInputTokens?: number;
   /** Reasoning/thinking tokens inside the completion (OpenAI reasoning_tokens). */
   reasoningTokens?: number;
+  /**
+   * Server-side tool calls Hydrogen dispatched for this request.
+   *
+   * Counted separately from tokens because that is how a real provider bills
+   * one: Anthropic reports `server_tool_use.web_search_requests` alongside the
+   * token counts and charges per search on top of them. An operator whose tool
+   * endpoint bills per call needs the same number, and it cannot be derived
+   * from tokens.
+   */
+  toolDispatches?: number;
 }
 
 export const ZERO_USAGE: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -72,6 +82,7 @@ export function addUsage(a: Usage, b: Usage): Usage {
   const cachedInputTokens = sum(a.cachedInputTokens, b.cachedInputTokens);
   const cacheCreationInputTokens = sum(a.cacheCreationInputTokens, b.cacheCreationInputTokens);
   const reasoningTokens = sum(a.reasoningTokens, b.reasoningTokens);
+  const toolDispatches = sum(a.toolDispatches, b.toolDispatches);
   return {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
@@ -79,5 +90,6 @@ export function addUsage(a: Usage, b: Usage): Usage {
     ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
     ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
     ...(reasoningTokens != null ? { reasoningTokens } : {}),
+    ...(toolDispatches != null ? { toolDispatches } : {}),
   };
 }

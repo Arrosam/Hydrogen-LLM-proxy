@@ -352,7 +352,7 @@ export class ProxyController {
         this.deps.streamCommitGraceMs ?? 2_500,
         this.deps.streamPingIntervalMs ?? 10_000,
       );
-      const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal });
+      const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal, allowedToolIds: token.scopeTools });
       keepalive.stop();
       if (!outcome.result.ok) {
         if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
@@ -374,7 +374,7 @@ export class ProxyController {
       this.deps.jsonCommitGraceMs ?? 30_000,
       this.deps.streamPingIntervalMs ?? 10_000,
     );
-    const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal });
+    const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal, allowedToolIds: token.scopeTools });
     jsonKeepalive.stop();
     if (!outcome.result.ok) {
       if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, false, outcome);

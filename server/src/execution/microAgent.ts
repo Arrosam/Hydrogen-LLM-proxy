@@ -8,6 +8,7 @@ import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { serializeForLog } from "../util/logPayload";
 import { stageOverrides, type AgentDef, type ServiceSteps } from "./definition";
 import { audioHash, transcribeAudio } from "./asr";
+import { DispatchBudget } from "./toolDispatch";
 import {
   buildOcrRequest,
   buildStageRequest,
@@ -140,6 +141,16 @@ export class MicroAgent extends ModelService {
     const values = new Map<string, InvokeValue>();
     const responses = new Map<string, Response>();
     const calls: ServiceCall[] = [];
+    // One budget for the whole agent run, so a per-tool max_uses bounds the
+    // client's request rather than resetting at every stage (E5). Inherited when
+    // this agent is itself a stage of another.
+    const dispatchBudget = opts.dispatchBudget ?? new DispatchBudget();
+    /** Tools visible to a stage: the agent's own grants plus that stage's. */
+    const stageToolOpts = (stage: { grantTools?: string[] }): Pick<InvokeOptions, "grantTools" | "dispatchBudget" | "allowedToolIds"> => ({
+      grantTools: [...(agent.grantTools ?? []), ...(stage.grantTools ?? []), ...(opts.grantTools ?? [])],
+      dispatchBudget,
+      allowedToolIds: opts.allowedToolIds,
+    });
     let usage: Usage = ZERO_USAGE;
     let lastValue: InvokeValue | null = null;
     let terminal = agent.stages[0]?.name ?? "";
@@ -339,7 +350,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.nested", `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
               const started = Date.now();
               const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: this.stageRequestPayload(stageReq), calls: [] };
-              const sub = await r.executor.invoke(stageReq, childOverrides, { stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog });
+              const sub = await r.executor.invoke(stageReq, childOverrides, { stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog, ...stageToolOpts(stage) });
               wrapper.calls = sub.attemptPath as ServiceCall[];
               wrapper.latencyMs = Date.now() - started;
               calls.push(wrapper);
@@ -356,7 +367,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, stageToolOpts(stage));
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -368,7 +379,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, stageToolOpts(stage));
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -417,9 +428,12 @@ export class MicroAgent extends ModelService {
     signal: AbortSignal | undefined,
     timeoutMs: number | undefined,
     prog: ProgressRecorder | null = null,
+    /** Tool grants visible to this stage, and the budget shared by the whole
+     * agent run so max_uses bounds one client request rather than each stage. */
+    toolOpts: Pick<InvokeOptions, "grantTools" | "dispatchBudget" | "allowedToolIds"> = {},
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
     const started = Date.now();
-    const inv = await service.invoke(stageReq, overrides, { signal, timeoutMs, progress: prog });
+    const inv = await service.invoke(stageReq, overrides, { signal, timeoutMs, progress: prog, ...toolOpts });
     const path = inv.attemptPath as AttemptRecord[];
     const call: ServiceCall = {
       stage: meta.stage,

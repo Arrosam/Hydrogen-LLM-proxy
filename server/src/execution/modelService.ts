@@ -9,6 +9,12 @@ import { runSteps } from "./steps";
 import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition";
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
+import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
+import { buildResponse } from "../core/format/registry";
+import { resolveTools, toolsForUpstream } from "./toolPolicy";
+import { DispatchBudget, dispatchTool } from "./toolDispatch";
+import { appendToolTurn, describeTool, mayDispatch, shouldContinue, splitToolCalls, type ToolRuntime } from "./toolLoop";
+import type { DispatchableTool } from "../persistence/toolRepo";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
 /** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
@@ -40,6 +46,9 @@ export interface ServiceDeps {
   simulatedStreamingTokenRate?: number | (() => number);
   /** Auto-cache breakpoint lifetime in minutes (Settings, default 30). */
   promptCacheTtlMinutes?: number | (() => number);
+  /** Server-side tools. Absent/null = no tool can ever be dispatched, and every
+   * path below behaves exactly as it did before the feature existed. */
+  tools?: ToolRuntime | null;
 }
 
 export interface InvokeOptions {
@@ -51,6 +60,15 @@ export interface InvokeOptions {
   stack?: string[];
   /** Progress recorder for emitting real-time events (null = no tracking). */
   progress?: ProgressRecorder | null;
+  /** Free-form tool names granted on top of the service's own -- a Micro Agent
+   * stage adds its own and the agent's here (E5). */
+  grantTools?: string[];
+  /** Shared across a Micro Agent's stages, so max_uses bounds the whole client
+   * request rather than resetting at every stage. */
+  dispatchBudget?: DispatchBudget;
+  /** Tool ids the calling client key may dispatch. Null/absent = no limit.
+   * Per request rather than per service, because it comes from the key. */
+  allowedToolIds?: number[] | null;
 }
 
 /**
@@ -101,7 +119,22 @@ export class ModelService {
     return inlineUrlFiles(merged, family, this.deps.transport, opts);
   }
 
-  async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
+  /**
+   * One pass down the step chain, buffered.
+   *
+   * With `tools` present, each step resolves who serves what against THAT
+   * provider's capabilities and swaps the request's tool list for the
+   * upstream-facing one, then reports back what may be dispatched. Resolution is
+   * per step rather than per request because the answer changes with the
+   * provider: the same tool the first step passes through natively is one the
+   * fallback step needs Hydrogen to serve.
+   */
+  private async runChain(
+    request: Request,
+    overrides: RequestOverrides | undefined,
+    opts: InvokeOptions,
+    tools: { runtime: ToolRuntime; grants: string[] } | null,
+  ): Promise<Invocation> {
     const prog = opts.progress ?? null;
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
@@ -111,8 +144,28 @@ export class ModelService {
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
       const t = res.target;
-      const merged = this.merge(request, step, overrides);
+      let merged = this.merge(request, step, overrides);
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
+
+      // Who serves each tool, against THIS provider's capabilities.
+      let dispatchable: Map<string, DispatchableTool> | undefined;
+      if (tools) {
+        const declaredByName = new Map((merged.tools ?? []).map((tool) => [tool.name, tool]));
+        const resolved = resolveTools({
+          declared: merged.tools,
+          grants: tools.grants,
+          capabilities: t.toolCapabilities,
+          lookup: tools.runtime.lookup,
+          allowedToolIds: opts.allowedToolIds,
+        });
+        for (const d of resolved.decisions) {
+          if (d.outcome === "drop") prog?.record("llm", "tool.drop", `tool "${d.tool.name}" dropped: ${d.reason}`, { tool: d.tool.name });
+        }
+        const upstreamTools = toolsForUpstream(resolved, (entry) => describeTool(entry, declaredByName.get(entry.name)));
+        merged = merged.withTools(upstreamTools.length ? upstreamTools : undefined);
+        dispatchable = resolved.dispatchable;
+      }
+
       // A URL attachment this family cannot carry is downloaded and inlined
       // first (see fileFetch). Resolved per step, because the very same request
       // needs no pre-pass at all on a family that takes URLs natively.
@@ -148,10 +201,88 @@ export class ModelService {
           providerName: t.providerName,
           modelName: t.modelName,
           upstreamRequest: sent.sentBody,
+          ...(dispatchable ? { dispatchable } : {}),
         },
       };
     }, { progress: prog, signal: opts.signal });
     return { result, attemptPath: path, attempts: path.length };
+  }
+
+  async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
+    const runtime = this.deps.tools ?? null;
+    const grants = [...(this.def.grantTools ?? []), ...(opts.grantTools ?? [])];
+    // Nothing configured could ever be dispatched: take exactly the path this
+    // service took before the feature existed, with no extra objects built.
+    if (!runtime || !mayDispatch(request, grants, runtime)) {
+      return this.runChain(request, overrides, opts, null);
+    }
+    return this.runToolLoop(request, overrides, opts, { runtime, grants });
+  }
+
+  /**
+   * Ask, dispatch what the model called, ask again.
+   *
+   * The loop wraps the STEP CHAIN rather than living inside it, which is what
+   * makes a fallback behave the way S12 requires: each round runs the whole
+   * chain against the conversation so far, so a step that dies mid-loop hands
+   * the accumulated history to the next step instead of restarting the turn.
+   * Results already in the conversation are never re-derived, so an operator's
+   * endpoint is never fired twice for one client request -- which matters
+   * because it may be a write.
+   */
+  private async runToolLoop(
+    request: Request,
+    overrides: RequestOverrides | undefined,
+    opts: InvokeOptions,
+    tools: { runtime: ToolRuntime; grants: string[] },
+  ): Promise<Invocation> {
+    const prog = opts.progress ?? null;
+    const budget = opts.dispatchBudget ?? new DispatchBudget();
+    // `Invocation.attemptPath` is deliberately `unknown` (it is log payload, not
+    // control flow), so the rounds are concatenated as opaque entries.
+    const path: unknown[] = [];
+    let convo = request;
+    let usage: Usage = ZERO_USAGE;
+
+    for (;;) {
+      const inv = await this.runChain(convo, overrides, opts, tools);
+      path.push(...(Array.isArray(inv.attemptPath) ? inv.attemptPath : [inv.attemptPath]));
+      if (!inv.result.ok) return { result: inv.result, attemptPath: path, attempts: path.length };
+
+      const v = inv.result.value;
+      usage = addUsage(usage, v.response.usage);
+      const split = splitToolCalls(v.response, v.dispatchable ?? new Map());
+
+      if (!shouldContinue(split)) {
+        // Done. The client's copy reports what the WHOLE turn cost, the way a
+        // provider running its own tool loop inside one request does (S14).
+        const total: Usage = { ...usage, ...(budget.dispatches ? { toolDispatches: budget.dispatches } : {}) };
+        const response = buildResponse(v.response.family, { ...v.response.data(), usage: total });
+        return {
+          result: { ok: true, value: { ...v, response } },
+          attemptPath: path,
+          attempts: path.length,
+        };
+      }
+
+      const results: Array<{ call: (typeof split.ours)[number]; output: string; isError: boolean }> = [];
+      for (const call of split.ours) {
+        const entry = v.dispatchable!.get(call.name)!;
+        const allowed = budget.take(entry);
+        if (!allowed.ok) {
+          // Out of budget is told to the model, not raised to the client: it can
+          // answer with what it already has (S14).
+          prog?.record("llm", "tool.budget", allowed.error, { tool: call.name });
+          results.push({ call, output: allowed.error, isError: true });
+          continue;
+        }
+        prog?.record("llm", "tool.dispatch", `dispatching tool "${call.name}" to ${entry.endpointUrl}`, { tool: call.name });
+        const r = await dispatchTool(entry, { tool: call.name, arguments: call.input, call_id: call.id }, tools.runtime.dispatch);
+        prog?.record("llm", "tool.result", r.ok ? `tool "${call.name}" returned` : `tool "${call.name}" failed: ${r.error}`, { tool: call.name, ok: r.ok });
+        results.push({ call, output: r.ok ? r.output : r.error, isError: !r.ok });
+      }
+      convo = appendToolTurn(convo, v.response, results);
+    }
   }
 
   /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by
@@ -196,7 +327,21 @@ export class ModelService {
     // and enabling truncation detection); when stream=false a plain JSON
     // request is sent. Either way the full response is buffered locally before
     // fabrication, so the client always receives a complete, paced stream.
-    if (this.def.reliableStreaming) {
+    //
+    // A tool loop buffers for a second reason: it makes several upstream round
+    // trips and only the last one's text is the answer. Relaying the first
+    // straight through would stream the model's tool CALL to the client as if it
+    // were the reply, and then a second reply after it.
+    //
+    // NOTE (S13): the spec wants the tool call and its result streamed live
+    // while text stays buffered. That needs a client-visible shape for a
+    // server-executed tool -- `server_tool_use` and its result block -- which is
+    // Path A emission, and those shapes are unmeasured. Until then the whole
+    // loop is buffered and replayed, which is correct but shows the tool
+    // activity only once the answer arrives.
+    const toolRuntime = this.deps.tools ?? null;
+    const toolGrants = [...(this.def.grantTools ?? []), ...(opts.grantTools ?? [])];
+    if (this.def.reliableStreaming || mayDispatch(request, toolGrants, toolRuntime)) {
       return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
     }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {

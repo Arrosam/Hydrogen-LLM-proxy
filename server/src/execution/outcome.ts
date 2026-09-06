@@ -2,6 +2,7 @@ import type { Family } from "../core/format/family";
 import type { Response } from "../core/ir/response";
 import type { StreamEvent } from "../core/ir/stream";
 import type { AttemptResult } from "./steps";
+import type { DispatchableTool } from "../persistence/toolRepo";
 
 /** A successful buffered run: the response plus which target actually served it. */
 export interface InvokeValue {
@@ -12,6 +13,11 @@ export interface InvokeValue {
   modelName: string;
   /** The exact body sent upstream (overrides + translation applied), for logging. */
   upstreamRequest: Record<string, unknown>;
+  /** Tools THIS step decided Hydrogen would serve, keyed by the name the model
+   * will call. Set only when a tool runtime is wired; the loop reads it to know
+   * which of the model's calls are its own to run and which belong to the
+   * client. */
+  dispatchable?: Map<string, DispatchableTool>;
 }
 
 /** A successful streaming run: a committed live event stream from the winning target. */
