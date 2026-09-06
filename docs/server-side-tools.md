@@ -649,3 +649,51 @@ Consequences:
 - A client-declared hosted `web_search` (Codex sends one unconditionally) is a
   *different thing* from an operator's tool named `web_search`. Whether they are
   allowed to collide, and which wins, is still open.
+
+## S8. Two paths, because there are two goals (amends S7)
+
+The stated purpose is two things at once, and they need different mechanisms:
+
+> "the agent requires server side tools but local inference or 3rd party
+> inference doesn't provide that, caused agent error" — **compatibility**
+>
+> "provide agent developer more space to define server side tools, so they don't
+> need to rely on any specific model provider" — **freedom**
+
+**Path A — compatibility, for the known hosted vocabulary.** The client declares
+a hosted tool. If the resolved provider cannot serve it natively (S4) and an
+endpoint is configured (S2), Hydrogen executes it through that endpoint and
+replies **in the client's own hosted shape** — `server_tool_use` +
+`web_search_tool_result` for Anthropic, `web_search_call` for Responses. An
+unmodified Codex or Claude Code works with no idea anything was substituted.
+
+This is why S7 alone was not enough: handing back a plain `function_call` named
+`web_search` to a client that declared a *hosted* `web_search` reproduces the
+very agent error the feature exists to remove. **Behavior 5 is restored, scoped
+to Path A.**
+
+**Path B — freedom, for everything else.** Any name outside the vocabulary is a
+free-form function tool exactly as S7 describes: declared as a `function`,
+executed by Hydrogen, no per-tool code, no release needed to add one.
+
+Hydrogen still **implements** none of it (S1). The vocabulary buys recognition
+and correct re-emission, not implementation.
+
+### The vocabulary, as documented
+
+| Family | Server-executed tool types |
+|---|---|
+| Anthropic | `web_search_20250305`, `web_search_20260209`, `web_fetch_20250910`, `web_fetch_20260209`, `code_execution_*`, `tool_search` |
+| Responses | `web_search` (+ dated and preview variants), `file_search`, `code_interpreter`, `image_generation`, `computer` / `computer_use_preview`, `mcp`, `tool_search`, `programmatic_tool_calling`, `shell` / `local_shell`, `apply_patch` |
+
+Anthropic's `bash_*`, `text_editor_*` and `computer_*` are **client** tools — the
+client executes them, so they are out of scope entirely.
+
+### Still open, following from S8
+
+- One logical tool has several type strings across families and versions
+  (`web_search_20250305` / `web_search_20260209` / `web_search`). How an operator
+  configures that once is undecided.
+- What a client sees for a **Path B** tool. Path A is settled (native shape);
+  Path B is not.
+- What happens when an operator names a free-form tool `web_search`.
