@@ -552,3 +552,63 @@ rather than adding a capability, and needs no credential of any kind.
 The reverse (Responses → a narrower family) stays lossy by nature: nothing in
 the Anthropic or Chat Completions wire can carry a `tool_search_call`. Behavior 9
 covers the one case worth translating rather than dropping.
+
+---
+
+# Second pass — decided 2026-09-06 (supersedes Behaviors 1, 3 and 8)
+
+## S1. Hydrogen implements no tools. A tool is a user-defined API call.
+
+**This reverses Behavior 1.** Hydrogen does not run web search, does not generate
+images, does not host a sandbox, does not speak MCP. A server-side tool is an
+HTTP endpoint the operator configures; Hydrogen declares it upstream, receives
+the model's call, dispatches to that endpoint, and feeds the result back.
+
+Consequences, all deliberate:
+
+- **D3 and D4 are void.** No image Model Service routing, no Tavily/SearXNG
+  choice, no search credential in Hydrogen. There is nothing to pick.
+- **The sandbox decision is void.** No container per call, no egress filter, no
+  Docker socket — and therefore no Rainyun portability caveat.
+- **Slices 4–7 collapse.** "web_search", "image_generation", "mcp" and
+  "code_interpreter" stop being four build items and become four things an
+  operator may point at their own endpoints.
+- This revives the **user-configurable HTTP tool surface that the Oxygen plan
+  listed as an explicit non-goal** ("built once, reverted"). Re-decided
+  knowingly: with Oxygen gone there is no other home for an implementation, and
+  the alternative is Hydrogen growing dependencies it does not want.
+
+## S2. A tool with no configured API call is never advertised
+
+If no endpoint is configured for a tool, Hydrogen does not declare it upstream
+and does not tell the model it exists. The model is never offered a capability
+that cannot be served.
+
+This folds two questions into one gate. A tool is offered only when **both** an
+endpoint exists **and** policy (S3) says Hydrogen should serve it.
+
+## S3. Native-vs-Hydrogen is an operator preference, per tool
+
+Not inferred. For each tool the operator chooses:
+
+- **prefer provider** — if the resolved provider serves the tool natively, pass
+  it through untouched; use the configured endpoint only where it does not.
+- **override** — always strip the native tool and dispatch to the configured
+  endpoint, even when the provider could have served it.
+
+This replaces Behavior 3's automatic native-first rule with an explicit switch,
+while keeping "surface the upstream error" (Behavior 4) unchanged.
+
+## S4. Capability is declared on the provider, mapped per model
+
+Resolves the per-provider/per-model gap. A provider declares which tools it can
+serve natively; **Model Mapping selects and maps them per model, exactly as it
+already does for the API format.** A provider endpoint fronting both a
+tool-capable and a tool-incapable model is expressible, and the capability lives
+next to the credential it belongs to.
+
+## S5. Rename
+
+Repo name, GHCR image path and the `areel.org` deployment all move to the new
+name. **Old images are retained, not deleted**, and the old name keeps working —
+the new name is added alongside rather than swapped in.
