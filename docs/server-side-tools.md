@@ -877,3 +877,32 @@ Hydrogen's own and consistently accepted.
 
 Consequence, accepted: a Model Service that mixes a Hydrogen-served tool with a
 native-capable fallback will break on that fallback path, visibly.
+
+## S16. Both entries may exist. The declaration decides which one applies.
+
+A free-form entry named `web_search` and a vocabulary entry `web_search` can be
+configured at the same time. They do not collide, because the **wire shape**
+distinguishes them:
+
+| Declared as | Resolves to |
+|---|---|
+| `{"type": "web_search"}` | the Path A vocabulary entry — hosted semantics, native result blocks |
+| `{"type": "function", "name": "web_search"}` | the Path B free-form entry — an ordinary function tool |
+
+The kind is a property of the config entry the operator created, and the client's
+declaration selects between them. No reserved-word list, no name rejected at
+config time, and neither path silently acquires the other's semantics.
+
+### The intervention rule, stated once
+
+This is the whole of Hydrogen's tool policy, and everything above is a special
+case of it. **Hydrogen touches a tool in exactly two situations:**
+
+1. **Gap-fill** — the resolved provider does not serve a declared tool, and a
+   config entry exists for it. Hydrogen executes it.
+2. **Override** — the operator explicitly set that tool to override (S3), so
+   Hydrogen executes it even where the provider could have.
+
+In every other case the tool passes through untouched and the provider owns it.
+A tool that is neither servable by the provider nor configured is dropped and
+logged (S10).
