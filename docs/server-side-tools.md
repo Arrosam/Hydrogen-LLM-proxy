@@ -507,3 +507,48 @@ Responses -> openai_completion  tools: null
 
 Fixing the same-family replay is smaller than Behavior 9 and independent of it;
 it should land first, because it is a live break rather than a missing feature.
+
+## Behavior 11 — the Tools tab is a library of tool definitions (2026-09-06)
+
+Revises Behavior 10. The Tools tab does not hold config for the four tools
+Hydrogen executes; it holds **definitions for any of the eighteen Responses tool
+types**, `custom` included, with that type's own configuration fields —
+`allowed_domains`, `search_context_size`, `user_location`, `vector_store_ids`,
+`container`, `image_settings`, a `custom` tool's grammar, an `mcp` server's
+label and URL, a `namespace`'s members, and so on.
+
+A definition is a named, reusable row. Providers reference them (which ones they
+serve natively) and Model Services and Micro Agents reference them (which ones
+they grant). The ownership rule from Behavior 10 is unchanged: the definition
+lives here, the *references* live where their owner lives.
+
+This splits the tools into two classes, and the tab must show which is which:
+
+- **Hydrogen-executed** — `web_search`, `image_generation`, `mcp`,
+  `code_interpreter`. Hydrogen runs these and needs a credential or a sandbox.
+- **Declaration-only** — the other fourteen. Hydrogen cannot execute them; it
+  declares them upstream and relays what comes back. A definition still has to
+  exist so a service can grant one and so the round trip is lossless.
+
+## Behavior 12 — lossless Responses conversion (2026-09-06)
+
+Promoted ahead of the tool-execution slices, because it fixes a live break
+rather than adding a capability, and needs no credential of any kind.
+
+1. **Responses → Responses is a passthrough and must be lossless.** Every one of
+   the eighteen tool types survives; every output/input item type survives,
+   including the ones Hydrogen models nowhere today (`custom_tool_call`,
+   `local_shell_call`, `web_search_call`, `image_generation_call`,
+   `tool_search_call`, `tool_search_output`, `additional_tools`, `program`,
+   `program_output`, the `compaction` family); and every correlation field on a
+   `function_call` survives — `namespace`, `caller`, and any future sibling.
+   Carrying them generically, not field by field, is the requirement.
+
+2. **Other → Responses conversion is in scope too.** An Anthropic or Chat
+   Completions client served by a Responses provider must produce a valid
+   Responses request, and the reply must come back in the client's own format
+   without losing what that format can express.
+
+The reverse (Responses → a narrower family) stays lossy by nature: nothing in
+the Anthropic or Chat Completions wire can carry a `tool_search_call`. Behavior 9
+covers the one case worth translating rather than dropping.
