@@ -1,5 +1,5 @@
 import type { Family } from "./params";
-import { reasoningOf, textOf, toolCallsOf, type ContentPart } from "./content";
+import { reasoningOf, splitToolName, textOf, toolCallsOf, withToolNamespace, type ContentPart } from "./content";
 import type { Usage } from "./usage";
 import { fabricateStream, type ResponseData, type StreamContext } from "./stream";
 import { applyThinkingFormat, type ThinkingFormat } from "./thinkingFormat";
@@ -90,6 +90,28 @@ export abstract class Response implements ResponseData {
   withThinkingFormat(format: ThinkingFormat | undefined): this {
     const content = applyThinkingFormat(this.content, format);
     if (content === this.content) return this;
+    return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
+  }
+
+  /**
+   * Re-attach namespaces to tool calls that came back from a provider without
+   * them. The buffered counterpart of `withNamespaces` in ir/stream.ts; see
+   * that comment for why the split is matched against the declared list.
+   *
+   * Returns `this` unchanged when the request declared no namespaces, which is
+   * every request except a Responses one using tool grouping.
+   */
+  withNamespaces(namespaces: readonly string[]): this {
+    if (!namespaces.length) return this;
+    let changed = false;
+    const content = this.content.map((p) => {
+      if (p.type !== "tool_use") return p;
+      const split = splitToolName(p.name, namespaces);
+      if (!split.namespace) return p;
+      changed = true;
+      return withToolNamespace({ ...p, name: split.name }, split.namespace);
+    });
+    if (!changed) return this;
     return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
   }
 

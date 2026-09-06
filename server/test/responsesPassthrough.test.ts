@@ -105,8 +105,13 @@ describe("Responses passthrough — correlation fields on function_call", () => 
     const canonical = parseRequest("openai_responses", requestBody()).data();
     for (const family of ["anthropic", "openai_completion"] as const) {
       const rendered = JSON.stringify(buildRequest(family, canonical).render({ upstreamModel: "m" }));
-      expect(rendered).not.toContain("namespace");
-      expect(rendered).not.toContain("mcp__node_repl");
+      // The `namespace` FIELD is Responses-only and must never appear as a key.
+      expect(rendered).not.toContain('"namespace"');
+      expect(rendered).not.toContain("caller");
+      // The namespace still shows up inside the flattened tool NAME, which is
+      // deliberate and is what makes the call match the flattened declaration
+      // -- see test/namespaceFlatten.test.ts.
+      expect(rendered).toContain("mcp__node_repl__js");
     }
   });
 });

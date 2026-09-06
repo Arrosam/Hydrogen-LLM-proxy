@@ -1,6 +1,7 @@
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
+  flatToolName,
   normalizeMessages,
   orderReasoningFirst,
   type ContentPart,
@@ -9,6 +10,7 @@ import {
   type Message,
   type StopReason,
   type TextPart,
+  toolNamespaceOf,
   type Tool,
   type ToolChoice,
 } from "../ir/content";
@@ -184,7 +186,9 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
       case "opaque":
         break; // another family's private part; nothing Anthropic can carry
       case "tool_use":
-        blocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
+        // Upstream-bound: a namespaced call is declared here under its
+        // flattened name, so the replayed call must match it.
+        blocks.push({ type: "tool_use", id: p.id, name: flatToolName(p.name, toolNamespaceOf(p)), input: p.input ?? {}, ...cc(p) });
         break;
       case "tool_result":
         blocks.push({ type: "tool_result", tool_use_id: p.toolUseId, content: partsToBlocks(p.content), ...(p.isError ? { is_error: true } : {}), ...cc(p) });
@@ -398,7 +402,7 @@ export class AnthropicRequest extends Request {
       // (they cannot be expressed here) rather than sent as empty client tools.
       const rendered = this.tools
         .filter((t) => !t.raw || t.raw.family === "anthropic")
-        .map((t) => (t.raw ? t.raw.value : { name: t.name, description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
+        .map((t) => (t.raw ? t.raw.value : { name: flatToolName(t.name, t.namespace), description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
       if (rendered.length) out.tools = rendered;
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToAnthropic(this.toolChoice);

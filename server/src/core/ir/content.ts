@@ -113,6 +113,20 @@ export interface Tool {
   /** OpenAI structured-outputs strict flag. */
   strict?: boolean;
   cacheControl?: unknown;
+  /**
+   * The Responses `namespace` this tool was declared inside.
+   *
+   * Only the Responses wire has namespaces. Everywhere else the member is
+   * declared as an ordinary function under {@link flatToolName}, because the
+   * alternative — dropping the whole namespace, as this proxy used to — costs a
+   * Codex client ten of its fourteen tools the moment a step resolves to a
+   * non-Responses provider.
+   *
+   * A member tool is stored ALONGSIDE the namespace's own `raw` entry: the raw
+   * one replays the namespace verbatim to a Responses upstream, and the members
+   * are what every other family renders.
+   */
+  namespace?: string;
   /** A provider-executed (server-side) or otherwise family-specific tool
    * declaration, kept verbatim: replayed untouched to the SAME family, dropped
    * when crossing families (never mangled into an empty client tool). */
@@ -234,4 +248,50 @@ export function orderReasoningFirst(messages: Message[]): Message[] {
       ],
     };
   });
+}
+
+// --- namespaced tools ----------------------------------------------------
+
+/**
+ * The separator between a namespace and its member on a wire that has no
+ * namespaces. `__` is not arbitrary: it is the convention the Responses API
+ * itself uses for flat MCP tools (`mcp__server__tool`), so a model that has seen
+ * one reads the other the same way.
+ */
+export const NAMESPACE_SEP = "__";
+
+/** The name a namespaced tool takes where namespaces do not exist. */
+export function flatToolName(name: string, namespace?: string): string {
+  return namespace ? `${namespace}${NAMESPACE_SEP}${name}` : name;
+}
+
+/** The namespace a tool call carries, if it carries one. */
+export function toolNamespaceOf(part: ToolUsePart): string | undefined {
+  if (part.extra?.family !== "openai_responses") return undefined;
+  const ns = part.extra.fields.namespace;
+  return typeof ns === "string" && ns ? ns : undefined;
+}
+
+/**
+ * Split a flattened name back into its namespace and member, given the
+ * namespaces that were actually declared for this request.
+ *
+ * Matched against the declared list rather than by splitting on the last `__`,
+ * because a client is free to declare a plain function tool whose own name
+ * contains the separator, and guessing would rename it. The longest match wins,
+ * so nested-looking namespaces resolve to the most specific one.
+ */
+export function splitToolName(flat: string, namespaces: readonly string[]): { name: string; namespace?: string } {
+  let best: string | undefined;
+  for (const ns of namespaces) {
+    const prefix = ns + NAMESPACE_SEP;
+    if (flat.startsWith(prefix) && flat.length > prefix.length && (!best || ns.length > best.length)) best = ns;
+  }
+  return best ? { name: flat.slice(best.length + NAMESPACE_SEP.length), namespace: best } : { name: flat };
+}
+
+/** Attach a namespace to a tool call, in the shape ToolUsePart.extra expects. */
+export function withToolNamespace(part: ToolUsePart, namespace: string): ToolUsePart {
+  const fields = { ...(part.extra?.family === "openai_responses" ? part.extra.fields : {}), namespace };
+  return { ...part, extra: { family: "openai_responses", fields } };
 }

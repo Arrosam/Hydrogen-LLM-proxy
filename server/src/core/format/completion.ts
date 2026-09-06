@@ -1,6 +1,7 @@
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
+  flatToolName,
   normalizeMessages,
   stripStaleReasoning,
   textOf,
@@ -8,6 +9,7 @@ import {
   type Message,
   type StopReason,
   type TextPart,
+  toolNamespaceOf,
   type Tool,
   type ToolChoice,
 } from "../ir/content";
@@ -457,7 +459,7 @@ export class OpenAICompletionRequest extends Request {
           entry.tool_calls = toolUses.map((tu) => ({
             id: (tu as { id: string }).id,
             type: "function",
-            function: { name: (tu as { name: string }).name, arguments: JSON.stringify((tu as { input: unknown }).input ?? {}) },
+            function: { name: flatToolName((tu as { name: string }).name, toolNamespaceOf(tu as never)), arguments: JSON.stringify((tu as { input: unknown }).input ?? {}) },
           }));
         }
         messages.push(entry);
@@ -483,7 +485,7 @@ export class OpenAICompletionRequest extends Request {
     if (this.tools) {
       const rendered = this.tools
         .filter((t) => !t.raw || t.raw.family === "openai_completion")
-        .map((t) => (t.raw ? t.raw.value : { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }));
+        .map((t) => (t.raw ? t.raw.value : { type: "function", function: { name: flatToolName(t.name, t.namespace), description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }));
       if (rendered.length) out.tools = rendered;
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);

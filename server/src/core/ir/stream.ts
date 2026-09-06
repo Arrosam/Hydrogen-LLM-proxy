@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { ContentPart, ReasoningPart, StopReason, ToolUsePart } from "./content";
+import { splitToolName, type ContentPart, type ReasoningPart, type StopReason, type ToolUsePart } from "./content";
 import type { Usage } from "./usage";
 import type { ThinkingFormat } from "./thinkingFormat";
 import { genId, nowSeconds } from "../../util/ids";
@@ -373,3 +373,37 @@ export async function* fabricateStream(
 }
 
 export { num };
+
+// --- namespaced tool calls ----------------------------------------------
+
+/**
+ * Re-attach namespaces to tool calls coming back from a provider that has no
+ * namespaces.
+ *
+ * Hydrogen declared `mcp__node_repl`'s member `js` to that provider as the flat
+ * tool `mcp__node_repl__js` (see flatToolName), so the model calls it by that
+ * name. The client asked for a namespaced tool and will not recognise the flat
+ * one, so the split is undone here, against the namespaces the client actually
+ * declared rather than by guessing at separators.
+ *
+ * A no-op when the request declared no namespaces, which is every request from
+ * every client except a Responses one using tool grouping.
+ */
+export async function* withNamespaces(
+  events: AsyncGenerator<StreamEvent>,
+  namespaces: readonly string[],
+): AsyncGenerator<StreamEvent> {
+  for await (const ev of events) {
+    if (ev.type !== "tool_start") {
+      yield ev;
+      continue;
+    }
+    const split = splitToolName(ev.name, namespaces);
+    if (!split.namespace) {
+      yield ev;
+      continue;
+    }
+    const fields = { ...(ev.extra?.family === "openai_responses" ? ev.extra.fields : {}), namespace: split.namespace };
+    yield { ...ev, name: split.name, extra: { family: "openai_responses", fields } };
+  }
+}

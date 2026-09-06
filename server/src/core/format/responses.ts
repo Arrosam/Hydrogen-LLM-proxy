@@ -154,6 +154,25 @@ function parseTools(raw: unknown): Tool[] | undefined {
       // Built-in tools (web_search, file_search, code_interpreter, mcp, ...):
       // keep verbatim for same-family replay instead of dropping them.
       if (tool.type) tools.push({ name: String(tool.name ?? tool.type), parameters: {}, raw: { family: "openai_responses", value: tool } });
+      // A namespace ALSO contributes its members as ordinary tools, so a family
+      // without namespaces can still offer them (flattened) rather than losing
+      // the group entirely. The raw entry above still replays the namespace
+      // verbatim to a Responses upstream; these members are skipped there.
+      if (tool.type === "namespace" && tool.name && Array.isArray(tool.tools)) {
+        const ns = String(tool.name);
+        for (const raw of tool.tools) {
+          if (!raw || typeof raw !== "object") continue;
+          const member = raw as Record<string, unknown>;
+          if (member.type !== "function" || !member.name) continue;
+          tools.push({
+            name: String(member.name),
+            namespace: ns,
+            description: member.description ? String(member.description) : undefined,
+            parameters: (member.parameters as Record<string, unknown>) ?? { type: "object", properties: {} },
+            ...(typeof member.strict === "boolean" ? { strict: member.strict } : {}),
+          });
+        }
+      }
       continue;
     }
     tools.push({
@@ -494,6 +513,9 @@ export class OpenAIResponsesRequest extends Request {
     if (this.system) out.instructions = this.system;
     if (this.tools) {
       const rendered = this.tools
+        // Members are skipped: the namespace they came from is replayed whole
+        // by its own raw entry, so emitting them too would declare each tool twice.
+        .filter((t) => !t.namespace)
         .filter((t) => !t.raw || t.raw.family === "openai_responses")
         .map((t) => (t.raw ? t.raw.value : { type: "function", name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) }));
       if (rendered.length) out.tools = rendered;

@@ -7,6 +7,7 @@ import { buildErrorBody, buildErrorFrame, failureMessage, failureStatus, pingFra
 import {
   newAccumulator,
   tapStream,
+  withNamespaces,
   withoutReasoning,
   type StreamAccumulator,
 } from "../core/ir/stream";
@@ -34,6 +35,12 @@ interface RequestCtx {
   ingress: Family;
   /** How this service presents thinking to its client (ir/thinkingFormat.ts). */
   thinkingFormat: ThinkingFormat;
+  /** Tool namespaces the CLIENT declared. A step that resolves to a provider
+   * without namespaces gets those tools flattened on the way out, so the calls
+   * coming back carry flattened names and have to be split again before the
+   * client -- which only asked for the namespaced form -- ever sees them.
+   * Empty for every ingress but Responses, which makes the split a no-op. */
+  namespaces: string[];
 }
 
 /**
@@ -321,7 +328,8 @@ export class ProxyController {
       return this.replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
     }
 
-    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat };
+    const namespaces = [...new Set((request.tools ?? []).map((t) => t.namespace).filter((n): n is string => !!n))];
+    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat, namespaces };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
     const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
@@ -384,6 +392,7 @@ export class ProxyController {
     // it into the answer, or drop it. `original` returns the same object.
     const clientBody = value.response
       .withThinkingFormat(thinkingFormat)
+      .withNamespaces(ctx.namespaces)
       .render(ingress, serviceName, { thinkingFormat });
     // Deliver first, then log what actually happened: writing the 200 row
     // before send() is how a response nobody received was recorded as success.
@@ -550,7 +559,7 @@ export class ProxyController {
     const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
     // Shaped BEFORE the tap, so the log records the copy the client actually
     // received rather than a canonical form it never saw.
-    const shaped = withThinkingFormat(events, ctx.thinkingFormat);
+    const shaped = withNamespaces(withThinkingFormat(events, ctx.thinkingFormat), ctx.namespaces);
     const outGen = serializeStream(ctx.ingress, tapStream(shaped, acc), {
       model: ctx.serviceName,
       thinkingFormat: ctx.thinkingFormat,
