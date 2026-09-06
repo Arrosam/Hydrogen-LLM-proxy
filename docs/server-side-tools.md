@@ -188,3 +188,54 @@ What the capture has to answer, and nothing gets written until it does:
   still cannot reach it.
 - Does the system prompt name tools that are absent from the `tools` array? That
   gap is the actual bug this feature exists to close.
+
+### M2 — Codex DOES declare a server-side tool. Measured 2026-09-06.
+
+Source: Codex CLI **0.144.5**, default config, driven at `http://localhost:8080/v1`
+with `wire_api = "responses"` against a bogus model so the 404 fires after the
+body is logged. `request_logs` rows 9–20, ingress `openai_responses`, 68 KB.
+
+14 tools per request:
+
+| Shape | Count | Names |
+|---|---|---|
+| `type: "function"` | 10 | `shell_command`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, `update_plan`, `request_user_input`, `view_image`, `get_goal`, `create_goal`, `update_goal` |
+| `type: "web_search"` | 1 | sent verbatim as `{"type":"web_search","external_web_access":false}` |
+| `type: "namespace"` | 3 | `multi_agent_v1`, `mcp__cua_repl`, `mcp__node_repl` — each with a nested `tools: [names]` array |
+
+**Findings that change the spec:**
+
+1. **The name is `web_search`.** Not `web_search_preview`, not a dated variant.
+   The binary contains `web_search`, `web_search_call`, `image_generation`,
+   `local_shell`, `computer_use` and `file_search`; `web_search_preview` appears
+   once and is not what 0.144.5 emits.
+
+2. **It is sent unconditionally.** Adding `-c tools.web_search=true` produced a
+   byte-identical tool. `external_web_access: false` is governed by something
+   other than that switch. Hydrogen cannot assume the tool is absent by default.
+
+3. **The system prompt never mentions it.** All 21,026 characters of
+   `instructions` never say `web_search`, `browse`, or `image_generation`. This
+   **falsifies the July premise** that the harness prompt promises hosted tools
+   the model cannot reach. The model learns the tool exists only from the `tools`
+   array — so when Hydrogen drops it, the model does not hallucinate a promised
+   tool, it simply never knows the tool existed. The bug is real; the mechanism
+   is not the one assumed.
+
+4. **`type: "namespace"` is not a documented Responses shape.** It is a Codex
+   extension carrying sub-agent and MCP tool groups. Hydrogen's `parseTools`
+   already funnels it into `Tool.raw` unchanged, so same-family replay is intact.
+
+5. **Cross-family, Codex loses 4 of its 14 tools.** `responses.ts:130` stores all
+   four non-function tools as `raw`; `anthropic.ts:400` and `completion.ts:485`
+   filter on `t.raw.family === <their own>`, so all four are dropped. Ten plain
+   function tools survive. That is the concrete, measured defect.
+
+6. **Fields Hydrogen must carry unharmed:** `store: false`, `include: []`,
+   `prompt_cache_key`, `client_metadata` (Codex telemetry),
+   `parallel_tool_calls: false`, `tool_choice: "auto"`, `reasoning: null`.
+
+**Open, following from M2:** the three `namespace` tools are dropped cross-family
+alongside `web_search`, and they matter more (they carry MCP and sub-agent
+tooling). Whether Hydrogen translates, passes through, or keeps dropping them is
+not decided by anything above.
