@@ -86,7 +86,9 @@ export interface Mapping {
   providerId: number;
   upstreamModel: string;
   /** Wire families of the provider's endpoints this mapping may use.
-   * Null = every family the provider offers. */
+   * Null or empty = the provider's PRIMARY type only, not every family it
+   * offers (see endpointPool in server/src/catalog/catalog.ts). Note this is
+   * the opposite of how `toolCapabilities` reads a null. */
   families?: string[] | null;
   /** Narrows the provider's declared tool capabilities to THIS model. Null =
    * inherit the provider's list, as `families` inherits its endpoints. */

@@ -23,8 +23,10 @@ interface FormState {
   scopeAll: boolean;
   /** Tool ids this key may cause to be dispatched. */
   scopeTools: number[];
-  /** No tool restriction. Distinct from an EMPTY scopeTools, which the
-   * server would read as a list that matches nothing. */
+  /** No tool restriction. The server reads BOTH null and an empty list as
+   * "every tool" (`scopeAllows` in server/src/execution/toolPolicy.ts), so an
+   * explicit scope that selects nothing is not "no tools" -- it is the opposite.
+   * The save refuses that state rather than storing a lie. */
   scopeToolsAll: boolean;
   maxRequests: string;
   maxTokens: string;
@@ -87,8 +89,17 @@ export function Tokens() {
 
   const serviceName = (id: number) => data?.services.find((m) => m.id === id)?.name ?? `#${id}`;
 
+  /** True when the form claims to restrict tools but names none.
+   *
+   * The server allows every tool for an empty list, so saving this would hand
+   * the key the exact opposite of what the operator selected. Hydrogen cannot
+   * record "this key may dispatch nothing", so the limit is surfaced instead of
+   * being quietly rewritten into one of the two states that DO exist. */
+  const emptyToolScope = (f: FormState) => !f.scopeToolsAll && f.scopeTools.length === 0;
+
   const create = async () => {
     if (!form) return;
+    if (emptyToolScope(form)) return toast.error(i18n("tokens.toast.emptyToolScope"));
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -113,6 +124,7 @@ export function Tokens() {
 
   const saveEdit = async () => {
     if (!form || editingId == null) return;
+    if (emptyToolScope(form)) return toast.error(i18n("tokens.toast.emptyToolScope"));
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -383,7 +395,9 @@ export function Tokens() {
                     ))}
                   </div>
                 )}
-                <p className="mt-1 text-xs text-ink-500">{i18n("tokens.field.scopeTools.hint")}</p>
+                <p className={`mt-1 text-xs ${emptyToolScope(form) ? "text-amber-400" : "text-ink-500"}`}>
+                  {i18n(emptyToolScope(form) ? "tokens.field.scopeTools.emptyWarning" : "tokens.field.scopeTools.hint")}
+                </p>
               </div>
             )}
             <div className="grid grid-cols-2 gap-3">

@@ -190,6 +190,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setOcr(undefined);
         setCategory((service.steps as ServiceSteps)?.category ?? "chat");
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
+        // The editor stays mounted between opens, so anything not reset on
+        // EVERY branch leaks into the next service. `asr` only exists on an
+        // agent; a resilience service that inherited one would silently save an
+        // audio pre-pass nobody configured.
+        setAsr(undefined);
       }
       setGrantTools(service.steps?.grantTools ?? []);
       setThinkingFormat(service.steps?.thinkingFormat ?? "original");
@@ -205,6 +210,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setStages([]);
       setOutput("");
       setOcr(undefined);
+      setAsr(undefined);
       setCategory("chat");
       setReliableStreaming(false);
       setGrantTools([]);
@@ -239,7 +245,11 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           steps,
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
-          ...(grantTools.length ? { grantTools } : {}),
+          // Gated exactly as the picker is: a grant kept on a category whose
+          // editor cannot show it is inert at runtime but still blocks deleting
+          // or renaming the tool, pointing the admin at a service that appears
+          // to grant nothing.
+          ...(isChatPipelineCategory(category) && grantTools.length ? { grantTools } : {}),
           ...thinkingFormatField(),
         } as ServiceSteps);
 
@@ -496,10 +506,12 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           </div>
         )}
 
-        {isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
+        {/* Hidden in raw mode: `save` reads the JSON there, so a chip toggled
+            here would report success and change nothing. */}
+        {!raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
           <ToolGrantPicker
             label={t(kind === "chain" ? "agents.field.grantTools" : "services.field.grantTools")}
-            hint={t("services.field.grantTools.hint")}
+            hint={t(kind === "chain" ? "agents.field.grantTools.hint" : "services.field.grantTools.hint")}
             tools={tools}
             value={grantTools}
             onChange={setGrantTools}

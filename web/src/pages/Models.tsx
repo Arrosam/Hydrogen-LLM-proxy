@@ -260,7 +260,14 @@ export function Models() {
                 className="select"
                 value={mapForm.providerId}
                 disabled={mapForm.id != null}
-                onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value), toolCapabilities: null })}
+                onChange={(e) =>
+                  // Both narrowings belong to the provider that was selected:
+                  // families names ITS endpoints, capabilities ITS declared
+                  // types. Neither survives the switch, and the families control
+                  // is hidden for a single-family provider, so a stale value
+                  // would be unreachable as well as wrong.
+                  setMapForm({ ...mapForm, providerId: Number(e.target.value), families: [], toolCapabilities: null })
+                }
               >
                 {data?.providers.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
@@ -330,8 +337,10 @@ export function Models() {
               return (
                 <div>
                   <label className="label">{t("mapping.field.toolCapabilities")}</label>
-                  {providerCaps == null || providerCaps.length === 0 ? (
+                  {providerCaps == null ? (
                     <p className="text-xs text-ink-500">{t("mapping.field.toolCapabilities.undeclared")}</p>
+                  ) : providerCaps.length === 0 ? (
+                    <p className="text-xs text-ink-500">{t("mapping.field.toolCapabilities.providerServesNone")}</p>
                   ) : (
                     <>
                       <Toggle
@@ -360,6 +369,25 @@ export function Models() {
                               </button>
                             );
                           })}
+                          {/* A type the provider no longer declares is still in
+                              the stored list and is still written back on every
+                              save. Showing it is the only way to clear it. */}
+                          {narrowed
+                            .filter((cap) => !providerCaps.includes(cap))
+                            .map((cap) => (
+                              <button
+                                key={`stale:${cap}`}
+                                type="button"
+                                className="badge-red"
+                                title={t("mapping.field.toolCapabilities.stale")}
+                                onClick={() =>
+                                  setMapForm({ ...mapForm, toolCapabilities: narrowed.filter((x) => x !== cap) })
+                                }
+                              >
+                                <i className="bi bi-exclamation-triangle" />
+                                <code>{cap}</code>
+                              </button>
+                            ))}
                         </div>
                       )}
                       <p className="mt-1 text-xs text-ink-500">{t("mapping.field.toolCapabilities.hint")}</p>

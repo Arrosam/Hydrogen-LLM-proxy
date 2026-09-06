@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Modal } from "./Modal";
 import { useI18n } from "../lib/i18n";
+import type { Tool } from "../types";
 
 export function Spinner({ label }: { label?: string }) {
   return (
@@ -149,8 +150,11 @@ export function ToolGrantPicker({
 }: {
   label: string;
   hint?: string;
-  /** Every configured tool; the picker filters to the grantable ones itself. */
-  tools: { id: number; name: string; kind: string; enabled: boolean }[];
+  /** Every configured tool; the picker filters to the grantable ones itself.
+   * Typed as `Tool` rather than structurally, so the `kind` union is checked --
+   * the freeform filter below is the single line deciding what is grantable at
+   * all, and a widened `string` would let a typo silently list nothing. */
+  tools: Tool[];
   value: string[];
   onChange: (next: string[]) => void;
 }) {

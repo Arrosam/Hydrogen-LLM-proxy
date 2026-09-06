@@ -8,7 +8,7 @@ import type { Container } from "../composition/container";
 import { requireSession } from "../auth/middleware";
 import { cookieOptions, resolveCookieSecure, SESSION_COOKIE, signSession, type SessionPayload } from "../auth/session";
 import { DEFAULT_ADMIN_PASSWORD } from "../db/bootstrap";
-import { AgentOcrSchema, isAgent, isChatPipeline, serviceCategory, summarizeService, type AgentOcr, type ServiceDef } from "../execution/definition";
+import { AgentOcrSchema, grantedToolNames, isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type AgentOcr, type ServiceDef } from "../execution/definition";
 import { ServiceValidationError } from "../execution/serviceValidator";
 import { buildOcrRequest, parseOcrResults } from "../execution/agentContext";
 import type { ModelService } from "../execution/modelService";
@@ -477,6 +477,45 @@ function serviceValidationError(e: unknown): { status: number; body: Record<stri
   return null;
 }
 
+/** The free-form tools a definition grants, or none if it no longer parses.
+ * Takes `unknown` because a stored row's definition is only a JSON blob. */
+function grantsOf(definition: unknown): string[] {
+  try {
+    return grantedToolNames(parseService(definition));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A non-admin may edit a service, but not change which tools it grants.
+ *
+ * Managing services is a manager's job. Directing this server's credentialed,
+ * billable egress is not: a grant makes Hydrogen POST to an operator's own
+ * endpoint with the operator's stored headers, and `toolRoutes` deliberately
+ * hides both the URL and the header names from a manager. Letting them attach
+ * that endpoint to a service would hand them exactly the capability the tool
+ * routes refuse to even show them.
+ *
+ * Only a CHANGE is refused, so a manager can still edit the timeout, steps or
+ * stages of a service that already grants something -- otherwise adding one
+ * grant would lock managers out of the service entirely.
+ */
+function grantsAllowed(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  before: string[],
+  after: ServiceDef,
+): boolean {
+  if (req.user?.role === "admin") return true;
+  const next = grantsOf(after);
+  const a = [...before].sort();
+  const b = [...next].sort();
+  if (a.length === b.length && a.every((n, i) => n === b[i])) return true;
+  void reply.code(403).send({ error: "only an admin can change which tools a service grants" });
+  return false;
+}
+
 async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/", async () => ({ services: c.services.list().map((m) => presentService(c, m)) }));
 
@@ -499,6 +538,7 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     try {
       const { def } = c.validator.validate(parsed.data.steps);
+      if (!grantsAllowed(req, reply, [], def)) return reply;
       const row = c.services.create({ name: parsed.data.name, description: parsed.data.description, definition: def, enabled: parsed.data.enabled });
       return reply.code(201).send({ service: presentService(c, row) });
     } catch (e) {
@@ -520,7 +560,11 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
         description: parsed.data.description,
         enabled: parsed.data.enabled,
       };
-      if (parsed.data.steps !== undefined) patch.definition = c.validator.validate(parsed.data.steps).def;
+      if (parsed.data.steps !== undefined) {
+        const def = c.validator.validate(parsed.data.steps).def;
+        if (!grantsAllowed(req, reply, grantsOf(c.services.get(id)!.definition), def)) return reply;
+        patch.definition = def;
+      }
       const row = c.services.update(id, patch);
       return { service: row ? presentService(c, row) : null };
     } catch (e) {

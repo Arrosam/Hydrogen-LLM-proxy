@@ -226,6 +226,40 @@ describe("tool routes — review regressions", () => {
     expect(JSON.parse(patched.body).provider.toolCapabilities).toEqual(["web_search"]);
   });
 
+  it("refuses a manager who tries to change which tools a service grants", async () => {
+    // A grant makes Hydrogen POST to the operator's own endpoint with the
+    // operator's stored headers -- and the tool list already hides that URL
+    // from a manager. Attaching it to a service is the same capability by
+    // another route, so it is admin-only too.
+    const steps = { timeoutMs: 60000, steps: [{ model: "m", provider: "p" }] };
+    const made = await req("POST", "/admin/api/services", adminCookie, { name: "mgr-target", steps });
+    expect(made.statusCode).toBe(201);
+    const id = JSON.parse(made.body).service.id as number;
+
+    const escalated = await req("PATCH", `/admin/api/services/${id}`, managerCookie, {
+      steps: { ...steps, grantTools: ["check_inventory"] },
+    });
+    expect(escalated.statusCode).toBe(403);
+    expect(escalated.body).toContain("only an admin can change which tools a service grants");
+
+    const creating = await req("POST", "/admin/api/services", managerCookie, {
+      name: "mgr-made",
+      steps: { ...steps, grantTools: ["check_inventory"] },
+    });
+    expect(creating.statusCode).toBe(403);
+
+    // Everything else about the service is still a manager's to edit, including
+    // one that already grants a tool -- otherwise a single grant would lock
+    // managers out of it entirely.
+    expect((await req("PATCH", `/admin/api/services/${id}`, managerCookie, { description: "still mine" })).statusCode).toBe(200);
+    await req("PATCH", `/admin/api/services/${id}`, adminCookie, { steps: { ...steps, grantTools: ["check_inventory"] } });
+    const unrelated = await req("PATCH", `/admin/api/services/${id}`, managerCookie, {
+      steps: { ...steps, timeoutMs: 12345, grantTools: ["check_inventory"] },
+    });
+    expect(unrelated.statusCode).toBe(200);
+    expect(JSON.parse(unrelated.body).service.steps.timeoutMs).toBe(12345);
+  });
+
   it("prunes a deleted tool's id from every key that scoped itself to it", async () => {
     const made = await req("POST", "/admin/api/tools", adminCookie, { name: "scoped_tool", endpointUrl: "https://tools.invalid/s" });
     const toolId = JSON.parse(made.body).tool.id as number;

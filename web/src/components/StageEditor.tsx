@@ -246,6 +246,22 @@ function StageBody({
         {!model && (
           <p className="mt-1 text-xs text-ink-500">{t("stageEditor.routerHint")}</p>
         )}
+        {/* A router stage runs no model, so it has nothing to offer a tool to
+            and is given no picker. But a grant CAN reach one through raw JSON,
+            and `grantedToolNames` walks every stage -- so the whole agent then
+            refuses to save, naming the tool and not the stage. Show it here
+            when there is one, or it can only be cleared in the JSON. */}
+        {!model && (stage.grantTools?.length ?? 0) > 0 && (
+          <div className="mt-2">
+            <ToolGrantPicker
+              label={t("agents.stage.grantTools")}
+              hint={t("agents.stage.grantTools.router")}
+              tools={tools}
+              value={stage.grantTools ?? []}
+              onChange={(next) => onPatch({ grantTools: next.length ? next : undefined })}
+            />
+          </div>
+        )}
       </div>
 
       {model && (
