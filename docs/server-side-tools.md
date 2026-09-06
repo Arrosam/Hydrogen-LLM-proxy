@@ -319,3 +319,42 @@ bare `js` and `js_reset` each collide across two namespaces). Inbound, a call
 named `mcp__node_repl__js` splits back into `{"name":"js","namespace":"mcp__node_repl"}`.
 The mapping is derivable from the item itself, so **it needs no server-side
 state** and survives retries, fallback steps and restarts.
+
+## Behavior 10 — the Tools tab (decided 2026-09-06)
+
+A **Tools** tab in the web console, owning tool configuration and nothing else.
+
+**It owns:**
+- the web-search backend choice and its API key
+- operator-configured MCP servers (name, URL, auth)
+- `code_interpreter` sandbox settings (image, timeout, memory, egress policy)
+- per-tool enable/disable and the round cap (D5)
+
+**It deliberately does NOT own:**
+- *which providers natively serve which tool* — that stays on **Providers**,
+  beside the base URL and key it belongs to
+- *which Model Services grant which tool* — that stays in the **Model Services**
+  editor, beside the steps it applies to
+
+Each fact is editable from exactly one screen. The cost, accepted: there is no
+single place to see where a tool is in use.
+
+**Permissions**, matching Proxies: writes are admin-only (a tool row carries a
+credential and decides where this server's traffic goes); **reads are not
+admin-gated**, because the Model Services editor must list the configured tools
+to render its grant picker.
+
+**Wiring**, following the existing convention exactly:
+- `NAV` entry in `web/src/components/Layout.tsx` — `{to: "/tools", labelKey:
+  "nav.tools", icon: "bi-...", adminOnly: false}`
+- route in `web/src/App.tsx`
+- `nav.tools` plus every field label in `web/src/lib/i18n.tsx`, **en and zh both**
+- Bootstrap Icons only, never emoji
+- `web/src/pages/Tools.tsx`, modelled on `Proxies.tsx`
+- server side: a `toolRoutes` group registered like `proxyRoutes`, with secrets
+  encrypted under the master key and included in the sealed export
+
+**Storage:** new tables. Provider capabilities need migration `0008` (the
+`providers` table has no such column today); service tool grants need **no**
+migration — a service definition is a JSON blob validated by zod in
+`execution/definition.ts`, so the grant is a schema extension.
