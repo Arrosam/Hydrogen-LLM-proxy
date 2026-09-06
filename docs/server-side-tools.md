@@ -857,3 +857,23 @@ That is fine while Hydrogen keeps serving the tool, since it is also the one
 reading the value back. It breaks when a later turn falls back to a **real**
 Anthropic provider with native web search: that provider is handed a value it
 never issued and rejects the request. See S15.
+
+## S15. Hydrogen does not launder its own tool results. The 400 surfaces.
+
+When a conversation carrying Hydrogen-issued `encrypted_content` reaches a
+provider that validates it, that provider returns a 400 and **the 400 goes to
+the client**. Hydrogen does not rewrite its blocks into plain text, does not skip
+the offending fallback step, and does not pre-emptively force override.
+
+This is the same rule already settled twice for Anthropic `thinking` (`62ab091`)
+and `reasoning_effort` clamping: the proxy does not quietly reshape a request so
+it succeeds differently from what was asked. A validation error naming the
+problem is more useful than a 200 that silently degraded the conversation.
+
+The remedy is configuration, where it belongs. An operator who does not want this
+either keeps native-capable providers out of a service whose tools Hydrogen
+serves, or sets that tool to override (S3) so every value in the conversation is
+Hydrogen's own and consistently accepted.
+
+Consequence, accepted: a Model Service that mixes a Hydrogen-served tool with a
+native-capable fallback will break on that fallback path, visibly.
