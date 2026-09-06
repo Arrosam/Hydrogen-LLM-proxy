@@ -749,3 +749,30 @@ emit is how a strict client gets broken.
 
 Two documented fidelity tiers, same rule as Behavior 5 — represent it natively
 where the format has a place for it, stay quiet where it does not.
+
+## S12. Hydrogen presents itself as a provider that natively has these tools
+
+The governing principle for the loop, and it settles the fallback question
+without a special rule: **from the model's side, the tools are the provider's
+own.** A step change is therefore an ordinary model switch mid-conversation, not
+a restart.
+
+What follows:
+
+- **Tool calls and their results carry forward across steps.** Step 2 continues
+  the conversation that step 1 was having, tool history included. It does not
+  replay the client's original request.
+- **Hydrogen never re-dispatches a tool it has already run.** This matters
+  beyond cost: an operator's endpoint may be a write, and a fallback must not
+  fire `check_inventory` twice from one client request.
+- The conversation handed to step 2 contains work authored by a different model
+  on possibly a different family. That is exactly what a mid-run model switch
+  is, and it is accepted as such.
+- Cross-family is safe by construction: an executed tool lives in the IR as
+  canonical `tool_use` / `tool_result` parts, which every family renders.
+
+**This does not change how partial text behaves.** A mid-stream failure still
+discards the partial answer and re-attempts, as today — the client never sees a
+half answer. The asymmetry is deliberate: partial text is cheap to regenerate
+and meaningless on its own, whereas a completed tool result was paid for and may
+have already changed something in the world.
