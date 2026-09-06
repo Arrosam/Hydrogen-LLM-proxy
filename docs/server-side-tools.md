@@ -612,3 +612,19 @@ next to the credential it belongs to.
 Repo name, GHCR image path and the `areel.org` deployment all move to the new
 name. **Old images are retained, not deleted**, and the old name keeps working —
 the new name is added alongside rather than swapped in.
+
+## S6. The dispatch contract is a fixed envelope Hydrogen owns
+
+Hydrogen POSTs a shape it defines — the tool name, the model's arguments, the
+call id — and expects `{ output }` or `{ error }` back. It does no templating,
+no placeholder interpolation, and no response extraction.
+
+The operator supplies an adapter that turns that envelope into whatever the real
+service wants. That keeps Hydrogen free of a template language, secret
+interpolation and response-path extraction — the three things that made the
+reverted HTTP tool builder large — and leaves exactly one contract to document
+and test. The cost, accepted: an operator who wants Tavily needs somewhere to run
+a small adapter rather than pointing Hydrogen straight at `api.tavily.com`.
+
+An `{ error }` reply is fed to the model as an errored tool result, per
+Behavior 6, not surfaced to the client.
