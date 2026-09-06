@@ -628,3 +628,24 @@ a small adapter rather than pointing Hydrogen straight at `api.tavily.com`.
 
 An `{ error }` reply is fed to the model as an errored tool result, per
 Behavior 6, not surfaced to the client.
+
+## S7. Tools are free-form. There is no hosted-tool vocabulary.
+
+An operator names a tool whatever they like — `check_inventory`,
+`query_warehouse`, `web_search` — gives it a description and a parameter schema,
+and points it at an endpoint. Hydrogen declares it upstream as an ordinary
+**function** tool and executes it when the model calls it.
+
+Consequences:
+
+- **No per-tool translation code.** Nothing in Hydrogen knows what a web search
+  *is*. A new tool is configuration, never a release.
+- **Works on every wire format immediately**, because a function tool is the one
+  thing all three families model natively.
+- **Behavior 5 loses its subject.** There is no `server_tool_use` /
+  `web_search_tool_result` / `web_search_call` to synthesize, because Hydrogen no
+  longer serves the hosted-tool types those blocks describe. What the client sees
+  instead is settled in S8.
+- A client-declared hosted `web_search` (Codex sends one unconditionally) is a
+  *different thing* from an operator's tool named `web_search`. Whether they are
+  allowed to collide, and which wins, is still open.
