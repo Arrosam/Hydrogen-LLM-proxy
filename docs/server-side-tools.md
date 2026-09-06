@@ -734,3 +734,18 @@ the turn working when the model can answer without it.
 The log is what stops this being the silent-degradation failure the feature
 exists to fix — the loss becomes visible to the operator, just not fatal to the
 caller.
+
+## S11. A Path B tool is shown as a server-side tool where the format allows
+
+Anthropic clients see real `server_tool_use` + `tool_result` blocks for a
+free-form tool. That block type exists so a client knows the server already ran
+it and must not execute it itself, and it carries a `name`, so an arbitrary name
+fits without inventing anything.
+
+Responses and Chat Completions clients see nothing but the final answer: neither
+format can express "the server executed this function tool" for a name outside
+its hosted vocabulary (S8), and fabricating an item type the real API would never
+emit is how a strict client gets broken.
+
+Two documented fidelity tiers, same rule as Behavior 5 — represent it natively
+where the format has a place for it, stay quiet where it does not.
