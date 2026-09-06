@@ -130,16 +130,23 @@ open question below.
 
 ## Open
 
-- **The measurement gate is half cleared** — see [Measurements](#measurements).
-  M1 measured the Anthropic-wire coding harness and it came back **negative**: it
-  declares no server-side tools at all. M2, the Responses-wire case this feature
-  was actually premised on, is still unmeasured, and no dispatch code is written
-  until it is. The tool *type strings* Hydrogen declares must match what the
-  harness's system prompt promises, or the model still cannot reach them.
+*Revised 2026-09-07, after stages A-C shipped. The entries below are what is
+still open; what closed is recorded where it was decided.*
+
+- **The measurement gate for building the loop is cleared.** M1 came back
+  negative — the Anthropic-wire harness declares no server-side tools — but M2
+  cleared positively (Codex declares one) and M3 reproduced the defect live, so
+  the dispatch code was written and shipped in Stage A. The tool *type strings*
+  Hydrogen declares must still match what a harness's system prompt promises, or
+  the model cannot reach them; S9 settles that as one config entry per exact
+  string.
+- **The gate for CLIENT-FACING emission is not cleared.** Two shapes remain
+  unmeasured and block Stage D: M5, what Codex accepts as a hosted-tool result,
+  and M6, what Claude Code sends and accepts on the Anthropic wire — which
+  subsumes the older open question about whether it validates a synthesized
+  `encrypted_content`. Both are written out under
+  [Stage D — PARKED](#stage-d--path-a-native-emission-parked-2026-09-07-not-built).
 - Search backend (D4) — needs a key that does not exist yet.
-- Whether Claude Code validates Anthropic's `encrypted_content` on a
-  `web_search_tool_result`, or accepts a synthesized value. Resolve by testing
-  against the real client.
 - Service-granted tools: chat category only, or also embeddings/tts? Assumed
   chat only.
 - Whether the rename moves the repo and GHCR image path, and what happens to
@@ -165,7 +172,12 @@ for that client class sits in the **service-granted** half. That reorders the
 build: the service-grant config surface (D6) is not a secondary convenience, it
 is the primary path.
 
-### M2 — Responses-wire harness: NOT MEASURED
+### M2 — Responses-wire harness: NOT MEASURED — SUPERSEDED 2026-09-06
+
+**This section is the state before the capture. It was cleared: see
+[M2 — Codex DOES declare a server-side tool](#m2--codex-does-declare-a-server-side-tool-measured-2026-09-06)
+below.** Kept because it records what the gate actually was, and what evidence
+was accepted as clearing it.
 
 There is no `/v1/responses` request in any log, ever — `select distinct
 ingress_format from request_logs` returns only `anthropic`. The premise this
