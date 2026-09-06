@@ -1,6 +1,6 @@
-# Getting started with Hydrogen
+# Getting started with Hydro AI station
 
-This guide takes you from a freshly started Hydrogen to a working API call, then shows how to
+This guide takes you from a freshly started Hydro AI station to a working API call, then shows how to
 build a **Micro Agent** — a multi-stage pipeline that clients call as if it were a single model.
 
 If you just want the shortest path: **Provider → Model → Model Service → API key → call it.** That
@@ -12,7 +12,7 @@ order is not a suggestion; each step depends on the one before it.
 
 ## The mental model
 
-Clients never name a real model. They set `model` to the name of a **Model Service**, and Hydrogen
+Clients never name a real model. They set `model` to the name of a **Model Service**, and Hydro AI station
 decides what that means:
 
 ```
@@ -43,7 +43,7 @@ Client code keeps asking for `sonnet-any` and never notices.
 
 ## Before you start
 
-You need a running Hydrogen and an admin login. If you haven't got that yet, see **Quick start** in
+You need a running Hydro AI station and an admin login. If you haven't got that yet, see **Quick start** in
 the [README](../README.md). Open the dashboard (`http://localhost:8080` by default) and sign in.
 
 The left sidebar is the map of everything below: **Model Services**, **Micro Agents**,
@@ -60,7 +60,7 @@ The left sidebar is the map of everything below: **Model Services**, **Micro Age
 | Field | What to put in it |
 |---|---|
 | **Name** | Your label for this upstream, e.g. `openai-official`. Model Services refer to it by this name. |
-| **Type** | `OpenAI (Chat Completions)`, `OpenAI (Responses API)`, or `Anthropic`. This is the wire format Hydrogen speaks *to this provider* — it has nothing to do with what your clients speak. |
+| **Type** | `OpenAI (Chat Completions)`, `OpenAI (Responses API)`, or `Anthropic`. This is the wire format Hydro AI station speaks *to this provider* — it has nothing to do with what your clients speak. |
 | **Base URL** | See below. |
 | **API key** | Encrypted with AES-256-GCM the moment you save. It is never shown again. |
 | **Extra headers (JSON, optional)** | For upstreams that need something extra, e.g. `{"x-org": "team-a"}`. |
@@ -195,7 +195,7 @@ Before saving, use the footer buttons:
 Off (default), a streaming request relays token by token — real-time, but once the headers are sent
 a mid-stream truncation can't be retried.
 
-On, Hydrogen streams from the upstream, buffers the whole thing (a truncated stream counts as a
+On, Hydro AI station streams from the upstream, buffers the whole thing (a truncated stream counts as a
 retryable failure under your rules), then replays the complete result. The client gets a whole
 response or a clean 502 — never a half one. It costs first-token latency. Worth it for unattended
 jobs; usually not for a chat UI.
@@ -238,7 +238,7 @@ curl http://localhost:8080/v1/messages \
 ```
 
 The client's format and the provider's format are independent. An Anthropic-speaking client can be
-served by an OpenAI provider, and vice versa — Hydrogen translates both ways.
+served by an OpenAI provider, and vice versa — Hydro AI station translates both ways.
 
 | Method | Path |
 |---|---|
@@ -484,9 +484,9 @@ Set the budget to 0 to turn caching off and empty it.
 | Validate: *"These (model, provider) pairs are not mapped in the catalog"* | The step points at a pair that doesn't exist. Fix the mapping or the step. |
 | Dry-run fails with a 401/403 | Wrong API key on the provider. Re-enter it (blank = keep current, so you must type the new one). |
 | Dry-run fails with a 404 | The **Upstream model id** in the mapping isn't what that provider calls it. |
-| Client gets 401 from Hydrogen | Bad or revoked API key, or the key isn't scoped to that service. |
+| Client gets 401 from Hydro AI station | Bad or revoked API key, or the key isn't scoped to that service. |
 | Client gets 404 for the model | The `model` you sent isn't a Model Service name, or the service is disabled. |
 | *"Create a provider first"* | Provider → Model → Mapping. In that order. |
 | Agent: *"references unknown Model Service or Micro Agent"* | A stage names a service that doesn't exist. Save the Model Service first. |
 | Agent: *"transition goto ... must be a later stage"* | Transitions are forward-only. Reorder the stages instead. |
-| Hydrogen refuses to boot | `PROXY_MASTER_KEY` changed and no longer matches the encrypted keys. See **Security notes** in the [README](../README.md). |
+| Hydro AI station refuses to boot | `PROXY_MASTER_KEY` changed and no longer matches the encrypted keys. See **Security notes** in the [README](../README.md). |

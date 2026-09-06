@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/hero.zh.svg" alt="Hydrogen — 自托管 LLM 代理，同时支持 OpenAI 和 Anthropic 协议格式" width="100%">
+<img src="docs/images/hero.zh.svg" alt="Hydro AI station — 自托管 LLM 代理，同时支持 OpenAI 和 Anthropic 协议格式" width="100%">
 
 <p>
   <a href="docs/getting-started.zh.md"><b>快速上手</b></a> ·
@@ -27,8 +27,8 @@
 
 ---
 
-**Hydrogen** 保管你的大模型供应商 API 密钥，并逐请求决定由哪个供应商的哪个模型来服务。客户端永远不需要
-指定真实模型名：它们只需指定一个**模型服务（Model Service）**的名字，Hydrogen 会按该服务定义的有序步骤
+**Hydro AI station** 保管你的大模型供应商 API 密钥，并逐请求决定由哪个供应商的哪个模型来服务。客户端永远不需要
+指定真实模型名：它们只需指定一个**模型服务（Model Service）**的名字，Hydro AI station 会按该服务定义的有序步骤
 （重试 → 供应商回退 → 模型回退）在你自建的目录中执行。它同时支持 **OpenAI** 和 **Anthropic** 两种协议
 格式并能双向翻译，所以一个使用 Anthropic 协议的客户端可以被 OpenAI 供应商服务而毫无感知。
 
@@ -102,7 +102,7 @@
   持有者可在公开的**密钥检查**页面查看自己的状态。
 - **可观测性。** 每个请求都记录了每次尝试、请求/响应体、延迟和 Token 用量——代理阶段嵌套在客户端请求下
   ——还有实时**活跃请求**面板和仪表板统计。
-- **备份与恢复。** 整个实例打包为一个受密码保护的文件，可恢复到任意其他 Hydrogen 实例。
+- **备份与恢复。** 整个实例打包为一个受密码保护的文件，可恢复到任意其他 Hydro AI station 实例。
 - **两种角色，两种语言。** admin / manager，仪表板支持英文和中文。
 - **默认安全。** 供应商密钥用 AES-256-GCM 加密，密码用 argon2id 散列，客户端密钥用 SHA-256，
   供应商 Base URL 有 SSRF 防护，启动时有主密钥哨兵检查。
@@ -131,21 +131,21 @@
 | **3** | [源码构建](#3-源码构建) | 本地开发或自定义构建。 |
 
 无论哪种方式，一条规则高于一切：**`/data` 必须持久化。** 它保存着 SQLite 数据库和
-`hydrogen-secrets.json`（主密钥），后者用于解密你的供应商 API 密钥。丢失它，Hydrogen 会拒绝启动，
+`hydrogen-secrets.json`（主密钥），后者用于解密你的供应商 API 密钥。丢失它，Hydro AI station 会拒绝启动，
 而不是用无法读取的密钥继续运行。
 
 ### 1. 雨云应用商店（一键部署）
 
-Hydrogen 已上架雨云云应用商店，无需自行构建。
+Hydro AI station 已上架雨云云应用商店，无需自行构建。
 
 1. **登录[雨云](https://app.rainyun.com/)。** 还没有账号？通过
    [邀请链接](https://www.rainyun.com/MTA1NzAwNA==_)注册可支持本项目。
 2. **打开应用商店** — [app.rainyun.com/apps/rca/store](https://app.rainyun.com/apps/rca/store) —
-   搜索 **Hydrogen**，部署到你的项目中。
+   搜索 **Hydrogen**（应用商店上的名称尚未更新），部署到你的项目中。
 3. **选择资源配置。** 0.5 核 / 512 MB 足以运行；推荐 1 核 / 1 GB。
 4. **保留模板自带的 `/data` 卷**（子路径 `hydrogen/data`）。这是重新部署时不丢失供应商密钥的关键。
 5. **环境变量**都是可选的。如需自定义首次登录凭据可设置 `ADMIN_USERNAME` / `ADMIN_PASSWORD`；
-   `PROXY_MASTER_KEY` 和 `SESSION_SECRET` **留空**即可，Hydrogen 会自动生成并持久化。
+   `PROXY_MASTER_KEY` 和 `SESSION_SECRET` **留空**即可，Hydro AI station 会自动生成并持久化。
    不要用雨云的随机字符串生成器填充主密钥——生成的不会是有效的 32 字节 base64 密钥，应用会拒绝启动。
 6. **打开分配的 URL** 并登录。如果 `ADMIN_PASSWORD` 留空，首次登录凭据为 `admin` / `password`，
    登录后会强制要求设置新密码。
@@ -229,7 +229,7 @@ npm run build                 # web → web/dist, server → server/dist/server.
 DATA_DIR=./data node server/dist/server.cjs
 ```
 
-`PROXY_MASTER_KEY` 和 `SESSION_SECRET` 不设就好，Hydrogen 会在首次启动时生成强随机值并保存到
+`PROXY_MASTER_KEY` 和 `SESSION_SECRET` 不设就好，Hydro AI station 会在首次启动时生成强随机值并保存到
 `$DATA_DIR/hydrogen-secrets.json`。如果要自行管理：
 
 ```bash
@@ -338,7 +338,7 @@ curl http://localhost:8080/v1/messages \
 ## 备份与恢复
 
 **设置 → 备份与恢复**（仅 admin）将整个实例——供应商、模型、映射、服务、代理、API 密钥、用户、设置，
-以及可选的请求日志和图像缓存——导出为一个 JSON 文件，可恢复到任意其他 Hydrogen 实例。
+以及可选的请求日志和图像缓存——导出为一个 JSON 文件，可恢复到任意其他 Hydro AI station 实例。
 客户端 API 密钥和仪表板密码会继续可用，因为它们的哈希值随文件一起迁移。
 
 供应商 API 密钥需要特殊处理，因为它们用 `PROXY_MASTER_KEY` 加密，而主密钥存在于
@@ -359,7 +359,7 @@ curl http://localhost:8080/v1/messages \
 ## 安全说明
 
 - **供应商 API 密钥**使用 AES-256-GCM 加密（密钥为 `PROXY_MASTER_KEY`），从不以明文离开服务器。
-  首次启动时写入一个哨兵值；以不同的主密钥启动，Hydrogen 会**拒绝启动**而不是产生不可预测的行为。
+  首次启动时写入一个哨兵值；以不同的主密钥启动，Hydro AI station 会**拒绝启动**而不是产生不可预测的行为。
 - **客户端 API 密钥**创建时显示一次，只存储 SHA-256 哈希加前缀。
 - **密码**使用 argon2id。会话 cookie 带签名、httpOnly、`SameSite=Lax`，在 HTTPS 下标记 `Secure`
   ——请在 TLS 之后提供仪表板。

@@ -1,8 +1,8 @@
-# Publishing Hydrogen on Rainyun (雨云云应用 / RCA)
+# Publishing Hydro AI station on Rainyun (雨云云应用 / RCA)
 
 Rainyun Cloud Applications deploy a **pre-built public Docker image** (they do not build
 from source). Each app becomes a Kubernetes Deployment configured through Rainyun's visual
-template builder. Hydrogen fits cleanly: one container, one web port, a `/data` volume, and
+template builder. Hydro AI station fits cleanly: one container, one web port, a `/data` volume, and
 secrets it generates itself.
 
 There are three steps: **publish the image → fill in the RCA template → submit for review.**
@@ -69,7 +69,7 @@ One public service:
 The dashboard **and** the OpenAI/Anthropic API are both served on this one port.
 
 ### Environment variables
-All of these are optional — Hydrogen auto-generates what's missing — but set them explicitly
+All of these are optional — Hydro AI station auto-generates what's missing — but set them explicitly
 for clarity. Expose `ADMIN_USERNAME` / `ADMIN_PASSWORD` as user-editable **Options** if you want
 deployers to choose them.
 
@@ -95,7 +95,7 @@ deployers to choose them.
 
 > **Why this is mandatory:** `/data` holds the SQLite database, the auto-generated master key,
 > and the session secret. The master key decrypts stored provider API keys. Without a persistent
-> volume the key would be regenerated on restart and Hydrogen would **refuse to boot**
+> volume the key would be regenerated on restart and Hydro AI station would **refuse to boot**
 > (master-key sentinel mismatch). With the volume, everything stays stable across restarts.
 
 ### Command / Args / Scripts

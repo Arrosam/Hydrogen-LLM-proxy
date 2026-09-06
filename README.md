@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/hero.svg" alt="Hydrogen — a self-hosted LLM proxy speaking both the OpenAI and Anthropic wire formats" width="100%">
+<img src="docs/images/hero.svg" alt="Hydro AI station — a self-hosted LLM proxy speaking both the OpenAI and Anthropic wire formats" width="100%">
 
 <p>
   <a href="docs/getting-started.md"><b>Getting started</b></a> ·
@@ -27,9 +27,9 @@
 
 ---
 
-**Hydrogen** holds your provider API keys, and decides — per request — which model at which
+**Hydro AI station** holds your provider API keys, and decides — per request — which model at which
 provider actually serves it. Clients never name a real model: they name a **Model Service**, and
-Hydrogen runs that service's ordered steps (retry → provider fallback → model fallback) over your
+Hydro AI station runs that service's ordered steps (retry → provider fallback → model fallback) over your
 own catalogue. It speaks both the **OpenAI** and **Anthropic** wire formats and translates between
 them, so an Anthropic-speaking client can be served by an OpenAI provider and never notice.
 
@@ -106,7 +106,7 @@ agent pipeline is a dashboard edit. Client code keeps asking for `sonnet-any`.
 - **Observability.** Every request logged with each attempt, payloads, latency and token usage —
   agent stages nested under the client request — plus live **Active Requests** and dashboard stats.
 - **Backup & restore.** The whole instance in one passphrase-sealed file that restores onto any
-  other Hydrogen.
+  other Hydro AI station.
 - **Two roles, two languages.** admin / manager, dashboard in English or 中文.
 - **Safe by default.** AES-256-GCM for provider keys, argon2id for passwords, SHA-256 for client
   keys, an SSRF guard on provider base URLs, and a boot-time master-key sentinel.
@@ -136,21 +136,22 @@ Three paths, in order of effort:
 
 Whatever the path, one rule outranks the rest: **`/data` must be persistent.** It holds the SQLite
 database *and* `hydrogen-secrets.json`, which carries the master key that decrypts your provider API
-keys. Lose it and Hydrogen refuses to boot rather than run with keys it can no longer read.
+keys. Lose it and Hydro AI station refuses to boot rather than run with keys it can no longer read.
 
 ### 1. Rainyun app store (one click)
 
-Hydrogen is published as a Rainyun Cloud Application (雨云云应用), so there is nothing to build.
+Hydro AI station is published as a Rainyun Cloud Application (雨云云应用), so there is nothing to build.
 
 1. **Sign in to [Rainyun](https://app.rainyun.com/).** No account yet? Registering through
    [this invitation link](https://www.rainyun.com/MTA1NzAwNA==_) supports the project.
 2. **Open the app store** — [app.rainyun.com/apps/rca/store](https://app.rainyun.com/apps/rca/store) —
-   search for **Hydrogen**, and deploy it into one of your projects.
+   search for **Hydrogen** (the store listing still carries the old name), and
+   deploy it into one of your projects.
 3. **Pick the resources.** 0.5 core / 512 MB is enough to run; 1 core / 1 GB is comfortable.
 4. **Keep the `/data` volume** the template ships with (sub-path `hydrogen/data`). It is the whole
    reason a redeploy doesn't cost you your provider keys.
 5. **Environment variables** are optional. Set `ADMIN_USERNAME` / `ADMIN_PASSWORD` if you want to
-   choose the first login; leave `PROXY_MASTER_KEY` and `SESSION_SECRET` **empty** so Hydrogen
+   choose the first login; leave `PROXY_MASTER_KEY` and `SESSION_SECRET` **empty** so Hydro AI station
    generates and persists them itself. Do not fill the master key with Rainyun's random-string
    generator — it will not be a valid 32-byte base64 key and the app will refuse to start.
 6. **Open the assigned URL** and sign in. With `ADMIN_PASSWORD` left empty the first login is
@@ -244,7 +245,7 @@ npm run build                 # web → web/dist, server → server/dist/server.
 DATA_DIR=./data node server/dist/server.cjs
 ```
 
-Leave `PROXY_MASTER_KEY` and `SESSION_SECRET` unset and Hydrogen generates strong values on first
+Leave `PROXY_MASTER_KEY` and `SESSION_SECRET` unset and Hydro AI station generates strong values on first
 boot, persisting them in `$DATA_DIR/hydrogen-secrets.json`. To manage them yourself:
 
 ```bash
@@ -356,7 +357,7 @@ See [`.env.example`](.env.example) for the annotated version.
 
 **Settings → Backup & restore** (admin only) exports the whole instance — providers, models,
 mappings, services, agents, API keys, users, settings, and optionally request logs and the image
-cache — as one JSON file, and restores it onto any Hydrogen. Client API keys and dashboard passwords
+cache — as one JSON file, and restores it onto any Hydro AI station. Client API keys and dashboard passwords
 keep working, because their hashes travel with the package.
 
 Provider API keys need care, because they are encrypted with `PROXY_MASTER_KEY`, which lives in
@@ -382,7 +383,7 @@ and request history. Treat it as sensitive.
 
 - **Provider API keys** are encrypted with AES-256-GCM under `PROXY_MASTER_KEY` and never leave the
   server in plaintext. A sentinel is written on first boot; start with a different master key and
-  Hydrogen **refuses to boot** rather than behave unpredictably.
+  Hydro AI station **refuses to boot** rather than behave unpredictably.
 - **Client API keys** are shown once at creation and stored only as a SHA-256 hash plus a prefix.
 - **Passwords** use argon2id. Sessions are signed, httpOnly, `SameSite=Lax` cookies, marked `Secure`
   on HTTPS — serve the dashboard behind TLS.

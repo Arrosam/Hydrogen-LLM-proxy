@@ -277,7 +277,7 @@ export async function exportBackup(
 function validate(pkg: unknown): asserts pkg is BackupPackage {
   if (!pkg || typeof pkg !== "object") throw new BackupError("not a backup file");
   const p = pkg as Partial<BackupPackage>;
-  if (p.format !== BACKUP_FORMAT) throw new BackupError("not a Hydrogen backup file");
+  if (p.format !== BACKUP_FORMAT) throw new BackupError("not a Hydro AI station backup file");
   if (p.version !== BACKUP_VERSION) {
     throw new BackupError(`unsupported backup version ${String(p.version)} (this server reads version ${BACKUP_VERSION})`);
   }

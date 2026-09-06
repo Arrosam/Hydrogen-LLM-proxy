@@ -9,7 +9,7 @@ async function main(): Promise<void> {
   const app = await buildApp(container);
 
   await app.listen({ port: container.config.port, host: container.config.host });
-  app.log.info(`Hydrogen listening on http://${container.config.host}:${container.config.port}`);
+  app.log.info(`Hydro AI station listening on http://${container.config.host}:${container.config.port}`);
 
   // Auto-prune the request log by age. The retention (log_retention_days, 0 =
   // keep forever) is re-read on every tick, so changing it in the dashboard

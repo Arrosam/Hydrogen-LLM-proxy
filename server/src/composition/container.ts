@@ -164,7 +164,7 @@ function printInitialAdmin(seed: SeedResult): void {
   const rows = [
     "",
     line,
-    "  Hydrogen - initial admin account created",
+    "  Hydro AI station - initial admin account created",
     `  URL:      http://localhost:<PORT>`,
     `  username: ${seed.username}`,
   ];

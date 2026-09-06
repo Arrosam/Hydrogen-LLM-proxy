@@ -1,6 +1,6 @@
-# Hydrogen 上手指南
+# Hydro AI station 上手指南
 
-本文带你从一个刚启动的 Hydrogen 走到第一次成功的 API 调用，然后教你搭建一个**微型代理**——一条多阶段流水线，但客户端调用它时就像调用一个普通模型。
+本文带你从一个刚启动的 Hydro AI station 走到第一次成功的 API 调用，然后教你搭建一个**微型代理**——一条多阶段流水线，但客户端调用它时就像调用一个普通模型。
 
 如果只想要最短路径：**提供商 → 模型 → 模型服务 → API 密钥 → 调用**。这个顺序不是建议，而是每一步都依赖上一步。
 
@@ -10,7 +10,7 @@
 
 ## 先理解这四个概念
 
-客户端从不指定真实模型。它把 `model` 填成**模型服务**的名字，剩下的由 Hydrogen 决定：
+客户端从不指定真实模型。它把 `model` 填成**模型服务**的名字，剩下的由 Hydro AI station 决定：
 
 ```
 客户端请求（model = "sonnet-any"）
@@ -39,7 +39,7 @@
 
 ## 开始之前
 
-你需要一个已经跑起来的 Hydrogen 和一个管理员账号。还没有的话，请先看 [README](../README.md) 的 **Quick start**。打开控制台（默认 `http://localhost:8080`）并登录。
+你需要一个已经跑起来的 Hydro AI station 和一个管理员账号。还没有的话，请先看 [README](../README.md) 的 **Quick start**。打开控制台（默认 `http://localhost:8080`）并登录。
 
 左侧导航就是下文的全部地图：**模型服务**、**微型代理**、**模型映射**、**提供商**、**API 密钥**、**日志**、**活动请求**。
 
@@ -56,7 +56,7 @@
 | 字段 | 怎么填 |
 |---|---|
 | **名称** | 你给这个上游起的标签，如 `openai-official`。模型服务靠这个名字引用它。 |
-| **类型** | `OpenAI (Chat Completions)`、`OpenAI (Responses API)` 或 `Anthropic`。这是 Hydrogen **对上游**说的协议格式，跟你的客户端说什么格式毫无关系。 |
+| **类型** | `OpenAI (Chat Completions)`、`OpenAI (Responses API)` 或 `Anthropic`。这是 Hydro AI station **对上游**说的协议格式，跟你的客户端说什么格式毫无关系。 |
 | **基础 URL** | 见下方说明。 |
 | **API 密钥** | 保存的瞬间就用 AES-256-GCM 加密，之后再也不会显示。 |
 | **额外请求头（JSON，可选）** | 上游需要额外头时填，如 `{"x-org": "team-a"}`。 |
@@ -155,7 +155,7 @@
 
 关闭（默认）时，流式请求逐 token 透传——实时，但响应头一旦发出，中途被截断就没法重试了。
 
-打开时，Hydrogen 会流式读取上游、先缓冲完整结果（被截断的流按你的重试规则算作一次可重试的失败），再把完整结果回放给客户端。客户端要么拿到完整响应，要么拿到一个干净的 502，绝不会拿到半截。代价是首 token 延迟变高。无人值守的任务值得开；日常聊天界面通常不需要。
+打开时，Hydro AI station 会流式读取上游、先缓冲完整结果（被截断的流按你的重试规则算作一次可重试的失败），再把完整结果回放给客户端。客户端要么拿到完整响应，要么拿到一个干净的 502，绝不会拿到半截。代价是首 token 延迟变高。无人值守的任务值得开；日常聊天界面通常不需要。
 
 ---
 
@@ -191,7 +191,7 @@ curl http://localhost:8080/v1/messages \
   -d '{"model":"sonnet-any","max_tokens":256,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
-客户端的协议和提供商的协议是彼此独立的。说 Anthropic 协议的客户端完全可以由 OpenAI 提供商来服务，反之亦然——Hydrogen 双向翻译。
+客户端的协议和提供商的协议是彼此独立的。说 Anthropic 协议的客户端完全可以由 OpenAI 提供商来服务，反之亦然——Hydro AI station 双向翻译。
 
 | 方法 | 路径 |
 |---|---|
@@ -384,9 +384,9 @@ curl http://localhost:8080/v1/chat/completions \
 | 校验报「These (model, provider) pairs are not mapped in the catalog」 | 步骤指向了一对并不存在的组合。改映射，或改步骤。 |
 | 试运行返回 401/403 | 提供商的 API 密钥不对。重新填一遍（留空 = 保持原值，所以必须真的把新密钥打进去）。 |
 | 试运行返回 404 | 映射里的**上游模型 ID** 不是该提供商认的那个名字。 |
-| 客户端收到 Hydrogen 的 401 | API 密钥错误或已吊销，又或者该密钥的范围不包含这个服务。 |
+| 客户端收到 Hydro AI station 的 401 | API 密钥错误或已吊销，又或者该密钥的范围不包含这个服务。 |
 | 客户端收到模型 404 | 你发的 `model` 不是一个模型服务名，或者该服务被禁用了。 |
 | 提示「请先创建提供商」 | 提供商 → 模型 → 映射，就是这个顺序。 |
 | 代理报「references unknown Model Service or Micro Agent」 | 某个阶段引用了不存在的服务。先把那个模型服务存下来。 |
 | 代理报「transition goto ... must be a later stage」 | transition 只能向前。请改成调整阶段顺序。 |
-| Hydrogen 拒绝启动 | `PROXY_MASTER_KEY` 变了，跟已加密的密钥对不上。见 [README](../README.md) 的 **Security notes**。 |
+| Hydro AI station 拒绝启动 | `PROXY_MASTER_KEY` 变了，跟已加密的密钥对不上。见 [README](../README.md) 的 **Security notes**。 |
