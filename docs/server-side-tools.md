@@ -335,6 +335,10 @@ A **Tools** tab in the web console, owning tool configuration and nothing else.
   beside the base URL and key it belongs to
 - *which Model Services grant which tool* — that stays in the **Model Services**
   editor, beside the steps it applies to
+- *which tools a **Micro Agent** grants* — that stays in the Micro Agent editor.
+  A Micro Agent is not merely a consumer of a service's grants: it declares its
+  own, the same way a Model Service does (confirmed 2026-09-06, superseding the
+  weaker D8 wording that agents only *inherit*)
 
 Each fact is editable from exactly one screen. The cost, accepted: there is no
 single place to see where a tool is in use.
@@ -358,3 +362,20 @@ to render its grant picker.
 `providers` table has no such column today); service tool grants need **no**
 migration — a service definition is a JSON blob validated by zod in
 `execution/definition.ts`, so the grant is a schema extension.
+
+### Where each tool fact is edited (confirmed 2026-09-06)
+
+| Fact | Screen | Storage |
+|---|---|---|
+| Tool config: backend, key, MCP servers, sandbox, round cap | **Tools** tab | new tables |
+| Which providers serve which tool natively | **Providers** tab | migration `0008` |
+| Which tools a Model Service grants | **Model Services** editor | zod schema, no migration |
+| Which tools a Micro Agent grants | **Micro Agent** editor | zod schema, no migration |
+
+`ServiceDef = AgentDef | ServiceSteps` (`execution/definition.ts:327`), so both
+service kinds are JSON-blob definitions validated by zod. Adding a grant to each
+is the same symmetric schema change, and neither needs a migration.
+
+Grants **union**, never subtract, at every level — client-declared ∪ agent ∪
+service — consistent with D2. Nothing anywhere can remove a tool the caller
+asked for.
