@@ -927,3 +927,28 @@ request log records which of the two dropped it (S10).
 | E4 | **SSRF**: tool endpoint URLs go through the existing `ssrf.ts` guard, since the URL is operator-supplied but the request is caller-triggered. |
 | E5 | **Micro Agents**: each stage runs its own tool loop, with the tools visible to that stage (client ∪ agent ∪ stage ∪ invoked service). |
 | E6 | **Retries**: a failing endpoint is not retried. One dispatch, then the model is told. Retrying a possibly-non-idempotent operator endpoint is not Hydrogen's call to make. |
+
+---
+
+# Slice 0 — done 2026-09-06 (`d0d6782`)
+
+Same-family Responses passthrough is lossless. What changed:
+
+- **`ToolUsePart.extra`** — family-tagged, holding every field of a
+  `function_call` the canonical part does not model. Collected by *subtracting*
+  the modelled keys rather than allowlisting, so `namespace` and `caller` are
+  carried today and a field invented next year is carried without an edit.
+- **Unmodelled items round-trip whole** on both legs, as opaque parts. The
+  render half already existed with no producer; this added the producer,
+  mirroring `completion.ts`'s handling of `input_audio`.
+- **The stream carries both**, so a streaming client is not the one path that
+  still loses the field.
+
+Verified: 9 new tests in `test/responsesPassthrough.test.ts` covering the
+measured Codex turn-2 shape, an invented field, both legs, all 18 tool types,
+the streaming path, and — the other half of the contract — that none of it leaks
+onto the Anthropic or Chat Completions wire. Full suite 892/892.
+
+**Done-when 3 remains unverified**: proving a real Codex conversation survives
+turn 2 needs a genuine gpt-5.4+ Responses endpoint, which no configured provider
+is. Done-when 1 and 2 are covered by the tests above.
