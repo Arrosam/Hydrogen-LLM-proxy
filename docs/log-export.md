@@ -57,7 +57,7 @@ filter on the model that actually served the request, and no search on error tex
 ```json
 {
   "exportedAt": "2026-09-06T08:00:00.000Z",
-  "hydrogenVersion": "2.0.0b",
+  "hydrogenVersion": "2.0.0-b",
   "selection": { "mode": "filter", "filters": { "...": "..." } },
   "count": 42,
   "logs": [ { "id": 123, "...": "every column, payloads included" } ]

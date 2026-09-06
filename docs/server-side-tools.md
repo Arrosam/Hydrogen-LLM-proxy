@@ -112,9 +112,18 @@ status is at the end of this document, under
 
 ## Repositioning
 
-The release carrying this feature is **v2.0.0b**, under the name
-**Hydro AI station**. The rename is a separate work item from the feature, and it
-touches more than a string:
+The release carrying this feature is **v2.0.0-b**, under the name
+**Hydro AI station**.
+
+The version is written `2.0.0-b`, not `2.0.0b`, because the latter is not valid
+semver and `parseVersion` in `updateService` reads it as plain `2.0.0`: the
+trailing `b` is dropped, `isPrerelease` returns false, and it compares EQUAL to a
+real 2.0.0 tag. A deployment stamped that way would sit on the stable channel and
+never be offered anything from the 2.0.0 line. `2.0.0-b` parses as
+`{core:[2,0,0], pre:["b"]}` and sorts correctly below 2.0.0.
+
+The rename is a separate work item from the feature, and it touches more than a
+string:
 
 - repo name and every URL that embeds it
 - the GHCR image path (`ghcr.io/arrosam/hydrogen-llm-proxy`)
@@ -124,9 +133,21 @@ touches more than a string:
 - the Rainyun app-store listing
 - the live deployment at `llm.areel.org`
 
-Nothing here is decided yet beyond the name and the version. Whether the image
-path and repo actually move — and what happens to pulls of the old path — is an
-open question below.
+**Decided 2026-09-07: the rename is IN-TREE ONLY** (`046de47`). The product name,
+the dashboard, both READMEs and the user-facing docs carry the new name; the
+GitHub repo, the GHCR image path and the live deployment do not move, so no
+existing pull breaks and nothing outward-facing changes. Session cookie, database
+filename, language storage key and every `HYDROGEN_*` environment variable are
+deliberately untouched — renaming any of them would log users out, orphan the
+database, reset preferences, or break the live box's `.env`.
+
+Two consequences accepted: the product is called Hydro AI station while its
+artifacts still say `hydrogen-llm-proxy`, and the Rainyun store listing still
+reads **Hydrogen**, which the READMEs now say explicitly so a reader is not sent
+after a name that is not there.
+
+Still open: whether the image path and repo ever move, and what happens to pulls
+of the old path.
 
 ## Open
 
