@@ -203,6 +203,20 @@ export const ServiceStepsSchema = z.object({
    * retried once headers commit).
    */
   reliableStreaming: z.boolean().optional(),
+  /**
+   * Free-form tools this Model Service grants, by name.
+   *
+   * A grant reaches a client that never asked for tools at all, so it can only
+   * name a FREE-FORM entry: a hosted vocabulary tool exists to answer a client
+   * that declared it, and there is no such client here. Named rather than
+   * referenced by id, matching how steps name their model and provider, so a
+   * definition survives export and re-import.
+   *
+   * Grants union and never subtract -- client-declared, agent, stage and the
+   * invoked service's grants are added together, so nothing here can take away
+   * a tool the caller asked for.
+   */
+  grantTools: z.array(z.string().min(1)).optional(),
   /** How thinking reaches this service's client. Omitted = "original". */
   thinkingFormat: ThinkingFormatSchema.optional(),
 });
@@ -258,6 +272,20 @@ export const AgentStageSchema = z.object({
    * Omitted/"inherit" passes tools + tool_choice through unchanged.
    */
   tools: z.enum(["inherit", "none"]).optional(),
+  /**
+   * Free-form tools this stage grants, by name.
+   *
+   * A grant reaches a client that never asked for tools at all, so it can only
+   * name a FREE-FORM entry: a hosted vocabulary tool exists to answer a client
+   * that declared it, and there is no such client here. Named rather than
+   * referenced by id, matching how steps name their model and provider, so a
+   * definition survives export and re-import.
+   *
+   * Grants union and never subtract -- client-declared, agent, stage and the
+   * invoked service's grants are added together, so nothing here can take away
+   * a tool the caller asked for.
+   */
+  grantTools: z.array(z.string().min(1)).optional(),
   /** Legacy flat overrides (folded into `overrides` at consumption). */
   system: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
@@ -297,6 +325,20 @@ export const AgentSchema = z.object({
   kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
   timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
   stages: z.array(AgentStageSchema).min(1, "a Micro Agent needs at least one stage"),
+  /**
+   * Free-form tools this Micro Agent grants, by name.
+   *
+   * A grant reaches a client that never asked for tools at all, so it can only
+   * name a FREE-FORM entry: a hosted vocabulary tool exists to answer a client
+   * that declared it, and there is no such client here. Named rather than
+   * referenced by id, matching how steps name their model and provider, so a
+   * definition survives export and re-import.
+   *
+   * Grants union and never subtract -- client-declared, agent, stage and the
+   * invoked service's grants are added together, so nothing here can take away
+   * a tool the caller asked for.
+   */
+  grantTools: z.array(z.string().min(1)).optional(),
   /** Name of the stage whose output is returned; omitted = the last stage. */
   output: z.string().optional(),
   /** Optional image-to-text OCR pre-pass run before the first stage. */

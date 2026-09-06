@@ -29,6 +29,7 @@ import { RequestLogger } from "../observability/requestLogger";
 import { UsageMeter } from "../observability/usageMeter";
 import { ActiveRequestRegistry } from "../observability/activeRequests";
 import { UpdateService } from "../update/updateService";
+import { ToolRepo } from "../persistence/toolRepo";
 import { ProxyRepo } from "../persistence/proxyRepo";
 import { EgressProxyPool } from "../core/upstream/egress/pool";
 
@@ -45,6 +46,9 @@ export interface Container {
   providers: ProviderRepo;
   /** Egress proxy profiles; a provider may route its traffic through one. */
   proxies: ProxyRepo;
+  /** Server-side tool definitions. Named `toolDefs` rather than `tools` because
+   * "tools" already means the per-request tool list everywhere else. */
+  toolDefs: ToolRepo;
   /** Dispatchers for those proxies. Owned here so they are shut down once. */
   egressPool: EgressProxyPool;
   providerModels: ProviderModelRepo;
@@ -84,6 +88,7 @@ export async function boot(): Promise<Container> {
   // The proxy repo is built before the provider repo because a materialized
   // provider carries its egress proxy: toUpstream() asks this for it.
   const proxies = new ProxyRepo(db, config.masterKey);
+  const toolDefs = new ToolRepo(db, config.masterKey);
   const providers = new ProviderRepo(db, config.masterKey, proxies);
   const providerModels = new ProviderModelRepo(db);
   const models = new ModelRepo(db);
@@ -126,7 +131,7 @@ export async function boot(): Promise<Container> {
 
   return {
     config, sqlite, db,
-    providers, proxies, egressPool, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
+    providers, proxies, toolDefs, egressPool, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates,
   };
 }

@@ -81,6 +81,13 @@ export const providers = sqliteTable(
      * so removing a proxy degrades to a direct connection rather than
      * orphaning the provider. */
     proxyId: integer("proxy_id").references(() => proxies.id, { onDelete: "set null" }),
+    /** Hosted tool type strings this provider serves NATIVELY, e.g.
+     * ["web_search", "code_interpreter"]. Declared by the operator because it
+     * cannot be discovered: a third-party Anthropic-compatible gateway usually
+     * implements none of them, and a wrong guess costs either a dropped tool or
+     * a 400. Narrowed per model in the mapping, since one endpoint can front
+     * both a tool-capable and a tool-incapable model. */
+    toolCapabilities: text("tool_capabilities", { mode: "json" }).$type<string[] | null>(),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: createdAt(),
   },
@@ -136,6 +143,10 @@ export const modelProviders = sqliteTable(
     /** Wire families this mapping may use, of the provider's available
      * endpoints. Null/empty = the provider's primary type only. */
     families: text("families", { mode: "json" }).$type<string[]>(),
+    /** Which of the provider's declared tool capabilities this MODEL actually
+     * has. Null = inherit the provider's list unchanged, which is the common
+     * case; a list narrows it, exactly as `families` narrows the endpoints. */
+    toolCapabilities: text("tool_capabilities", { mode: "json" }).$type<string[] | null>(),
     priority: integer("priority").notNull().default(0),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: createdAt(),
@@ -184,6 +195,11 @@ export const tokens = sqliteTable(
     ownerUserId: integer("owner_user_id").references(() => users.id, { onDelete: "set null" }),
     /** Array of service ids this token may call; null/empty = all. */
     scopeServices: text("scope_services_json", { mode: "json" }).$type<number[] | null>(),
+    /** Tool ids this token may cause to be dispatched; null/empty = all. A
+     * dispatch spends the operator's money at their own endpoint, so an
+     * expensive tool can be withheld from one key without duplicating the
+     * Model Service that grants it. */
+    scopeTools: text("scope_tools_json", { mode: "json" }).$type<number[] | null>(),
     maxRequests: integer("max_requests"),
     maxTokens: integer("max_tokens"),
     usedRequests: integer("used_requests").notNull().default(0),
@@ -300,6 +316,52 @@ export const imageCache = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// Server-side tools. Hydrogen implements none of them: a row is an HTTP endpoint
+// an operator points at, and Hydrogen only declares the tool upstream, receives
+// the model's call, dispatches it here, and feeds the result back.
+//
+// `kind` is what separates the two paths. A `vocabulary` row is named for a real
+// hosted tool type (`web_search`, `web_search_20250305`, `code_interpreter`) and
+// serves a client that declared that hosted tool, answering in the client's own
+// hosted shape. A `freeform` row is any name the operator likes and is declared
+// as an ordinary function tool on every wire. Both may exist under one name --
+// the wire shape of the declaration decides which applies.
+// ---------------------------------------------------------------------------
+export const tools = sqliteTable(
+  "tools",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** The exact hosted tool type string, or a free-form tool name. */
+    name: text("name").notNull(),
+    kind: text("kind", { enum: ["vocabulary", "freeform"] }).notNull().default("freeform"),
+    description: text("description"),
+    /** JSON Schema for the model-facing arguments. Free-form tools need one;
+     * a hosted type already has a shape the client and model agree on. */
+    parameters: text("parameters_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    /** Where Hydrogen POSTs {tool, arguments, call_id} expecting {output}|{error}. */
+    endpointUrl: text("endpoint_url").notNull(),
+    /** Master-key-encrypted JSON object of static request headers (same columns
+     * as providers/proxies/tokens). The operator's credential for their own
+     * endpoint; Hydrogen never inspects it. */
+    headersCiphertext: text("headers_ciphertext"),
+    headersIv: text("headers_iv"),
+    headersTag: text("headers_tag"),
+    /** `prefer_provider`: only fill the gap where the resolved provider cannot
+     * serve the tool. `override`: always dispatch here, even when it could. */
+    policy: text("policy", { enum: ["prefer_provider", "override"] }).notNull().default("prefer_provider"),
+    /** Dispatches allowed per request, mirroring Anthropic's per-tool `max_uses`.
+     * On exhaustion the model is told, rather than the request failing. */
+    maxUses: integer("max_uses").notNull().default(8),
+    timeoutMs: integer("timeout_ms").notNull().default(30_000),
+    /** Send this tool's traffic through a configured proxy. Null = direct. */
+    proxyId: integer("proxy_id").references(() => proxies.id, { onDelete: "set null" }),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => ({ nameKindIdx: uniqueIndex("tools_name_kind_idx").on(t.name, t.kind) }),
+);
+
+// ---------------------------------------------------------------------------
 // Key/value settings (master-key sentinel, SSRF allowlist, log retention).
 // ---------------------------------------------------------------------------
 export const settings = sqliteTable("settings", {
@@ -317,3 +379,4 @@ export type ModelServiceRow = typeof modelServices.$inferSelect;
 export type Token = typeof tokens.$inferSelect;
 export type RequestLog = typeof requestLogs.$inferSelect;
 export type ImageCacheRow = typeof imageCache.$inferSelect;
+export type ToolRow = typeof tools.$inferSelect;
