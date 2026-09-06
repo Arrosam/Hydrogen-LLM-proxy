@@ -229,3 +229,81 @@ describe("Responses passthrough — streaming", () => {
     expect(out).toContain('"namespace":"mcp__node_repl"');
   });
 });
+
+describe("Responses passthrough — regressions", () => {
+  /**
+   * Keeping an unmodelled item canonically must not turn a request that used to
+   * work into one the upstream rejects. Before this, a Responses request whose
+   * only assistant content was an opaque item produced `{role:"assistant",
+   * content:[]}` on Anthropic and `{role:"assistant", content:null}` on Chat
+   * Completions, and both APIs reject those.
+   */
+  it("does not emit an empty assistant turn on a wire that cannot carry the item", () => {
+    const canonical = parseRequest("openai_responses", {
+      model: "svc",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "tool_search_call", execution: "server", status: "completed", arguments: { paths: ["crm"] } },
+      ],
+      stream: false,
+    }).data();
+
+    const anthropic = buildRequest("anthropic", canonical).render({ upstreamModel: "m" }) as Record<string, unknown>;
+    for (const m of anthropic.messages as Array<{ content: unknown[] }>) {
+      expect(m.content.length).toBeGreaterThan(0);
+    }
+
+    const completion = buildRequest("openai_completion", canonical).render({ upstreamModel: "m" }) as Record<string, unknown>;
+    for (const m of completion.messages as Array<Record<string, unknown>>) {
+      const empty = m.content == null && !m.tool_calls && !m.reasoning_content;
+      expect(empty, `empty ${String(m.role)} turn reached the wire`).toBe(false);
+    }
+  });
+
+  it("still keeps a turn whose OTHER parts survive the crossing", () => {
+    // The drop must be "nothing left to say", not "an opaque part was present".
+    const canonical = parseRequest("openai_responses", {
+      model: "svc",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "tool_search_call", execution: "server", status: "completed", arguments: {} },
+        NAMESPACED_CALL,
+      ],
+      stream: false,
+    }).data();
+
+    const anthropic = buildRequest("anthropic", canonical).render({ upstreamModel: "m" }) as Record<string, unknown>;
+    const blocks = (anthropic.messages as Array<{ content: Item[] }>).flatMap((m) => m.content);
+    expect(blocks.some((b) => b.type === "tool_use")).toBe(true);
+  });
+
+  /**
+   * A passthrough that reorders is not a passthrough. The documented tool-search
+   * sequence needs the search call and its output ahead of the function_call
+   * they enable; emitting the message first put them behind it.
+   */
+  it("preserves upstream item order, message included", () => {
+    const upstream: Item[] = [
+      { type: "tool_search_call", execution: "server", status: "completed", arguments: { paths: ["crm"] } },
+      { type: "tool_search_output", execution: "server", status: "completed", tools: [] },
+      { type: "function_call", id: "fc1", call_id: "c1", name: "get", arguments: "{}", status: "completed" },
+      { type: "message", id: "m1", status: "completed", role: "assistant", content: [{ type: "output_text", text: "done", annotations: [] }] },
+    ];
+    const out = (parseResponse("openai_responses", { id: "r", model: "m", output: upstream, usage: { input_tokens: 1, output_tokens: 1 } })
+      .render("openai_responses", "svc") as Record<string, unknown>).output as Item[];
+
+    expect(out.map((i) => i.type)).toEqual(upstream.map((i) => i.type));
+  });
+
+  it("keeps the answer when the message came first", () => {
+    const upstream: Item[] = [
+      { type: "message", id: "m1", status: "completed", role: "assistant", content: [{ type: "output_text", text: "first", annotations: [] }] },
+      { type: "web_search_call", id: "ws1", status: "completed" },
+    ];
+    const out = (parseResponse("openai_responses", { id: "r", model: "m", output: upstream, usage: { input_tokens: 1, output_tokens: 1 } })
+      .render("openai_responses", "svc") as Record<string, unknown>).output as Item[];
+
+    expect(out.map((i) => i.type)).toEqual(["message", "web_search_call"]);
+    expect(JSON.stringify(out)).toContain("first");
+  });
+});

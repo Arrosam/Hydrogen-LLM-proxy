@@ -204,3 +204,44 @@ describe("round trip", () => {
     });
   });
 });
+
+describe("namespace flattening — tool_choice", () => {
+  /**
+   * A forced choice has to name the tool as it was DECLARED. Declaring
+   * `mcp__node_repl__js` while forcing `js` asks the provider for a tool it was
+   * never given, which it rejects or silently ignores.
+   */
+  const forcing = (name: string) => responsesRequest({ tool_choice: { type: "function", name } });
+
+  it("qualifies a forced namespaced member on both foreign wires", () => {
+    expect((renderTo("anthropic", forcing("spawn_agent")) as Record<string, unknown>).tool_choice).toEqual({
+      type: "tool",
+      name: "multi_agent_v1__spawn_agent",
+    });
+    expect((renderTo("openai_completion", forcing("spawn_agent")) as Record<string, unknown>).tool_choice).toEqual({
+      type: "function",
+      function: { name: "multi_agent_v1__spawn_agent" },
+    });
+  });
+
+  it("matches what was actually declared", () => {
+    const rendered = renderTo("anthropic", forcing("spawn_agent"));
+    const declared = ((rendered.tools as Item[]) ?? []).map((t) => t.name);
+    const chosen = (rendered.tool_choice as Item).name;
+    expect(declared).toContain(chosen);
+  });
+
+  it("leaves a plain tool's choice alone", () => {
+    expect((renderTo("anthropic", forcing("shell_command")) as Record<string, unknown>).tool_choice).toEqual({
+      type: "tool",
+      name: "shell_command",
+    });
+  });
+
+  it("keeps the bare name for a Responses provider, which has namespaces", () => {
+    expect((renderTo("openai_responses", forcing("spawn_agent")) as Record<string, unknown>).tool_choice).toEqual({
+      type: "function",
+      name: "spawn_agent",
+    });
+  });
+});

@@ -205,6 +205,15 @@ describe("log export", () => {
     expect(JSON.parse(res.body)).toEqual({ models: ["alpha", "beta"] });
   });
 
+  it("accepts a repeated ids key instead of throwing", async () => {
+    // Fastify parses `?ids=1&ids=2` into an array; assuming a string here turned
+    // the most natural way to send a list into a 500.
+    const doc = await exported(`ids=${ids[0]}&ids=${ids[2]}`);
+    expect(doc.selection.mode).toBe("ids");
+    expect(doc.count).toBe(2);
+    expect(doc.logs.map((l) => l.id).sort()).toEqual([ids[0], ids[2]].sort());
+  });
+
   it("stays valid JSON when nothing matches", async () => {
     const doc = await exported("servedModel=nothing-served-this");
     expect(doc.count).toBe(0);
