@@ -262,3 +262,60 @@ successful reply, so what Codex accepts back for a namespaced call — a
 unknown. Resolve by pointing Codex at a working Model Service and capturing a
 completed turn. Getting this wrong breaks every namespaced tool call, so it is a
 gate on shipping the flattening, not on designing it.
+
+### M3 — the defect reproduced live on the production instance
+
+Two requests to `https://llm.areel.org/v1/responses`, service `Auto-free`, same
+model, same prompt, differing only in tool shape:
+
+| Tool sent | Model's reply |
+|---|---|
+| `{"type":"function","name":"js",...}` | a real `function_call` item: `{"name":"js","arguments":"{\"code\":\"1+1\"}"}` |
+| Codex's actual `{"type":"namespace","name":"mcp__node_repl",...}` | **no tool call at all** — plain text reading `<{"tool_call": {"tool_name": "node_repl/js", ...}}>` |
+
+The namespace tool is dropped before the model sees it, and the model then
+invents a tool-call-shaped string in prose. This is the defect, reproducible on
+demand, on the live deployment. It also means **no reachable provider can serve a
+namespaced tool today**, which is why M4 needed a stub rather than a real turn.
+
+### M4 — the return shape, measured 2026-09-06
+
+Method: a stub Responses upstream (`scratchpad/stub-responses.cjs`) asserted one
+namespaced call; Codex executed it through its real `node_repl` MCP server and
+sent the result back. Captured on the first probe — the hypothesis read out of
+the binary's serde field table was correct.
+
+**What Codex accepts** (assistant side):
+
+```json
+{"type":"function_call","call_id":"call_stub_1","name":"js",
+ "namespace":"mcp__node_repl","arguments":"{\"code\":\"1+1\"}"}
+```
+
+Codex logged `mcp: node_repl/js started` / `(completed)` and ran it.
+
+**What Codex sends back** (next turn's `input`):
+
+```json
+{"type":"function_call","name":"js","namespace":"mcp__node_repl",
+ "arguments":"{\"code\":\"1+1\"}","call_id":"call_stub_1"}
+{"type":"function_call_output","call_id":"call_stub_1",
+ "output":"Wall time: 6.6820 seconds\nOutput:\n[{\"type\":\"text\",\"text\":\"\"}]"}
+```
+
+**Three facts that pin the design:**
+
+1. `namespace` is a first-class sibling of `name` on a `function_call` item —
+   **not** a qualified name like `mcp__node_repl__js`.
+2. `function_call_output` carries **only** `call_id` and `output`. There is no
+   namespace on the return leg; correlation is by `call_id` alone.
+3. Codex replays the assistant's `function_call` verbatim next turn, `namespace`
+   included — so Hydrogen must re-flatten prior-turn items on every subsequent
+   outbound request, not just the first.
+
+**Behavior 9, now fully specified.** Outbound to a non-Responses provider,
+`{name, namespace}` flattens to a qualified `namespace + "__" + name` (required:
+bare `js` and `js_reset` each collide across two namespaces). Inbound, a call
+named `mcp__node_repl__js` splits back into `{"name":"js","namespace":"mcp__node_repl"}`.
+The mapping is derivable from the item itself, so **it needs no server-side
+state** and survives retries, fallback steps and restarts.
