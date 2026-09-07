@@ -150,3 +150,6 @@ hydrogen-secrets.json
 .dbg/
 debug-proxy-stream-502.md
 .trae/
+
+# Measurement harnesses and throwaway probes. Never shipped.
+scratchpad/
