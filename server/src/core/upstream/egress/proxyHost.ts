@@ -1,6 +1,5 @@
-import dns from "node:dns/promises";
 import net from "node:net";
-import { isBlockedAddress, UpstreamUrlError, type ResolvedAddress } from "../ssrf";
+import { isBlockedAddress, lookupAddresses, UpstreamUrlError, type ResolvedAddress } from "../ssrf";
 import { proxyLabel, type EgressProxy } from "./types";
 
 /**
@@ -39,7 +38,7 @@ const REFUSED_PORTS = new Set([0, 22, 25, 465, 587]);
  * {@link SsrfGuard.resolveAllowed}'s are, so the proxy hop keeps the same
  * DNS-rebinding protection the direct path has.
  */
-export async function resolveProxyHost(p: EgressProxy): Promise<ResolvedAddress[]> {
+export async function resolveProxyHost(p: EgressProxy, signal?: AbortSignal): Promise<ResolvedAddress[]> {
   if (!Number.isInteger(p.port) || p.port < 1 || p.port > 65535) {
     throw new UpstreamUrlError(`proxy ${proxyLabel(p)} has an invalid port`);
   }
@@ -55,8 +54,9 @@ export async function resolveProxyHost(p: EgressProxy): Promise<ResolvedAddress[
     addrs = [host];
   } else {
     try {
-      addrs = (await dns.lookup(host, { all: true, verbatim: true })).map((r) => r.address);
-    } catch {
+      addrs = await lookupAddresses(host, signal, `proxy host for "${p.name}"`);
+    } catch (e) {
+      if (e instanceof UpstreamUrlError) throw e;
       throw new UpstreamUrlError(`cannot resolve proxy host "${host}" (proxy "${p.name}")`);
     }
     if (addrs.length === 0) throw new UpstreamUrlError(`proxy host "${host}" did not resolve`);

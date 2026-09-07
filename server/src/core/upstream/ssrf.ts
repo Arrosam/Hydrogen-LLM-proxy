@@ -13,6 +13,47 @@ export class UpstreamUrlError extends Error {
   }
 }
 
+/**
+ * `dns.lookup` under a deadline.
+ *
+ * Node's resolver accepts no AbortSignal and an OS lookup cannot be cancelled,
+ * so this RACES rather than aborts: the caller stops waiting while the
+ * resolver's own thread finishes in its own time. That is the difference that
+ * matters here -- an attempt whose host blackholes now fails on the timeout its
+ * caller asked for instead of hanging past it. `Promise.race` subscribes to
+ * both, so the loser's eventual rejection is never unhandled.
+ *
+ * `dns.lookup` is kept rather than swapped for `dns.Resolver`, which does take a
+ * timeout: the resolver queries nameservers directly and would stop honouring
+ * the hosts file, so a compose `extra_hosts` entry or any locally mapped name
+ * would silently stop resolving. Bounding the wait is worth doing; changing
+ * WHAT resolves is not.
+ *
+ * The message says "timed out" on purpose. `classifyError` tests for that
+ * before it tests the error's name, so this lands as kind "timeout" -- which is
+ * in DEFAULT_RETRY_ON, and therefore retries and falls back like any other
+ * timeout instead of being treated as an unretryable configuration fault.
+ */
+export async function lookupAddresses(
+  host: string,
+  signal: AbortSignal | undefined,
+  what: string,
+): Promise<string[]> {
+  const lookup = dns.lookup(host, { all: true, verbatim: true }).then((rs) => rs.map((r) => r.address));
+  if (!signal) return lookup;
+  return Promise.race([lookup, rejectWhenAborted(signal, host, what)]);
+}
+
+function rejectWhenAborted(signal: AbortSignal, host: string, what: string): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const fail = (): void => reject(new UpstreamUrlError(`timed out resolving ${what} "${host}"`));
+    if (signal.aborted) fail();
+    // `once` removes the listener when it fires; every signal reaching here is
+    // per-attempt and short-lived, so one that never fires is collected with it.
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
 // --- IPv4 -------------------------------------------------------------------
 
 function v4ToInt(ip: string): number {
@@ -189,15 +230,15 @@ export class SsrfGuard {
   }
 
   /** Assert-only variant, for callers that do not need the pinned addresses. */
-  async assertAllowed(rawUrl: string): Promise<void> {
-    await this.resolveAllowed(rawUrl);
+  async assertAllowed(rawUrl: string, signal?: AbortSignal): Promise<void> {
+    await this.resolveAllowed(rawUrl, signal);
   }
 
   /**
    * Validate a URL as {@link assertAllowed} does, and return the hostname plus
    * the addresses it is allowed to be connected on.
    */
-  async resolveAllowed(rawUrl: string): Promise<UpstreamResolution> {
+  async resolveAllowed(rawUrl: string, signal?: AbortSignal): Promise<UpstreamResolution> {
     let url: URL;
     try {
       url = new URL(rawUrl);
@@ -211,7 +252,7 @@ export class SsrfGuard {
     let host = url.hostname.toLowerCase();
     if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1); // IPv6 literal
 
-    const addresses = await this.validateHost(host);
+    const addresses = await this.validateHost(host, signal);
     return { host, addresses };
   }
 
@@ -221,14 +262,17 @@ export class SsrfGuard {
    * somewhere the per-request pin did not cover -- so even that path resolves
    * and validates, never falling back to the OS resolver unchecked.
    */
-  async validateHost(host: string): Promise<ResolvedAddress[]> {
+  async validateHost(host: string, signal?: AbortSignal): Promise<ResolvedAddress[]> {
     let addrs: string[];
     if (net.isIP(host)) {
       addrs = [host];
     } else {
       try {
-        addrs = (await dns.lookup(host, { all: true, verbatim: true })).map((r) => r.address);
-      } catch {
+        addrs = await lookupAddresses(host, signal, "upstream host");
+      } catch (e) {
+        // A deadline is not a bad hostname: let it through with its own message
+        // so it classifies as a timeout rather than a configuration fault.
+        if (e instanceof UpstreamUrlError) throw e;
         throw new UpstreamUrlError(`cannot resolve upstream host "${host}"`);
       }
       if (addrs.length === 0) throw new UpstreamUrlError(`upstream host "${host}" did not resolve`);

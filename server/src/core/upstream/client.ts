@@ -20,6 +20,15 @@ const PIN_TTL_MS = 30_000;
 const MAX_PINNED_HOSTS = 512;
 
 /**
+ * Deadline for the fail-closed re-validation inside {@link
+ * UpstreamClient.lookupPinned}. That path runs inside undici's connect, not
+ * inside a request method, so it has no caller's `timeoutMs` to inherit --
+ * matched to undici's own 10s default connect timeout, which is what bounds the
+ * rest of establishing that socket.
+ */
+const RESOLVE_TIMEOUT_MS = 10_000;
+
+/**
  * The concrete HTTP transport. Implements the {@link Transport} port used by
  * Request subclasses' send/relay, plus a getJson for provider connection tests.
  * Applies the SSRF guard before every request and the idle body timeout on
@@ -71,9 +80,9 @@ export class UpstreamClient implements Transport {
    * thing that does not work. The target still has to be a well-formed
    * http/https URL, which is checked here rather than left to undici.
    */
-  private async egress(url: string, opts: TransportOptions): Promise<Dispatcher> {
+  private async egress(url: string, opts: TransportOptions, signal: AbortSignal): Promise<Dispatcher> {
     if (!opts.proxy) {
-      await this.pin(url);
+      await this.pin(url, signal);
       return this.dispatcher;
     }
     if (!this.egressPool) {
@@ -88,12 +97,12 @@ export class UpstreamClient implements Transport {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new UpstreamUrlError(`unsupported upstream URL scheme "${parsed.protocol}" (use http/https)`);
     }
-    return this.egressPool.dispatcherFor(opts.proxy);
+    return this.egressPool.dispatcherFor(opts.proxy, signal);
   }
 
   /** Validate the URL and remember the addresses it was approved on. */
-  private async pin(url: string): Promise<void> {
-    const { host, addresses } = await this.ssrf.resolveAllowed(url);
+  private async pin(url: string, signal?: AbortSignal): Promise<void> {
+    const { host, addresses } = await this.ssrf.resolveAllowed(url, signal);
     this.pinned.set(host, { addresses, expiresAt: Date.now() + PIN_TTL_MS });
     if (this.pinned.size > MAX_PINNED_HOSTS) {
       const oldest = this.pinned.keys().next().value;
@@ -134,8 +143,10 @@ export class UpstreamClient implements Transport {
       return;
     }
     // Fail closed: never let the OS resolver answer for an unchecked host.
+    // Bounded too: this runs inside connect, where a lookup that never returns
+    // would hold the socket open with nothing to cancel it.
     void this.ssrf
-      .validateHost(key)
+      .validateHost(key, AbortSignal.timeout(RESOLVE_TIMEOUT_MS))
       .then((addresses) => {
         this.pinned.set(key, { addresses, expiresAt: Date.now() + PIN_TTL_MS });
         respond(addresses);
@@ -159,13 +170,17 @@ export class UpstreamClient implements Transport {
     body: unknown,
     opts: TransportOptions,
   ): Promise<TransportJsonResult> {
-    const dispatcher = await this.egress(url, opts);
+    // One deadline for the whole attempt: DNS resolution used to happen before
+    // this signal existed, so `timeoutMs` bounded the request but never the
+    // lookup in front of it.
+    const signal = this.combineSignals(opts.timeoutMs, opts.signal);
+    const dispatcher = await this.egress(url, opts, signal);
     const res = await request(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      signal,
       // undici defaults BOTH of these to 5 minutes when omitted. A non-streaming
       // upstream (a local model especially) sends its headers only after the
       // whole completion is computed, which can take far longer — the service's
@@ -197,7 +212,10 @@ export class UpstreamClient implements Transport {
     body: unknown,
     opts: TransportOptions,
   ): Promise<TransportStreamResult> {
-    const dispatcher = await this.egress(url, opts);
+    // The HTTP phase keeps `opts.signal` alone -- a wall-clock abort would cut
+    // off a long healthy stream, which is what headersTimeout and the IDLE
+    // bodyTimeout are for. Resolution in front of it still gets the deadline.
+    const dispatcher = await this.egress(url, opts, this.combineSignals(opts.timeoutMs, opts.signal));
     const res = await request(url, {
       method: "POST",
       headers,
@@ -218,13 +236,14 @@ export class UpstreamClient implements Transport {
     body: Buffer | string,
     opts: TransportOptions,
   ): Promise<TransportJsonResult> {
-    const dispatcher = await this.egress(url, opts);
+    const signal = this.combineSignals(opts.timeoutMs, opts.signal);
+    const dispatcher = await this.egress(url, opts, signal);
     const res = await request(url, {
       method: "POST",
       headers,
       body,
       dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      signal,
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
@@ -240,7 +259,7 @@ export class UpstreamClient implements Transport {
 
   /** GET returning the raw response stream (binary downloads, e.g. video content). */
   async getStream(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportStreamResult> {
-    const dispatcher = await this.egress(url, opts);
+    const dispatcher = await this.egress(url, opts, this.combineSignals(opts.timeoutMs, opts.signal));
     const res = await request(url, {
       method: "GET",
       headers,
@@ -254,12 +273,13 @@ export class UpstreamClient implements Transport {
 
   /** GET request returning JSON (provider connection tests / model lists). */
   async getJson(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportJsonResult> {
-    const dispatcher = await this.egress(url, opts);
+    const signal = this.combineSignals(opts.timeoutMs, opts.signal);
+    const dispatcher = await this.egress(url, opts, signal);
     const res = await request(url, {
       method: "GET",
       headers,
       dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
+      signal,
       // Same as postJson: keep undici's silent 5-minute defaults out of the way.
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,

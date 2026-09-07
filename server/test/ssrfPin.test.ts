@@ -12,8 +12,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { LookupAddress, LookupOptions } from "node:dns";
 import { Agent, request } from "undici";
-import { SsrfGuard } from "../src/core/upstream/ssrf";
+import { lookupAddresses, SsrfGuard, UpstreamUrlError } from "../src/core/upstream/ssrf";
 import { UpstreamClient } from "../src/core/upstream/client";
+import { classifyError } from "../src/execution/steps";
 
 let server: http.Server;
 let baseUrl: string;
@@ -154,5 +155,47 @@ describe("UpstreamClient pins guard-validated addresses", () => {
     });
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/cannot resolve/);
+  });
+});
+describe("DNS resolution runs under the attempt's deadline", () => {
+  it("rejects on the deadline, and reads as a timeout rather than a bad URL", async () => {
+    // The resolver takes no AbortSignal and an OS lookup cannot be cancelled,
+    // so the deadline races it. An already-aborted signal makes that
+    // deterministic: `dns.lookup` needs at least one threadpool round trip.
+    const err = await lookupAddresses("example.invalid", AbortSignal.abort(), "upstream host").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(UpstreamUrlError);
+    expect((err as Error).message).toMatch(/timed out resolving upstream host/);
+    // classifyError tests for "timed out" BEFORE it tests the error's name, so
+    // this lands as a retryable timeout instead of an unretryable config fault.
+    expect(classifyError(err).kind).toBe("timeout");
+  });
+
+  it("a host whose lookup never returns fails on timeoutMs instead of hanging", async () => {
+    const guard = new SsrfGuard({ allowPrivate: true, allowlist: () => [] });
+    // Stands in for a host whose authoritative DNS blackholes: nothing settles
+    // this on its own, so only the caller's deadline can end it. Before the fix
+    // the signal never reached here at all and this hung past every timeout.
+    guard.validateHost = (host: string, signal?: AbortSignal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new UpstreamUrlError(`timed out resolving upstream host "${host}"`)),
+          { once: true },
+        );
+      });
+
+    const client = new UpstreamClient(guard);
+    const started = Date.now();
+    const err = await client
+      .postJson(`http://${GHOST_HOST}/v1/chat`, {}, { hello: "world" }, { timeoutMs: 150 })
+      .then(() => null, (e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(classifyError(err).kind).toBe("timeout");
+    // Generous: the assertion is "bounded at all", not a latency claim.
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 });

@@ -63,7 +63,7 @@ export class EgressProxyPool {
    * than failing: the operator attached a proxy because the direct route is not
    * acceptable, and silently taking it anyway leaks traffic they meant to route.
    */
-  async dispatcherFor(proxy: EgressProxy): Promise<Dispatcher> {
+  async dispatcherFor(proxy: EgressProxy, signal?: AbortSignal): Promise<Dispatcher> {
     const key = proxyKey(proxy);
     const existing = this.entries.get(key);
     if (existing && existing.expiresAt > Date.now()) {
@@ -75,7 +75,7 @@ export class EgressProxyPool {
       return existing.dispatcher;
     }
 
-    const addresses = await resolveProxyHost(proxy);
+    const addresses = await resolveProxyHost(proxy, signal);
 
     if (existing) {
       // Same proxy, stale pin: refresh the addresses in place. The dispatcher
