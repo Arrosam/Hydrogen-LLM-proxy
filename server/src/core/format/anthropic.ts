@@ -1,3 +1,4 @@
+import { decodeReasoning, encodeReasoning } from "./reasoningBridge";
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
@@ -91,12 +92,12 @@ function blocksToParts(content: unknown): ContentPart[] {
     const cc = b.cache_control != null ? { cacheControl: b.cache_control } : {};
     switch (b.type) {
       case "thinking":
-        parts.push({ type: "reasoning", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
+        parts.push((typeof b.signature === "string" ? decodeReasoning(b.signature) : null) ?? { type: "reasoning", origin: "anthropic", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
         break;
       case "redacted_thinking":
         // Opaque bytes; only a same-family replay can restore them. Never
         // rewrite the text -- a signature over altered text can never verify.
-        parts.push({ type: "reasoning", text: "", redacted: true, signature: b.data != null ? String(b.data) : undefined });
+        parts.push({ type: "reasoning", origin: "anthropic", text: "", redacted: true, signature: b.data != null ? String(b.data) : undefined });
         break;
       case "text":
         parts.push({ type: "text", text: String(b.text ?? ""), ...cc });
@@ -167,6 +168,11 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
         blocks.push({ type: "text", text: p.text, ...cc(p) });
         break;
       case "reasoning":
+        // Foreign opaque data cannot verify on this upstream. Keep readable text only.
+        if (p.signature && p.origin && p.origin !== "anthropic") {
+          if (p.text) blocks.push({ type: "text", text: p.text });
+          break;
+        }
         if (p.redacted) blocks.push({ type: "redacted_thinking", data: p.signature ?? "" });
         else blocks.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.signature } : {}) });
         break;
@@ -260,29 +266,18 @@ function toolChoiceToAnthropic(choice: ToolChoice): unknown {
 // --- thinking / params ---------------------------------------------------
 
 function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined {
-  // `output_config.effort` outranks the on/off flag: saying how much to think
-  // already says that it should. It stays OUT of RESERVED on purpose -- the rest
-  // of `output_config` (structured outputs) has to keep riding the passthrough,
-  // and the renderer merges the effort back into whatever the client sent.
-  const oc = body.output_config;
-  if (oc && typeof oc === "object" && !Array.isArray(oc)) {
-    const effort = (oc as Record<string, unknown>).effort;
-    if (effort === "minimal" || effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
-      return effort;
-    }
-  }
-  const t = body.thinking;
-  if (!t || typeof t !== "object") return undefined;
-  const cfg = t as Record<string, unknown>;
-  // `adaptive` is the current on-switch and the one modern clients send; reading
-  // only `enabled` meant an adaptive request looked like "said nothing", and on a
-  // model where an absent `thinking` means no thinking that silently turned it off.
-  if (cfg.type === "adaptive") return "enabled";
+  const cfg = body.thinking as Record<string, unknown> | undefined;
+  if (!cfg || typeof cfg !== "object") return undefined;
+  if (cfg.type === "disabled") return "disabled";
   if (cfg.type === "enabled") {
     const budget = numOrUndef(cfg.budget_tokens);
     return budget != null ? { budget } : "enabled";
   }
-  if (cfg.type === "disabled") return "disabled";
+  if (cfg.type === "adaptive") {
+    const effort = (body.output_config as Record<string, unknown> | undefined)?.effort;
+    if (effort === "minimal" || effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") return effort;
+    return "enabled";
+  }
   return undefined;
 }
 
@@ -317,6 +312,9 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   if (meta && typeof meta.user_id === "string" && meta.user_id) params.user = meta.user_id;
   const thinking = parseThinking(body);
   if (thinking) params.thinking = thinking;
+  if (body.thinking && typeof body.thinking === "object" && !Array.isArray(body.thinking)) {
+    params.anthropicThinking = { ...body.thinking as Record<string, unknown> };
+  }
   // `metadata` (and any other unmodeled key) rides the family-scoped passthrough,
   // not `extra`: it is an Anthropic-shaped field, so it must reach only Anthropic
   // providers -- `extra` applies to every family and would leak it to OpenAI.
@@ -449,10 +447,10 @@ export class AnthropicRequest extends Request {
     // the provider's hard cap. It does NOT substitute one when the client named
     // none -- there is no built-in fallback any more, and this wire's own 400 is
     // what says so (see ir/thinkingFormat.ts's sibling note in ir/thinking.ts).
-    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap);
+    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, target.upstreamModel);
     if (p.thinking != null) {
-      out.thinking = tf.thinking;
-      if (tf.effort) {
+      out.thinking = p.anthropicThinking ?? tf.thinking;
+      if (tf.effort && !p.anthropicThinking) {
         // `output_config` is shared -- structured outputs live there too -- so an
         // effort merges INTO whatever the client sent rather than replacing it.
         // It cannot ride the passthrough merge for this: that only fills keys the
@@ -497,6 +495,7 @@ export class AnthropicResponse extends Response {
     );
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
+    const reasoningTokens = thinkingTokens(usage);
     const cachedInputTokens = numOrUndef(usage.cache_read_input_tokens);
     const cacheCreationInputTokens = numOrUndef(usage.cache_creation_input_tokens);
     // This wire reports `input_tokens` EXCLUSIVE of both cache counters; the
@@ -510,6 +509,7 @@ export class AnthropicResponse extends Response {
       stopReason: stopReasonToStop(body.stop_reason as string | null),
       usage: {
         promptTokens, completionTokens, totalTokens: promptTokens + completionTokens,
+        ...(reasoningTokens != null ? { reasoningTokens } : {}),
         ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
         ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
       },
@@ -524,7 +524,7 @@ export class AnthropicResponse extends Response {
     for (const p of this.content) {
       if (p.type === "reasoning") {
         if (p.redacted) content.push({ type: "redacted_thinking", data: p.signature ?? "" });
-        else content.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.signature } : {}) });
+        else content.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.origin && p.origin !== "anthropic" ? encodeReasoning(p) : p.signature } : {}) });
       }
       else if (p.type === "text") content.push({ type: "text", text: p.text });
       else if (p.type === "tool_use") content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
@@ -543,6 +543,7 @@ export class AnthropicResponse extends Response {
         // together, so leaving the cache share inside input_tokens would make
         // every cached turn count twice.
         input_tokens: uncachedPromptTokens(this.usage), output_tokens: this.usage.completionTokens,
+        ...(this.usage.reasoningTokens != null ? { output_tokens_details: { thinking_tokens: this.usage.reasoningTokens } } : {}),
         ...(this.usage.cachedInputTokens != null ? { cache_read_input_tokens: this.usage.cachedInputTokens } : {}),
         ...(this.usage.cacheCreationInputTokens != null ? { cache_creation_input_tokens: this.usage.cacheCreationInputTokens } : {}),
       },
@@ -555,6 +556,7 @@ export class AnthropicResponse extends Response {
     // canonical inclusive count at every point one leaves this parser.
     let inputTokens = 0;
     let outputTokens = 0;
+    let reasoningTokens: number | undefined;
     let cachedInputTokens: number | undefined;
     // Cache WRITES are reported here too, and were the one usage field the
     // streaming path dropped while the buffered path kept it -- so the same
@@ -577,6 +579,8 @@ export class AnthropicResponse extends Response {
           const message = (data.message ?? {}) as Record<string, unknown>;
           const usage = (message.usage ?? {}) as Record<string, unknown>;
           inputTokens = num(usage.input_tokens);
+          outputTokens = num(usage.output_tokens);
+          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
           if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
           if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
           yield {
@@ -596,11 +600,14 @@ export class AnthropicResponse extends Response {
           if (block.type === "tool_use") {
             toolBlocks.add(index);
             yield { type: "tool_start", index, id: String(block.id ?? genId("toolu")), name: String(block.name ?? "") };
+          } else if (block.type === "text") {
+            if (typeof block.text === "string" && block.text) yield { type: "text_delta", text: block.text };
           } else if (block.type === "thinking" || block.type === "redacted_thinking") {
             const redacted = block.type === "redacted_thinking";
             const data = redacted && typeof block.data === "string" && block.data ? block.data : undefined;
-            thinkingBlocks.set(index, { signature: data, redacted });
-            yield { type: "reasoning_start", ...(redacted ? { redacted: true, signature: data } : {}) };
+            thinkingBlocks.set(index, { signature: data ?? (typeof block.signature === "string" ? block.signature : undefined), redacted });
+            yield { type: "reasoning_start", origin: "anthropic", ...(redacted ? { redacted: true, signature: data } : {}) };
+            if (!redacted && typeof block.thinking === "string" && block.thinking) yield { type: "reasoning_delta", text: block.thinking };
           }
           break;
         }
@@ -624,7 +631,8 @@ export class AnthropicResponse extends Response {
           } else if (thinkingBlocks.has(index)) {
             const tb = thinkingBlocks.get(index)!;
             thinkingBlocks.delete(index);
-            yield { type: "reasoning_stop", signature: tb.signature, ...(tb.redacted ? { redacted: true } : {}) };
+            const replay = tb.signature ? decodeReasoning(tb.signature) : null;
+            yield { type: "reasoning_stop", origin: replay?.origin ?? "anthropic", id: replay?.itemId, signature: replay?.signature ?? tb.signature, ...(tb.redacted ? { redacted: true } : {}) };
           }
           break;
         }
@@ -635,19 +643,24 @@ export class AnthropicResponse extends Response {
           if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
           // Some providers report the real prompt count -- and the cache
           // counters -- only here, at the end.
-          if (num(usage.input_tokens) > 0) inputTokens = num(usage.input_tokens);
+          if (numOrUndef(usage.input_tokens) != null) inputTokens = num(usage.input_tokens);
+          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
           if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
           if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
+          yield { type: "usage", usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens) };
           break;
         }
         case "message_stop": {
           const stopUsage = (data.usage ?? {}) as Record<string, unknown>;
-          if (num(stopUsage.output_tokens) > 0) outputTokens = num(stopUsage.output_tokens);
-          if (num(stopUsage.input_tokens) > 0) inputTokens = num(stopUsage.input_tokens);
+          if (thinkingTokens(stopUsage) != null) reasoningTokens = thinkingTokens(stopUsage);
+          if (numOrUndef(stopUsage.cache_read_input_tokens) != null) cachedInputTokens = num(stopUsage.cache_read_input_tokens);
+          if (numOrUndef(stopUsage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(stopUsage.cache_creation_input_tokens);
+          if (numOrUndef(stopUsage.output_tokens) != null) outputTokens = num(stopUsage.output_tokens);
+          if (numOrUndef(stopUsage.input_tokens) != null) inputTokens = num(stopUsage.input_tokens);
           yield {
             type: "finish",
             stopReason,
-            usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens),
+            usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens),
           };
           return;
         }
@@ -656,7 +669,7 @@ export class AnthropicResponse extends Response {
       }
     }
     // Reached only when the stream ended without a message_stop -- truncated.
-    yield { type: "finish", stopReason, usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens), incomplete: true };
+    yield { type: "finish", stopReason, usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens), incomplete: true };
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
@@ -677,6 +690,7 @@ export class AnthropicResponse extends Response {
     // data, not dressed up as a `thinking` block: a client replaying an empty
     // thinking block back to the upstream gets the whole request rejected.
     let reasoningRedacted = false;
+    let reasoningText = "";
     const toolMap = new Map<number, number>();
 
     const frame = (event: string, data: Record<string, unknown>): string =>
@@ -712,9 +726,14 @@ export class AnthropicResponse extends Response {
           yield frame("content_block_delta", { index: textIndex, delta: { type: "text_delta", text: ev.text } });
           break;
         case "reasoning_start":
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
+            reasoningText = "";
             reasoningRedacted = ev.redacted === true;
             yield frame("content_block_start", {
               index: reasoningIndex,
@@ -725,15 +744,21 @@ export class AnthropicResponse extends Response {
           }
           break;
         case "reasoning_delta":
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
+            reasoningText = "";
             reasoningRedacted = false;
             yield frame("content_block_start", { index: reasoningIndex, content_block: { type: "thinking", thinking: "" } });
           }
           // A redacted block has no readable thinking to delta; the wire form
           // carries everything it has on the block itself.
           if (!reasoningRedacted) {
+            reasoningText += ev.text;
             yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "thinking_delta", thinking: ev.text } });
           }
           break;
@@ -742,7 +767,7 @@ export class AnthropicResponse extends Response {
             // signature_delta belongs to a thinking block; a redacted block's
             // bytes already went out in its content_block_start.data.
             if (ev.signature && !reasoningRedacted) {
-              yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.signature } });
+              yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.origin && ev.origin !== "anthropic" ? encodeReasoning({ type: "reasoning", text: reasoningText, signature: ev.signature, itemId: ev.id, origin: ev.origin }) : ev.signature } });
             }
             yield frame("content_block_stop", { index: reasoningIndex });
             reasoningOpen = false;
@@ -782,7 +807,7 @@ export class AnthropicResponse extends Response {
         case "finish":
           // A truncated upstream must not be dressed up as a finished answer:
           // no message_delta, no message_stop. relay() aborts the connection.
-          if (ev.incomplete) return;
+          if (ev.incomplete || ev.error) return;
           if (reasoningOpen) {
             yield frame("content_block_stop", { index: reasoningIndex });
             reasoningOpen = false;
@@ -794,12 +819,12 @@ export class AnthropicResponse extends Response {
           for (const idx of toolMap.values()) yield frame("content_block_stop", { index: idx });
           toolMap.clear();
           if (ev.usage) {
-            inputTokens = uncachedPromptTokens(ev.usage) || inputTokens;
-            outputTokens = ev.usage.completionTokens || outputTokens;
+            inputTokens = uncachedPromptTokens(ev.usage);
+            outputTokens = ev.usage.completionTokens;
             if (ev.usage.cachedInputTokens != null) cacheReadTokens = ev.usage.cachedInputTokens;
             if (ev.usage.cacheCreationInputTokens != null) cacheWriteTokens = ev.usage.cacheCreationInputTokens;
           }
-          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: streamUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens) });
+          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: streamUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, ev.usage?.reasoningTokens) });
           yield frame("message_stop", {});
           break;
       }
@@ -808,22 +833,24 @@ export class AnthropicResponse extends Response {
 }
 
 /** Canonical usage from this wire's exclusive split. */
-function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number): Usage {
+function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Usage {
   const promptTokens = foldCacheIntoPrompt(uncached, cachedRead, cacheWrite);
   return {
     promptTokens,
     completionTokens: output,
     totalTokens: promptTokens + output,
+    ...(reasoningTokens != null ? { reasoningTokens } : {}),
     ...(cachedRead != null ? { cachedInputTokens: cachedRead } : {}),
     ...(cacheWrite != null ? { cacheCreationInputTokens: cacheWrite } : {}),
   };
 }
 
 /** A streamed `usage` object in this wire's exclusive split. */
-function streamUsage(uncached: number, output: number, cachedRead?: number, cacheWrite?: number): Record<string, unknown> {
+function streamUsage(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Record<string, unknown> {
   return {
     input_tokens: uncached,
     output_tokens: output,
+    ...(reasoningTokens != null ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}),
     ...(cachedRead != null ? { cache_read_input_tokens: cachedRead } : {}),
     ...(cacheWrite != null ? { cache_creation_input_tokens: cacheWrite } : {}),
   };
@@ -832,3 +859,7 @@ function streamUsage(uncached: number, output: number, cachedRead?: number, cach
 registerFormat("anthropic", { request: AnthropicRequest, response: AnthropicResponse });
 
 export { stopReasonToStop, stopToAnthropic };
+
+function thinkingTokens(usage: Record<string, unknown>): number | undefined {
+  return numOrUndef((usage.output_tokens_details as Record<string, unknown> | undefined)?.thinking_tokens);
+}

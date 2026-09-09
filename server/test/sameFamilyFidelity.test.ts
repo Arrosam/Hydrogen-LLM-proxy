@@ -93,7 +93,7 @@ describe("output_config is shared ground", () => {
       }),
     ).render(target("m"));
     expect(body.output_config).toEqual({ format, effort: "high" });
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toBeUndefined();
   });
 
   it("an adaptive request is recognised as thinking, not as silence", () => {
@@ -101,7 +101,7 @@ describe("output_config is shared ground", () => {
       AnthropicRequest.parse({ ...ANTHROPIC_BODY, thinking: { type: "adaptive" } }),
     ).render(target("m"));
     expect(body.thinking).toEqual({ type: "adaptive" });
-    expect(body.output_config).toBeDefined();
+    expect(body.output_config).toBeUndefined();
   });
 });
 

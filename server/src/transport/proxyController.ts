@@ -11,6 +11,7 @@ import {
   type StreamAccumulator,
 } from "../core/ir/stream";
 import { ZERO_USAGE, type Usage } from "../core/ir/usage";
+import { missingAnswerReason, requireAnswer } from "../core/ir/answer";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
 import { isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
@@ -382,9 +383,11 @@ export class ProxyController {
     const value = outcome.result.value;
     // Shape the client's copy: lift a `<think>` block out of the answer, inline
     // it into the answer, or drop it. `original` returns the same object.
-    const clientBody = value.response
-      .withThinkingFormat(thinkingFormat)
-      .render(ingress, serviceName, { thinkingFormat });
+    const shapedResponse = value.response.withThinkingFormat(thinkingFormat);
+    const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
+      missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
+    const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
+      : shapedResponse.render(ingress, serviceName, { thinkingFormat });
     // Deliver first, then log what actually happened: writing the 200 row
     // before send() is how a response nobody received was recorded as success.
     const socket = reply.raw.socket;
@@ -398,11 +401,11 @@ export class ProxyController {
         }
       } catch { /* the connection died first; responseFlushed reports it */ }
     } else {
-      reply.code(200).send(clientBody);
+      reply.code(emptyReason ? 502 : 200).send(clientBody);
     }
     const flushed = await settled;
-    const status = flushed ? 200 : 499;
-    const error = flushed ? null : "connection closed before the response was fully sent";
+    const status = flushed ? (emptyReason ? 502 : 200) : 499;
+    const error = flushed ? emptyReason ?? null : "connection closed before the response was fully sent";
     prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
     this.deps.activeRequests.finish(traceId, status, error ?? undefined);
     this.deps.logger.record({
@@ -410,7 +413,8 @@ export class ProxyController {
       servedModel: value.modelName, servedProvider: value.providerName,
       ingress, egress: value.family, streaming: false, httpStatus: status, http,
       upstreamPayload: this.deps.logger.capture(value.upstreamRequest),
-      responseBody: clientBody, usage: value.response.usage, latencyMs: Date.now() - started,
+      responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
+      usage: value.response.usage, latencyMs: Date.now() - started,
       attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
     });
     // The upstream consumed these tokens whether or not the delivery landed.
@@ -547,11 +551,12 @@ export class ProxyController {
    * reflects delivery failure. */
   private relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown; committed?: boolean }): void {
     const acc: StreamAccumulator = newAccumulator();
-    const events = value.dropReasoning ? withoutReasoning(value.events) : value.events;
+    const validated = requireAnswer(value.events);
+    const events = value.dropReasoning ? withoutReasoning(validated) : validated;
     // Shaped BEFORE the tap, so the log records the copy the client actually
     // received rather than a canonical form it never saw.
     const shaped = withThinkingFormat(events, ctx.thinkingFormat);
-    const outGen = serializeStream(ctx.ingress, tapStream(shaped, acc), {
+    const outGen = serializeStream(ctx.ingress, tapStream(requireAnswer(shaped), acc), {
       model: ctx.serviceName,
       thinkingFormat: ctx.thinkingFormat,
     });
@@ -620,14 +625,17 @@ export class ProxyController {
           // chunked body is an error in every HTTP client.
           const answerIsShort = streamError !== null || acc.incomplete;
           try {
-            if (answerIsShort) raw.destroy();
+            if (acc.error) {
+              raw.write(buildErrorFrame(ctx.ingress, 502, acc.error));
+              raw.end();
+            } else if (answerIsShort) raw.destroy();
             else raw.end();
           } catch { /* already closed */ }
         }
         // Only now can we tell whether the client actually got the response.
         const flushed = await settled;
 
-        const usage: Usage = acc.usage ?? ZERO_USAGE;
+        const usage: Usage = acc.usage ?? { ...ZERO_USAGE, incomplete: true };
         const responseBody: Record<string, unknown> = {
           streamed: true, role: "assistant", content: acc.text, stop_reason: acc.stopReason, usage,
         };
@@ -642,8 +650,9 @@ export class ProxyController {
         }
         else if (acc.incomplete) {
           status = 502;
-          error = "upstream stream ended before completion (truncated)";
+          error = acc.error ?? "upstream stream ended before completion (truncated)";
           responseBody.incomplete = true;
+          if (acc.error) responseBody.error = acc.error;
         }
         else if (!flushed) {
           // Every byte was written, but the connection died before they left

@@ -46,11 +46,7 @@ describe("OpenAI reasoning_effort", () => {
   });
 });
 
-describe("Anthropic effort (output_config.effort, not budget_tokens)", () => {
-  // `thinking: {type:"enabled", budget_tokens: N}` is rejected with a 400 on every
-  // current Anthropic model and deprecated on the two before them. `thinking` now
-  // says WHETHER to think, `output_config.effort` says HOW MUCH -- and its scale is
-  // the one this proxy already speaks, so a named effort crosses over by name.
+describe("Anthropic adaptive efforts and manual budgets", () => {
   it("a named effort crosses to Anthropic by name, thinking turned on adaptively", () => {
     for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
       const out = anthropic({ thinking: level });
@@ -63,18 +59,18 @@ describe("Anthropic effort (output_config.effort, not budget_tokens)", () => {
     expect(effortOf(anthropic({ thinking: "minimal" }))).toBe("low");
   });
 
-  it("an explicit token budget maps to the nearest effort", () => {
-    // The budget itself cannot be sent any more, so it is read as an intensity.
-    expect(effortOf(anthropic({ thinking: { budget: 2048 } }))).toBe("low");
-    expect(effortOf(anthropic({ thinking: { budget: 16000 } }))).toBe("medium");
-    expect(effortOf(anthropic({ thinking: { budget: 128000 } }))).toBe("max");
+  it("preserves explicit manual budgets", () => {
+    for (const budget of [2048, 16000, 128000]) {
+      const out = anthropic({ thinking: { budget } });
+      expect(out.thinking).toEqual({ type: "enabled", budget_tokens: budget });
+      expect(effortOf(out)).toBeUndefined();
+    }
   });
 
-  it("never emits budget_tokens", () => {
+  it("named efforts use adaptive mode for unknown targets", () => {
     for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
-      expect(anthropic({ thinking: level }).thinking).not.toHaveProperty("budget_tokens");
+      expect(anthropic({ thinking: level }).thinking).toEqual({ type: "adaptive" });
     }
-    expect(anthropic({ thinking: { budget: 32768 } }).thinking).not.toHaveProperty("budget_tokens");
   });
 
   it("disabled turns thinking off and carries no effort", () => {
@@ -90,25 +86,21 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
     expect(out.max_tokens).toBe(3000);
   });
 
-  it("keeps the requested effort when the client's max_tokens leaves room", () => {
+  it("keeps the requested manual budget when the ceiling leaves room", () => {
     const out = anthropic({ thinking: { budget: 32768 }, maxTokens: 64000 });
     expect(out.max_tokens).toBe(64000);
-    expect(effortOf(out)).toBe("high");
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
   });
 
-  it("a client's own effort survives a tight max_tokens untouched", () => {
-    // 32768 reads as `high`, and 20000 could never have held that as a token
-    // budget -- but effort is a hint the model paces itself against, not a
-    // reservation, so the level the caller asked for goes out as asked.
+  it("does not silently change a manual budget or ceiling", () => {
+    // Let the upstream validate conflicting explicit limits.
     const out = anthropic({ thinking: { budget: 32768 }, maxTokens: 20000 });
     expect(out.max_tokens).toBe(20000);
-    expect(effortOf(out)).toBe("high");
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
   });
 
   it("even a ceiling far below the effort's old budget does not lower it", () => {
-    // The old policy turned thinking OFF here (Anthropic required
-    // max_tokens > budget_tokens >= 1024). There is no budget any more, and no
-    // reason to answer at a level below the one requested.
+    // Adaptive effort does not reserve a fixed token budget.
     const out = anthropic({ thinking: "max", maxTokens: 800 });
     expect(out.thinking).toEqual({ type: "adaptive" });
     expect(effortOf(out)).toBe("max");
@@ -191,10 +183,8 @@ describe("Anthropic thinking is omitted unless a level was set", () => {
       thinking: { type: "enabled", budget_tokens: 8000 },
       messages: [{ role: "user", content: "hi" }],
     }).render({ upstreamModel: "m" });
-    // The budget it asked in cannot be sent on; it is read as an intensity and
-    // re-expressed as the effort nearest to it.
-    expect(out.thinking).toEqual({ type: "adaptive" });
-    expect(out.output_config).toEqual({ effort: "low" });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+    expect(out.output_config).toBeUndefined();
   });
 
   it("keeps the thinking blocks a thinking client does send back", () => {

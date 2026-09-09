@@ -31,7 +31,8 @@ let secret: string;
 let upstream: http.Server;
 let baseUrl: string;
 /** "tags" = thinking inline in the content; "field" = a reasoning_content field. */
-let style: "tags" | "field" = "tags";
+let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" = "tags";
+let finishReason = "stop";
 
 function startUpstream(): Promise<void> {
   return new Promise((resolve) => {
@@ -40,7 +41,7 @@ function startUpstream(): Promise<void> {
       req.on("data", (d) => (raw += d));
       req.on("end", () => {
         const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
-        const tagged = `<think>${THOUGHT}</think>\n\n${ANSWER}`;
+        const tagged = `<think>${THOUGHT}${style === "tags-spaced" ? "</think \n >" : "</think>"}\n\n${ANSWER}`;
 
         if (body.stream === true) {
           res.writeHead(200, { "content-type": "text/event-stream" });
@@ -48,31 +49,34 @@ function startUpstream(): Promise<void> {
             res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "up", ...d })}\n\n`);
           };
           chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-          if (style === "field") {
+          if (style === "field" || style === "thinking-only") {
             for (const piece of [THOUGHT.slice(0, 12), THOUGHT.slice(12)]) {
               chunk({ choices: [{ index: 0, delta: { reasoning_content: piece }, finish_reason: null }] });
             }
-            chunk({ choices: [{ index: 0, delta: { content: ANSWER }, finish_reason: null }] });
-          } else {
+            if (style === "field") chunk({ choices: [{ index: 0, delta: { content: ANSWER }, finish_reason: null }] });
+          } else if (style !== "empty") {
             // Three characters at a time: every tag lands across a boundary,
             // which is the only interesting case for a streamed scanner.
             for (let i = 0; i < tagged.length; i += 3) {
               chunk({ choices: [{ index: 0, delta: { content: tagged.slice(i, i + 3) }, finish_reason: null }] });
             }
           }
-          chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+          chunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] });
+          chunk({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14, completion_tokens_details: { reasoning_tokens: 4 } } });
           res.write("data: [DONE]\n\n");
           return res.end();
         }
 
-        const message = style === "field"
+        const message = style === "empty" ? { role: "assistant", content: null }
+          : style === "thinking-only" ? { role: "assistant", content: null, reasoning_content: THOUGHT }
+          : style === "field"
           ? { role: "assistant", content: ANSWER, reasoning_content: THOUGHT }
           : { role: "assistant", content: tagged };
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
           id: "c1", object: "chat.completion", created: 1, model: "up",
-          choices: [{ index: 0, message, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14 },
+          choices: [{ index: 0, message, finish_reason: finishReason }],
+          usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14, completion_tokens_details: { reasoning_tokens: 4 } },
         }));
       });
     });
@@ -275,5 +279,45 @@ describe("ST: the request log records the copy the client received", () => {
     // saw would make a support question unanswerable.
     expect(log.responseBody).toContain("reasoning_content");
     expect(log.responseBody).not.toContain("<think>");
+  });
+});
+
+describe("blank response regressions", () => {
+  afterAll(() => { style = "tags"; finishReason = "stop"; });
+
+  it("hidden thinking with a spaced closing tag retains the answer in both modes", async () => {
+    style = "tags-spaced";
+    expect(messageOf(await chat("hidden")).content).toBe(ANSWER);
+    expect(streamed((await chat("hidden", true)).payload).content).toBe(ANSWER);
+  });
+
+  for (const responseStyle of ["thinking-only", "empty"] as const) {
+    for (const stream of [false, true]) {
+      it(`${responseStyle}, stream=${stream}: sends an error and retains usage`, async () => {
+        style = responseStyle;
+        finishReason = "stop";
+        const r = await chat("plain", stream);
+        expect(r.payload).toContain("no answer or tool call");
+        if (stream) expect(r.payload).not.toContain("[DONE]");
+        else expect(r.statusCode).toBe(502);
+        const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
+        expect(log).toMatchObject({ httpStatus: 502, promptTokens: 5, completionTokens: 9, reasoningTokens: 4 });
+        expect(log.error).toContain("no answer or tool call");
+        const raw = JSON.parse(log.responseBody);
+        expect(stream ? raw.usage : raw.upstream_response.usage).toMatchObject({ completionTokens: 9, reasoningTokens: 4 });
+      });
+    }
+  }
+
+  it("records token exhaustion distinctly from an empty normal completion", async () => {
+    style = "thinking-only";
+    finishReason = "length";
+    for (const stream of [false, true]) {
+      const r = await chat("hidden", stream);
+      expect(r.payload).toContain("output token limit");
+      const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
+      expect(log.httpStatus).toBe(502);
+      expect(log.completionTokens).toBe(9);
+    }
   });
 });

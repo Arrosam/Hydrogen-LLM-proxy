@@ -66,9 +66,17 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
   const r = await transport.postJson(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
   if (r.status >= 200 && r.status < 300) {
     const body = r.json as Record<string, unknown> | undefined;
-    if (!body || typeof body !== "object") {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return { ok: false, status: 502, kind: "http", message: "upstream returned empty or invalid JSON body", sentBody };
     }
+    if (body.error != null || (req.family === "openai_responses" && (body.status === "failed" || body.status === "cancelled" || body.status === "queued" || body.status === "in_progress"))) {
+      const error = body.error as Record<string, unknown> | undefined;
+      return { ok: false, status: 502, kind: "http", message: typeof error?.message === "string" ? error.message : "upstream response did not complete", body, sentBody };
+    }
+    const hasEnvelope = req.family === "openai_completion" ? Array.isArray(body.choices) && body.choices.length > 0
+      : req.family === "anthropic" ? Array.isArray(body.content)
+      : Array.isArray(body.output);
+    if (!hasEnvelope) return { ok: false, status: 502, kind: "http", message: `upstream returned invalid ${req.family} response`, body, sentBody };
     return { ok: true, response: parseResponse(req.family, body), sentBody };
   }
   const errBody = r.json ?? r.text;

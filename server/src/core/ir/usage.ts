@@ -23,6 +23,8 @@
  * own clients expect and the number in between means one thing.
  */
 export interface Usage {
+  /** Only partial upstream accounting was available (e.g. interrupted stream). */
+  incomplete?: boolean;
   /** EVERY input token read, cache hits and cache writes included. */
   promptTokens: number;
   completionTokens: number;

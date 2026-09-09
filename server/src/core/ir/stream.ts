@@ -38,15 +38,17 @@ export type StreamEvent =
    * so a consumer that only watches `reasoning_delta` would see the block as
    * empty and drop it. Only a same-family replay can restore such a block; every
    * other family must discard it rather than invent text for it. */
-  | { type: "reasoning_start"; id?: string; signature?: string; redacted?: boolean }
+  | { type: "reasoning_start"; id?: string; signature?: string; redacted?: boolean; origin?: ReasoningPart["origin"] }
   | { type: "reasoning_delta"; text: string }
-  | { type: "reasoning_stop"; id?: string; signature?: string; redacted?: boolean }
+  | { type: "reasoning_stop"; id?: string; signature?: string; redacted?: boolean; origin?: ReasoningPart["origin"] }
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
+  /** A cumulative accounting snapshot, retained even if the next read throws. */
+  | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
    * (message_stop / [DONE] / response.completed), i.e. it was truncated. */
-  | { type: "finish"; stopReason: StopReason; usage?: Usage; incomplete?: boolean };
+  | { type: "finish"; stopReason: StopReason; usage?: Usage; incomplete?: boolean; error?: string };
 
 export interface StreamContext {
   /** Model name echoed to the client (the service name). */
@@ -118,6 +120,8 @@ export async function* withoutReasoning(events: AsyncGenerator<StreamEvent>): As
 // --- usage/text tap (for logging) ---------------------------------------
 
 export interface StreamAccumulator {
+  /** Semantic failure reported after the upstream finished, e.g. an empty answer. */
+  error?: string;
   usage?: Usage;
   stopReason: StopReason;
   /** Reconstructed assistant text (concatenated deltas), for logging. */
@@ -144,6 +148,13 @@ export async function* tapStream(
     switch (ev.type) {
       case "start":
         acc.upstreamModel = ev.model;
+        if (ev.inputTokens != null || ev.cachedInputTokens != null || ev.cacheCreationInputTokens != null) {
+          acc.usage = { promptTokens: ev.inputTokens ?? 0, completionTokens: 0, totalTokens: ev.inputTokens ?? 0,
+            ...(ev.cachedInputTokens != null ? { cachedInputTokens: ev.cachedInputTokens } : {}),
+            ...(ev.cacheCreationInputTokens != null ? { cacheCreationInputTokens: ev.cacheCreationInputTokens } : {}),
+            incomplete: true,
+          };
+        }
         break;
       case "text_delta":
         acc.text += ev.text;
@@ -163,9 +174,13 @@ export async function* tapStream(
         break;
       }
       case "finish":
-        acc.usage = ev.usage;
+        if (ev.usage) acc.usage = { ...acc.usage, ...ev.usage, incomplete: ev.incomplete === true || ev.usage.incomplete === true };
         acc.stopReason = ev.stopReason;
-        acc.incomplete = ev.incomplete === true;
+        acc.incomplete = ev.incomplete === true || ev.error != null;
+        acc.error = ev.error;
+        break;
+      case "usage":
+        acc.usage = { ...acc.usage, ...ev.usage, incomplete: true };
         break;
     }
     yield ev;
@@ -217,7 +232,7 @@ export async function collectStream(
         text += ev.text;
         break;
       case "reasoning_start":
-        currentReasoning = { type: "reasoning", text: "", itemId: ev.id };
+        currentReasoning = { type: "reasoning", text: "", itemId: ev.id, ...(ev.origin ? { origin: ev.origin } : {}) };
         // A redacted block carries its whole opaque payload here and streams no
         // deltas; recording it at `start` is the only chance to keep it.
         if (ev.redacted) currentReasoning.redacted = true;
@@ -233,10 +248,11 @@ export async function collectStream(
         break;
       case "reasoning_stop":
         if (!currentReasoning) {
-          currentReasoning = { type: "reasoning", text: "", itemId: ev.id };
+          currentReasoning = { type: "reasoning", text: "", itemId: ev.id, ...(ev.origin ? { origin: ev.origin } : {}) };
           reasoningParts.push(currentReasoning);
         }
         if (ev.id) currentReasoning.itemId = ev.id;
+        if (ev.origin) currentReasoning.origin = ev.origin;
         if (ev.signature) currentReasoning.signature = ev.signature;
         if (ev.redacted) currentReasoning.redacted = true;
         currentReasoning = null;
@@ -252,8 +268,11 @@ export async function collectStream(
       }
       case "finish":
         stopReason = ev.stopReason;
-        usage = ev.usage;
+        usage = ev.usage ?? usage;
         incomplete = ev.incomplete === true;
+        break;
+      case "usage":
+        usage = ev.usage;
         break;
     }
   }
@@ -352,13 +371,13 @@ export async function* fabricateStream(
       // form carries the data up front) and the buffered collector reads them
       // back at either end.
       const redacted = p.redacted === true;
-      yield { type: "reasoning_start", id: p.itemId, ...(redacted ? { redacted: true, signature: p.signature } : {}) };
+      yield { type: "reasoning_start", id: p.itemId, origin: p.origin, ...(redacted ? { redacted: true, signature: p.signature } : {}) };
       for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
         const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
         yield { type: "reasoning_delta", text: piece };
         await pace(piece.length);
       }
-      yield { type: "reasoning_stop", id: p.itemId, signature: p.signature, ...(redacted ? { redacted: true } : {}) };
+      yield { type: "reasoning_stop", id: p.itemId, origin: p.origin, signature: p.signature, ...(redacted ? { redacted: true } : {}) };
     } else if (p.type === "tool_use") {
       yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };

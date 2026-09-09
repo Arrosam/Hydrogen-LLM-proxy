@@ -1,36 +1,7 @@
 import type { EffortLevel, ThinkingLevel } from "./params";
 
-/**
- * Maps the canonical extended-thinking level onto each wire family's own knob.
- *
- * There is little left to map. All three families express depth as a named
- * effort on a shared scale -- OpenAI's `reasoning_effort`, Responses'
- * `reasoning.effort`, Anthropic's `output_config.effort` -- so the level a
- * caller asked for is the level that goes out, verbatim, on all three.
- *
- * Nothing here rewrites `max_tokens` either. It used to have to: reasoning was
- * billed inside the output ceiling as an explicit `budget_tokens`, so thinking a
- * step imposed meant growing the ceiling to hold a thought the client had not
- * budgeted for, and a ceiling too small to hold one meant lowering the effort or
- * dropping the thinking outright. A named effort is a hint the model paces
- * itself against, not tokens the API sets aside, so none of that arithmetic has
- * anything left to compute. The client's ceiling is the client's ceiling; a
- * provider's hard cap is the only thing that bounds it.
- *
- * Do not reintroduce either. Growing the ceiling spends tokens the caller never
- * agreed to; lowering the effort answers at a level nobody asked for. An upstream
- * that refuses a level refuses it out loud and the error reaches the client --
- * and a user who wants degradation configures it, with a Model Services fallback
- * step carrying a `thinking` override.
- *
- * The same rule covers the ceiling itself. `max_tokens` is REQUIRED on the
- * Anthropic wire and optional on the OpenAI ones, so a client that omits it and
- * lands on an Anthropic upstream produces a request that upstream will reject.
- * This policy does not paper over that with a number of its own -- an invented
- * ceiling silently truncates an answer at a length nobody chose, and the caller
- * has no way to know it happened. The 400 names the missing field; a number
- * would name nothing.
- */
+/** Maps thinking controls without changing the caller's output ceiling.
+ * Native Anthropic options are preserved by its request adapter. */
 
 /**
  * Anthropic's own effort scale. Hydrogen carries one extra rung at the bottom --
@@ -46,12 +17,7 @@ const TO_ANTHROPIC_EFFORT: Record<EffortLevel, AnthropicEffort> = {
   max: "max",
 };
 
-/**
- * Nearest named effort for an explicit token budget. Anthropic clients may still
- * send `thinking.budget_tokens`, and it cannot be forwarded -- a 400 on every
- * current model -- so it is read as an intensity and re-expressed as the closest
- * level rather than dropped.
- */
+/** Nearest named effort when translating a manual budget to an OpenAI wire. */
 function budgetToEffort(budget: number): EffortLevel {
   if (budget <= 2_048) return "minimal";
   if (budget <= 10_000) return "low";
@@ -77,8 +43,8 @@ export interface ReasoningCeiling {
 }
 
 export interface AnthropicThinkingFields {
-  /** Whether to think. `budget_tokens` is gone -- see the note on the policy. */
-  thinking: { type: "adaptive" } | { type: "disabled" };
+  /** Whether to think, with a budget for manual mode. */
+  thinking: { type: "adaptive" } | { type: "disabled" } | { type: "enabled"; budget_tokens: number };
   /** How much to think, for `output_config.effort`. Absent when thinking is off. */
   effort?: AnthropicEffort;
   /** The client's own ceiling, bounded by the provider cap. Undefined when the
@@ -111,24 +77,12 @@ export const ThinkingPolicy = {
     return reasoningCeiling(thinking, clientMax, providerCap);
   },
 
-  /**
-   * Anthropic: `thinking` says WHETHER, `output_config.effort` says HOW MUCH.
-   *
-   * `thinking: {type:"enabled", budget_tokens: N}` is gone -- a 400 on every
-   * current model (Fable 5, Opus 5, 4.8, 4.7, Sonnet 5), deprecated on Opus 4.6
-   * and Sonnet 4.6 -- replaced by adaptive thinking plus a named effort.
-   * `output_config.effort` is GA, needs no beta header, and its scale is the one
-   * this proxy already speaks, so a `reasoning_effort` from either OpenAI wire
-   * crosses over by NAME.
-   *
-   * `thinking: {type:"adaptive"}` is emitted alongside the effort because on Opus
-   * 4.8, 4.7 and Sonnet 5 an absent `thinking` means no thinking at all -- effort
-   * by itself would not switch it on.
-   */
+  /** Anthropic manual budgets and adaptive named efforts. */
   anthropic(
     thinking: ThinkingLevel,
     clientMax: number | undefined,
     providerCap: number | undefined,
+    model?: string,
   ): AnthropicThinkingFields {
     // Undefined when the client named no ceiling: this wire requires max_tokens,
     // and the upstream saying so is more useful than a number nobody chose.
@@ -137,6 +91,17 @@ export const ThinkingPolicy = {
       : undefined;
 
     if (thinking === "disabled") return { thinking: { type: "disabled" }, max_tokens };
+    // Explicit manual budgets remain valid on older models. For cross-family
+    // named efforts targeting pre-adaptive Claude models, use a manual budget.
+    // Never grow the caller's output ceiling to accommodate it.
+    const version = /claude-(?:sonnet|opus|haiku)-(\d+)(?:[.-](\d)(?=-|$))?/i.exec(model ?? "");
+    const legacy = /claude-3[.-]/i.test(model ?? "") ||
+      (version != null && Number(version[1]) === 4 && Number(version[2] ?? 0) < 6);
+    if (typeof thinking === "object" || legacy) {
+      const budgets: Record<EffortLevel, number> = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 32768, max: 65536 };
+      const budget = typeof thinking === "object" ? thinking.budget : budgets[resolveEffort(thinking)];
+      return { thinking: { type: "enabled", budget_tokens: budget }, max_tokens };
+    }
     return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[resolveEffort(thinking)], max_tokens };
   },
 };

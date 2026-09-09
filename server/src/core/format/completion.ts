@@ -1,3 +1,5 @@
+import { chatReasoningDetails, parseChatReasoningDetails } from "./reasoningBridge";
+import type { ReasoningPart } from "../ir/content";
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
@@ -306,6 +308,8 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   set("topK", numOrUndef(body.top_k));
   set("minP", numOrUndef(body.min_p));
   set("maxTokens", numOrUndef(body.max_completion_tokens) ?? numOrUndef(body.max_tokens));
+  if (body.max_completion_tokens != null) params.completionTokenKey = "max_completion_tokens";
+  else if (body.max_tokens != null) params.completionTokenKey = "max_tokens";
   set("stop", parseStop(body.stop));
   set("frequencyPenalty", numOrUndef(body.frequency_penalty));
   set("presencePenalty", numOrUndef(body.presence_penalty));
@@ -396,7 +400,9 @@ export class OpenAICompletionRequest extends Request {
         // OpenRouter-style gateways say reasoning, some v4 gateways say
         // reasoning_text. Accept them all.
         const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? msg.reasoning_text ?? "");
-        if (reasoning) content.push({ type: "reasoning", text: reasoning });
+        const replay = parseChatReasoningDetails(msg.reasoning_details);
+        if (replay.length) content.unshift(...replay);
+        else if (reasoning) content.push({ type: "reasoning", text: reasoning });
         const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
         for (const tc of toolCalls) {
           if (!tc || typeof tc !== "object") continue;
@@ -490,6 +496,8 @@ export class OpenAICompletionRequest extends Request {
     const cap = target.providerMaxOutputTokens;
     const p = this.params;
     applyParams(out, p);
+    const ceilingKey = /^(o[1-9](?:-|$)|gpt-5(?:[.-]|$))/i.test(target.upstreamModel)
+      ? "max_completion_tokens" : p.completionTokenKey ?? "max_tokens";
     if (this.stream) {
       out.stream = true;
       out.stream_options = { include_usage: true };
@@ -499,10 +507,10 @@ export class OpenAICompletionRequest extends Request {
       // sizes the ceiling to hold the reasoning and still leave the answer room.
       const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap);
       out.reasoning_effort = tf.effort;
-      if (tf.maxTokens != null) out.max_tokens = tf.maxTokens;
+      if (tf.maxTokens != null) out[ceilingKey] = tf.maxTokens;
     } else {
       const maxTokens = capMaxTokens(p.maxTokens, cap);
-      if (maxTokens != null) out.max_tokens = maxTokens;
+      if (maxTokens != null) out[ceilingKey] = maxTokens;
     }
     applyNonCanonical(out, p, this.family);
     return out;
@@ -534,7 +542,9 @@ export class OpenAICompletionResponse extends Response {
 
     const content: ContentPart[] = [];
     const reasoning = String(message.reasoning ?? message.reasoning_content ?? message.reasoning_text ?? "");
-    if (reasoning) content.push({ type: "reasoning", text: reasoning });
+    const replay = parseChatReasoningDetails(message.reasoning_details);
+    if (replay.length) content.push(...replay);
+    else if (reasoning) content.push({ type: "reasoning", text: reasoning });
     if (typeof message.content === "string" && message.content) {
       content.push({ type: "text", text: message.content });
     } else if (Array.isArray(message.content)) {
@@ -573,10 +583,12 @@ export class OpenAICompletionResponse extends Response {
 
   renderSelf(model: string, opts?: RenderOptions): Record<string, unknown> {
     const text = this.text();
-    // Redacted blocks belong to the Anthropic wire only (see render()).
+    // Visible reasoning is text; opaque blocks travel in client replay metadata.
     const reasoningParts = this.content.filter((p) => p.type === "reasoning" && !p.redacted);
     const toolUses = this.content.filter((p) => p.type === "tool_use");
     const message: Record<string, unknown> = { role: "assistant", content: text || null };
+    const signed = this.content.filter((p): p is ReasoningPart => p.type === "reasoning");
+    if (signed.some(p => p.signature || p.redacted)) message.reasoning_details = chatReasoningDetails(signed);
     if (reasoningParts.length) {
       const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
       // BOTH dialect spellings by default, so a DeepSeek-convention client sees
@@ -617,6 +629,7 @@ export class OpenAICompletionResponse extends Response {
     let terminated = false; // saw [DONE] or a finish_reason
     let stopReason: StopReason = null;
     let usage: ResponseData["usage"] | undefined;
+    let reasoningTextSeen = false;
     const seenTools = new Set<number>();
 
     for await (const frame of parseSSE(readable)) {
@@ -642,9 +655,21 @@ export class OpenAICompletionResponse extends Response {
       const delta = (choice.delta ?? {}) as Record<string, unknown>;
 
       if (typeof delta.content === "string" && delta.content) yield { type: "text_delta", text: delta.content };
+      if (typeof delta.refusal === "string" && delta.refusal) yield { type: "text_delta", text: delta.refusal };
 
       const reasoning = delta.reasoning ?? delta.reasoning_content ?? delta.reasoning_text;
-      if (typeof reasoning === "string" && reasoning) yield { type: "reasoning_delta", text: reasoning };
+      if (typeof reasoning === "string" && reasoning) {
+        reasoningTextSeen = true;
+        yield { type: "reasoning_delta", text: reasoning };
+      }
+      for (const p of parseChatReasoningDetails(delta.reasoning_details)) {
+        if (!reasoningTextSeen) {
+          yield { type: "reasoning_start", origin: p.origin, id: p.itemId, redacted: p.redacted, signature: p.signature };
+          if (p.text) yield { type: "reasoning_delta", text: p.text };
+        }
+        yield { type: "reasoning_stop", origin: p.origin, id: p.itemId, redacted: p.redacted, signature: p.signature };
+        reasoningTextSeen = false;
+      }
 
       const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
       for (const tc of toolCalls) {
@@ -667,13 +692,21 @@ export class OpenAICompletionResponse extends Response {
         const u = chunk.usage as Record<string, unknown>;
         const cd = (u.completion_tokens_details ?? {}) as Record<string, unknown>;
         const cached = openAiCachedTokens(u);
+        const prompt = numOrUndef(u.prompt_tokens);
+        const completion = numOrUndef(u.completion_tokens);
+        const total = numOrUndef(u.total_tokens);
+        const reasoning = numOrUndef(cd.reasoning_tokens);
+        if (prompt == null && completion == null && total == null && cached == null && reasoning == null) continue;
         usage = {
-          promptTokens: num(u.prompt_tokens),
-          completionTokens: num(u.completion_tokens),
-          totalTokens: num(u.total_tokens) || num(u.prompt_tokens) + num(u.completion_tokens),
+          ...usage,
+          promptTokens: prompt ?? usage?.promptTokens ?? 0,
+          completionTokens: completion ?? usage?.completionTokens ?? 0,
+          totalTokens: total ?? (prompt == null && completion == null && usage ? usage.totalTokens :
+            (prompt ?? usage?.promptTokens ?? 0) + (completion ?? usage?.completionTokens ?? 0)),
           ...(cached != null ? { cachedInputTokens: cached } : {}),
           ...(numOrUndef(cd.reasoning_tokens) != null ? { reasoningTokens: num(cd.reasoning_tokens) } : {}),
         };
+        yield { type: "usage", usage };
       }
     }
 
@@ -688,6 +721,8 @@ export class OpenAICompletionResponse extends Response {
     let id = genId("chatcmpl");
     let created = nowSeconds();
     const model = ctx.model;
+    let reasoningPart: ReasoningPart | undefined;
+    let reasoningIndex = 0;
 
     const chunk = (payload: Record<string, unknown>): string =>
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, ...payload })}\n\n`;
@@ -702,7 +737,20 @@ export class OpenAICompletionResponse extends Response {
         case "text_delta":
           yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });
           break;
+        case "reasoning_start":
+          reasoningPart = { type: "reasoning", text: "", origin: ev.origin, itemId: ev.id, signature: ev.signature, redacted: ev.redacted };
+          break;
+        case "reasoning_stop": {
+          const p: ReasoningPart = { ...reasoningPart, type: "reasoning", text: reasoningPart?.text ?? "", origin: ev.origin ?? reasoningPart?.origin, signature: ev.signature ?? reasoningPart?.signature, itemId: ev.id ?? reasoningPart?.itemId, redacted: ev.redacted ?? reasoningPart?.redacted };
+          if (p.text || p.signature || p.redacted) {
+            const detail = chatReasoningDetails([p])[0] as Record<string, unknown>;
+            yield chunk({ choices: [{ index: 0, delta: { reasoning_details: [{ ...detail, index: reasoningIndex++ }] }, finish_reason: null }] });
+          }
+          reasoningPart = undefined;
+          break;
+        }
         case "reasoning_delta": {
+          if (reasoningPart) reasoningPart.text += ev.text;
           // Both dialect spellings unless the service named one (see renderSelf).
           const delta: Record<string, unknown> = {};
           if (ctx.thinkingFormat !== "reasoning_content") delta.reasoning = ev.text;
@@ -727,7 +775,7 @@ export class OpenAICompletionResponse extends Response {
           // Emitting finish_reason + [DONE] here would leave the client unable
           // to tell a complete response from a cut-off one; relay() aborts the
           // connection instead, which every HTTP client surfaces as an error.
-          if (ev.incomplete) return;
+          if (ev.incomplete || ev.error) return;
           yield chunk({ choices: [{ index: 0, delta: {}, finish_reason: stopToFinishReason(ev.stopReason) }] });
           if (ev.usage) {
             yield chunk({

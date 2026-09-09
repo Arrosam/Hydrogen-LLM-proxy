@@ -152,7 +152,7 @@ describe("Anthropic -> Anthropic", () => {
 });
 
 describe("cross-family output never leaks the payload", () => {
-  it("drops it on an OpenAI Chat Completions stream", async () => {
+  it("wraps it in replay metadata on an OpenAI Chat Completions stream", async () => {
     const events = parseStream("anthropic", frames(...REDACTED_WITH_TOOL));
     const out = await text(serializeStream("openai_completion", events, { model: "svc" }));
     expect(out).not.toContain(OPAQUE);
@@ -175,15 +175,15 @@ describe("cross-family output never leaks the payload", () => {
     expect(out).toContain('"name":"get_weather"');
   });
 
-  it("wraps it in a buffered Responses body, and never sends it to Chat Completions", async () => {
+  it("wraps it in replay metadata for both OpenAI client families", async () => {
     const { data } = await collectStream(parseStream("anthropic", frames(...REDACTED_ONLY)));
     const { buildResponse } = await import("../src/core/format");
     const canonical = buildResponse("anthropic", data);
 
-    // Chat Completions has no field that survives a replay, so it gets nothing.
+    // Chat clients that preserve reasoning_details can replay the envelope.
     const chat = JSON.stringify(canonical.render("openai_completion", "svc"));
     expect(chat).not.toContain(OPAQUE);
-    expect(chat).not.toContain("hydrogen-redacted-thinking-v1:");
+    expect(chat).toContain("hydrogen-reasoning-v1:");
 
     const responses = JSON.stringify(canonical.render("openai_responses", "svc"));
     expect(responses).not.toContain(OPAQUE);

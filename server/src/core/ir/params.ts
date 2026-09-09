@@ -43,6 +43,12 @@ export interface GenerationParams {
   minP?: number;
   /** Max output tokens (max_tokens / max_completion_tokens / max_output_tokens). */
   maxTokens?: number;
+  /** Preserve the Chat client's choice of output-ceiling parameter. */
+  completionTokenKey?: "max_tokens" | "max_completion_tokens";
+  /** Native nested options, replayed only by their own adapter. */
+  anthropicThinking?: Record<string, unknown>;
+  responsesReasoning?: Record<string, unknown>;
+  responsesText?: Record<string, unknown>;
   stop?: string[];
   frequencyPenalty?: number;
   presencePenalty?: number;
@@ -112,6 +118,7 @@ export interface RequestOverrides extends Partial<GenerationParams> {
 export function mergeParams(base: GenerationParams, patch?: Partial<GenerationParams>): GenerationParams {
   if (!patch) return base;
   const out: GenerationParams = { ...base };
+  if (patch.thinking !== undefined) out.anthropicThinking = undefined;
   for (const key of Object.keys(patch) as OverridableParam[]) {
     const v = patch[key];
     if (v === undefined) continue;

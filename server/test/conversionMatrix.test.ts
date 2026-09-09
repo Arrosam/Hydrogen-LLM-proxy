@@ -75,7 +75,7 @@ interface MockProvider {
   baseUrlFor: (f: Family) => string;
   received: Received[];
   /** Toggles what the next answers contain. */
-  opts: { thinking: boolean; tool: boolean; usage: boolean; redacted: boolean; toolDoneOnly?: boolean };
+  opts: { thinking: boolean; tool: boolean; usage: boolean; redacted: boolean; toolDoneOnly?: boolean; emptyUsageTail?: boolean };
   close: () => Promise<void>;
 }
 
@@ -96,6 +96,7 @@ function anthropicBody(o: MockProvider["opts"]): Record<string, unknown> {
       ? {
           input_tokens: ANTHROPIC_UNCACHED_TOKENS, output_tokens: COMPLETION_TOKENS,
           cache_read_input_tokens: CACHED_TOKENS, cache_creation_input_tokens: CACHE_WRITE_TOKENS,
+          output_tokens_details: { thinking_tokens: REASONING_TOKENS },
         }
       : {},
   };
@@ -170,7 +171,7 @@ function anthropicStream(o: MockProvider["opts"]): string {
     s += sse("content_block_delta", { index: i, delta: { type: "input_json_delta", partial_json: JSON.stringify(TOOL_ARGS) } });
     s += sse("content_block_stop", { index: i++ });
   }
-  s += sse("message_delta", { delta: { stop_reason: o.tool ? "tool_use" : "end_turn" }, usage: { output_tokens: COMPLETION_TOKENS } });
+  s += sse("message_delta", { delta: { stop_reason: o.tool ? "tool_use" : "end_turn" }, usage: { output_tokens: COMPLETION_TOKENS, output_tokens_details: { thinking_tokens: REASONING_TOKENS } } });
   s += sse("message_stop", {});
   return s;
 }
@@ -195,6 +196,7 @@ function chatStream(o: MockProvider["opts"]): string {
       },
     });
   }
+  if (o.emptyUsageTail) s += chunk({ choices: [], usage: {} });
   return s + "data: [DONE]\n\n";
 }
 
@@ -462,8 +464,7 @@ describe("Decision table: thinking requested x egress family", () => {
       expect(sent.reasoning_effort).not.toBe("none");
     },
     anthropic: (sent) => {
-      // `thinking` says whether, `output_config.effort` says how much. A
-      // budget_tokens here would be a 400 on every current Anthropic model.
+      // Cross-family named efforts use adaptive mode on this generic target.
       expect(sent.thinking).toEqual({ type: "adaptive" });
       expect(sent.thinking).not.toHaveProperty("budget_tokens");
       expect(sent.output_config).toMatchObject({ effort: expect.any(String) });
@@ -479,7 +480,9 @@ describe("Decision table: thinking requested x egress family", () => {
       it(`${ingress} asks to think -> ${egress} carries its own knob`, async () => {
         const r = await convert(ingress, egress, { thinking: true });
         expect(r.status).toBe(200);
-        EXPECTED_KNOB[egress](r.sent);
+        if (ingress === "anthropic" && egress === "anthropic") {
+          expect(r.sent.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+        } else EXPECTED_KNOB[egress](r.sent);
       });
     }
   }
@@ -493,18 +496,15 @@ describe("Decision table: thinking requested x egress family", () => {
     Object.assign(upstream.opts, { thinking: true });
   });
 
-  it("BVA: a ceiling at the minimum thinking budget drops thinking rather than starving the answer", async () => {
-    // A client ceiling of 1024 cannot hold a heavy thought AND leave the answer
-    // room, so the EFFORT steps down -- it does not switch thinking off, which
-    // would silently drop what the caller asked for. The ceiling is never
-    // inflated past what the client asked. A roomier ceiling keeps the effort up.
+  it("BVA: native manual limits remain unchanged for upstream validation", async () => {
+    // Preserve explicit manual limits; never silently grow the output ceiling.
     upstream.received.length = 0;
     await app.inject({
       method: "POST", url: "/v1/messages", headers: auth(),
       payload: { model: SERVICE_FOR.anthropic, max_tokens: 1024, messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled", budget_tokens: 2048 } },
     });
-    expect(upstream.received[0].body.thinking).toEqual({ type: "adaptive" });
-    expect(upstream.received[0].body.output_config).toEqual({ effort: "low" });
+    expect(upstream.received[0].body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+    expect(upstream.received[0].body.output_config).toBeUndefined();
     expect(upstream.received[0].body.max_tokens).toBe(1024);
 
     upstream.received.length = 0;
@@ -512,8 +512,8 @@ describe("Decision table: thinking requested x egress family", () => {
       method: "POST", url: "/v1/messages", headers: auth(),
       payload: { model: SERVICE_FOR.anthropic, max_tokens: 8192, messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled", budget_tokens: 2048 } },
     });
-    expect(upstream.received[0].body.thinking).toEqual({ type: "adaptive" });
-    expect(upstream.received[0].body.output_config).toMatchObject({ effort: expect.any(String) });
+    expect(upstream.received[0].body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+    expect(upstream.received[0].body.output_config).toBeUndefined();
     expect(upstream.received[0].body.max_tokens).toBe(8192);
   });
 
@@ -652,6 +652,24 @@ describe("BVA: usage counters, including the cached share", () => {
     await convert("anthropic", "anthropic", { stream: true });
     const log = lastLog();
     expect(log.cacheCreationInputTokens).toBe(CACHE_WRITE_TOKENS);
+  });
+
+  it("late empty Chat usage does not erase counters in the dashboard or raw JSON", async () => {
+    upstream.opts.emptyUsageTail = true;
+    try {
+      await convert("openai_completion", "openai_completion", { stream: true });
+      const log = lastLog();
+      expect(log).toMatchObject({ promptTokens: PROMPT_TOKENS, completionTokens: COMPLETION_TOKENS, cachedInputTokens: CACHED_TOKENS, reasoningTokens: REASONING_TOKENS });
+      const raw = JSON.parse(log.responseBody as string);
+      expect(raw.usage).toMatchObject({ promptTokens: PROMPT_TOKENS, completionTokens: COMPLETION_TOKENS, cachedInputTokens: CACHED_TOKENS, reasoningTokens: REASONING_TOKENS });
+    } finally { upstream.opts.emptyUsageTail = false; }
+  });
+
+  it("Anthropic thinking tokens reach the dashboard in both transport modes", async () => {
+    for (const stream of [false, true]) {
+      await convert("openai_completion", "anthropic", { stream });
+      expect(lastLog().reasoningTokens).toBe(REASONING_TOKENS);
+    }
   });
 
   it("OpenAI reasoning tokens are recorded", async () => {

@@ -1,31 +1,9 @@
 import type { ReasoningPart } from "../ir/content";
 
-/**
- * Carrying an Anthropic `redacted_thinking` block across an OpenAI-format client.
- *
- * Ordinary thinking already survives the round trip on its own: its text becomes
- * the reasoning item's text and its signature becomes `encrypted_content`, and
- * both come back intact for an Anthropic upstream to accept. A redacted block
- * does not, because what makes it redacted is not its content -- it has none --
- * but a flag, and the canonical form of "a reasoning item with opaque bytes and
- * no text" is indistinguishable from a thinking block whose text was empty.
- * Replay it as the wrong one and the upstream rejects the whole request.
- *
- * So the block is wrapped: the flag plus its opaque payload, base64'd behind a
- * versioned prefix, riding in the field the destination protocol already
- * reserves for exactly this kind of opaque replay data (`encrypted_content`).
- * The idea is borrowed from cc-switch's reasoning bridge, which does the same
- * thing in the other direction (OpenAI reasoning items through Anthropic blocks).
- *
- * The envelope exists ONLY between Hydrogen and its own client, which is the one
- * party guaranteed to hand it back here. It is decoded on the way in and never
- * forwarded to an upstream: an Anthropic provider gets a real `redacted_thinking`
- * block back, and a provider that cannot express one gets nothing rather than
- * another vendor's bytes in a field it would try to decrypt.
- */
-
-/** Bump only if the payload shape changes; an older prefix simply stops decoding
- * and the block degrades to being dropped, exactly as it was before this existed. */
+/** Client replay metadata preserves block boundaries, text and signature origin.
+ * Envelopes are decoded at ingress; only native signatures reach an upstream.
+ * The old redacted-only envelope remains readable for existing conversations.
+ * Chat clients must retain reasoning_details to replay signed thinking. */
 const PREFIX = "hydrogen-redacted-thinking-v1:";
 
 interface Envelope {
@@ -62,4 +40,38 @@ export function decodeRedacted(value: string): Pick<ReasoningPart, "redacted" | 
   } catch {
     return null;
   }
+}
+
+const REASONING_PREFIX = "hydrogen-reasoning-v1:";
+
+/** Client-only replay envelope. It must be decoded before any upstream render. */
+export function encodeReasoning(part: ReasoningPart): string {
+  return REASONING_PREFIX + Buffer.from(JSON.stringify(part), "utf8").toString("base64");
+}
+
+export function decodeReasoning(value: string): ReasoningPart | null {
+  const redacted = decodeRedacted(value);
+  if (redacted) return { type: "reasoning", text: "", origin: "anthropic", ...redacted };
+  if (!value.startsWith(REASONING_PREFIX)) return null;
+  try {
+    const p = JSON.parse(Buffer.from(value.slice(REASONING_PREFIX.length), "base64").toString("utf8"));
+    if (p.type !== "reasoning" || typeof p.text !== "string") return null;
+    if (p.origin !== undefined && !["anthropic", "openai_responses", "openai_completion"].includes(p.origin)) return null;
+    if (p.signature !== undefined && typeof p.signature !== "string") return null;
+    if (p.itemId !== undefined && typeof p.itemId !== "string") return null;
+    return { type: "reasoning", text: p.text, origin: p.origin, signature: p.signature, itemId: p.itemId, ...(p.redacted === true ? { redacted: true } : {}) };
+  } catch { return null; }
+}
+
+/** Chat clients that preserve reasoning_details can replay signed blocks. */
+export function chatReasoningDetails(parts: ReasoningPart[]): unknown[] {
+  return parts.map((p, index) => ({ type: "reasoning.encrypted", data: encodeReasoning(p), index }));
+}
+
+export function parseChatReasoningDetails(value: unknown): ReasoningPart[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(d => {
+    const p = typeof d?.data === "string" ? decodeReasoning(d.data) : null;
+    return p ? [p] : [];
+  });
 }

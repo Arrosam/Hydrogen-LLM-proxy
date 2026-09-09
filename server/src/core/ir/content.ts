@@ -68,6 +68,8 @@ export interface ToolResultPart {
 
 /** A reasoning/thinking block produced by the model (extended thinking). */
 export interface ReasoningPart {
+  /** Wire family that issued the opaque signature; never replay across families. */
+  origin?: "anthropic" | "openai_responses" | "openai_completion";
   type: "reasoning";
   text: string;
   /** Provider signature for the block (Anthropic thinking/redacted_thinking),

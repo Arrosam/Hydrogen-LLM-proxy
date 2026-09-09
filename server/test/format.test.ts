@@ -352,7 +352,7 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 1024 });
     const body = OpenAICompletionRequest.construct(req.withOverrides({ thinking: "high" })).render(capped("gpt-5"));
     expect(body.reasoning_effort).toBe("high");
-    expect(body.max_tokens).toBe(1024);
+    expect(body.max_completion_tokens).toBe(1024);
   });
 
   it("does NOT inflate a client's own thinking — its max already includes reasoning (finding 8)", () => {
@@ -366,7 +366,7 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
   it("a client's own thinking on Chat Completions is likewise taken as-is", () => {
     const req = OpenAICompletionRequest.parse({ model: "svc", messages: [{ role: "user", content: "hi" }], max_tokens: 2000, reasoning_effort: "high" });
     const body = OpenAICompletionRequest.construct(req).render(capped("gpt-5"));
-    expect(body.max_tokens).toBe(2000);
+    expect(body.max_completion_tokens).toBe(2000);
   });
 
   it("Anthropic: a tight provider cap bounds max_tokens without lowering the effort", () => {
@@ -385,7 +385,7 @@ describe("reasoning budget across families (imposed vs client-requested)", () =>
       AnthropicRequest.parse(shape).withOverrides({ thinking: "high" }),
     ).render(capped("claude", 131072));
     const viaClient = AnthropicRequest.construct(
-      AnthropicRequest.parse({ ...shape, output_config: { effort: "high" } }),
+      AnthropicRequest.parse({ ...shape, thinking: { type: "adaptive" }, output_config: { effort: "high" } }),
     ).render(capped("claude", 131072));
     expect(viaOverride.max_tokens).toBe(1024);
     expect(viaOverride.thinking).toEqual({ type: "adaptive" });

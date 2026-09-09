@@ -29,7 +29,7 @@ import {
 } from "./wire";
 import { FormatConversionError } from "./errors";
 import type { Usage } from "../ir/usage";
-import { decodeRedacted, encodeRedacted } from "./reasoningBridge";
+import { decodeReasoning, encodeReasoning, encodeRedacted } from "./reasoningBridge";
 import { registerFormat } from "./registry";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
@@ -254,6 +254,12 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
   if (numOrUndef(body.top_p) != null) params.topP = numOrUndef(body.top_p);
   if (numOrUndef(body.max_output_tokens) != null) params.maxTokens = numOrUndef(body.max_output_tokens);
+  if (body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)) params.responsesReasoning = { ...body.reasoning as Record<string, unknown> };
+  if (body.text && typeof body.text === "object" && !Array.isArray(body.text)) {
+    params.responsesText = { ...body.text as Record<string, unknown> };
+    const verbosity = params.responsesText.verbosity;
+    if (verbosity === "low" || verbosity === "medium" || verbosity === "high") params.verbosity = verbosity;
+  }
   const thinking = parseThinking(body.reasoning);
   if (thinking) params.thinking = thinking;
   const rf = parseResponseFormat(body.text);
@@ -335,9 +341,9 @@ export class OpenAIResponsesRequest extends Request {
           // An Anthropic redacted block this proxy wrapped on the way out (see
           // reasoningBridge): unwrap it so the canonical part is the redacted
           // block again, and an Anthropic upstream gets the real thing back.
-          const unwrapped = encrypted ? decodeRedacted(encrypted) : null;
+          const unwrapped = encrypted ? decodeReasoning(encrypted) : null;
           if (unwrapped) {
-            messages.push({ role: "assistant", content: [{ type: "reasoning", text: "", ...unwrapped }] });
+            messages.push({ role: "assistant", content: [unwrapped] });
           } else if (text || encrypted) {
             messages.push({
               role: "assistant",
@@ -345,6 +351,7 @@ export class OpenAIResponsesRequest extends Request {
                 type: "reasoning",
                 text,
                 signature: encrypted,
+                origin: "openai_responses",
                 itemId: typeof item.id === "string" && item.id ? item.id : undefined,
               }],
             });
@@ -419,10 +426,10 @@ export class OpenAIResponsesRequest extends Request {
           flushParts();
           input.push({
             type: "reasoning",
-            id: p.itemId ?? genId("rs"),
+            id: (!p.origin || p.origin === "openai_responses" ? p.itemId : undefined) ?? genId("rs"),
             summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
             ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
-            ...(p.signature ? { encrypted_content: p.signature } : {}),
+            ...(p.signature && (!p.origin || p.origin === "openai_responses") ? { encrypted_content: p.signature } : {}),
           });
         }
       }
@@ -440,11 +447,13 @@ export class OpenAIResponsesRequest extends Request {
       if (rendered.length) out.tools = rendered;
     }
     if (this.toolChoice) out.tool_choice = toolChoiceToResponses(this.toolChoice);
+    if (p.responsesReasoning) out.reasoning = { ...p.responsesReasoning };
+    if (p.responsesText) out.text = { ...p.responsesText };
     if (p.thinking) {
       // The thinking policy owns max_output_tokens when reasoning is on: the
       // reasoning is spent out of that same ceiling, so it has to size it.
       const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
-      out.reasoning = { effort: tf.effort };
+      out.reasoning = { ...p.responsesReasoning, effort: tf.effort };
       if (tf.maxTokens != null) out.max_output_tokens = tf.maxTokens;
     } else {
       const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
@@ -452,7 +461,8 @@ export class OpenAIResponsesRequest extends Request {
     }
     if (p.temperature != null) out.temperature = p.temperature;
     if (p.topP != null) out.top_p = p.topP;
-    if (p.responseFormat) out.text = responseFormatToResponses(p.responseFormat);
+    if (p.responseFormat) out.text = { ...p.responsesText, ...responseFormatToResponses(p.responseFormat) as Record<string, unknown> };
+    if (p.verbosity) out.text = { ...out.text as Record<string, unknown>, verbosity: p.verbosity };
     if (p.parallelToolCalls != null) out.parallel_tool_calls = p.parallelToolCalls;
     if (p.serviceTier != null) out.service_tier = p.serviceTier;
     if (p.user != null) out.user = p.user;
@@ -494,10 +504,11 @@ export class OpenAIResponsesResponse extends Response {
         const text = reasoningItemText(item);
         const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
         if (text || encrypted) {
-          content.push({
+          content.push((encrypted ? decodeReasoning(encrypted) : null) ?? {
             type: "reasoning",
             text,
             signature: encrypted,
+            origin: "openai_responses",
             itemId: typeof item.id === "string" && item.id ? item.id : undefined,
           });
         }
@@ -554,7 +565,7 @@ export class OpenAIResponsesResponse extends Response {
         id: p.itemId ?? genId("rs"),
         summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
         ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
-        ...(p.signature ? { encrypted_content: p.signature } : {}),
+        ...(p.signature ? { encrypted_content: p.origin && p.origin !== "openai_responses" ? encodeReasoning(p) : p.signature } : {}),
       });
     }
 
@@ -600,21 +611,106 @@ export class OpenAIResponsesResponse extends Response {
     const reasoningWithText = new Set<string>();
     let currentReasoningId: string | undefined;
     let nextToolIndex = 0;
+    // Some compatible gateways put the answer only in done/completed snapshots.
+    // Track each content part so snapshots fill missing suffixes without replaying
+    // text that has already reached the client through deltas.
+    const textByItem = new Map<string, Map<number, string>>();
+    const textByIndex = new Map<number, Map<number, string>>();
+    const textState = (id: unknown, index: unknown): Map<number, string> => {
+      const itemId = typeof id === "string" ? id : undefined;
+      const outputIndex = typeof index === "number" ? index : itemId ? undefined : 0;
+      const state = (itemId ? textByItem.get(itemId) : undefined) ??
+        (outputIndex != null ? textByIndex.get(outputIndex) : undefined) ?? new Map<number, string>();
+      if (itemId) textByItem.set(itemId, state);
+      if (outputIndex != null) textByIndex.set(outputIndex, state);
+      return state;
+    };
+    function* emitText(data: Record<string, unknown>, text: unknown, snapshot: boolean): Generator<StreamEvent> {
+      if (typeof text !== "string" || !text) return;
+      const state = textState(data.item_id, data.output_index);
+      const part = num(data.content_index);
+      const previous = state.get(part) ?? "";
+      // A snapshot cannot revise bytes already streamed. Only append its unseen
+      // suffix when it agrees with the emitted prefix.
+      const delta = snapshot ? (text.startsWith(previous) ? text.slice(previous.length) : "") : text;
+      if (delta) {
+        state.set(part, previous + delta);
+        yield { type: "text_delta", text: delta };
+      }
+    }
+    function* emitMessage(item: Record<string, unknown>, outputIndex: unknown): Generator<StreamEvent> {
+      if (item.type !== "message" || !Array.isArray(item.content)) return;
+      for (const [contentIndex, raw] of item.content.entries()) {
+        if (!raw || typeof raw !== "object") continue;
+        const part = raw as Record<string, unknown>;
+        if (part.type === "output_text" || part.type === "text" || part.type === "refusal") {
+          yield* emitText({ item_id: item.id, output_index: outputIndex, content_index: contentIndex }, part.type === "refusal" ? part.refusal : part.text, true);
+        }
+      }
+    }
+
+    const finishedItems = new Set<string>();
+    const toolArguments = new Map<number, string>();
+    function* finishItem(item: Record<string, unknown>, outputIndex: unknown): Generator<StreamEvent> {
+      if (item.type === "message") { yield* emitMessage(item, outputIndex); return; }
+      const itemId = String(item.id ?? item.call_id ?? (item.type === "reasoning" ? currentReasoningId : undefined) ?? outputIndex ?? "0");
+      const key = String(item.type) + ":" + itemId;
+      if (finishedItems.has(key)) return;
+      if (item.type === "reasoning") {
+        if (!reasoningStarted.has(itemId)) {
+          reasoningStarted.add(itemId);
+          yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
+        }
+        if (!reasoningWithText.has(itemId)) {
+          const text = reasoningItemText(item);
+          if (text) yield { type: "reasoning_delta", text };
+        }
+        const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+        const replay = encrypted ? decodeReasoning(encrypted) : null;
+        yield { type: "reasoning_stop", origin: replay?.origin ?? "openai_responses", id: replay?.itemId ?? itemId, signature: replay?.signature ?? encrypted, redacted: replay?.redacted };
+        if (currentReasoningId === itemId) currentReasoningId = undefined;
+      } else if (item.type === "function_call") {
+        sawToolCall = true;
+        let index = toolIndexByItem.get(itemId);
+        if (index == null) {
+          index = nextToolIndex++;
+          toolIndexByItem.set(itemId, index);
+          yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
+        }
+        const args = typeof item.arguments === "string" ? item.arguments : "";
+        const previous = toolArguments.get(index) ?? "";
+        if (args.startsWith(previous) && args.length > previous.length) {
+          yield { type: "tool_args_delta", index, delta: args.slice(previous.length) };
+        }
+        yield { type: "tool_stop", index };
+      }
+      finishedItems.add(key);
+    }
 
     for await (const frame of parseSSE(readable)) {
       const data = safeParseJson(frame.data);
       if (!data) continue;
       const type = frame.event ?? String(data.type ?? "");
 
+      if (!started && type.startsWith("response.")) {
+        const r = (data.response ?? {}) as Record<string, unknown>;
+        started = true;
+        yield { type: "start", id: String(r.id ?? genId("resp")), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
+      }
+
       switch (type) {
         case "response.created": {
-          const r = (data.response ?? {}) as Record<string, unknown>;
-          started = true;
-          yield { type: "start", id: String(r.id ?? genId("resp")), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
           break;
         }
         case "response.output_text.delta":
-          if (typeof data.delta === "string" && data.delta) yield { type: "text_delta", text: data.delta };
+        case "response.refusal.delta":
+          yield* emitText(data, data.delta, false);
+          break;
+        case "response.output_text.done":
+          yield* emitText(data, data.text, true);
+          break;
+        case "response.refusal.done":
+          yield* emitText(data, data.refusal, true);
           break;
         case "response.reasoning_summary_text.delta":
         case "response.reasoning_text.delta": {
@@ -622,7 +718,7 @@ export class OpenAIResponsesResponse extends Response {
           if (itemId && !reasoningStarted.has(itemId)) {
             reasoningStarted.add(itemId);
             currentReasoningId = itemId;
-            yield { type: "reasoning_start", id: itemId };
+            yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
           }
           if (typeof data.delta === "string" && data.delta) {
             reasoningWithText.add(itemId ?? "");
@@ -637,54 +733,26 @@ export class OpenAIResponsesResponse extends Response {
             currentReasoningId = itemId;
             if (!reasoningStarted.has(itemId)) {
               reasoningStarted.add(itemId);
-              yield { type: "reasoning_start", id: itemId };
+              yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
             }
           } else if (item.type === "function_call") {
             sawToolCall = true;
             const index = nextToolIndex++;
-            toolIndexByItem.set(String(item.id ?? index), index);
+            toolIndexByItem.set(String(item.id ?? item.call_id ?? index), index);
             yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
           }
           break;
         }
         case "response.function_call_arguments.delta": {
           const index = toolIndexByItem.get(String(data.item_id ?? ""));
-          if (index != null && typeof data.delta === "string" && data.delta) yield { type: "tool_args_delta", index, delta: data.delta };
+          if (index != null && typeof data.delta === "string" && data.delta) {
+            toolArguments.set(index, (toolArguments.get(index) ?? "") + data.delta);
+            yield { type: "tool_args_delta", index, delta: data.delta };
+          }
           break;
         }
         case "response.output_item.done": {
-          const item = (data.item ?? {}) as Record<string, unknown>;
-          if (item.type === "reasoning") {
-            const itemId = String(item.id ?? currentReasoningId ?? genId("rs"));
-            if (!reasoningStarted.has(itemId)) {
-              reasoningStarted.add(itemId);
-              yield { type: "reasoning_start", id: itemId };
-            }
-            if (!reasoningWithText.has(itemId)) {
-              const text = reasoningItemText(item);
-              if (text) yield { type: "reasoning_delta", text };
-            }
-            const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
-            yield { type: "reasoning_stop", id: itemId, signature: encrypted };
-            if (currentReasoningId === itemId) currentReasoningId = undefined;
-          } else if (item.type === "function_call") {
-            let index = toolIndexByItem.get(String(item.id ?? ""));
-            if (index == null) {
-              // No `output_item.added` opened this call. OpenAI itself always
-              // sends one, but compatible gateways routinely emit only the
-              // terminal item -- and it carries everything the call needs, so
-              // synthesizing it here keeps the whole tool call instead of
-              // dropping it silently. Arguments come from the item, since no
-              // delta ever arrived for them either.
-              sawToolCall = true;
-              index = nextToolIndex++;
-              toolIndexByItem.set(String(item.id ?? index), index);
-              yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
-              const args = typeof item.arguments === "string" ? item.arguments : "";
-              if (args) yield { type: "tool_args_delta", index, delta: args };
-            }
-            yield { type: "tool_stop", index };
-          }
+          yield* finishItem((data.item ?? {}) as Record<string, unknown>, data.output_index);
           break;
         }
         case "response.completed":
@@ -709,6 +777,15 @@ export class OpenAIResponsesResponse extends Response {
           if (type === "response.failed") {
             yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
             return;
+          }
+          if (!started) {
+            started = true;
+            yield { type: "start", id: String(r.id ?? genId("resp")), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
+          }
+          if (Array.isArray(r.output)) {
+            for (const [index, item] of r.output.entries()) {
+              if (item && typeof item === "object") yield* finishItem(item as Record<string, unknown>, index);
+            }
           }
           yield { type: "finish", stopReason: type === "response.incomplete" ? "length" : sawToolCall ? "tool_use" : "stop", usage };
           return;
@@ -845,7 +922,8 @@ export class OpenAIResponsesResponse extends Response {
             yield* closeMessage();
             yield* openReasoning(ev.id);
           }
-          reasoningSignature = ev.signature;
+          reasoningSignature = ev.signature && ev.origin && ev.origin !== "openai_responses"
+            ? encodeReasoning({ type: "reasoning", text: reasoningText ?? "", signature: ev.signature, origin: ev.origin, itemId: ev.id }) : ev.signature;
           yield* closeReasoning();
           break;
         case "text_delta":
@@ -890,7 +968,7 @@ export class OpenAIResponsesResponse extends Response {
         case "finish": {
           // A truncated upstream must not be dressed up as a finished answer:
           // no response.completed. relay() aborts the connection instead.
-          if (ev.incomplete) return;
+          if (ev.incomplete || ev.error) return;
           yield* closeReasoning();
           yield* closeMessage();
           for (const tc of tools.values()) {
@@ -902,7 +980,10 @@ export class OpenAIResponsesResponse extends Response {
           tools.clear();
           const incomplete = ev.stopReason === "length";
           const usage = ev.usage
-            ? { input_tokens: ev.usage.promptTokens, output_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens }
+            ? { input_tokens: ev.usage.promptTokens, output_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
+                ...(ev.usage.cachedInputTokens != null ? { input_tokens_details: { cached_tokens: ev.usage.cachedInputTokens } } : {}),
+                ...(ev.usage.reasoningTokens != null ? { output_tokens_details: { reasoning_tokens: ev.usage.reasoningTokens } } : {}),
+              }
             : undefined;
           yield frame(incomplete ? "response.incomplete" : "response.completed", {
             response: response(incomplete ? "incomplete" : "completed", {

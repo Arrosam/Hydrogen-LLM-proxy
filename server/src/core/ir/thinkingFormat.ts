@@ -187,7 +187,7 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
     // `start` is metadata and is ALWAYS the first event of a stream. Treating
     // it as the answer beginning would end the scan before a single character
     // of text had arrived -- which is to say, on every stream there is.
-    if (ev.type === "start") {
+    if (ev.type === "start" || ev.type === "usage") {
       yield ev;
       continue;
     }
@@ -239,10 +239,10 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
     }
 
     // mode === "inside"
-    const at = buffer.toLowerCase().indexOf(closeTag.toLowerCase());
-    if (at >= 0) {
-      const thought = buffer.slice(0, at);
-      const tail = buffer.slice(at + closeTag.length).replace(/^\s+/, "");
+    const close = new RegExp(`${closeTag.slice(0, -1)}\\s*>`, "i").exec(buffer);
+    if (close) {
+      const thought = buffer.slice(0, close.index);
+      const tail = buffer.slice(close.index + close[0].length).replace(/^\s+/, "");
       if (thought) yield { type: "reasoning_delta", text: thought };
       yield { type: "reasoning_stop" };
       buffer = "";
@@ -255,9 +255,11 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
     }
     // Hold back just enough that a closing tag split across two deltas is still
     // recognised when the second half lands.
-    const hold = closeTag.length - 1;
-    if (buffer.length > hold) {
-      const safe = buffer.slice(0, buffer.length - hold);
+    // Keep an unfinished closing tag, including whitespace before its `>`.
+    const partialClose = new RegExp(`${closeTag.slice(0, -1)}\\s*$`, "i").exec(buffer);
+    const keepFrom = partialClose?.index ?? Math.max(0, buffer.length - closeTag.length + 1);
+    if (keepFrom > 0) {
+      const safe = buffer.slice(0, keepFrom);
       buffer = buffer.slice(safe.length);
       yield { type: "reasoning_delta", text: safe };
     }
@@ -275,6 +277,7 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
 async function* inlineThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
   let open = false;
   for await (const ev of events) {
+    if (ev.type === "usage") { yield ev; continue; }
     if (ev.type === "reasoning_start") continue; // deferred until there is text
     if (ev.type === "reasoning_delta") {
       if (!open) {
