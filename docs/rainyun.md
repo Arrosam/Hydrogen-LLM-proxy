@@ -99,7 +99,7 @@ deployers to choose them.
 > (master-key sentinel mismatch). With the volume, everything stays stable across restarts.
 
 ### Command / Args / Scripts
-Leave empty — the image already starts with `node server/dist/server.cjs`.
+Leave empty — the image already starts with `node gateway/dist/server.cjs`.
 
 ---
 
