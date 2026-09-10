@@ -15,4 +15,7 @@ await build({
   external: Object.keys(pkg.dependencies ?? {}),
   tsconfig: "tsconfig.json",
   logLevel: "info",
+  // A dropped bare import means a package registered nothing at load time (the
+  // wire formats, for one); the bundle would start and fail on the first request.
+  logOverride: { "ignored-bare-import": "error" },
 });

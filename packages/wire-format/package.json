@@ -30,10 +30,7 @@
     "dist",
     "README.md"
   ],
-  "sideEffects": [
-    "./dist/format/index.js",
-    "./dist/index.js"
-  ],
+  "sideEffects": true,
   "engines": {
     "node": ">=20"
   },

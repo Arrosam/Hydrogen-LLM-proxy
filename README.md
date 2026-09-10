@@ -329,8 +329,6 @@ See the [design and scope](docs/server-tools-design.md) and [integration guide (
 mappings, services, tokens, users, logs, stats, settings, backup). Served alongside the dashboard SPA.
 **Public:** `GET /healthz` and the `/check` key-status page.
 
----
-
 ### Admin API without the console
 
 The console is only a GUI over `/admin/api`. Log in from a script and use the returned token as a
@@ -341,6 +339,8 @@ TOKEN=$(curl -s -X POST http://localhost:8080/admin/api/login \
   -H "content-type: application/json" -d '{"username":"admin","password":"..."}' | jq -r .token)
 curl -s http://localhost:8080/admin/api/providers -H "Authorization: Bearer $TOKEN"
 ```
+
+---
 
 ## Configuration
 

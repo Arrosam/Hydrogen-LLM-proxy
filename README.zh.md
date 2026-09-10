@@ -130,9 +130,10 @@
 | **2** | [容器镜像](#2-容器镜像任意-docker-主机) | 任意 VPS 或家用服务器。拉取 `ghcr.io/arrosam/hydrogen-llm-proxy`。 |
 | **3** | [源码构建](#3-源码构建) | 本地开发或自定义构建。 |
 
-无论哪种方式，一条规则高于一切：**`/data` 必须持久化。** 它保存着 SQLite 数据库和
+无论哪种方式，一条规则高于一切：**`/data` 必须持久化。** 它保存着 SQLite 数据库（`hydro.db`）和
 `hydrogen-secrets.json`（主密钥），后者用于解密你的供应商 API 密钥。丢失它，Hydrogen 会拒绝启动，
-而不是用无法读取的密钥继续运行。
+而不是用无法读取的密钥继续运行。从包拆分之前的版本升级：首次启动会找到旧的 `hydrogen.db`，
+把全部内容复制进 `hydro.db`，旧文件原样保留——所以回滚就是在同一个卷上运行之前的镜像。
 
 ### 1. 雨云应用商店（一键部署）
 
@@ -165,9 +166,14 @@ DNS 端，将 `CNAME` 指向雨云给出的地址——如果该域名在 Cloudf
 每次推送到 `main` 分支和每个 `v*` 标签都会构建镜像发布到 GHCR，架构为 `linux/amd64`：
 
 ```
-ghcr.io/arrosam/hydrogen-llm-proxy:latest     # 随 main 更新——适合试用
-ghcr.io/arrosam/hydrogen-llm-proxy:v1.5.2     # 正式环境请锁定版本
+ghcr.io/arrosam/hydrogen-llm-proxy:latest           # 网关 + 控制台，随 main 更新——适合试用
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>            # 正式环境请锁定版本标签
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>-api        # 仅网关：没有仪表板，通过管理 API 操作
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>-console    # 仅控制台：将 BACKEND_URL 指向一个网关
 ```
+
+前两个标签是同一个镜像——下文所有内容默认采用的单容器部署。后两个用于把仪表板放在独立的主机名上，
+或者干脆不部署仪表板——双容器 compose 配置见 [`deploy/split/`](deploy/split)。
 
 最快启动方式：
 
@@ -225,8 +231,8 @@ docker compose up -d --build  # 本地构建镜像，数据存入命名卷
 
 ```bash
 npm install
-npm run build                 # web → web/dist, server → server/dist/server.cjs
-DATA_DIR=./data node server/dist/server.cjs
+npm run build                 # packages → dist/, console → apps/console/dist, gateway → apps/gateway/dist/server.cjs
+DATA_DIR=./data node apps/gateway/dist/server.cjs
 ```
 
 `PROXY_MASTER_KEY` 和 `SESSION_SECRET` 不设就好，Hydrogen 会在首次启动时生成强随机值并保存到
@@ -303,6 +309,17 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 （供应商、模型、映射、服务、密钥、用户、日志、统计、设置、备份）。与仪表板 SPA 一同提供。
 **公开接口：** `GET /healthz` 和 `/check` 密钥状态页。
 
+### 不经控制台调用管理 API
+
+控制台只不过是 `/admin/api` 之上的一层图形界面。在脚本里登录，凡是仪表板会带 cookie 的地方，
+都可以改用返回的 token 作为 bearer 请求头：
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/admin/api/login \
+  -H "content-type: application/json" -d '{"username":"admin","password":"..."}' | jq -r .token)
+curl -s http://localhost:8080/admin/api/providers -H "Authorization: Bearer $TOKEN"
+```
+
 ---
 
 ## 配置
@@ -378,28 +395,48 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 
 ```bash
 npm install
-npm run dev            # server (tsx watch) + web (vite)，同时运行
-npm run test           # 服务端单元测试：翻译、步骤引擎、流式
+npm run dev            # gateway (tsx watch) + console (vite)，同时运行
+npm run test           # 每个包的测试套件：翻译、步骤引擎、流式、升级导入
 npm run typecheck
-npm run db:generate    # schema 变更后重新生成 SQL 迁移
+npm run build:packages # 将可发布的 @areelai 包编译到 dist/
 ```
 
-Vite 开发服务器会将 `/admin/api`、`/v1` 和 `/healthz` 代理到运行中的后端服务
+Vite 开发服务器会将 `/admin/api`、`/v1` 和 `/healthz` 代理到运行中的网关
 （默认 `http://127.0.0.1:8080`，可用 `HYDROGEN_API` 覆盖）。
 `node preview-server.cjs` 提供生产构建的单进程一次性预览（仅限开发密钥）。
 
+某个包的 schema 变更后，先在该包目录下运行 `npx drizzle-kit generate`，再回到仓库根目录运行
+`node scripts/embed-migrations.mjs`：每个包都把自己的迁移内嵌发布，并应用到各自的记录表中，
+因此多个包可以共用同一个数据库文件。
+
 ```
-server/   Fastify + Drizzle (SQLite)
-  src/core/format/      OpenAI ⇄ canonical IR ⇄ Anthropic 翻译（含 SSE）
-  src/core/proxy/       请求编排
-  src/execution/        步骤引擎、微代理运行时、验证器、OCR 缓存
-  src/catalog/          模型、供应商、映射解析
-  src/transport/        代理、媒体和管理路由
-  src/security/         主密钥、供应商密钥加密、密码、Token
-  src/observability/    请求日志、活跃请求、用量计量、脱敏
-  src/backup/           受密码保护的导出与恢复
-web/      React + Vite + Tailwind 仪表板（Bootstrap Icons），英文 + 中文
+packages/               基础构件，以 @areelai/* 发布到 npm
+  common/               AES-256-GCM 机密加密、ID 生成、zod 校验、SQLite 打开 + 按包迁移
+  wire-format/          OpenAI Chat ⇄ canonical IR ⇄ OpenAI Responses ⇄ Anthropic 翻译（含 SSE）——零依赖
+  supplier-management/  供应商、出口代理、发现的模型、模型目录与映射
+  user-management/      仪表板用户、会话（cookie 或 bearer）、限定范围的客户端 API 密钥、用量计量
+  model-services/       步骤链（重试 → 回退）、带防护的上游传输、媒体直通、托管工具
+  micro-agent/          阶段流水线、路由器、OCR/ASR 预处理——注册为 "micro_agent" 服务类型
+  test-support/         测试套件用的假上游 + 内存数据库（私有，不发布）
+apps/
+  gateway/              Fastify：/v1 + /admin/api、请求日志、有状态 Responses、备份、旧版数据导入
+  console/              React + Vite + Tailwind 仪表板（Bootstrap Icons），英文 + 中文——可选
 ```
+
+### 单独采用某个包
+
+每个包都能独立使用，并自带一份 README，内含一个简短而完整的示例：
+
+```bash
+npm install @areelai/wire-format           # 只做三种协议格式之间的翻译，别无其他
+npm install @areelai/supplier-management   # 供应商 + 密钥 + 目录，存在你自己的 SQLite 文件里
+npm install @areelai/model-services @areelai/supplier-management   # 运行重试/回退步骤链
+npm install @areelai/micro-agent           # 以服务类型的形式加入阶段流水线
+npm install @areelai/user-management       # 用户、会话和限定范围的客户端 API 密钥
+```
+
+拥有数据表的包都自带默认的 SQLite 存储实现；`*Store` 接口类型描述了自定义实现需要提供什么。
+网关就是把它们全部组合起来的产物。
 
 ---
 

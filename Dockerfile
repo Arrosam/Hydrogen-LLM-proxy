@@ -35,9 +35,13 @@ ENV NODE_ENV=production
 WORKDIR /app/gateway
 
 # Install ONLY the gateway's production dependencies (fastify, drizzle,
-# better-sqlite3, argon2, ...). The @areelai packages are inlined in the bundle.
+# better-sqlite3, argon2, ...). The @areelai packages are inlined in the bundle
+# and listed as devDependencies; they are stripped here because npm resolves
+# devDependencies for its lockfile even with --omit=dev, and they may not be on
+# the registry yet (or not at this version).
 COPY apps/gateway/package.json ./package.json
-RUN apt-get update \
+RUN node -e "const p=require('./package.json');delete p.devDependencies;require('fs').writeFileSync('package.json',JSON.stringify(p,null,2))" \
+ && apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
  && npm install --omit=dev --no-audit --no-fund \
  && apt-get purge -y python3 make g++ \
