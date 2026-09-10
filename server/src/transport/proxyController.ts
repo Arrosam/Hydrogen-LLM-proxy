@@ -206,7 +206,10 @@ function watchDelivery(socket: Socket, onFailed: (reason: string) => void, windo
 
 /** The client-facing proxy: parse -> resolve service -> invoke/stream -> log. */
 export class ProxyController {
-  constructor(private readonly deps: ProxyDeps) {}
+  constructor(private readonly deps: ProxyDeps, private readonly stateful?: {
+    accepts(body: unknown, family: Family): boolean;
+    create(req: FastifyRequest, reply: FastifyReply, family: Family): Promise<unknown>;
+  }) {}
 
   register(app: FastifyInstance): void {
     const { tokens } = this.deps;
@@ -236,6 +239,7 @@ export class ProxyController {
   }
 
   private async handleChat(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> {
+    if (this.stateful?.accepts(req.body, ingress)) return this.stateful.create(req, reply, ingress);
     const token = req.clientToken!;
     // Take the local reference BEFORE httpInfo clears req.body, then let it go as
     // soon as the canonical request exists: from that point the parsed wire shape

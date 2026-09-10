@@ -49,6 +49,12 @@ const TABLES = [
   "model_providers",
   "model_services",
   "tokens",
+  "hosted_tools",
+  "service_tools",
+  "response_conversations",
+  "conversation_items",
+  "stored_responses",
+  "response_events",
   "request_logs",
   "settings",
   "image_cache",
@@ -57,7 +63,7 @@ const TABLES = [
 type TableName = (typeof TABLES)[number];
 
 /** Tables holding history rather than configuration; skippable on export. */
-const LOG_TABLES: ReadonlySet<string> = new Set(["request_logs"]);
+const LOG_TABLES: ReadonlySet<string> = new Set(["request_logs", "response_conversations", "conversation_items", "stored_responses", "response_events"]);
 
 /**
  * Tables holding a cache of what an upstream reported rather than anything the
@@ -90,7 +96,7 @@ const CACHE_TABLES: ReadonlySet<string> = new Set(["image_cache"]);
  * any other configuration, but their absence is not an error. Without this,
  * adding a table would reject every backup anyone had already taken.
  */
-const POST_V1_TABLES: ReadonlySet<string> = new Set(["proxies"]);
+const POST_V1_TABLES: ReadonlySet<string> = new Set(["proxies", "hosted_tools", "service_tools"]);
 
 /** The configuration tables a valid package must carry (everything but history
  * and re-fetchable caches). A package missing any of these is rejected, so a
@@ -148,6 +154,7 @@ export interface BackupPackage {
 
 /** The shape sealed inside `secrets`. */
 interface SecretPayload {
+  toolHeaders?: { id: number; headers: string }[];
   providerKeys: { id: number; apiKey: string }[];
   /** Absent in packages written before v1.5.2. */
   tokenKeys?: { id: number; secret: string }[];
@@ -177,11 +184,19 @@ export async function exportBackup(
   const providerKeys: SecretPayload["providerKeys"] = [];
   const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
   const proxyPasswords: NonNullable<SecretPayload["proxyPasswords"]> = [];
+  const toolHeaders: NonNullable<SecretPayload["toolHeaders"]> = [];
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
     if (CACHE_TABLES.has(table) && !opts.includeImageCache) continue;
     const rows = sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).all() as Row[];
+
+    if (table === "hosted_tools") {
+      for (const row of rows) {
+        toolHeaders.push({ id: row.id as number, headers: decryptSecret(JSON.parse(row.headers_secret as string), masterKey) });
+        delete row.headers_secret;
+      }
+    }
 
     if (table === "providers") {
       for (const row of rows) {
@@ -234,7 +249,7 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -305,6 +320,7 @@ export async function restoreBackup(
   // proxies password-less, which is exactly what the source instance had.
   const proxyPasswordById = new Map<number, string>();
   for (const { id, password } of secrets.proxyPasswords ?? []) proxyPasswordById.set(id, password);
+  const toolHeadersById = new Map((secrets.toolHeaders ?? []).map(value => [value.id, value.headers]));
 
   const restored: Record<string, number> = {};
 
@@ -332,6 +348,15 @@ export async function restoreBackup(
       let written = 0;
       for (const row of rows) {
         const values: Row = { ...row };
+        if (table === "hosted_tools") {
+          const headers = toolHeadersById.get(values.id as number);
+          if (headers === undefined) throw new BackupError("Missing sealed tool headers");
+          values.headers_secret = JSON.stringify(encryptSecret(headers, masterKey));
+        }
+        if (table === "stored_responses" && (values.status === "queued" || values.status === "in_progress")) {
+          values.status = "failed";
+          values.response_json = JSON.stringify({ ...JSON.parse(values.response_json as string), status: "failed", error: { code: "backup_restored", message: "Execution was not replayed after restoring a backup" } });
+        }
 
         if (table === "settings" && LOCAL_ONLY_SETTINGS.has(String(values.key))) continue;
 

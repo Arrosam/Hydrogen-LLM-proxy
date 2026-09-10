@@ -23,6 +23,7 @@ const NAV: NavItem[] = [
   { to: "/", labelKey: "nav.overview", icon: "bi-speedometer2", end: true },
   { to: "/services", labelKey: "nav.modelServices", icon: "bi-diagram-3" },
   { to: "/micro-agents", labelKey: "nav.microAgents", icon: "bi-robot" },
+  { to: "/tools", labelKey: "nav.tools", icon: "bi-tools", adminOnly: true },
   { to: "/model", labelKey: "nav.models", icon: "bi-box" },
   { to: "/providers", labelKey: "nav.providers", icon: "bi-hdd-network" },
   { to: "/proxies", labelKey: "nav.proxies", icon: "bi-shuffle" },

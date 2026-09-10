@@ -234,16 +234,16 @@ const OWNED = new Set([
  * Fields that name state living on the provider's side, which this proxy does
  * not have and must never pretend to.
  *
- * The proxy is stateless (`store: false`) and mints its own response ids, so an
+ * Provider egress is stateless (`store: false`). Hydrogen owns response IDs, so an
  * id a client holds is Hydrogen's invention -- the upstream has never seen it.
  * Relaying one asks the provider to continue a conversation that does not exist
  * there; at best it errors, at worst it answers against the wrong context.
  * `background` is here for the same reason in a different shape: it makes the
  * provider return a queued placeholder instead of an answer.
  *
- * These are dropped rather than rejected, which is what the proxy did before
- * client passthrough existed. A client relying on them silently loses its
- * server-side history: it must send the full `input` instead.
+ * The Responses controller resolves state locally before entering the format
+ * layer. Strip these fields here as well so internal calls and passthrough can
+ * never delegate Hydrogen-owned history or background jobs to the provider.
  */
 const PROVIDER_STATE = new Set(["previous_response_id", "conversation", "background", "prompt"]);
 
@@ -437,7 +437,7 @@ export class OpenAIResponsesRequest extends Request {
     }
 
     const p = this.params;
-    // store:false keeps the proxy stateless (no server-side response storage).
+    // Provider-side storage is disabled; Hydrogen manages ingress state locally.
     const out: Record<string, unknown> = { model: target.upstreamModel, input, store: false };
     if (this.system) out.instructions = this.system;
     if (this.tools) {

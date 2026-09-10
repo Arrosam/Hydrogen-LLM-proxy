@@ -5,7 +5,8 @@ import type { Response } from "../core/ir/response";
 import { buildResponse } from "../core/format/registry";
 import { textOf, type ImagePart } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
-import { serializeForLog } from "../util/logPayload";
+import { callService, countAttempts, requestPayload, responsePayload, type ServiceCall } from "./serviceCall";
+export { countAttempts, type ServiceCall } from "./serviceCall";
 import { stageOverrides, type AgentDef, type ServiceSteps } from "./definition";
 import { audioHash, transcribeAudio } from "./asr";
 import {
@@ -20,8 +21,7 @@ import {
   translateAudioInRequest,
 } from "./agentContext";
 import { imageHash, type OcrCacheStore } from "./ocrCache";
-import type { AttemptFailure, AttemptRecord, AttemptResult } from "./steps";
-import { failureMessage } from "../core/proxy/errors";
+import type { AttemptFailure, AttemptResult } from "./steps";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 
@@ -44,37 +44,6 @@ export interface MicroAgentDeps extends ServiceDeps {
   logMaxChars: number | (() => number);
   /** Cache for the OCR pre-pass. Omitted/null = every image goes to the model. */
   ocrCache?: OcrCacheStore | null;
-}
-
-/**
- * One Model Service invocation a Micro Agent made -- one per stage, the OCR
- * pre-pass, or a nested Micro Agent. Mirrors a top-level request log: the called
- * service, its own attempt path, request/response payloads, status, latency,
- * usage. A nested Micro Agent is one call whose `calls` holds what IT called.
- */
-export interface ServiceCall {
-  stage: string;
-  service: string;
-  kind: "service" | "agent" | "router";
-  status: number;
-  latencyMs: number;
-  usage?: Usage;
-  attempts: AttemptRecord[];
-  request?: string;
-  response?: string;
-  error?: string;
-  calls?: ServiceCall[];
-  streamed?: boolean;
-}
-
-/** Total upstream attempts across a call log (incl. nested Micro Agents). */
-export function countAttempts(calls: ServiceCall[]): number {
-  let n = 0;
-  for (const c of calls) {
-    n += c.attempts.length;
-    if (c.calls) n += countAttempts(c.calls);
-  }
-  return n;
 }
 
 function withoutSystem(o?: RequestOverrides): RequestOverrides | undefined {
@@ -145,7 +114,7 @@ export class MicroAgent extends ModelService {
     let terminal = agent.stages[0]?.name ?? "";
     let returnStage: string | undefined = agent.output;
 
-    const fail = (result: AttemptFailure): Invocation => ({ result, attemptPath: calls, attempts: countAttempts(calls) });
+    const fail = (result: AttemptFailure): Invocation => ({ result, attemptPath: calls, attempts: countAttempts(calls), usage: calls.reduce((sum, call) => addUsage(sum, call.usage ?? ZERO_USAGE), ZERO_USAGE) });
     const errorInv = (message: string): Invocation => fail({ ok: false, status: 0, kind: "error", message });
     const commit = (name: string, value: InvokeValue): void => {
       outputs.set(name, textOf(value.response.content));
@@ -207,7 +176,7 @@ export class MicroAgent extends ModelService {
           const byHash = new Map(known);
           if (pending.length > 0) {
             const ocrReq = buildOcrRequest(request, pending.map((p) => p.image), ocr);
-            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog);
+            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted);
             calls.push(call);
             if (!result.ok) {
               prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
@@ -339,11 +308,12 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.nested", `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
               const started = Date.now();
               const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: this.stageRequestPayload(stageReq), calls: [] };
-              const sub = await r.executor.invoke(stageReq, childOverrides, { stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog });
+              const sub = await r.executor.invoke(stageReq, childOverrides, { ...opts, stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog });
               wrapper.calls = sub.attemptPath as ServiceCall[];
               wrapper.latencyMs = Date.now() - started;
               calls.push(wrapper);
               if (!sub.result.ok) {
+                wrapper.usage = sub.usage;
                 wrapper.status = sub.result.status;
                 wrapper.error = sub.result.message;
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (nested agent) failed: ${sub.result.message}`, { stage: stage.name, status: sub.result.status });
@@ -356,7 +326,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -368,7 +338,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -417,42 +387,16 @@ export class MicroAgent extends ModelService {
     signal: AbortSignal | undefined,
     timeoutMs: number | undefined,
     prog: ProgressRecorder | null = null,
+    hosted?: InvokeOptions["hosted"],
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    const started = Date.now();
-    const inv = await service.invoke(stageReq, overrides, { signal, timeoutMs, progress: prog });
-    const path = inv.attemptPath as AttemptRecord[];
-    const call: ServiceCall = {
-      stage: meta.stage,
-      service: meta.service ?? "(inline)",
-      kind: "service",
-      status: inv.result.ok ? 200 : inv.result.status,
-      latencyMs: Date.now() - started,
-      attempts: path,
-      request: inv.result.ok ? serializeForLog(inv.result.value.upstreamRequest, this.resolveLogMaxChars()) : this.stageRequestPayload(stageReq),
-    };
-    if (inv.result.ok) {
-      call.usage = inv.result.value.response.usage;
-      call.response = this.stageResponsePayload(inv.result.value.response);
-    } else {
-      call.error = failureMessage(inv.result);
-    }
-    return { call, result: inv.result };
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {
-    return serializeForLog(
-      {
-        system: stageReq.system,
-        messages: stageReq.messages,
-        tools: stageReq.tools,
-        tool_choice: stageReq.toolChoice,
-        params: stageReq.params,
-      },
-      this.resolveLogMaxChars(),
-    );
+    return requestPayload(stageReq, this.resolveLogMaxChars());
   }
 
   private stageResponsePayload(response: Response): string {
-    return serializeForLog(response.toLogPayload(), this.resolveLogMaxChars());
+    return responsePayload(response, this.resolveLogMaxChars());
   }
 }

@@ -19,6 +19,7 @@ import { BLOCK_THRESHOLD_MS } from "../observability/activeRequests";
 import { withJsonHeartbeat } from "./jsonKeepalive";
 import { benchRoutes } from "./benchRoutes";
 import { proxyRoutes } from "./proxyRoutes";
+import { hostedToolRoutes } from "./hostedToolRoutes";
 import { BackupError, exportBackup, restoreBackup } from "../backup/archive";
 import { PassphraseError } from "../security/passphrase";
 import { APP_VERSION } from "../util/version";
@@ -41,6 +42,7 @@ export async function adminRoutes(app: FastifyInstance, c: Container): Promise<v
     await scoped.register((s) => proxyRoutes(s, c), { prefix: "/proxies" });
     await scoped.register((s) => catalogRoutes(s, c));
     await scoped.register((s) => serviceRoutes(s, c), { prefix: "/services" });
+    await scoped.register((s) => hostedToolRoutes(s, c), { prefix: "/tools" });
     await scoped.register((s) => tokenRoutes(s, c), { prefix: "/tokens" });
     await scoped.register((s) => logRoutes(s, c));
     await scoped.register((s) => activeRequestRoutes(s, c));
@@ -419,12 +421,14 @@ async function catalogRoutes(app: FastifyInstance, c: Container): Promise<void> 
 // --- services ---------------------------------------------------------------
 
 const ServiceCreate = z.object({
+  toolIds: z.array(z.number().int().positive()).max(64).optional(),
   name: z.string().min(1).max(120),
   description: z.string().nullable().optional(),
   steps: z.unknown(),
   enabled: z.boolean().optional(),
 });
 const ServiceUpdate = z.object({
+  toolIds: z.array(z.number().int().positive()).max(64).optional(),
   name: z.string().min(1).max(120).optional(),
   description: z.string().nullable().optional(),
   steps: z.unknown().optional(),
@@ -438,7 +442,7 @@ function presentService(c: Container, m: ModelServiceRow): Record<string, unknow
   } catch {
     summary = "(invalid steps)";
   }
-  return { id: m.id, name: m.name, description: m.description, steps: m.definition, enabled: m.enabled, summary, createdAt: asMillis(m.createdAt) };
+  return { id: m.id, name: m.name, description: m.description, steps: m.definition, enabled: m.enabled, summary, createdAt: asMillis(m.createdAt), toolIds: c.hostedTools?.boundIds(m.id) ?? [] };
 }
 
 const OcrTestSchema = z.object({
@@ -478,9 +482,15 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
   app.post("/", async (req, reply) => {
     const parsed = parse(ServiceCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    if (parsed.data.toolIds !== undefined && !requireAdmin(req, reply, "bind hosted tools")) return;
     try {
       const { def } = c.validator.validate(parsed.data.steps);
-      const row = c.services.create({ name: parsed.data.name, description: parsed.data.description, definition: def, enabled: parsed.data.enabled });
+      if (parsed.data.toolIds?.length && !isChatPipeline(serviceCategory(def))) return reply.code(400).send({ error: "Hosted tools require a chat service" });
+      const row = c.db.transaction(() => {
+        const row = c.services.create({ name: parsed.data.name, description: parsed.data.description, definition: def, enabled: parsed.data.enabled });
+        if (parsed.data.toolIds) c.hostedTools.bind(row.id, parsed.data.toolIds);
+        return row;
+      });
       return reply.code(201).send({ service: presentService(c, row) });
     } catch (e) {
       const mapped = serviceValidationError(e);
@@ -495,6 +505,7 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
     if (!c.services.get(id)) return reply.code(404).send({ error: "not found" });
     const parsed = parse(ServiceUpdate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    if (parsed.data.toolIds !== undefined && !requireAdmin(req, reply, "bind hosted tools")) return;
     try {
       const patch: { name?: string; description?: string | null; definition?: ServiceDef; enabled?: boolean } = {
         name: parsed.data.name,
@@ -502,7 +513,13 @@ async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> 
         enabled: parsed.data.enabled,
       };
       if (parsed.data.steps !== undefined) patch.definition = c.validator.validate(parsed.data.steps).def;
-      const row = c.services.update(id, patch);
+      const effective = patch.definition ?? c.services.def(c.services.get(id)!);
+      if ((parsed.data.toolIds ?? c.hostedTools.boundIds(id)).length && !isChatPipeline(serviceCategory(effective))) return reply.code(400).send({ error: "Hosted tools require a chat service" });
+      const row = c.db.transaction(() => {
+        const row = c.services.update(id, patch);
+        if (parsed.data.toolIds) c.hostedTools.bind(id, parsed.data.toolIds);
+        return row;
+      });
       return { service: row ? presentService(c, row) : null };
     } catch (e) {
       const mapped = serviceValidationError(e);
@@ -811,6 +828,17 @@ const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024 * 1024;
 const ImageCachePut = z.object({ maxBytes: z.number().int().min(0).max(MAX_IMAGE_CACHE_BYTES) });
 
 async function settingsRoutes(app: FastifyInstance, c: Container): Promise<void> {
+  app.get("/response-retention", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return;
+    return { days: c.settings.responseRetentionDays() };
+  });
+  app.put("/response-retention", async (req, reply) => {
+    if (!requireAdmin(req, reply, "change response retention")) return;
+    const value = z.object({ days: z.number().int().min(0).max(3650) }).parse(req.body);
+    c.settings.set("response_retention_days", String(value.days));
+    c.responses.prune();
+    return value;
+  });
   // The Settings page is admin-only, so its data is too -- with one exception,
   // /ui-language below, which is not settings data so much as a property of the
   // whole dashboard: every user's I18nProvider reads it to render any page at
@@ -975,9 +1003,11 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
 
   app.post("/restore", { bodyLimit: RESTORE_BODY_LIMIT }, async (req, reply) => {
     if (!requireAdmin(req, reply, "restore a backup")) return reply;
+    if (c.activeRequests.listActive().length) return reply.code(409).send({ error: "Wait for active requests to finish or cancel them before restoring a backup" });
     const parsed = parse(BackupRestore, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     let report;
+    c.responses.beginRestore();
     try {
       report = await restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
     } catch (e) {
@@ -987,6 +1017,8 @@ async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
         return reply.code(400).send({ error: e.message });
       }
       throw e;
+    } finally {
+      c.responses.endRestore();
     }
     // The settings table was replaced underneath the cached allowlist.
     c.settings.reload();

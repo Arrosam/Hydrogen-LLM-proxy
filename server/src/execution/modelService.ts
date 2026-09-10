@@ -43,6 +43,7 @@ export interface ServiceDeps {
 }
 
 export interface InvokeOptions {
+  hosted?: import("./hostedToolLoop").HostedContext;
   /** Aborts the upstream call (client disconnect). */
   signal?: AbortSignal;
   /** Override the step-chain timeout (an agent stage may set its own). */

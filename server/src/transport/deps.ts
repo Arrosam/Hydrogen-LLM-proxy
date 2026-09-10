@@ -9,6 +9,7 @@ import type { ActiveRequestRegistry } from "../observability/activeRequests";
 
 /** Everything the client-facing proxy needs, injected by the composition root. */
 export interface ProxyDeps {
+  logMaxChars?: () => number;
   services: ServiceRepo;
   factory: ServiceFactory;
   tokens: TokenRepo;

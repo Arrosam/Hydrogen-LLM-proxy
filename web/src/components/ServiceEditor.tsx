@@ -8,6 +8,9 @@ import { OverridesEditor } from "./OverridesEditor";
 import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
 import { useListKeys } from "../lib/useListKeys";
+import { useAuth } from "../auth";
+import { HostedToolBinding } from "./HostedToolBinding";
+import type { HostedTool, HostedToolOptions } from "../types";
 import type {
   AdvanceTrigger,
   AgentDef,
@@ -126,6 +129,16 @@ function toggle<T>(arr: T[] | undefined, val: T): T[] {
 }
 
 export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
+  const { user } = useAuth();
+  const [hostedTools, setHostedTools] = useState<HostedTool[]>([]);
+  const [toolIds, setToolIds] = useState<number[]>([]);
+  const [toolConfig, setToolConfig] = useState<HostedToolOptions>({ streamMode: "progress", maxRounds: 8, maxCalls: 16 });
+  useEffect(() => {
+    if (!open) return;
+    setToolIds(service?.toolIds ?? []);
+    setToolConfig(service?.steps.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
+    if (user?.role === "admin") api.get<{ tools: HostedTool[] }>("/tools").then(r => setHostedTools(r.tools)).catch(() => setHostedTools([]));
+  }, [open, service, user?.role]);
   const toast = useToast();
   const { t } = useI18n();
   const [name, setName] = useState("");
@@ -224,6 +237,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           ...(ocr ? { ocr } : {}),
           ...(asr ? { asr } : {}),
           ...thinkingFormatField(),
+          hostedTools: toolConfig,
         } as AgentDef)
       : ({
           timeoutMs,
@@ -231,6 +245,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
           ...thinkingFormatField(),
+          ...(isChatPipelineCategory(category) ? { hostedTools: toolConfig } : {}),
         } as ServiceSteps);
 
   const patchStep = (i: number, patch: Partial<ServiceStep>) =>
@@ -307,6 +322,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       setThinkingFormat(parsed.thinkingFormat ?? "original");
+      setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
       return parsed;
     } catch {
       toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
@@ -371,7 +387,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
     }
     setBusy(true);
     try {
-      const payload = { name, description: description || null, steps: s, enabled };
+      const payload = { name, description: description || null, steps: s, enabled, ...(user?.role === "admin" ? { toolIds: isChatPipelineCategory(kind === "chain" ? "chat" : category) ? toolIds : [] } : {}) };
       if (service) await api.patch(`/services/${service.id}`, payload);
       else await api.post("/services", payload);
       const kindLabel = kind === "chain" ? t("common.microAgent") : t("common.modelService");
@@ -463,6 +479,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
             <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label={t("serviceEditor.reliableStreaming")} />
           )}
         </div>
+        {user?.role === "admin" && !raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && <HostedToolBinding tools={hostedTools} ids={toolIds} config={toolConfig} onIds={setToolIds} onConfig={setToolConfig} />}
         {kind === "resilience" && isChatPipelineCategory(category) && reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
             {t("serviceEditor.reliableStreamingDescription")}

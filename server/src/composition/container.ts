@@ -25,6 +25,8 @@ import { SsrfGuard } from "../core/upstream/ssrf";
 import { UpstreamClient } from "../core/upstream/client";
 import { ServiceValidator } from "../execution/serviceValidator";
 import { ServiceFactory } from "../execution/serviceFactory";
+import { HostedToolRepo } from "../persistence/hostedToolRepo";
+import { ResponseRepo } from "../persistence/responseRepo";
 import { RequestLogger } from "../observability/requestLogger";
 import { UsageMeter } from "../observability/usageMeter";
 import { ActiveRequestRegistry } from "../observability/activeRequests";
@@ -51,6 +53,8 @@ export interface Container {
   models: ModelRepo;
   mappings: MappingRepo;
   services: ServiceRepo;
+  hostedTools: HostedToolRepo;
+  responses: ResponseRepo;
   tokens: TokenRepo;
   users: UserRepo;
   logs: RequestLogRepo;
@@ -101,6 +105,10 @@ export async function boot(): Promise<Container> {
     promptCacheTtlMinutes: 30,
   });
   const stats = new StatsQueries(db);
+  const hostedTools = new HostedToolRepo(db, config.masterKey);
+  const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000);
+  responses.failInterrupted();
+  responses.prune();
   // Seed the incremental stats counters: full aggregation on first boot, then
   // only the rows the last flush missed. Everything after is in-memory bumps.
   const statsCache = new StatsCache(stats, settings);
@@ -119,6 +127,7 @@ export async function boot(): Promise<Container> {
     { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes() },
     () => settings.logPayloadMaxChars(),
     new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
+    hostedTools,
   );
   const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars(), statsCache);
   const usageMeter = new UsageMeter(tokens);
@@ -126,7 +135,7 @@ export async function boot(): Promise<Container> {
 
   return {
     config, sqlite, db,
-    providers, proxies, egressPool, providerModels, models, mappings, services, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
+    providers, proxies, egressPool, providerModels, models, mappings, services, hostedTools, responses, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates,
   };
 }

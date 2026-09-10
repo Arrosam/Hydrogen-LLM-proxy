@@ -65,6 +65,12 @@ export class SettingsRepo {
     return this.db.select().from(settings).where(eq(settings.key, key)).get()?.value;
   }
 
+  responseRetentionDays(): number {
+    const raw = this.get("response_retention_days");
+    const days = raw == null ? 30 : Number(raw);
+    return Number.isInteger(days) && days >= 0 && days <= 3650 ? days : 30;
+  }
+
   set(key: string, value: string): void {
     this.db
       .insert(settings)

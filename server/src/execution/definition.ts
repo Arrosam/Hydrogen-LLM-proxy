@@ -188,7 +188,15 @@ export function isChatPipeline(category: ServiceCategory): boolean {
   return category === "chat" || category === "ocr";
 }
 
+export const HostedToolOptionsSchema = z.object({
+  streamMode: z.enum(["all", "progress", "final"]).default("progress"),
+  maxRounds: z.number().int().min(1).max(32).default(8),
+  maxCalls: z.number().int().min(1).max(128).default(16),
+});
+export type HostedToolOptions = z.infer<typeof HostedToolOptionsSchema>;
+
 export const ServiceStepsSchema = z.object({
+  hostedTools: HostedToolOptionsSchema.optional(),
   kind: z.literal("model_service").optional(),
   /** Omitted = "chat" (backward compatible with pre-category definitions). */
   category: ServiceCategorySchema.optional(),
@@ -293,6 +301,7 @@ export const AgentAsrSchema = z.object({
 });
 
 export const AgentSchema = z.object({
+  hostedTools: HostedToolOptionsSchema.optional(),
   // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
   kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
   timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),

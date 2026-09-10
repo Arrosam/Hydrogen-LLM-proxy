@@ -10,6 +10,7 @@ import { fuzzyRewriteUrl } from "./transport/fuzzyUrl";
 import type { Container } from "./composition/container";
 import { adminRoutes } from "./transport/adminRoutes";
 import { ProxyController } from "./transport/proxyController";
+import { ResponsesController } from "./transport/responsesController";
 import { MediaController } from "./transport/mediaController";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB (allow image payloads)
@@ -61,6 +62,7 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 
   const proxyDeps = {
+    logMaxChars: () => c.settings.logPayloadMaxChars(),
     services: c.services,
     factory: c.factory,
     tokens: c.tokens,
@@ -73,7 +75,9 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     streamPingIntervalMs: cfg.streamPingIntervalMs,
     jsonCommitGraceMs: cfg.jsonCommitGraceMs,
   };
-  new ProxyController(proxyDeps).register(app);
+  const responses = new ResponsesController(proxyDeps, c.responses, c.hostedTools);
+  responses.register(app);
+  new ProxyController(proxyDeps, responses).register(app);
   new MediaController({ ...proxyDeps, providers: c.providers }).register(app);
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });

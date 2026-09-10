@@ -22,6 +22,8 @@ import { RequestLogRepo, type LogInsert } from "../src/persistence/requestLogRep
 import { entrySize, ImageCacheRepo } from "../src/persistence/imageCacheRepo";
 import { BackupError, exportBackup, restoreBackup, type BackupPackage } from "../src/backup/archive";
 import { PassphraseError, openWithPassphrase, sealWithPassphrase } from "../src/security/passphrase";
+import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
+import { HttpToolSchema } from "../src/execution/toolHttp";
 
 const KEY_A = Buffer.alloc(32, 7); // the instance that takes the backup
 const KEY_B = Buffer.alloc(32, 9); // a fresh install with its own master key
@@ -198,6 +200,19 @@ describe("restore onto a DIFFERENT master key", () => {
   afterEach(() => {
     close(a);
     close(b);
+  });
+
+  it("re-encrypts hosted tool headers and preserves service bindings", async () => {
+    const source = new HostedToolRepo(a.db, KEY_A);
+    const tool = source.create(HttpToolSchema.parse({ name: "lookup", url: "https://adapter.test/run", parameters: { type: "object" }, bodyTemplate: { args: "{{arguments}}" }, headers: { authorization: "Bearer tool-secret" } }));
+    const service = new ServiceRepo(a.db).list()[0]; source.bind(service.id, [tool.id]);
+    const pkg = await takeBackup(a, KEY_A);
+    expect(JSON.stringify(pkg.tables)).not.toContain("tool-secret");
+    expect(pkg.tables.hosted_tools[0]).not.toHaveProperty("headers_secret");
+    await restoreBackup(b.sqlite, KEY_B, overTheWire(pkg), PASSPHRASE);
+    const restored = new HostedToolRepo(b.db, KEY_B);
+    expect(restored.forService(service.id)[0].headers.authorization).toBe("Bearer tool-secret");
+    expect(restored.boundIds(service.id)).toEqual([tool.id]);
   });
 
   it("brings the provider key back, usable under the new key", async () => {

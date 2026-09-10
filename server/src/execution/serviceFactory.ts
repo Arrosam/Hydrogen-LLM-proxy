@@ -4,6 +4,8 @@ import { isAgent, isChatPipeline, parseService, serviceCategory, type ServiceDef
 import { ModelService, type ServiceDeps } from "./modelService";
 import { MicroAgent, type MicroAgentDeps, type ResolveResult, type ServiceResolver } from "./microAgent";
 import type { OcrCacheStore } from "./ocrCache";
+import type { HostedToolRepo } from "../persistence/hostedToolRepo";
+import { HostedToolService } from "./hostedToolService";
 
 /**
  * Builds a runnable executor (ModelService or MicroAgent) from a saved service.
@@ -18,6 +20,7 @@ export class ServiceFactory implements ServiceResolver {
     private readonly logMaxChars: number | (() => number),
     /** Image-description cache for the OCR pre-pass; omitted = no caching. */
     private readonly ocrCache: OcrCacheStore | null = null,
+    private readonly hostedTools: HostedToolRepo | null = null,
   ) {}
 
   private microDeps(): MicroAgentDeps {
@@ -34,6 +37,21 @@ export class ServiceFactory implements ServiceResolver {
   /** Build the top-level executor for a saved service. Throws ZodError on a bad definition. */
   forRow(row: ModelServiceRow): { executor: ModelService; isAgent: boolean } {
     return this.buildDef(parseService(row.definition));
+  }
+
+  /** Include nested stage bindings when choosing the stateful Anthropic route. */
+  hasHostedTools(row: ModelServiceRow, visited = new Set<number>()): boolean {
+    if (visited.has(row.id) || !row.enabled) return false;
+    visited.add(row.id);
+    if (this.hostedTools?.forService(row.id).length) return true;
+    let def: ServiceDef;
+    try { def = parseService(row.definition); } catch { return false; }
+    if (!isAgent(def)) return false;
+    const names = [...def.stages.map(stage => stage.service), def.ocr?.service];
+    return names.some(name => {
+      const child = name ? this.services.getByName(name) : undefined;
+      return child ? this.hasHostedTools(child, visited) : false;
+    });
   }
 
   /** Resolve an stt-category Model Service to its raw step chain (the ASR
@@ -70,7 +88,8 @@ export class ServiceFactory implements ServiceResolver {
         return { ok: false, message: `"${name}" is a ${category} service and cannot run inside a Micro Agent` };
       }
       const { executor, isAgent: agent } = this.buildDef(def);
-      return { ok: true, executor, isAgent: agent };
+      const tools = this.hostedTools?.forService(row.id) ?? [];
+      return { ok: true, executor: tools.length ? new HostedToolService(executor, this.deps, tools, def.hostedTools) : executor, isAgent: agent };
     } catch {
       return { ok: false, message: `"${name}" has an invalid definition` };
     }

@@ -161,6 +161,7 @@ export type ThinkingFormat = "original" | "reasoning_content" | "reasoning" | "t
 export const THINKING_FORMATS: ThinkingFormat[] = ["original", "reasoning_content", "reasoning", "think_tags", "none"];
 
 export interface ServiceSteps {
+  hostedTools?: HostedToolOptions;
   category?: ServiceCategory;
   timeoutMs: number;
   steps: ServiceStep[];
@@ -225,6 +226,7 @@ export interface AgentOcr {
 }
 
 export interface AgentDef {
+  hostedTools?: HostedToolOptions;
   /** "micro_agent" is the canonical discriminant; "agent" is the legacy one the editor used to emit. */
   kind: "micro_agent" | "agent";
   timeoutMs: number;
@@ -251,6 +253,7 @@ export function serviceCategoryOf(def: ServiceDef | null | undefined): ServiceCa
 }
 
 export interface ModelService {
+  toolIds?: number[];
   id: number;
   name: string;
   description: string | null;
@@ -359,4 +362,24 @@ export interface BenchMapping {
 export interface BenchTargets {
   services: BenchServiceInfo[];
   mappings: BenchMapping[];
+}
+
+export interface HostedToolOptions {
+  streamMode: "all" | "progress" | "final";
+  maxRounds: number;
+  maxCalls: number;
+}
+export interface HostedTool {
+  id: number;
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  url: string;
+  bodyTemplate: unknown;
+  resultPath: string;
+  timeoutMs: number;
+  maxResultBytes: number;
+  enabled: boolean;
+  headerNames: string[];
+  hasHeaders: boolean;
 }

@@ -71,6 +71,12 @@ const as = (cookie: string, opts: { method?: "GET" | "POST" | "PATCH" | "DELETE"
   app.inject({ method: opts.method ?? "GET", url: opts.url, payload: opts.payload as never, headers: { cookie } });
 
 describe("manager restrictions", () => {
+  it("cannot inspect, register or preview server tools or change response retention", async () => {
+    expect((await as(managerCookie, { url: "/admin/api/tools" })).statusCode).toBe(403);
+    expect((await as(managerCookie, { method: "POST", url: "/admin/api/tools", payload: {} })).statusCode).toBe(403);
+    expect((await as(managerCookie, { method: "POST", url: "/admin/api/tools/preview", payload: {} })).statusCode).toBe(403);
+    expect((await as(managerCookie, { url: "/admin/api/settings/response-retention" })).statusCode).toBe(403);
+  });
   it("cannot copy an issued API key (secret reveal is admin-only, and now a POST)", async () => {
     const res = await as(managerCookie, { method: "POST", url: `/admin/api/tokens/${tokenId}/secret` });
     expect(res.statusCode).toBe(403);
@@ -154,6 +160,17 @@ describe("manager restrictions", () => {
 });
 
 describe("admin keeps the full surface", () => {
+  it("registers and edits tools without revealing stored authentication headers", async () => {
+    const input = { name: "permission_lookup", url: "https://adapter.invalid/run", parameters: { type: "object" }, bodyTemplate: { args: "{{arguments}}" }, headers: { authorization: "Bearer tool-secret" } };
+    const created = await as(adminCookie, { method: "POST", url: "/admin/api/tools", payload: input });
+    expect(created.statusCode).toBe(201);
+    expect(created.body).not.toContain("tool-secret");
+    const { headers: _headers, ...update } = input;
+    const edited = await as(adminCookie, { method: "PATCH", url: `/admin/api/tools/${created.json().tool.id}`, payload: update });
+    expect(edited.statusCode).toBe(200); expect(edited.json().tool.headerNames).toEqual(["authorization"]);
+    const invalid = await as(adminCookie, { method: "POST", url: "/admin/api/tools", payload: { ...input, name: "bad_ref", parameters: { type: "object", properties: { nested: { $ref: "https://remote.invalid/schema" } } } } });
+    expect(invalid.statusCode).toBe(400);
+  });
   it("views users, creates a user, and copies a key", async () => {
     expect((await as(adminCookie, { url: "/admin/api/users" })).statusCode).toBe(200);
 

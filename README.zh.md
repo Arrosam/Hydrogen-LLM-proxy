@@ -280,7 +280,10 @@ curl http://localhost:8080/v1/messages \
 | 方法 | 路径 | 类别 | 说明 |
 |---|---|---|---|
 | POST | `/v1/chat/completions` | chat | OpenAI Chat Completions，流式 + 非流式 |
-| POST | `/v1/responses` | chat | OpenAI Responses API |
+| POST | `/v1/responses` | chat | 有状态 Responses，支持流式和后台执行 |
+| GET / DELETE | `/v1/responses/:id` | chat | 查询 / 删除当前 API Key 的响应 |
+| POST | `/v1/responses/:id/cancel` | chat | 取消后台响应 |
+| POST / GET / DELETE | `/v1/conversations` 及其子路由 | chat | 会话与条目的创建、查询、更新和删除 |
 | POST | `/v1/messages` | chat | Anthropic Messages |
 | GET | `/v1/models` | — | 列出你的模型服务（发送 `anthropic-version` 头则返回 Anthropic 格式） |
 | POST | `/v1/embeddings` | embedding | OpenAI 兼容供应商 |
@@ -293,6 +296,8 @@ curl http://localhost:8080/v1/messages \
 
 因为 `/v1/models` 返回的是模型服务，任何有模型选择器的工具都会显示你的服务名
 ——这正是设计意图：`sonnet-any` *就是*模型，对客户端而言。
+
+Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hydrogen 保存会话并执行工具循环，具体工具逻辑由外部 HTTP 转接服务实现。参见[会话与服务器工具接入指南](docs/server-tools.zh.md)（[English design](docs/server-tools-design.md)）。
 
 **管理端。** `POST /admin/api/login` 后使用 session cookie 访问 `/admin/api/*`
 （供应商、模型、映射、服务、密钥、用户、日志、统计、设置、备份）。与仪表板 SPA 一同提供。

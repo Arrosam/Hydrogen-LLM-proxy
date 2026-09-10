@@ -296,7 +296,10 @@ Model Service name.
 | Method | Path | Category | Notes |
 |---|---|---|---|
 | POST | `/v1/chat/completions` | chat | OpenAI Chat Completions, streaming + non-streaming |
-| POST | `/v1/responses` | chat | OpenAI Responses API |
+| POST | `/v1/responses` | chat | Stateful Responses, streaming and background execution |
+| GET / DELETE | `/v1/responses/:id` | chat | Retrieve / delete an owned response |
+| POST | `/v1/responses/:id/cancel` | chat | Cancel a background response |
+| POST / GET / DELETE | `/v1/conversations` and subroutes | chat | Owned conversations and items |
 | POST | `/v1/messages` | chat | Anthropic Messages |
 | GET | `/v1/models` | — | Your Model Services (Anthropic shape if `anthropic-version` is sent) |
 | POST | `/v1/embeddings` | embedding | OpenAI-compatible providers |
@@ -309,6 +312,9 @@ Model Service name.
 
 Because `/v1/models` returns Model Services, any tool with a model picker shows your service names —
 which is the intent: `sonnet-any` *is* the model, as far as a client is concerned.
+
+Operators can bind hosted HTTP tools to Model Services and Micro Agents for Responses and Anthropic requests.
+See the [design and scope](docs/server-tools-design.md) and [integration guide (中文)](docs/server-tools.zh.md).
 
 **Admin.** `POST /admin/api/login`, then session-cookie CRUD under `/admin/api/*` (providers, models,
 mappings, services, tokens, users, logs, stats, settings, backup). Served alongside the dashboard SPA.

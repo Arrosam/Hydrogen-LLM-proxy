@@ -32,6 +32,8 @@ export interface StreamValue {
  * loggable attempt path without branching on the kind.
  */
 export interface Invocation {
+  /** Usage consumed before a failed orchestrated invocation. */
+  usage?: import("../core/ir/usage").Usage;
   result: AttemptResult<InvokeValue>;
   /** AttemptRecord[] for a Model Service; ServiceCall[] for a Micro Agent. */
   attemptPath: unknown;

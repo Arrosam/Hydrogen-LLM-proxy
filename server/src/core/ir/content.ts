@@ -93,6 +93,8 @@ export interface Message {
 }
 
 export interface Tool {
+  /** Internal provenance; parsers never accept this marker from clients. */
+  hosted?: boolean;
   name: string;
   description?: string;
   /** JSON Schema object for the tool's parameters. */

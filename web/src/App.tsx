@@ -15,6 +15,7 @@ import { ModelBench } from "./pages/ModelBench";
 import { ActiveRequests } from "./pages/ActiveRequests";
 import { Settings } from "./pages/Settings";
 import { Check } from "./pages/Check";
+import { Tools } from "./pages/Tools";
 
 function FullSpinner() {
   return (
@@ -63,6 +64,7 @@ export default function App() {
         {user?.role === "admin" && <Route path="logs" element={<Logs />} />}
         {user?.role === "admin" && <Route path="users" element={<Users />} />}
         {user?.role === "admin" && <Route path="settings" element={<Settings />} />}
+        {user?.role === "admin" && <Route path="tools" element={<Tools />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

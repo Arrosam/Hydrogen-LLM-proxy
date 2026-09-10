@@ -19,7 +19,7 @@ export function extractPresentedToken(req: FastifyRequest): string | null {
  * quota. Errors are returned in the client's wire format. The token repo is
  * injected (no global DB access).
  */
-export function requireClientToken(tokens: TokenRepo, family: Family) {
+export function requireClientToken(tokens: TokenRepo, family: Family, enforceQuota = true) {
   return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const fail = (status: number, message: string) => reply.code(status).send(buildErrorBody(family, status, message));
 
@@ -33,10 +33,10 @@ export function requireClientToken(tokens: TokenRepo, family: Family) {
     if (expiresAt != null && expiresAt < Date.now()) {
       return void (await fail(401, "API key has expired."));
     }
-    if (token.maxRequests != null && token.usedRequests >= token.maxRequests) {
+    if (enforceQuota && token.maxRequests != null && token.usedRequests >= token.maxRequests) {
       return void (await fail(429, "API key request quota exceeded."));
     }
-    if (token.maxTokens != null && token.usedTokens >= token.maxTokens) {
+    if (enforceQuota && token.maxTokens != null && token.usedTokens >= token.maxTokens) {
       return void (await fail(429, "Token usage quota exceeded."));
     }
 

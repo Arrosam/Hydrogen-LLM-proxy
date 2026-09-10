@@ -1,5 +1,8 @@
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import type { Message } from "../core/ir/content";
+import type { HttpTool } from "../execution/toolHttp";
+import type { EncryptedBlob } from "../security/crypto";
 
 /** Epoch-millis timestamp column defaulting to "now" at the DB level. */
 const createdAt = () =>
@@ -195,6 +198,55 @@ export const tokens = sqliteTable(
   (t) => ({ hashIdx: uniqueIndex("tokens_hash_idx").on(t.keyHash) }),
 );
 
+/** Operator-owned HTTP tools. Authentication headers are encrypted separately. */
+export const hostedTools = sqliteTable("hosted_tools", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  config: text("config_json", { mode: "json" }).$type<Omit<HttpTool, "headers">>().notNull(),
+  headersSecret: text("headers_secret", { mode: "json" }).$type<EncryptedBlob>().notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: createdAt(),
+}, t => ({ nameIdx: uniqueIndex("hosted_tools_name_idx").on(t.name) }));
+
+/** Bindings live outside service definition JSON, so renaming a tool preserves them. */
+export const serviceTools = sqliteTable("service_tools", {
+  serviceId: integer("service_id").notNull().references(() => modelServices.id, { onDelete: "cascade" }),
+  toolId: integer("tool_id").notNull().references(() => hostedTools.id, { onDelete: "cascade" }),
+}, t => ({ pairIdx: uniqueIndex("service_tools_pair_idx").on(t.serviceId, t.toolId) }));
+
+export const responseConversations = sqliteTable("response_conversations", {
+  id: text("id").primaryKey(),
+  tokenId: integer("token_id").notNull().references(() => tokens.id, { onDelete: "cascade" }),
+  metadata: text("metadata_json", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  /** Incremented by item mutations; used to reject overlapping conversation turns. */
+  revision: integer("revision").notNull().default(0),
+  createdAt: createdAt(),
+  touchedAt: integer("touched_at").notNull(),
+}, t => ({ ownerIdx: index("response_conversations_token_idx").on(t.tokenId), ageIdx: index("response_conversations_touch_idx").on(t.touchedAt) }));
+
+export const conversationItems = sqliteTable("conversation_items", {
+  sequence: integer("sequence").primaryKey({ autoIncrement: true }),
+  id: text("id").notNull(),
+  conversationId: text("conversation_id").notNull().references(() => responseConversations.id, { onDelete: "cascade" }),
+  item: text("item_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+}, t => ({ itemIdx: uniqueIndex("conversation_items_id_idx").on(t.conversationId, t.id), orderIdx: index("conversation_items_order_idx").on(t.conversationId, t.sequence) }));
+
+export const storedResponses = sqliteTable("stored_responses", {
+  id: text("id").primaryKey(),
+  tokenId: integer("token_id").notNull().references(() => tokens.id, { onDelete: "cascade" }),
+  serviceId: integer("service_id").references(() => modelServices.id, { onDelete: "set null" }),
+  previousResponseId: text("previous_response_id"),
+  conversationId: text("conversation_id"),
+  status: text("status", { enum: ["queued", "in_progress", "completed", "failed", "cancelled", "incomplete"] }).notNull(),
+  background: integer("background", { mode: "boolean" }).notNull().default(false),
+  response: text("response_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  inputItems: text("input_items_json", { mode: "json" }).$type<Record<string, unknown>[]>().notNull(),
+  /** Full independent snapshot: deleting an ancestor never corrupts a completed child. */
+  history: text("history_json", { mode: "json" }).$type<Message[]>().notNull(),
+  createdAt: createdAt(),
+  touchedAt: integer("touched_at").notNull(),
+}, t => ({ ownerIdx: index("stored_responses_token_idx").on(t.tokenId), ageIdx: index("stored_responses_touch_idx").on(t.touchedAt), statusIdx: index("stored_responses_status_idx").on(t.status) }));
+
 // ---------------------------------------------------------------------------
 // Request logs — one row per client request. Captures the full HTTP request
 // (method, path, headers, body — redacted) and response, plus the model and
@@ -306,6 +358,12 @@ export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+export const responseEvents = sqliteTable("response_events", {
+  sequence: integer("sequence").primaryKey({ autoIncrement: true }),
+  responseId: text("response_id").notNull().references(() => storedResponses.id, { onDelete: "cascade" }),
+  event: text("event", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+}, t => ({ responseIdx: index("response_events_response_idx").on(t.responseId, t.sequence) }));
 
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;

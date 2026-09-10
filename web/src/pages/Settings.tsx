@@ -35,12 +35,26 @@ export function Settings() {
       <LanguageCard />
       <BackupCard />
       <RetentionCard />
+      <ResponseRetentionCard />
       <ImageCacheCard />
       <AllowlistCard />
       <EnvCard />
       <AboutFooter />
     </div>
   );
+}
+
+function ResponseRetentionCard() {
+  const { language } = useI18n(), zh = language === "zh", toast = useToast();
+  const { data, error } = useAsync(() => api.get<{ days: number }>("/settings/response-retention"));
+  const [days, setDays] = useState(30), [busy, setBusy] = useState(false);
+  useEffect(() => { if (data) setDays(data.days); }, [data]);
+  const save = async () => {
+    setBusy(true);
+    try { await api.put("/settings/response-retention", { days }); toast.success(zh ? "会话保留期已保存" : "Response retention saved"); }
+    catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
+  };
+  return <section className="card mb-5 space-y-3 p-5"><h2 className="font-semibold">{zh ? "Responses 与工具会话历史" : "Responses and tool session history"}</h2><p className="text-sm text-ink-400">{zh ? "设置闲置历史的保留天数。续接会刷新期限；0 表示永久保留。缩短期限会立即清理已过期的历史，正在运行的任务会保留。" : "Retain idle history for this many days. Continuation refreshes expiry; 0 keeps history indefinitely. Reducing retention immediately clears expired history while preserving active jobs."}</p><label className="flex items-center gap-3"><span className="text-sm">{zh ? "保留天数" : "Retention days"}</span><input type="number" min={0} max={3650} className="input w-28" value={days} onChange={e => setDays(Number(e.target.value))} /><button className="btn-primary" disabled={busy || !data} onClick={() => void save()}>{zh ? "保存" : "Save"}</button></label>{error && <ErrorNote message={error} />}</section>;
 }
 
 /** The running server's release, reported by the server itself so a stale

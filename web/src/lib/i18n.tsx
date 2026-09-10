@@ -7,6 +7,7 @@ export type Language = "en" | "zh";
 type Dict = Record<string, string>;
 
 const en: Dict = {
+  "nav.tools": "Server Tools",
   "nav.overview": "Overview",
   "nav.modelServices": "Model Services",
   "nav.microAgents": "Micro Agents",
@@ -155,7 +156,7 @@ const en: Dict = {
   "settings.backup.passphrase.placeholder": "at least 8 characters",
   "settings.backup.passphrase.restorePlaceholder": "the passphrase used at export",
   "settings.backup.passphrase.warning": "Store this passphrase somewhere safe. It is not kept on the server, and without it the backup cannot be restored.",
-  "settings.backup.includeLogs": "Include request logs",
+  "settings.backup.includeLogs": "Include request logs and response history",
   "settings.backup.includeLogs.hint": "Off makes a much smaller, config-only package.",
   "settings.backup.includeImageCache": "Include the image description cache",
   "settings.backup.includeImageCache.hint": "Saves the target re-running OCR, but can add up to the cache's whole budget to the file.",
@@ -909,6 +910,7 @@ const en: Dict = {
 };
 
 const zh: Dict = {
+  "nav.tools": "服务器工具",
   "nav.overview": "概览",
   "nav.modelServices": "模型服务",
   "nav.microAgents": "微型代理",
@@ -1057,7 +1059,7 @@ const zh: Dict = {
   "settings.backup.passphrase.placeholder": "至少 8 个字符",
   "settings.backup.passphrase.restorePlaceholder": "导出时使用的口令",
   "settings.backup.passphrase.warning": "请妥善保存此口令。服务器不会保存它，遗失后备份将无法恢复。",
-  "settings.backup.includeLogs": "包含请求日志",
+  "settings.backup.includeLogs": "包含请求日志与响应历史",
   "settings.backup.includeLogs.hint": "关闭后仅导出配置，文件更小。",
   "settings.backup.includeImageCache": "包含图片描述缓存",
   "settings.backup.includeImageCache.hint": "可省去目标实例重新执行 OCR，但最多会让文件增大整个缓存预算。",
