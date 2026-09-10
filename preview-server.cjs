@@ -16,4 +16,4 @@ process.env.HOST ||= "127.0.0.1";
 // Local preview only: allow localhost upstreams so mock providers work.
 process.env.ALLOW_PRIVATE_UPSTREAMS ||= "true";
 
-require("./server/dist/server.cjs");
+require("./apps/gateway/dist/server.cjs");

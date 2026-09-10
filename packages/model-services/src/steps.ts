@@ -1,0 +1,325 @@
+import { DEFAULT_IDEMPOTENCY, DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_ON } from "./definition.js";
+import { extractUpstreamMessage } from "@areelai/wire-format";
+import { serializeForLog } from "@areelai/common";
+import type { AdvanceTrigger, BackoffConfig, RetryConfig, ServiceStep, ServiceSteps, Trigger } from "./definition.js";
+import type { ProgressSink } from "./progress.js";
+
+/**
+ * "network" is a transport failure: the connection never completed, so there is
+ * no HTTP status. It is kept separate from "error" (a configuration fault such
+ * as an unresolvable mapping or a rejected upstream URL) because one is worth
+ * retrying and the other can only fail the same way again.
+ */
+export type FailureKind = "http" | "timeout" | "network" | "error";
+
+export interface AttemptSuccess<T> {
+  ok: true;
+  value: T;
+}
+export interface AttemptFailure {
+  ok: false;
+  status: number; // HTTP status, or 0 for transport/timeout/config errors
+  kind: FailureKind;
+  message: string;
+  errorBody?: unknown;
+}
+export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
+
+/**
+ * An upstream error body is error JSON, not a conversation: a few hundred
+ * characters of `{"error":{"message":...}}`. This bound exists for the
+ * pathological case (an HTML error page, a stack trace), not the normal one,
+ * and is deliberately fixed rather than tied to LOG_PAYLOAD_MAX_CHARS -- an
+ * operator who shrinks the payload budget to keep transcripts small should not
+ * thereby lose the explanation of why a call failed.
+ */
+const ERROR_BODY_MAX_CHARS = 8_000;
+
+/** One recorded attempt, persisted to request_logs.attempt_path_json. */
+export interface AttemptRecord {
+  step: number; // 1-based
+  attempt: number; // 1-based within the step
+  model: string;
+  provider: string;
+  status: number;
+  kind: FailureKind | "ok";
+  latencyMs: number;
+  /** The proxy's own view: "upstream returned 429", "connection reset", the
+   * mapping that would not resolve. Always present on a failure. */
+  error?: string;
+  /** The PROVIDER's view, lifted out of its error body. This is the line that
+   * says "this model does not support tool use" or "your credit balance is too
+   * low" -- the proxy's own message can only ever say which status came back,
+   * and for years that was the only half that reached the log. */
+  upstreamError?: string;
+  /** The raw upstream error body, serialized and bounded, for the shapes
+   * `upstreamError` cannot read (HTML pages, vendor envelopes, bare strings). */
+  errorBody?: string;
+  /** Retry context for 499 and other retried failures. */
+  retry?: {
+    /** Monotonic retry index within this step (0 = first retry). */
+    retryIndex: number;
+    /** Delay (ms) applied BEFORE this retry attempt. */
+    delayMs: number;
+    /** Whether this retry was suppressed by an idempotency guard. */
+    suppressed: boolean;
+    /** Human-readable reason for the retry decision. */
+    reason: string;
+  };
+}
+
+export interface RunOutput<T> {
+  result: AttemptResult<T>;
+  path: AttemptRecord[];
+}
+
+/**
+ * Compute the exponential backoff delay with full jitter for a retry attempt.
+ *
+ * - attempt >= 2 (the 2nd call overall, 1st retry): base = initialMs
+ * - attempt N (Nth call, retry N-1): base = min(initialMs * 2^(N-2), maxMs)
+ * - Final delay = random(0, base)  [full jitter — decorrelates service load]
+ *
+ * For a fixed interval (no backoff config), returns `intervalMs` unchanged.
+ */
+export function computeRetryDelay(
+  attempt: number, // 1-based overall attempt number within this step
+  config: RetryConfig | undefined,
+): number {
+  if (!config) return 0;
+  // The first attempt (attempt === 1) never has a pre-delay.
+  if (attempt < 2) return 0;
+  const backoff: BackoffConfig | undefined = config.backoff;
+  if (!backoff) {
+    return config.intervalMs ?? 0;
+  }
+  // Exponential growth: attempt 2 -> 2^0=1, attempt 3 -> 2^1=2, attempt 4 -> 2^2=4 ...
+  const exponent = attempt - 2;
+  const raw = backoff.initialMs * Math.pow(2, exponent);
+  const base = Math.min(raw, backoff.maxMs);
+  // Full jitter: uniform random in [0, base).
+  return Math.floor(Math.random() * base);
+}
+
+/**
+ * Determine whether a 499 failure should be retried based on the step's
+ * idempotency classification. Non-499 failures are always eligible (they must
+ * still match the `retry.on` trigger set).
+ *
+ * - "read": idempotent — always safe to retry 499 (client closed early on a GET).
+ * - "safe_write": the upstream returned 499 before it could process the request
+ *   body, so a retry is safe (the server did not mutate state).
+ * - "unsafe": the request is non-idempotent and the server MAY have started
+ *   processing — 499 is NOT retried; a pre-check (e.g. a GET to verify state)
+ *   must confirm safety before retrying.
+ */
+export function is499Retryable(idempotency: RetryConfig["idempotency"] | undefined): boolean {
+  const mode = idempotency ?? "safe_write";
+  return mode !== "unsafe";
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function triggerMatches(set: Trigger[], f: AttemptFailure): boolean {
+  for (const t of set) {
+    if (t === "error") return true;
+    if (t === "timeout" && f.kind === "timeout") return true;
+    if (t === "network" && f.kind === "network") return true;
+    if (typeof t === "number" && f.kind === "http" && t === f.status) return true;
+  }
+  return false;
+}
+
+function shouldAdvance(advanceOn: AdvanceTrigger[] | undefined, f: AttemptFailure): boolean {
+  if (!advanceOn) return true;
+  if (advanceOn.includes("exhausted")) return true;
+  return triggerMatches(advanceOn.filter((t): t is Trigger => t !== "exhausted"), f);
+}
+
+export function classifyError(e: unknown): { kind: FailureKind; message: string } {
+  const message = e instanceof Error ? e.message : String(e);
+  const name = e instanceof Error ? e.name : "";
+  if (name === "TimeoutError" || name === "AbortError" || /timed out|timeout/i.test(message)) {
+    return { kind: "timeout", message };
+  }
+  // A rejected upstream URL is a configuration fault; retrying repeats it.
+  if (name === "UpstreamUrlError") return { kind: "error", message };
+  // The request carries something this egress family cannot express (a URL file
+  // for an inline-only family, another family's file_id). Rendering it again
+  // produces the identical failure, so it is a fault rather than a network
+  // blip -- but a later step on a family that CAN express it still gets its turn
+  // through the normal advance rules.
+  if (name === "FormatConversionError") return { kind: "error", message };
+  // Anything else thrown out of a send is the connection dying: undici socket
+  // errors, resets, a stream that stopped mid-body. Those are worth retrying.
+  return { kind: "network", message };
+}
+
+/**
+ * Execute a service's ordered steps against `attempt`, applying per-step retry
+ * and step-advance rules. Returns the first success, or the last failure once
+ * every step is exhausted. `attempt` is injected so the engine stays pure and
+ * testable.
+ *
+ * Retry policy (applies per step):
+ *  - A failure is retried when it matches a trigger in `retry.on` AND, if the
+ *    failure is a 499, the step's `idempotency` allows it.
+ *  - 499 (client closed connection) is now a default retriable trigger for
+ *    "read" and "safe_write" steps. "unsafe" steps never retry 499.
+ *  - When `retry.backoff` is set, the delay uses exponential growth with full
+ *    jitter (initial 100ms, cap 1s). Otherwise a fixed `intervalMs` is used.
+ *  - Maximum 3 retry attempts (configurable via `retry.maxAttempts`, capped 100).
+ *
+ * Every failed attempt records a `retry` block on its `AttemptRecord` with the
+ * retry index, applied delay, suppression flag, and reason — including attempts
+ * that were never eligible for a retry, so the log always says why it stopped.
+ * A successful attempt carries one only when it was itself a retry.
+ */
+export async function runSteps<T>(
+  steps: ServiceSteps,
+  attempt: (step: ServiceStep, stepIndex: number) => Promise<AttemptResult<T>>,
+  opts: { sleep?: (ms: number) => Promise<void>; progress?: ProgressSink | null; signal?: AbortSignal } = {},
+): Promise<RunOutput<T>> {
+  const baseSleep = opts.sleep ?? defaultSleep;
+  // A retry delay can be minutes long (intervalMs caps at 600s); if the client
+  // disconnects mid-sleep, waking only when the timer fires would pin the
+  // request (and its sockets) for the rest of the delay. Resolve early on
+  // abort — the loop's post-sleep abort check does the actual exit.
+  const sleep = (ms: number): Promise<void> => {
+    const signal = opts.signal;
+    if (!signal) return baseSleep(ms);
+    if (signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      signal.addEventListener("abort", finish, { once: true });
+      void baseSleep(ms).then(finish);
+    });
+  };
+  const prog = opts.progress ?? null;
+  const path: AttemptRecord[] = [];
+  let lastFailure: AttemptFailure | null = null;
+
+  for (let i = 0; i < steps.steps.length; i++) {
+    const step: ServiceStep = steps.steps[i];
+    const retry: RetryConfig | undefined = step.retry;
+    // A step may omit `retry` altogether, so RetrySchema's defaults never ran.
+    const maxAttempts = retry?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    const retryOn = retry?.on ?? DEFAULT_RETRY_ON;
+    const idempotency = retry?.idempotency ?? DEFAULT_IDEMPOTENCY;
+
+    let stepFailure: AttemptFailure | null = null;
+
+    for (let a = 1; a <= maxAttempts; a++) {
+      // The caller's signal aborting means the client is gone: nobody will
+      // receive the answer, so another attempt only burns quota. Checked again
+      // after the sleep, which is where a long backoff would otherwise hide it.
+      if (opts.signal?.aborted) break;
+      // The delay that was applied BEFORE this attempt (0 for attempt 1).
+      // Computed once so the log and the actual sleep agree.
+      const preDelayMs = a > 1 ? computeRetryDelay(a, retry) : 0;
+      if (preDelayMs > 0) {
+        prog?.record("retry", "retry.delay", `retry #${a - 1}: sleeping ${preDelayMs}ms before attempt`, { retryIndex: a - 1, delayMs: preDelayMs });
+        await sleep(preDelayMs);
+        if (opts.signal?.aborted) break;
+      }
+
+      const start = Date.now();
+      let res: AttemptResult<T>;
+      try {
+        res = await attempt(step, i);
+      } catch (e) {
+        const { kind, message } = classifyError(e);
+        res = { ok: false, status: 0, kind, message };
+      }
+      const latencyMs = Date.now() - start;
+
+      if (res.ok) {
+        // On a retried success (a > 1), record the retry context so the log
+        // shows which retry succeeded and the delay that was applied.
+        const retryCtx: AttemptRecord["retry"] | undefined = a > 1
+          ? {
+              retryIndex: a - 1,
+              delayMs: preDelayMs,
+              suppressed: false,
+              reason: `succeeded on retry #${a - 1}`,
+            }
+          : undefined;
+        path.push({ step: i + 1, attempt: a, model: step.model, provider: step.provider, status: 200, kind: "ok", latencyMs, retry: retryCtx });
+        return { result: res, path };
+      }
+
+      // Determine whether a retry is permitted for THIS failure.
+      const triggerMatched = triggerMatches(retryOn, res);
+      const is499 = res.status === 499;
+      const four99Allowed = !is499 || is499Retryable(idempotency);
+      const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
+
+      // Emit real-time retry trigger / suppression progress events.
+      if (canRetryFlag) {
+        prog?.record("retry", "retry.trigger", `attempt ${a} failed (${res.status || res.kind}); retrying`, { retryIndex: a, status: res.status, reason: res.message });
+      } else if (a > 1 || triggerMatched) {
+        prog?.record("retry", "retry.exhausted", `retries exhausted after ${a} attempt(s)`, { attempts: a, status: res.status });
+      }
+
+      // Every failed attempt carries the retry decision, including the ones that
+      // were never eligible: "why did this not retry?" is the first question a
+      // failed request raises, and the answer belongs in the log.
+      const is499Suppressed = is499 && !four99Allowed;
+      const trigger = res.kind === "http" ? String(res.status) : res.kind;
+      const retryCtx: AttemptRecord["retry"] = {
+        retryIndex: a - 1, // 0-based: how many retries preceded this attempt
+        delayMs: preDelayMs,
+        suppressed: !canRetryFlag,
+        reason: !triggerMatched
+          ? `trigger not in retry.on [${retryOn.join(", ")}]`
+          : is499Suppressed
+            ? `499 suppressed: idempotency="${idempotency}" (non-idempotent; pre-check required)`
+            : !canRetryFlag
+              ? `max attempts (${maxAttempts}) reached`
+              : is499
+                ? `499 retried (idempotency="${idempotency}")`
+                : `retrying on ${trigger}`,
+      };
+
+      const upstreamError = extractUpstreamMessage(res.errorBody) ?? undefined;
+      path.push({
+        step: i + 1,
+        attempt: a,
+        model: step.model,
+        provider: step.provider,
+        status: res.status,
+        kind: res.kind,
+        latencyMs,
+        error: res.message,
+        ...(upstreamError ? { upstreamError } : {}),
+        ...(res.errorBody != null ? { errorBody: serializeForLog(res.errorBody, ERROR_BODY_MAX_CHARS) } : {}),
+        retry: retryCtx,
+      });
+      stepFailure = res;
+      lastFailure = res;
+
+      if (canRetryFlag) {
+        continue;
+      }
+      break;
+    }
+
+    const isLastStep = i === steps.steps.length - 1;
+    if (isLastStep) break;
+    if (stepFailure && shouldAdvance(step.advanceOn, stepFailure)) continue;
+    break;
+  }
+
+  return {
+    result: lastFailure ?? { ok: false, status: 502, kind: "error", message: "no steps executed" },
+    path,
+  };
+}

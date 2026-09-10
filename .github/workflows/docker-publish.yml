@@ -1,8 +1,9 @@
-name: Publish Docker image (GHCR)
+name: Publish Docker images (GHCR)
 
-# Builds the Hydrogen image and pushes it to the GitHub Container Registry so
-# Rainyun (and anyone else) can pull a pre-built public image by URL:
-#   ghcr.io/<owner>/hydrogen-llm-proxy:latest
+# Builds three images and pushes them to the GitHub Container Registry:
+#   ghcr.io/<owner>/hydrogen-llm-proxy:<tag>            gateway + console (all-in-one; Rainyun, docker compose)
+#   ghcr.io/<owner>/hydrogen-llm-proxy:<tag>-api        gateway only
+#   ghcr.io/<owner>/hydrogen-llm-proxy:<tag>-console    console only (forwards to BACKEND_URL)
 #
 # No extra secrets required - the built-in GITHUB_TOKEN can push to GHCR.
 # After the first successful run, make the package Public once:
@@ -36,7 +37,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive image metadata
+      - name: Derive image metadata (all-in-one)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -46,13 +47,38 @@ jobs:
             type=ref,event=tag
             type=sha,format=short
 
+      - name: Derive image metadata (api)
+        id: meta_api
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            suffix=-api,onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Derive image metadata (console)
+        id: meta_console
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            suffix=-console,onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
       # Rainyun runs an amd64 Kubernetes cluster; build linux/amd64 by default.
       # Add linux/arm64 to `platforms` if you also need ARM (slower: native
       # modules compile under QEMU).
-      - name: Build and push
+      - name: Build and push (all-in-one)
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: runtime
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -61,3 +87,27 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
           cache-to: type=gha,mode=max
+
+      - name: Build and push (api)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime-api
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_api.outputs.tags }}
+          labels: ${{ steps.meta_api.outputs.labels }}
+          cache-from: type=gha
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+
+      - name: Build and push (console)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/console/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta_console.outputs.tags }}
+          labels: ${{ steps.meta_console.outputs.labels }}
+          cache-from: type=gha

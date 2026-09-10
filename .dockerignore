@@ -5,8 +5,11 @@
 *.log
 logs
 data
+**/data
 .env
 .env.*
 !.env.example
 **/.vite
 **/coverage
+graphify-out
+scratchpad

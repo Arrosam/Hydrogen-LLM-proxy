@@ -1,0 +1,55 @@
+{
+  "name": "@areelai/wire-format",
+  "version": "2.0.0",
+  "description": "Pure translation between the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages wire formats through one canonical request, response and stream model.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arrosam/Hydrogen-LLM-proxy.git",
+    "directory": "packages/wire-format"
+  },
+  "homepage": "https://github.com/Arrosam/Hydrogen-LLM-proxy#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./request": {
+      "types": "./dist/request.d.ts",
+      "default": "./dist/request.js"
+    },
+    "./response": {
+      "types": "./dist/response.d.ts",
+      "default": "./dist/response.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/format/index.js",
+    "./dist/index.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^22.9.0",
+    "@areelai/test-support": "2.0.0"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "@areelai/common",
+  "version": "2.0.0",
+  "description": "Shared primitives for the Areel AI packages: AES-256-GCM secrets, ids, timestamps, zod validation, SQLite open and per-package migrations.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arrosam/Hydrogen-LLM-proxy.git",
+    "directory": "packages/common"
+  },
+  "homepage": "https://github.com/Arrosam/Hydrogen-LLM-proxy#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^22.9.0",
+    "@types/better-sqlite3": "^7.6.11",
+    "@areelai/test-support": "2.0.0"
+  }
+}

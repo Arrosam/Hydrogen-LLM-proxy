@@ -1,0 +1,40 @@
+# Two containers: the gateway without a dashboard, and the console on its own
+# hostname forwarding the API paths to it. The gateway is reachable only on the
+# compose network unless you publish its port too (clients need /v1 from
+# outside; the console does not).
+#
+#   printf 'HYDROGEN_TAG=<tag>\n' > .env
+#   docker compose up -d
+#
+# Console at http://localhost:8081, gateway at http://localhost:8080.
+services:
+  gateway:
+    image: ghcr.io/arrosam/hydrogen-llm-proxy:${HYDROGEN_TAG:-latest}-api
+    container_name: hydrogen-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      DATA_DIR: /data
+      NODE_ENV: production
+      PROXY_MASTER_KEY: ${PROXY_MASTER_KEY:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # The console forwards X-Forwarded-Proto; trust that one hop.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+    volumes:
+      - ./data:/data
+
+  console:
+    image: ghcr.io/arrosam/hydrogen-llm-proxy:${HYDROGEN_TAG:-latest}-console
+    container_name: hydrogen-console
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "${CONSOLE_PORT:-8081}:8080"
+    environment:
+      PORT: 8080
+      BACKEND_URL: http://gateway:8080

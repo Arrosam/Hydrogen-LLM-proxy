@@ -1,0 +1,54 @@
+{
+  "name": "@areelai/micro-agent",
+  "version": "2.0.0",
+  "description": "Micro Agents: forward-only stage pipelines with routers, conditions and OCR/ASR pre-passes, plugged into Model Services as a service kind.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arrosam/Hydrogen-LLM-proxy.git",
+    "directory": "packages/micro-agent"
+  },
+  "homepage": "https://github.com/Arrosam/Hydrogen-LLM-proxy#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@areelai/common": "2.0.0",
+    "@areelai/wire-format": "2.0.0",
+    "@areelai/supplier-management": "2.0.0",
+    "@areelai/model-services": "2.0.0",
+    "drizzle-orm": "^0.36.4",
+    "better-sqlite3": "^11.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^22.9.0",
+    "@types/better-sqlite3": "^7.6.11",
+    "drizzle-kit": "^0.28.1",
+    "@areelai/test-support": "2.0.0"
+  }
+}

@@ -6,24 +6,26 @@
   "license": "MIT",
   "type": "module",
   "workspaces": [
-    "server",
-    "web"
+    "packages/*",
+    "apps/*"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:server": "npm run dev --workspace server",
-    "dev:web": "npm run dev --workspace web",
-    "build": "npm run build:web && npm run build:server",
-    "build:server": "npm run build --workspace server",
-    "build:web": "npm run build --workspace web",
-    "db:generate": "npm run db:generate --workspace server",
-    "test": "npm run test --workspace server",
-    "typecheck": "npm run typecheck --workspace server"
+    "dev": "concurrently -n gateway,console -c blue,green \"npm:dev:gateway\" \"npm:dev:console\"",
+    "dev:gateway": "npm run dev --workspace apps/gateway",
+    "dev:console": "npm run dev --workspace apps/console",
+    "build": "npm run build:packages && npm run build:console && npm run build:gateway",
+    "build:packages": "node scripts/build-packages.mjs",
+    "build:gateway": "npm run build --workspace apps/gateway",
+    "build:console": "npm run build --workspace apps/console",
+    "test": "vitest run",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "concurrently": "^9.1.0",
+    "vitest": "^2.1.5",
+    "typescript": "^5.6.3"
   }
 }

@@ -135,8 +135,11 @@ Three paths, in order of effort:
 | **3** | [Build from source](#3-build-from-source) | Local development, or a patched build of your own. |
 
 Whatever the path, one rule outranks the rest: **`/data` must be persistent.** It holds the SQLite
-database *and* `hydrogen-secrets.json`, which carries the master key that decrypts your provider API
-keys. Lose it and Hydrogen refuses to boot rather than run with keys it can no longer read.
+database (`hydro.db`) *and* `hydrogen-secrets.json`, which carries the master key that decrypts your
+provider API keys. Lose it and Hydrogen refuses to boot rather than run with keys it can no longer
+read. Upgrading from a release before the package split: the first boot finds the old `hydrogen.db`,
+copies everything into `hydro.db`, and leaves the old file untouched, so rolling back is running the
+previous image on the same volume.
 
 ### 1. Rainyun app store (one click)
 
@@ -175,9 +178,15 @@ the certificate never issues.
 Images are published to GHCR on every push to `main` and every `v*` tag, for `linux/amd64`:
 
 ```
-ghcr.io/arrosam/hydrogen-llm-proxy:latest     # moves under you — fine for a trial
-ghcr.io/arrosam/hydrogen-llm-proxy:v1.5.2     # pin this for anything real
+ghcr.io/arrosam/hydrogen-llm-proxy:latest           # gateway + console, moves under you — fine for a trial
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>            # pin a release tag for anything real
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>-api        # gateway only: no dashboard, drive it through the admin API
+ghcr.io/arrosam/hydrogen-llm-proxy:<tag>-console    # console only: point BACKEND_URL at a gateway
 ```
+
+The first is the one-container deploy everything below assumes. The other two are for running the
+dashboard on a hostname of its own, or not at all — see [`deploy/split/`](deploy/split) for a
+two-container compose stack.
 
 The fastest possible start:
 
@@ -240,8 +249,8 @@ container you export the variables yourself:
 
 ```bash
 npm install
-npm run build                 # web → web/dist, server → server/dist/server.cjs
-DATA_DIR=./data node server/dist/server.cjs
+npm run build                 # packages → dist/, console → apps/console/dist, gateway → apps/gateway/dist/server.cjs
+DATA_DIR=./data node apps/gateway/dist/server.cjs
 ```
 
 Leave `PROXY_MASTER_KEY` and `SESSION_SECRET` unset and Hydrogen generates strong values on first
@@ -321,6 +330,17 @@ mappings, services, tokens, users, logs, stats, settings, backup). Served alongs
 **Public:** `GET /healthz` and the `/check` key-status page.
 
 ---
+
+### Admin API without the console
+
+The console is only a GUI over `/admin/api`. Log in from a script and use the returned token as a
+bearer header wherever the dashboard would send its cookie:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/admin/api/login \
+  -H "content-type: application/json" -d '{"username":"admin","password":"..."}' | jq -r .token)
+curl -s http://localhost:8080/admin/api/providers -H "Authorization: Bearer $TOKEN"
+```
 
 ## Configuration
 
@@ -403,28 +423,48 @@ and request history. Treat it as sensitive.
 
 ```bash
 npm install
-npm run dev            # server (tsx watch) + web (vite), together
-npm run test           # server unit tests: translation, step engine, streaming
+npm run dev            # gateway (tsx watch) + console (vite), together
+npm run test           # every package's suite: translation, step engine, streaming, upgrade import
 npm run typecheck
-npm run db:generate    # regenerate SQL migrations after a schema change
+npm run build:packages # compile the publishable @areelai packages to dist/
 ```
 
-The Vite dev server proxies `/admin/api`, `/v1` and `/healthz` to the running server
+The Vite dev server proxies `/admin/api`, `/v1` and `/healthz` to the running gateway
 (`http://127.0.0.1:8080`, override with `HYDROGEN_API`). `node preview-server.cjs` serves a
 throwaway single-process preview of the production bundle (dev secrets only).
 
+After a schema change in a package, run `npx drizzle-kit generate` in that package and then
+`node scripts/embed-migrations.mjs` at the root: each package ships its migrations embedded and
+applies them into its own bookkeeping table, so several packages share one database file.
+
 ```
-server/   Fastify + Drizzle (SQLite)
-  src/core/format/      OpenAI ⇄ canonical IR ⇄ Anthropic translation, incl. SSE
-  src/core/proxy/       request orchestration
-  src/execution/        step engine, Micro Agent runtime, validators, OCR cache
-  src/catalog/          models, providers, mappings resolution
-  src/transport/        proxy, media and admin routes
-  src/security/         master key, provider-key crypto, passwords, tokens
-  src/observability/    request logs, active requests, usage metering, redaction
-  src/backup/           passphrase-sealed export & restore
-web/      React + Vite + Tailwind dashboard (Bootstrap Icons), English + 中文
+packages/               the building blocks, published to npm as @areelai/*
+  common/               AES-256-GCM secrets, ids, zod validation, SQLite open + per-package migrations
+  wire-format/          OpenAI Chat ⇄ canonical IR ⇄ OpenAI Responses ⇄ Anthropic, incl. SSE — zero dependencies
+  supplier-management/  providers, egress proxies, discovered models, the model catalogue and mappings
+  user-management/      dashboard users, sessions (cookie or bearer), scoped client API keys, usage metering
+  model-services/       step chains (retry → fallback), guarded upstream transport, media passthroughs, hosted tools
+  micro-agent/          stage pipelines, routers, OCR/ASR pre-passes — registered as the "micro_agent" service kind
+  test-support/         fake upstream + in-memory database for the suites (private)
+apps/
+  gateway/              Fastify: /v1 + /admin/api, request logs, stateful Responses, backup, the legacy import
+  console/              React + Vite + Tailwind dashboard (Bootstrap Icons), English + 中文 — optional
 ```
+
+### Adopting one piece
+
+Every package stands on its own and carries a README with a short, complete example:
+
+```bash
+npm install @areelai/wire-format           # translate between the three wire formats, nothing else
+npm install @areelai/supplier-management   # providers + keys + catalogue in your own SQLite file
+npm install @areelai/model-services @areelai/supplier-management   # run a retry/fallback step chain
+npm install @areelai/micro-agent           # add stage pipelines as a service kind
+npm install @areelai/user-management       # users, sessions and scoped client API keys
+```
+
+A package that owns tables ships its own default SQLite store; the `*Store` interface types describe
+what a custom implementation must provide. The gateway is the composition of all of them.
 
 ---
 

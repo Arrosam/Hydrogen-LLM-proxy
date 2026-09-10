@@ -1,0 +1,53 @@
+{
+  "name": "@areelai/user-management",
+  "version": "2.0.0",
+  "description": "Dashboard users, sessions and scoped client API keys with quotas, usage metering and key status checks, stored in the package's own SQLite tables.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arrosam/Hydrogen-LLM-proxy.git",
+    "directory": "packages/user-management"
+  },
+  "homepage": "https://github.com/Arrosam/Hydrogen-LLM-proxy#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@areelai/common": "2.0.0",
+    "argon2": "^0.41.1",
+    "jsonwebtoken": "^9.0.2",
+    "drizzle-orm": "^0.36.4",
+    "better-sqlite3": "^11.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "@types/node": "^22.9.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/better-sqlite3": "^7.6.11",
+    "drizzle-kit": "^0.28.1",
+    "@areelai/test-support": "2.0.0"
+  }
+}

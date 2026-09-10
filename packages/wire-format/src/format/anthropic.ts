@@ -1,0 +1,855 @@
+import { decodeReasoning, encodeReasoning } from "./reasoningBridge.js";
+import { Request, type RenderTarget } from "../ir/request.js";
+import { Response, type RenderOptions } from "../ir/response.js";
+import {
+  normalizeMessages,
+  orderReasoningFirst,
+  type ContentPart,
+  type FileSource,
+  type ImagePart,
+  type Message,
+  type StopReason,
+  type TextPart,
+  type Tool,
+  type ToolChoice,
+} from "../ir/content.js";
+import type { GenerationParams, ThinkingLevel } from "../ir/params.js";
+import { ThinkingPolicy } from "../ir/thinking.js";
+import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream.js";
+import { genId, nowSeconds } from "../ir/ids.js";
+import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire.js";
+import { FormatConversionError } from "./errors.js";
+import { foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage.js";
+import { registerFormat } from "./registry.js";
+
+// --- stop reason mapping -------------------------------------------------
+
+function stopReasonToStop(reason: string | null | undefined): StopReason {
+  switch (reason) {
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "max_tokens":
+      return "length";
+    case "tool_use":
+      return "tool_use";
+    case "refusal":
+      return "content_filter";
+    default:
+      return reason ? "stop" : null;
+  }
+}
+
+function stopToAnthropic(reason: StopReason): string {
+  switch (reason) {
+    case "length":
+      return "max_tokens";
+    case "tool_use":
+      return "tool_use";
+    case "content_filter":
+      return "refusal";
+    default:
+      return "end_turn";
+  }
+}
+
+// --- block <-> part coercion ---------------------------------------------
+
+function systemToText(system: unknown): string | undefined {
+  if (system == null) return undefined;
+  if (typeof system === "string") return system || undefined;
+  if (Array.isArray(system)) {
+    const text = system
+      .filter((b) => b && typeof b === "object" && (b as Record<string, unknown>).type === "text")
+      .map((b) => String((b as Record<string, unknown>).text ?? ""))
+      .join("\n\n");
+    return text || undefined;
+  }
+  return undefined;
+}
+
+function parseImageSource(source: unknown): ImagePart["source"] {
+  const s = (source ?? {}) as Record<string, unknown>;
+  if (s.type === "url") return { kind: "url", url: String(s.url ?? "") };
+  return { kind: "base64", mediaType: String(s.media_type ?? "image/png"), data: String(s.data ?? "") };
+}
+
+function imageSourceToBlock(source: ImagePart["source"]): unknown {
+  if (source.kind === "url") return { type: "url", url: source.url };
+  return { type: "base64", media_type: source.mediaType, data: source.data };
+}
+
+function blocksToParts(content: unknown): ContentPart[] {
+  if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
+  if (!Array.isArray(content)) return [];
+  const parts: ContentPart[] = [];
+  for (const raw of content) {
+    if (!raw || typeof raw !== "object") continue;
+    const b = raw as Record<string, unknown>;
+    const cc = b.cache_control != null ? { cacheControl: b.cache_control } : {};
+    switch (b.type) {
+      case "thinking":
+        parts.push((typeof b.signature === "string" ? decodeReasoning(b.signature) : null) ?? { type: "reasoning", origin: "anthropic", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
+        break;
+      case "redacted_thinking":
+        // Opaque bytes; only a same-family replay can restore them. Never
+        // rewrite the text -- a signature over altered text can never verify.
+        parts.push({ type: "reasoning", origin: "anthropic", text: "", redacted: true, signature: b.data != null ? String(b.data) : undefined });
+        break;
+      case "text":
+        parts.push({ type: "text", text: String(b.text ?? ""), ...cc });
+        break;
+      case "image":
+        parts.push({ type: "image", source: parseImageSource(b.source), ...cc });
+        break;
+      case "document": {
+        const src = (b.source ?? {}) as Record<string, unknown>;
+        const title = b.title != null ? String(b.title) : undefined;
+        if (src.type === "url") parts.push({ type: "file", source: { kind: "url", url: String(src.url ?? "") }, name: title, ...cc });
+        else if (src.type === "text") parts.push({ type: "text", text: String(src.data ?? ""), ...cc });
+        // A handle into Anthropic's own Files API. Kept like the other families'
+        // ids: replayed verbatim here, and refused loudly elsewhere rather than
+        // dropped, which would send the prompt on without its attachment.
+        else if (src.type === "file" && typeof src.file_id === "string" && src.file_id) {
+          parts.push({ type: "file", source: { kind: "file_id", id: src.file_id, family: "anthropic" }, name: title, ...cc });
+        }
+        else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? "application/pdf"), data: String(src.data) }, name: title, ...cc });
+        break;
+      }
+      case "tool_use":
+        parts.push({ type: "tool_use", id: String(b.id ?? genId("toolu")), name: String(b.name ?? ""), input: b.input ?? {}, ...cc });
+        break;
+      case "tool_result":
+        parts.push({
+          type: "tool_result",
+          toolUseId: String(b.tool_use_id ?? ""),
+          content: blocksToParts(b.content).filter((p): p is TextPart | ImagePart => p.type === "text" || p.type === "image"),
+          isError: b.is_error === true ? true : undefined,
+          ...cc,
+        });
+        break;
+    }
+  }
+  return parts;
+}
+
+/**
+ * A canonical file source as an Anthropic `document.source`. This wire takes
+ * inline base64, remote URLs, and its own Files API ids. A file id from ANOTHER
+ * family is the one shape it cannot carry: id spaces do not overlap, so
+ * forwarding a foreign id either 404s upstream or, worse, resolves to an
+ * unrelated document.
+ */
+function documentSource(source: FileSource): unknown {
+  switch (source.kind) {
+    case "url":
+      return { type: "url", url: source.url };
+    case "base64":
+      return { type: "base64", media_type: source.mediaType, data: source.data };
+    case "file_id":
+      if (source.family === "anthropic") return { type: "file", file_id: source.id };
+      throw new FormatConversionError(
+        `cannot send a ${source.family} file_id ("${source.id}") to an Anthropic provider: ` +
+          `a file id only resolves in the API that issued it`,
+      );
+  }
+}
+
+function partsToBlocks(parts: ContentPart[]): unknown[] {
+  const blocks: unknown[] = [];
+  const cc = (part: { cacheControl?: unknown }): Record<string, unknown> =>
+    part.cacheControl != null ? { cache_control: part.cacheControl } : {};
+  for (const p of parts) {
+    switch (p.type) {
+      case "text":
+        blocks.push({ type: "text", text: p.text, ...cc(p) });
+        break;
+      case "reasoning":
+        // Foreign opaque data cannot verify on this upstream. Keep readable text only.
+        if (p.signature && p.origin && p.origin !== "anthropic") {
+          if (p.text) blocks.push({ type: "text", text: p.text });
+          break;
+        }
+        if (p.redacted) blocks.push({ type: "redacted_thinking", data: p.signature ?? "" });
+        else blocks.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.signature } : {}) });
+        break;
+      case "image":
+        blocks.push({ type: "image", source: imageSourceToBlock(p.source), ...cc(p) });
+        break;
+      case "file":
+        blocks.push({
+          type: "document",
+          source: documentSource(p.source),
+          ...(p.name ? { title: p.name } : {}),
+          ...cc(p),
+        });
+        break;
+      case "opaque":
+        break; // another family's private part; nothing Anthropic can carry
+      case "tool_use":
+        blocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
+        break;
+      case "tool_result":
+        blocks.push({ type: "tool_result", tool_use_id: p.toolUseId, content: partsToBlocks(p.content), ...(p.isError ? { is_error: true } : {}), ...cc(p) });
+        break;
+    }
+  }
+  return blocks;
+}
+
+// --- tools ---------------------------------------------------------------
+
+function parseTools(raw: unknown): Tool[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const tools: Tool[] = [];
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    const tool = t as Record<string, unknown>;
+    // A server-side tool (web_search_20250305, bash, computer use, ...) has a
+    // `type` and no input_schema: keep it verbatim for same-family replay
+    // instead of mangling it into an empty-schema client tool.
+    if (tool.type && tool.input_schema == null) {
+      tools.push({ name: String(tool.name ?? tool.type), parameters: {}, raw: { family: "anthropic", value: t } });
+      continue;
+    }
+    if (!tool.name) continue;
+    tools.push({
+      name: String(tool.name),
+      description: tool.description ? String(tool.description) : undefined,
+      parameters: (tool.input_schema as Record<string, unknown>) ?? { type: "object", properties: {} },
+      ...(tool.cache_control != null ? { cacheControl: tool.cache_control } : {}),
+    });
+  }
+  return tools.length ? tools : undefined;
+}
+
+/** Anthropic's parallel-tools switch lives inside tool_choice. */
+function parseDisableParallel(raw: unknown): boolean | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const v = (raw as Record<string, unknown>).disable_parallel_tool_use;
+  return typeof v === "boolean" ? v : undefined;
+}
+
+function parseToolChoice(raw: unknown): ToolChoice | undefined {
+  if (raw == null || typeof raw !== "object") return undefined;
+  const c = raw as Record<string, unknown>;
+  switch (c.type) {
+    case "auto":
+      return { type: "auto" };
+    case "any":
+      return { type: "required" };
+    case "none":
+      return { type: "none" };
+    case "tool":
+      return c.name ? { type: "tool", name: String(c.name) } : { type: "required" };
+    default:
+      return undefined;
+  }
+}
+
+function toolChoiceToAnthropic(choice: ToolChoice): unknown {
+  switch (choice.type) {
+    case "auto":
+      return { type: "auto" };
+    case "none":
+      return { type: "none" };
+    case "required":
+      return { type: "any" };
+    case "tool":
+      return { type: "tool", name: choice.name };
+  }
+}
+
+// --- thinking / params ---------------------------------------------------
+
+function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined {
+  const cfg = body.thinking as Record<string, unknown> | undefined;
+  if (!cfg || typeof cfg !== "object") return undefined;
+  if (cfg.type === "disabled") return "disabled";
+  if (cfg.type === "enabled") {
+    const budget = numOrUndef(cfg.budget_tokens);
+    return budget != null ? { budget } : "enabled";
+  }
+  if (cfg.type === "adaptive") {
+    const effort = (body.output_config as Record<string, unknown> | undefined)?.effort;
+    if (effort === "minimal" || effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") return effort;
+    return "enabled";
+  }
+  return undefined;
+}
+
+/** Every key this format models itself — parsed below, or emitted by `render`. */
+const RESERVED = new Set([
+  "model",
+  "messages",
+  "system",
+  "stream",
+  "tools",
+  "tool_choice",
+  "temperature",
+  "top_p",
+  "top_k",
+  "max_tokens",
+  "stop_sequences",
+  "thinking",
+]);
+
+function parseParams(body: Record<string, unknown>): GenerationParams {
+  const params: GenerationParams = {};
+  if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
+  if (numOrUndef(body.top_p) != null) params.topP = numOrUndef(body.top_p);
+  if (numOrUndef(body.top_k) != null) params.topK = numOrUndef(body.top_k);
+  if (numOrUndef(body.max_tokens) != null) params.maxTokens = numOrUndef(body.max_tokens);
+  if (Array.isArray(body.stop_sequences)) params.stop = body.stop_sequences.map(String);
+  const disableParallel = parseDisableParallel(body.tool_choice);
+  if (disableParallel != null) params.parallelToolCalls = !disableParallel;
+  // metadata.user_id is this wire's spelling of OpenAI's `user`; translate it so
+  // it survives a cross-family hop (same-family metadata still rides passthrough).
+  const meta = body.metadata as Record<string, unknown> | undefined;
+  if (meta && typeof meta.user_id === "string" && meta.user_id) params.user = meta.user_id;
+  const thinking = parseThinking(body);
+  if (thinking) params.thinking = thinking;
+  if (body.thinking && typeof body.thinking === "object" && !Array.isArray(body.thinking)) {
+    params.anthropicThinking = { ...body.thinking as Record<string, unknown> };
+  }
+  // `metadata` (and any other unmodeled key) rides the family-scoped passthrough,
+  // not `extra`: it is an Anthropic-shaped field, so it must reach only Anthropic
+  // providers -- `extra` applies to every family and would leak it to OpenAI.
+  const passthrough = collectPassthrough(body, RESERVED, "anthropic");
+  if (passthrough) params.passthrough = passthrough;
+  return params;
+}
+
+export class AnthropicRequest extends Request {
+  readonly family = "anthropic" as const;
+
+  static parse(body: Record<string, unknown>): AnthropicRequest {
+    const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+    const messages: Message[] = [];
+    for (const raw of rawMessages) {
+      if (!raw || typeof raw !== "object") continue;
+      const m = raw as Record<string, unknown>;
+      const role = m.role === "assistant" ? "assistant" : "user";
+      messages.push({ role, content: blocksToParts(m.content) });
+    }
+    return new AnthropicRequest({
+      requestedService: String(body.model ?? ""),
+      system: systemToText(body.system),
+      // A block array carries per-block cache_control that the flattened text
+      // cannot; keep it for a same-family replay. A plain string system has
+      // nothing extra to preserve, so it stays text-only.
+      systemBlocks: Array.isArray(body.system) ? body.system : undefined,
+      // Reasoning is NOT stripped here: what a target may be sent back is the
+      // egress family's rule, applied in render().
+      messages: normalizeMessages(messages),
+      tools: parseTools(body.tools),
+      toolChoice: parseToolChoice(body.tool_choice),
+      params: parseParams(body),
+      stream: Boolean(body.stream),
+    });
+  }
+
+  render(target: RenderTarget): Record<string, unknown> {
+    // Thinking blocks are kept, not stripped: this family REQUIRES the history's
+    // thinking back when thinking mode is on — DeepSeek's Anthropic-compatible
+    // endpoint answers a request whose assistant turns have none with
+    // "content[].thinking in the thinking mode must be passed back" (4028).
+    // They also have to lead their message, which is not the order an OpenAI
+    // ingress produces.
+    const messages = orderReasoningFirst(this.messages).map((m) => ({ role: m.role, content: partsToBlocks(m.content) }));
+    const p = this.params;
+    // An OpenAI-family client that signalled caching intent gets the breakpoint
+    // planted for it: on the last cacheable block of the last message, so each
+    // turn's request caches the whole conversation prefix. A client's own
+    // cache_control anywhere in that message wins. Wire accepts 5m/1h only.
+    if (p.cacheHint) {
+      const last = messages[messages.length - 1];
+      const blocks = (last?.content ?? []) as Array<Record<string, unknown>>;
+      const hasOwn = blocks.some((b) => b.cache_control != null);
+      for (let i = blocks.length - 1; i >= 0 && !hasOwn; i--) {
+        const b = blocks[i];
+        if (b.type === "thinking" || b.type === "redacted_thinking") continue;
+        b.cache_control = { type: "ephemeral", ...((p.cacheTtlMinutes ?? 30) > 5 ? { ttl: "1h" } : {}) };
+        break;
+      }
+    }
+    const cap = target.providerMaxOutputTokens;
+
+    const out: Record<string, unknown> = { model: target.upstreamModel, messages };
+    // Replay the client's own system blocks when they are still the prompt being
+    // sent -- that is what keeps a `cache_control` breakpoint on the system
+    // prompt alive across an Anthropic -> Anthropic hop.
+    //
+    // "Still the prompt" is decided by flattening them and comparing with the
+    // effective `system`, rather than by tracking every place that can change
+    // it. A step or stage override, a Micro Agent stage rebuild, an appended
+    // tool reference: each rewrites `system`, and each therefore drops the stale
+    // blocks here automatically. Nothing downstream has to remember to.
+    const replayable = this.systemBlocks && systemToText(this.systemBlocks) === this.system;
+    if (replayable) out.system = this.systemBlocks;
+    else if (this.system) out.system = this.system;
+    if (this.tools) {
+      // Same-family server tools replay verbatim; another family's are dropped
+      // (they cannot be expressed here) rather than sent as empty client tools.
+      const rendered = this.tools
+        .filter((t) => !t.raw || t.raw.family === "anthropic")
+        .map((t) => (t.raw ? t.raw.value : { name: t.name, description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
+      if (rendered.length) out.tools = rendered;
+    }
+    if (this.toolChoice) out.tool_choice = toolChoiceToAnthropic(this.toolChoice);
+    // OpenAI's parallel_tool_calls=false translates to this wire's
+    // tool_choice.disable_parallel_tool_use (tool_choice defaults to auto).
+    if (p.parallelToolCalls === false) {
+      const tc = (out.tool_choice ?? { type: "auto" }) as Record<string, unknown>;
+      if (tc.type === "auto" || tc.type === "any" || tc.type === "tool") out.tool_choice = { ...tc, disable_parallel_tool_use: true };
+    }
+    // Anthropic's sampling ranges are narrower than OpenAI's (temperature 0..1
+    // vs 0..2); clamp instead of letting the upstream 400 the whole request.
+    if (p.temperature != null) out.temperature = Math.min(Math.max(p.temperature, 0), 1);
+    if (p.topP != null) out.top_p = Math.min(Math.max(p.topP, 0), 1);
+    if (p.topK != null) out.top_k = p.topK;
+    if (p.stop && p.stop.length) out.stop_sequences = p.stop;
+    if (this.stream) out.stream = true;
+    // This family has no response_format; a JSON contract silently vanishing is
+    // worse than a blunt instruction, so say it in the system prompt.
+    if (p.responseFormat && p.responseFormat.type !== "text") {
+      const schema = p.responseFormat.type === "json_schema" ? ` matching this JSON Schema: ${JSON.stringify(p.responseFormat.schema)}` : "";
+      const jsonNote = `Respond ONLY with a valid JSON object${schema}. No prose, no markdown fences.`;
+      out.system = this.system ? `${this.system}\n\n${jsonNote}` : jsonNote;
+    }
+
+    // `thinking` is emitted ONLY when a level was actually set -- by the client
+    // or by a step/stage override. A request that said nothing carries no field,
+    // so the provider's own default stands, including a provider that defaults
+    // to thinking ON.
+    //
+    // This reverses an earlier fix, deliberately. DeepSeek's Anthropic-compatible
+    // endpoint defaults V4 to thinking ON when the field is missing, then rejects
+    // the request with "content[].thinking in the thinking mode must be passed
+    // back" (4028) because the assistant turns replayed to it carry no thinking
+    // blocks. Pinning {"type":"disabled"} onto every request silenced that -- by
+    // disabling thinking for every caller who never asked to have it off. That
+    // traded a visible error for an invisible loss of capability, and it breaks
+    // outright against an upstream that rejects the field itself rather than
+    // honouring it (AMD's /v1/messages answers `"thinking" is not supported for
+    // this model. Remove the "thinking" parameter`, so a pinned disable makes
+    // EVERY request through that egress fail, thinking or not).
+    //
+    // The 4028 is the real defect and belongs where it happens: the replayed
+    // assistant turns must carry their thinking blocks. Until that is fixed,
+    // surfacing 4028 is the correct behaviour. Do NOT re-pin the field to make
+    // it go away.
+    //
+    // The policy still owns max_tokens: it bounds the client's own ceiling by
+    // the provider's hard cap. It does NOT substitute one when the client named
+    // none -- there is no built-in fallback any more, and this wire's own 400 is
+    // what says so (see ir/thinkingFormat.ts's sibling note in ir/thinking.ts).
+    const tf = ThinkingPolicy.anthropic(p.thinking ?? "disabled", p.maxTokens, cap, target.upstreamModel);
+    if (p.thinking != null) {
+      out.thinking = p.anthropicThinking ?? tf.thinking;
+      if (tf.effort && !p.anthropicThinking) {
+        // `output_config` is shared -- structured outputs live there too -- so an
+        // effort merges INTO whatever the client sent rather than replacing it.
+        // It cannot ride the passthrough merge for this: that only fills keys the
+        // renderer left alone, so writing the key here would drop the client's
+        // `format` outright.
+        const own = p.passthrough?.family === "anthropic" ? p.passthrough.params.output_config : undefined;
+        const base = own && typeof own === "object" && !Array.isArray(own) ? (own as Record<string, unknown>) : {};
+        out.output_config = { ...base, effort: tf.effort };
+      }
+    }
+    if (tf.max_tokens != null) out.max_tokens = tf.max_tokens;
+    applyNonCanonical(out, p, this.family);
+    // OpenAI's `user` abuse-tracking id maps to metadata.user_id; a client's own
+    // passthrough metadata (same family) wins.
+    if (p.user) {
+      const meta = (out.metadata ?? {}) as Record<string, unknown>;
+      if (meta.user_id == null) out.metadata = { ...meta, user_id: p.user };
+    }
+    return out;
+  }
+
+  /** Rebuild any canonical Request as an Anthropic Messages request. */
+  static construct(base: Request): AnthropicRequest {
+    return new AnthropicRequest(base.data());
+  }
+
+}
+
+export class AnthropicResponse extends Response {
+  readonly family = "anthropic" as const;
+
+  static parse(body: Record<string, unknown>): AnthropicResponse {
+    const content = blocksToParts(body.content).filter(
+      (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning",
+    );
+    const usage = (body.usage ?? {}) as Record<string, unknown>;
+    const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
+    const reasoningTokens = thinkingTokens(usage);
+    const cachedInputTokens = numOrUndef(usage.cache_read_input_tokens);
+    const cacheCreationInputTokens = numOrUndef(usage.cache_creation_input_tokens);
+    // This wire reports `input_tokens` EXCLUSIVE of both cache counters; the
+    // canonical prompt count includes them (ir/usage.ts).
+    const promptTokens = foldCacheIntoPrompt(numOrUndef(usage.input_tokens) ?? 0, cachedInputTokens, cacheCreationInputTokens);
+    return new AnthropicResponse({
+      id: String(body.id ?? genId("msg")),
+      model: String(body.model ?? ""),
+      created: nowSeconds(),
+      content,
+      stopReason: stopReasonToStop(body.stop_reason as string | null),
+      usage: {
+        promptTokens, completionTokens, totalTokens: promptTokens + completionTokens,
+        ...(reasoningTokens != null ? { reasoningTokens } : {}),
+        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+        ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+      },
+    });
+  }
+
+  /** `opts.thinkingFormat` names a Chat Completions field; this wire has one
+   * native thinking block and no field to choose between. The content-level
+   * formats (`think_tags`, `none`) were already applied before rendering. */
+  renderSelf(model: string, _opts?: RenderOptions): Record<string, unknown> {
+    const content: unknown[] = [];
+    for (const p of this.content) {
+      if (p.type === "reasoning") {
+        if (p.redacted) content.push({ type: "redacted_thinking", data: p.signature ?? "" });
+        else content.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.origin && p.origin !== "anthropic" ? encodeReasoning(p) : p.signature } : {}) });
+      }
+      else if (p.type === "text") content.push({ type: "text", text: p.text });
+      else if (p.type === "tool_use") content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+    }
+    if (content.length === 0) content.push({ type: "text", text: "" });
+    return {
+      id: this.id,
+      type: "message",
+      role: "assistant",
+      model,
+      content,
+      stop_reason: stopToAnthropic(this.stopReason),
+      stop_sequence: null,
+      usage: {
+        // Back to this wire's exclusive convention: its clients add the three
+        // together, so leaving the cache share inside input_tokens would make
+        // every cached turn count twice.
+        input_tokens: uncachedPromptTokens(this.usage), output_tokens: this.usage.completionTokens,
+        ...(this.usage.reasoningTokens != null ? { output_tokens_details: { thinking_tokens: this.usage.reasoningTokens } } : {}),
+        ...(this.usage.cachedInputTokens != null ? { cache_read_input_tokens: this.usage.cachedInputTokens } : {}),
+        ...(this.usage.cacheCreationInputTokens != null ? { cache_creation_input_tokens: this.usage.cacheCreationInputTokens } : {}),
+      },
+    };
+  }
+
+  static async *parseStream(readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent> {
+    let stopReason: StopReason = null;
+    // The uncached remainder as this wire reports it; folded into the
+    // canonical inclusive count at every point one leaves this parser.
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let reasoningTokens: number | undefined;
+    let cachedInputTokens: number | undefined;
+    // Cache WRITES are reported here too, and were the one usage field the
+    // streaming path dropped while the buffered path kept it -- so the same
+    // request billed a cache write invisibly when it streamed.
+    let cacheCreationInputTokens: number | undefined;
+    const toolBlocks = new Set<number>();
+    // Thinking blocks stream their signature in a trailing signature_delta;
+    // hold it per block and attach it to the reasoning_stop. A redacted block is
+    // the exception: its opaque bytes arrive whole in content_block_start.data
+    // and no delta of any kind follows, so the payload is captured there.
+    const thinkingBlocks = new Map<number, { signature?: string; redacted?: boolean }>();
+
+    for await (const frame of parseSSE(readable)) {
+      const data = safeParseJson(frame.data);
+      if (!data) continue;
+      const type = frame.event ?? String(data.type ?? "");
+
+      switch (type) {
+        case "message_start": {
+          const message = (data.message ?? {}) as Record<string, unknown>;
+          const usage = (message.usage ?? {}) as Record<string, unknown>;
+          inputTokens = num(usage.input_tokens);
+          outputTokens = num(usage.output_tokens);
+          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
+          if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
+          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
+          yield {
+            type: "start",
+            id: String(message.id ?? genId("msg")),
+            model: String(message.model ?? ""),
+            created: nowSeconds(),
+            inputTokens: foldCacheIntoPrompt(inputTokens, cachedInputTokens, cacheCreationInputTokens),
+            ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+            ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+          };
+          break;
+        }
+        case "content_block_start": {
+          const index = num(data.index);
+          const block = (data.content_block ?? {}) as Record<string, unknown>;
+          if (block.type === "tool_use") {
+            toolBlocks.add(index);
+            yield { type: "tool_start", index, id: String(block.id ?? genId("toolu")), name: String(block.name ?? "") };
+          } else if (block.type === "text") {
+            if (typeof block.text === "string" && block.text) yield { type: "text_delta", text: block.text };
+          } else if (block.type === "thinking" || block.type === "redacted_thinking") {
+            const redacted = block.type === "redacted_thinking";
+            const data = redacted && typeof block.data === "string" && block.data ? block.data : undefined;
+            thinkingBlocks.set(index, { signature: data ?? (typeof block.signature === "string" ? block.signature : undefined), redacted });
+            yield { type: "reasoning_start", origin: "anthropic", ...(redacted ? { redacted: true, signature: data } : {}) };
+            if (!redacted && typeof block.thinking === "string" && block.thinking) yield { type: "reasoning_delta", text: block.thinking };
+          }
+          break;
+        }
+        case "content_block_delta": {
+          const index = num(data.index);
+          const delta = (data.delta ?? {}) as Record<string, unknown>;
+          if (delta.type === "text_delta" && typeof delta.text === "string") yield { type: "text_delta", text: delta.text };
+          else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") yield { type: "reasoning_delta", text: delta.thinking };
+          else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+            const tb = thinkingBlocks.get(index);
+            if (tb) tb.signature = (tb.signature ?? "") + delta.signature;
+          }
+          else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") yield { type: "tool_args_delta", index, delta: delta.partial_json };
+          break;
+        }
+        case "content_block_stop": {
+          const index = num(data.index);
+          if (toolBlocks.has(index)) {
+            toolBlocks.delete(index);
+            yield { type: "tool_stop", index };
+          } else if (thinkingBlocks.has(index)) {
+            const tb = thinkingBlocks.get(index)!;
+            thinkingBlocks.delete(index);
+            const replay = tb.signature ? decodeReasoning(tb.signature) : null;
+            yield { type: "reasoning_stop", origin: replay?.origin ?? "anthropic", id: replay?.itemId, signature: replay?.signature ?? tb.signature, ...(tb.redacted ? { redacted: true } : {}) };
+          }
+          break;
+        }
+        case "message_delta": {
+          const delta = (data.delta ?? {}) as Record<string, unknown>;
+          if (delta.stop_reason) stopReason = stopReasonToStop(delta.stop_reason as string);
+          const usage = (data.usage ?? {}) as Record<string, unknown>;
+          if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
+          // Some providers report the real prompt count -- and the cache
+          // counters -- only here, at the end.
+          if (numOrUndef(usage.input_tokens) != null) inputTokens = num(usage.input_tokens);
+          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
+          if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
+          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
+          yield { type: "usage", usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens) };
+          break;
+        }
+        case "message_stop": {
+          const stopUsage = (data.usage ?? {}) as Record<string, unknown>;
+          if (thinkingTokens(stopUsage) != null) reasoningTokens = thinkingTokens(stopUsage);
+          if (numOrUndef(stopUsage.cache_read_input_tokens) != null) cachedInputTokens = num(stopUsage.cache_read_input_tokens);
+          if (numOrUndef(stopUsage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(stopUsage.cache_creation_input_tokens);
+          if (numOrUndef(stopUsage.output_tokens) != null) outputTokens = num(stopUsage.output_tokens);
+          if (numOrUndef(stopUsage.input_tokens) != null) inputTokens = num(stopUsage.input_tokens);
+          yield {
+            type: "finish",
+            stopReason,
+            usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens),
+          };
+          return;
+        }
+        default:
+          break;
+      }
+    }
+    // Reached only when the stream ended without a message_stop -- truncated.
+    yield { type: "finish", stopReason, usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens), incomplete: true };
+  }
+
+  static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
+    let id = genId("msg");
+    const model = ctx.model;
+    // Held in this wire's own exclusive form, so every frame that states them
+    // states the split its clients expect.
+    let inputTokens = 0;
+    let cacheReadTokens: number | undefined;
+    let cacheWriteTokens: number | undefined;
+    let outputTokens = 0;
+    let nextIndex = 0;
+    let textOpen = false;
+    let textIndex = 0;
+    let reasoningOpen = false;
+    let reasoningIndex = 0;
+    // A redacted block must be reproduced as `redacted_thinking` with its opaque
+    // data, not dressed up as a `thinking` block: a client replaying an empty
+    // thinking block back to the upstream gets the whole request rejected.
+    let reasoningRedacted = false;
+    let reasoningText = "";
+    const toolMap = new Map<number, number>();
+
+    const frame = (event: string, data: Record<string, unknown>): string =>
+      `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`;
+
+    for await (const ev of events) {
+      switch (ev.type) {
+        case "start":
+          id = ev.id || id;
+          cacheReadTokens = ev.cachedInputTokens;
+          cacheWriteTokens = ev.cacheCreationInputTokens;
+          inputTokens = uncachedPromptTokens({
+            promptTokens: ev.inputTokens ?? 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cachedInputTokens: cacheReadTokens,
+            cacheCreationInputTokens: cacheWriteTokens,
+          });
+          yield frame("message_start", {
+            message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: streamUsage(inputTokens, 0, cacheReadTokens, cacheWriteTokens) },
+          });
+          break;
+        case "text_delta":
+          if (!textOpen) {
+            if (reasoningOpen) {
+              yield frame("content_block_stop", { index: reasoningIndex });
+              reasoningOpen = false;
+            }
+            textIndex = nextIndex++;
+            textOpen = true;
+            yield frame("content_block_start", { index: textIndex, content_block: { type: "text", text: "" } });
+          }
+          yield frame("content_block_delta", { index: textIndex, delta: { type: "text_delta", text: ev.text } });
+          break;
+        case "reasoning_start":
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
+          if (!reasoningOpen) {
+            reasoningIndex = nextIndex++;
+            reasoningOpen = true;
+            reasoningText = "";
+            reasoningRedacted = ev.redacted === true;
+            yield frame("content_block_start", {
+              index: reasoningIndex,
+              content_block: reasoningRedacted
+                ? { type: "redacted_thinking", data: ev.signature ?? "" }
+                : { type: "thinking", thinking: "" },
+            });
+          }
+          break;
+        case "reasoning_delta":
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
+          if (!reasoningOpen) {
+            reasoningIndex = nextIndex++;
+            reasoningOpen = true;
+            reasoningText = "";
+            reasoningRedacted = false;
+            yield frame("content_block_start", { index: reasoningIndex, content_block: { type: "thinking", thinking: "" } });
+          }
+          // A redacted block has no readable thinking to delta; the wire form
+          // carries everything it has on the block itself.
+          if (!reasoningRedacted) {
+            reasoningText += ev.text;
+            yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "thinking_delta", thinking: ev.text } });
+          }
+          break;
+        case "reasoning_stop":
+          if (reasoningOpen) {
+            // signature_delta belongs to a thinking block; a redacted block's
+            // bytes already went out in its content_block_start.data.
+            if (ev.signature && !reasoningRedacted) {
+              yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.origin && ev.origin !== "anthropic" ? encodeReasoning({ type: "reasoning", text: reasoningText, signature: ev.signature, itemId: ev.id, origin: ev.origin }) : ev.signature } });
+            }
+            yield frame("content_block_stop", { index: reasoningIndex });
+            reasoningOpen = false;
+            reasoningRedacted = false;
+          }
+          break;
+        case "tool_start": {
+          // Close any open thinking/text block first; overlapping content blocks
+          // make a strict Anthropic client drop the unclosed one (e.g. the
+          // thinking block on a text-less, tool-only response).
+          if (reasoningOpen) {
+            yield frame("content_block_stop", { index: reasoningIndex });
+            reasoningOpen = false;
+          }
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
+          const idx = nextIndex++;
+          toolMap.set(ev.index, idx);
+          yield frame("content_block_start", { index: idx, content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} } });
+          break;
+        }
+        case "tool_args_delta": {
+          const idx = toolMap.get(ev.index);
+          if (idx != null) yield frame("content_block_delta", { index: idx, delta: { type: "input_json_delta", partial_json: ev.delta } });
+          break;
+        }
+        case "tool_stop": {
+          const idx = toolMap.get(ev.index);
+          if (idx != null) {
+            yield frame("content_block_stop", { index: idx });
+            toolMap.delete(ev.index);
+          }
+          break;
+        }
+        case "finish":
+          // A truncated upstream must not be dressed up as a finished answer:
+          // no message_delta, no message_stop. relay() aborts the connection.
+          if (ev.incomplete || ev.error) return;
+          if (reasoningOpen) {
+            yield frame("content_block_stop", { index: reasoningIndex });
+            reasoningOpen = false;
+          }
+          if (textOpen) {
+            yield frame("content_block_stop", { index: textIndex });
+            textOpen = false;
+          }
+          for (const idx of toolMap.values()) yield frame("content_block_stop", { index: idx });
+          toolMap.clear();
+          if (ev.usage) {
+            inputTokens = uncachedPromptTokens(ev.usage);
+            outputTokens = ev.usage.completionTokens;
+            if (ev.usage.cachedInputTokens != null) cacheReadTokens = ev.usage.cachedInputTokens;
+            if (ev.usage.cacheCreationInputTokens != null) cacheWriteTokens = ev.usage.cacheCreationInputTokens;
+          }
+          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: streamUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, ev.usage?.reasoningTokens) });
+          yield frame("message_stop", {});
+          break;
+      }
+    }
+  }
+}
+
+/** Canonical usage from this wire's exclusive split. */
+function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Usage {
+  const promptTokens = foldCacheIntoPrompt(uncached, cachedRead, cacheWrite);
+  return {
+    promptTokens,
+    completionTokens: output,
+    totalTokens: promptTokens + output,
+    ...(reasoningTokens != null ? { reasoningTokens } : {}),
+    ...(cachedRead != null ? { cachedInputTokens: cachedRead } : {}),
+    ...(cacheWrite != null ? { cacheCreationInputTokens: cacheWrite } : {}),
+  };
+}
+
+/** A streamed `usage` object in this wire's exclusive split. */
+function streamUsage(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Record<string, unknown> {
+  return {
+    input_tokens: uncached,
+    output_tokens: output,
+    ...(reasoningTokens != null ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}),
+    ...(cachedRead != null ? { cache_read_input_tokens: cachedRead } : {}),
+    ...(cacheWrite != null ? { cache_creation_input_tokens: cacheWrite } : {}),
+  };
+}
+
+registerFormat("anthropic", { request: AnthropicRequest, response: AnthropicResponse });
+
+export { stopReasonToStop, stopToAnthropic };
+
+function thinkingTokens(usage: Record<string, unknown>): number | undefined {
+  return numOrUndef((usage.output_tokens_details as Record<string, unknown> | undefined)?.thinking_tokens);
+}

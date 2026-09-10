@@ -3,7 +3,9 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -12,6 +14,17 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@areelai/wire-format/request": [
+        "./packages/wire-format/src/request.ts"
+      ],
+      "@areelai/wire-format/response": [
+        "./packages/wire-format/src/response.ts"
+      ],
+      "@areelai/*": [
+        "./packages/*/src/index.ts"
+      ]
+    }
   }
 }
