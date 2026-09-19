@@ -195,6 +195,16 @@ export const HostedToolOptionsSchema = z.object({
 });
 export type HostedToolOptions = z.infer<typeof HostedToolOptionsSchema>;
 
+/**
+ * Optional aggregate budget (bytes) for the URL attachments a service inlines
+ * into a request. The proxy imposes none of its own -- a relay should not
+ * decide what a user may attach -- but an operator who knows their provider's
+ * (or their box's) appetite can set one per Model Service / Micro Agent.
+ * Absent or 0 means unlimited.
+ */
+export const MAX_ATTACHMENT_LIMIT = 8 * 1024 * 1024 * 1024;
+export const AttachmentBudgetSchema = z.number().int().min(0).max(MAX_ATTACHMENT_LIMIT);
+
 export const ServiceStepsSchema = z.object({
   hostedTools: HostedToolOptionsSchema.optional(),
   kind: z.literal("model_service").optional(),
@@ -213,6 +223,11 @@ export const ServiceStepsSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this service's client. Omitted = "original". */
   thinkingFormat: ThinkingFormatSchema.optional(),
+  /**
+   * Aggregate budget (bytes) for the URL attachments this service inlines.
+   * Absent or 0 = unlimited. See {@link AttachmentBudgetSchema}.
+   */
+  maxAttachmentBytes: AttachmentBudgetSchema.optional(),
 });
 
 // --- Micro Agent (stage orchestration) ------------------------------------
@@ -316,6 +331,12 @@ export const AgentSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this agent's client (see ServiceStepsSchema). */
   thinkingFormat: ThinkingFormatSchema.optional(),
+  /**
+   * Aggregate budget (bytes) for the URL attachments every call this agent
+   * makes may inline. Absent or 0 = unlimited; inherited by stages that do not
+   * set their own.
+   */
+  maxAttachmentBytes: AttachmentBudgetSchema.optional(),
 });
 
 export type Trigger = z.infer<typeof TriggerSchema>;

@@ -128,7 +128,12 @@ export class ResponsesController {
       this.repo.deleteItem(idFrom(req), req.clientToken!.id, idFrom(req, "itemId"));
       return present(conversation(req));
     });
-    const prune = setInterval(() => this.repo.prune(), 60_000); prune.unref();
+    const prune = setInterval(() => {
+      // A prune fault (a full disk, say) must not become an uncaught exception
+      // in a timer and take the process down; the next tick retries.
+      try { this.repo.prune(); } catch (error) { app.log.warn({ err: error }, "response prune failed"); }
+    }, 60_000);
+    prune.unref();
     app.addHook("onClose", async () => {
       clearInterval(prune);
       for (const job of this.jobs.values()) job.abort.abort();
@@ -284,6 +289,11 @@ export class ResponsesController {
       }
       return output;
     });
+    // Streaming and background responses never await this promise. Without a
+    // handler attached here, a failure in its bookkeeping (a log write on a
+    // full disk, say) would be unhandled and take the process down; the paths
+    // that DO await it still observe the rejection.
+    job.done.catch(() => undefined);
     if (!flags.background) reply.raw.once("close", () => { if (!reply.raw.writableFinished) abort.abort(); });
     try {
       if (flags.stream) return await this.follow(reply, row);

@@ -1,4 +1,4 @@
-import { asc, inArray, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { imageCache } from "../db/schema";
 
@@ -217,33 +217,47 @@ export class ImageCacheRepo {
    * `protectedHashes` (the rows the caller is about to rewrite). Stops early
    * when nothing evictable is left, so the caller must re-check the total rather
    * than trust that the room appeared.
+   *
+   * Protected rows are skipped in JS, not excluded by one `NOT IN`: a request
+   * can carry more images than SQLite allows variables in a single statement
+   * (see {@link PARAM_CHUNK}), and a `NOT IN` over that many hashes throws
+   * "too many SQL variables" and aborts the whole batch's write. A keyset cursor
+   * over the LRU order still guarantees progress -- each page starts strictly
+   * after the last row read -- even when a page holds nothing but protected rows.
    */
   private evict(tx: Queryable, needBytes: number, protectedHashes: ReadonlySet<string>): number {
-    // Excluding the protected hashes in SQL (not by filtering the result) is
-    // what guarantees progress: every row a round reads is one it may delete,
-    // so a round either frees bytes or finds the table empty.
-    const keep = [...protectedHashes];
     let freed = 0;
     let removed = 0;
+    let cursor: { lastUsedAt: Date; hash: string } | undefined;
     while (freed < needBytes) {
       const rows = tx
-        .select({ hash: imageCache.hash, sizeBytes: imageCache.sizeBytes })
+        .select({ hash: imageCache.hash, sizeBytes: imageCache.sizeBytes, lastUsedAt: imageCache.lastUsedAt })
         .from(imageCache)
-        .where(keep.length ? notInArray(imageCache.hash, keep) : undefined)
+        .where(
+          cursor
+            ? or(
+                gt(imageCache.lastUsedAt, cursor.lastUsedAt),
+                and(eq(imageCache.lastUsedAt, cursor.lastUsedAt), gt(imageCache.hash, cursor.hash)),
+              )
+            : undefined,
+        )
         // `hash` breaks ties so a batch stamped with one timestamp evicts in a
         // stable order instead of an arbitrary one.
         .orderBy(asc(imageCache.lastUsedAt), asc(imageCache.hash))
         .limit(EVICT_CHUNK)
         .all();
       if (rows.length === 0) break;
+      const last = rows[rows.length - 1];
+      cursor = { lastUsedAt: last.lastUsedAt, hash: last.hash };
 
       const victims: string[] = [];
       for (const r of rows) {
+        if (protectedHashes.has(r.hash)) continue;
         victims.push(r.hash);
         freed += r.sizeBytes;
         if (freed >= needBytes) break;
       }
-      tx.delete(imageCache).where(inArray(imageCache.hash, victims)).run();
+      if (victims.length) tx.delete(imageCache).where(inArray(imageCache.hash, victims)).run();
       removed += victims.length;
     }
     return removed;

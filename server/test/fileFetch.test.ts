@@ -15,7 +15,7 @@ import { inlineUrlFiles, needsUrlFileInlining } from "../src/execution/fileFetch
 import { ModelService } from "../src/execution/modelService";
 import { SsrfGuard, UpstreamUrlError } from "../src/core/upstream/ssrf";
 import type { Catalog } from "../src/catalog/catalog";
-import type { ServiceSteps } from "../src/execution/definition";
+import { parseService, type ServiceSteps } from "../src/execution/definition";
 import type { Transport, TransportStreamResult } from "../src/core/upstream/transport";
 
 const PDF_URL = "https://files.example.com/report.pdf";
@@ -120,6 +120,19 @@ describe("inlining", () => {
     expect(ready).toBe(req);
     expect(transport.seen).toEqual([]);
     expect(JSON.stringify(OpenAIResponsesRequest.construct(ready).render({ upstreamModel: "up" }))).toContain(PDF_URL);
+  });
+
+  // The proxy sets no aggregate budget of its own -- a relay should not decide
+  // what a user may attach -- but a service definition may opt into one.
+  it("honours an opt-in aggregate budget, and has none by default", async () => {
+    await expect(
+      inlineUrlFiles(withUrlDoc(), "openai_completion", fetchTransport(() => ({ status: 200, body: PDF_BYTES })), { timeoutMs: 5_000, maxTotalBytes: 10 }),
+    ).rejects.toThrow(/configured for this service/);
+
+    // No budget named: the same request inlines exactly as before.
+    await expect(
+      inlineUrlFiles(withUrlDoc(), "openai_completion", fetchTransport(() => ({ status: 200, body: PDF_BYTES })), { timeoutMs: 5_000 }),
+    ).resolves.toBeTruthy();
   });
 });
 
@@ -241,5 +254,26 @@ describe("through a Model Service", () => {
     await svc.invoke(withUrlDoc().withStream(false));
     expect(transport.seen).toEqual([]);
     expect(JSON.stringify(sent.body)).toContain(PDF_URL);
+  });
+
+  it("honours the Model Service's own maxAttachmentBytes", async () => {
+    const transport = sendingTransport({ body: null });
+    const svc = new ModelService(
+      { timeoutMs: 5_000, steps: [{ model: "m", provider: "p" }], maxAttachmentBytes: 10 } as ServiceSteps,
+      { catalog: catalogFor("openai_completion"), transport },
+    );
+    const inv = await svc.invoke(withUrlDoc().withStream(false));
+    expect(inv.result.ok).toBe(false);
+    if (!inv.result.ok) expect(inv.result.message).toMatch(/configured for this service/);
+  });
+
+  it("round-trips maxAttachmentBytes through the service and agent schemas", () => {
+    const svc = parseService({ timeoutMs: 5_000, steps: [{ model: "m", provider: "p" }], maxAttachmentBytes: 1234 });
+    expect((svc as ServiceSteps).maxAttachmentBytes).toBe(1234);
+    const agent = parseService({
+      kind: "micro_agent", timeoutMs: 5_000, maxAttachmentBytes: 99,
+      stages: [{ name: "s", input: [], steps: [{ model: "m", provider: "p" }] }],
+    });
+    expect((agent as { maxAttachmentBytes?: number }).maxAttachmentBytes).toBe(99);
   });
 });

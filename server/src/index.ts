@@ -1,6 +1,7 @@
 import { boot } from "./composition/container";
 import { buildApp } from "./app";
 import { closeWithDeadline } from "./util/shutdown";
+import { ensureHeapSized } from "./util/heap";
 
 const SHUTDOWN_GRACE_MS = 30_000;
 
@@ -49,8 +50,16 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error("Fatal startup error:\n", err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Size V8's heap to the container BEFORE the app allocates anything. When the
+// limit is detected and Node was not already given a ceiling, this re-execs and
+// the parent becomes a signal-forwarding supervisor; otherwise it returns false
+// and this process runs the app directly.
+if (ensureHeapSized()) {
+  // A container-sized child is running; the parent only supervises it.
+} else {
+  main().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error("Fatal startup error:\n", err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

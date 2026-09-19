@@ -167,6 +167,8 @@ export interface ServiceSteps {
   steps: ServiceStep[];
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Aggregate budget (bytes) for URL attachments inlined for this service. 0/absent = unlimited. */
+  maxAttachmentBytes?: number;
 }
 
 // --- Agent (compositional Micro Agent) ---
@@ -236,6 +238,8 @@ export interface AgentDef {
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Aggregate budget (bytes) for URL attachments inlined by each call. 0/absent = unlimited. */
+  maxAttachmentBytes?: number;
 }
 
 /** A service definition is either the resilience workflow or an agent. */

@@ -155,6 +155,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
   const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
+  const [maxAttachmentMiB, setMaxAttachmentMiB] = useState(0);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
   const [summary, setSummary] = useState<string>("");
@@ -199,6 +200,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
       setThinkingFormat(service.steps?.thinkingFormat ?? "original");
+      setMaxAttachmentMiB(Math.round((service.steps?.maxAttachmentBytes ?? 0) / (1024 * 1024)));
     } else {
       const firstModel = models[0]?.name ?? "";
       const firstProvider = providersForModel(firstModel)[0] ?? "";
@@ -214,6 +216,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setCategory("chat");
       setReliableStreaming(false);
       setThinkingFormat("original");
+      setMaxAttachmentMiB(0);
     }
     setRaw(false);
     setSummary("");
@@ -236,6 +239,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           ...(output ? { output } : {}),
           ...(ocr ? { ocr } : {}),
           ...(asr ? { asr } : {}),
+          ...(maxAttachmentMiB > 0 ? { maxAttachmentBytes: maxAttachmentMiB * 1024 * 1024 } : {}),
           ...thinkingFormatField(),
           hostedTools: toolConfig,
         } as AgentDef)
@@ -244,6 +248,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           steps,
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
+          ...(maxAttachmentMiB > 0 ? { maxAttachmentBytes: maxAttachmentMiB * 1024 * 1024 } : {}),
           ...thinkingFormatField(),
           ...(isChatPipelineCategory(category) ? { hostedTools: toolConfig } : {}),
         } as ServiceSteps);
@@ -322,6 +327,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       setThinkingFormat(parsed.thinkingFormat ?? "original");
+      setMaxAttachmentMiB(Math.round((parsed.maxAttachmentBytes ?? 0) / (1024 * 1024)));
       setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
       return parsed;
     } catch {
@@ -499,6 +505,14 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               ))}
             </select>
             <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
+          </div>
+        )}
+
+        {!raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
+          <div>
+            <label className="label">{t("serviceEditor.maxAttachmentLabel")}</label>
+            <input className="input" type="text" inputMode="numeric" value={maxAttachmentMiB} onFocus={selectAll} onClick={selectAll} onChange={(e) => setMaxAttachmentMiB(intInput(e.target.value, 0))} />
+            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.maxAttachmentHint")}</p>
           </div>
         )}
 

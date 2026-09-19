@@ -176,6 +176,20 @@ describe("ImageCacheRepo", () => {
     expect(report).toMatchObject({ stored: 0, skipped: 1 });
     expect(repo.stats()).toEqual({ entries: 0, usedBytes: 0 });
   });
+
+  // A request can carry more images than SQLite allows variables in a single
+  // statement. The protected-hash exclusion used to be one `NOT IN` over them
+  // all, which threw "too many SQL variables" and abandoned the whole batch.
+  it("stores what fits from a batch larger than SQLite's variable limit", () => {
+    fillToBudget();
+
+    const batch = Array.from({ length: 40_000 }, (_, i) => ({ hash: `bulk${i}`, description: "d" }));
+    const report = repo.put(batch, T0 + 11, BUDGET);
+
+    expect(report.stored + report.skipped).toBe(batch.length);
+    expect(report.stored).toBeGreaterThan(0);
+    expect(repo.stats().usedBytes).toBeLessThanOrEqual(BUDGET);
+  });
 });
 
 // --- hashing ---------------------------------------------------------------
@@ -433,5 +447,23 @@ describe("MicroAgent OCR pre-pass with the image cache", () => {
     await agent.invoke(reqWithImages("I"));
     await agent.invoke(reqWithImages("I"));
     expect(rec.ocrCalls).toEqual([["I"], ["I"]]);
+  });
+
+  // The OCR body is a second full copy of the batch's base64, so a request that
+  // names many images must not render them all into one call. Splitting must
+  // still place every description on the right image.
+  it("splits a large image set into several bounded OCR calls, mapping every result", async () => {
+    const rec = newRecorder();
+    const labels = Array.from({ length: 80 }, (_, i) => `L${i}`);
+
+    const inv = await agentWith(rec).invoke(reqWithImages(...labels));
+
+    expect(inv.result.ok).toBe(true);
+    expect(rec.ocrCalls.length).toBeGreaterThan(1); // 80 exceeds one batch
+    expect(rec.ocrCalls.flat().sort()).toEqual([...labels].sort()); // each image once
+    const text = userTextIn(rec.stageBodies[rec.stageBodies.length - 1]);
+    for (const label of labels) expect(text).toContain(`desc:${label}`);
+    // ...and every freshly transcribed image was cached.
+    expect(repo.stats().entries).toBe(80);
   });
 });

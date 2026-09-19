@@ -385,6 +385,13 @@ export class ProxyController {
     }
 
     const value = outcome.result.value;
+    // Capture the exact wire body sent upstream NOW and drop the reference.
+    // Rendering it produced a complete second copy of the conversation -- every
+    // base64 image in it -- and the delivery below can take a long time for a
+    // slow client. The size-bounded string is all the request log ever needed,
+    // so the full body has no reason to stay live across the send.
+    const upstreamPayload = this.deps.logger.capture(value.upstreamRequest);
+    value.upstreamRequest = {};
     // Shape the client's copy: lift a `<think>` block out of the answer, inline
     // it into the answer, or drop it. `original` returns the same object.
     const shapedResponse = value.response.withThinkingFormat(thinkingFormat);
@@ -416,7 +423,7 @@ export class ProxyController {
       traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
       servedModel: value.modelName, servedProvider: value.providerName,
       ingress, egress: value.family, streaming: false, httpStatus: status, http,
-      upstreamPayload: this.deps.logger.capture(value.upstreamRequest),
+      upstreamPayload,
       responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
       usage: value.response.usage, latencyMs: Date.now() - started,
       attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
@@ -685,7 +692,19 @@ export class ProxyController {
           });
         }
       }
-    })();
+    })()
+      // This writer is deliberately not awaited (the relay hands the client its
+      // bytes as they arrive). Everything above is inside try/finally, but a
+      // throw from the finally's own bookkeeping -- a log write on a full disk,
+      // say -- would otherwise be an unhandled rejection and kill the whole
+      // process, turning one request's failure into an outage for every client.
+      .catch((e: unknown) => {
+        try {
+          reply.log.error({ err: e }, "stream relay bookkeeping failed");
+        } catch {
+          /* nothing left to report it with */
+        }
+      });
   }
 
   private handleListModels(req: FastifyRequest): unknown {

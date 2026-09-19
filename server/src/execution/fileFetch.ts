@@ -17,8 +17,10 @@ import type { Transport } from "../core/upstream/transport";
  *
  * The proxy imposes no MIME or content limits of its own: it is a relay, and
  * the provider is the one that knows (and enforces) what it accepts. Size it
- * DOES bound: a download is capped at {@link MAX_DOWNLOAD_BYTES} so the
- * buffering below cannot be turned into a memory-exhaustion primitive. What it
+ * DOES bound: one download is capped at {@link MAX_DOWNLOAD_BYTES}, and a
+ * Model Service / Micro Agent may set an aggregate budget of its own
+ * (`maxAttachmentBytes`), so the buffering below cannot be turned into a
+ * memory-exhaustion primitive by default or by accident. What it
  * enforces beyond that is its own egress safety -- every hop, redirects
  * included, goes through the SSRF guard, because a URL that arrives in a
  * request body is attacker-controlled input and this process can reach
@@ -132,15 +134,38 @@ export async function inlineUrlFiles(
   request: Request,
   family: Family,
   transport: Transport,
-  opts: { timeoutMs: number; signal?: AbortSignal },
+  opts: {
+    timeoutMs: number;
+    signal?: AbortSignal;
+    /**
+     * Optional aggregate budget for this inline pass, from the Model Service /
+     * Micro Agent serving the request (`maxAttachmentBytes` in its definition).
+     * The proxy sets no limit of its own -- a relay should not decide what a
+     * user may attach -- but an operator who knows their provider's (or their
+     * box's) appetite can set one per service. Absent or 0 means unlimited.
+     */
+    maxTotalBytes?: number;
+  },
 ): Promise<Request> {
   if (!needsUrlFileInlining(request, family)) return request;
 
   const urls = new Set<string>();
   for (const m of request.messages) for (const p of m.content) if (isUrlFile(p)) urls.add(p.source.url);
 
+  const limit = opts.maxTotalBytes != null && opts.maxTotalBytes > 0 ? opts.maxTotalBytes : Infinity;
   const fetched = new Map<string, { data: string; mediaType: string }>();
-  for (const url of urls) fetched.set(url, await download(url, transport, opts));
+  let totalBytes = 0;
+  for (const url of urls) {
+    const got = await download(url, transport, opts);
+    // base64 is 4/3 of the bytes it encodes.
+    totalBytes += Math.floor((got.data.length * 3) / 4);
+    if (totalBytes > limit) {
+      throw new FormatConversionError(
+        `cannot inline the URL attachments: together they exceed the ${limit}-byte limit configured for this service`,
+      );
+    }
+    fetched.set(url, got);
+  }
 
   const messages: Message[] = request.messages.map((m) => ({
     ...m,

@@ -28,6 +28,51 @@ import type { ProgressRecorder } from "../observability/progressRecorder";
 /** How deep nested Micro Agents may reference one another before we stop. */
 const MAX_AGENT_DEPTH = 8;
 
+/**
+ * One OCR upstream call may carry at most this many images, and this many bytes
+ * of image data.
+ *
+ * A stage request is rendered and serialized into a fresh wire body, and that
+ * body is a complete second copy of the batch's base64. Sending every image in
+ * a request as one call therefore makes the peak scale with the whole request
+ * even though each image is transcribed independently -- the largest avoidable
+ * allocation on the image path. Batching bounds the peak to one batch's worth,
+ * and keeps a request under a provider's own per-request image cap.
+ *
+ * Both are deliberately generous: an ordinary request (a handful of images)
+ * still makes exactly one call, so nothing changes for it.
+ */
+export const OCR_IMAGES_PER_CALL = 32;
+export const OCR_BYTES_PER_CALL = 8 * 1024 * 1024;
+
+/** The image's contribution to a wire body: base64 characters, or a URL. */
+function imageApproxBytes(img: ImagePart): number {
+  return img.source.kind === "base64" ? img.source.data.length : img.source.url.length;
+}
+
+/** Split OCR work into bounded batches. An oversized single image is its own batch. */
+export function batchImages<T extends { image: ImagePart }>(
+  items: T[],
+  maxCount: number = OCR_IMAGES_PER_CALL,
+  maxBytes: number = OCR_BYTES_PER_CALL,
+): T[][] {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let bytes = 0;
+  for (const item of items) {
+    const size = imageApproxBytes(item.image);
+    if (current.length > 0 && (current.length >= maxCount || bytes + size > maxBytes)) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(item);
+    bytes += size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
 /** Resolves a saved service name to a runnable executor (Model Service or nested agent). */
 export type ResolveResult =
   | { ok: true; executor: ModelService; isAgent: boolean }
@@ -103,6 +148,9 @@ export class MicroAgent extends ModelService {
     const agent = this.agent;
     const stack = opts.stack ?? [];
     const prog = opts.progress ?? null;
+    // A URL-attachment budget set on this agent bounds each call it makes; an
+    // enclosing agent's budget is inherited when this one sets none.
+    const attachmentLimit = this.agent.maxAttachmentBytes ?? opts.maxAttachmentBytes;
     prog?.record("agent", "agent.init", `micro agent initialized: ${agent.stages.length} stage(s)`, { stages: agent.stages.map((s) => s.name) });
     const byName = new Map(agent.stages.map((s, i) => [s.name, i]));
     const outputs = new Map<string, string>();
@@ -111,6 +159,13 @@ export class MicroAgent extends ModelService {
     const calls: ServiceCall[] = [];
     let usage: Usage = ZERO_USAGE;
     let lastValue: InvokeValue | null = null;
+    // The full rendered wire body of the LAST stage only. A stage's body is a
+    // complete copy of the conversation -- for an image request, another copy of
+    // every base64 image -- and holding one per stage is what turns a single
+    // request into N copies in memory. Nothing downstream reads a stage's body
+    // except the final log line, and each stage already keeps a size-bounded
+    // copy of its own for the attempt log (see serviceCall.ts).
+    let lastUpstreamRequest: Record<string, unknown> = {};
     let terminal = agent.stages[0]?.name ?? "";
     let returnStage: string | undefined = agent.output;
 
@@ -118,9 +173,14 @@ export class MicroAgent extends ModelService {
     const errorInv = (message: string): Invocation => fail({ ok: false, status: 0, kind: "error", message });
     const commit = (name: string, value: InvokeValue): void => {
       outputs.set(name, textOf(value.response.content));
-      values.set(name, value);
+      // Store only what a later stage or the final response needs (the response
+      // and the small identity fields) and drop the full wire body, so it is
+      // collectible as soon as the next stage begins.
+      const stored: InvokeValue = { ...value, upstreamRequest: {} };
+      values.set(name, stored);
       responses.set(name, value.response);
-      lastValue = value;
+      lastUpstreamRequest = value.upstreamRequest;
+      lastValue = stored;
       usage = addUsage(usage, value.response.usage);
     };
 
@@ -175,24 +235,30 @@ export class MicroAgent extends ModelService {
 
           const byHash = new Map(known);
           if (pending.length > 0) {
-            const ocrReq = buildOcrRequest(request, pending.map((p) => p.image), ocr);
-            const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted);
-            calls.push(call);
-            if (!result.ok) {
-              prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
-              return fail(result);
+            // One call per bounded batch, not one for every image in the request
+            // (see OCR_IMAGES_PER_CALL): a smaller wire body per call is the
+            // whole point, and positions are tracked per batch so results still
+            // land on the right images.
+            const stored: Array<{ hash: string; description: string }> = [];
+            for (const batch of batchImages(pending)) {
+              const ocrReq = buildOcrRequest(request, batch.map((p) => p.image), ocr);
+              const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted, attachmentLimit);
+              calls.push(call);
+              if (!result.ok) {
+                prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
+                return fail(result);
+              }
+              usage = addUsage(usage, result.value.response.usage);
+              const fresh = parseOcrResults(result.value.response.text(), batch.length);
+              fresh.forEach((description, i) => {
+                byHash.set(batch[i].hash, description);
+                // Only what the model actually produced is remembered: caching
+                // an empty result would make one bad response that image's
+                // permanent description.
+                if (description.trim() !== "") stored.push({ hash: batch[i].hash, description });
+              });
             }
-            usage = addUsage(usage, result.value.response.usage);
-            const fresh = parseOcrResults(result.value.response.text(), pending.length);
-            fresh.forEach((description, i) => byHash.set(pending[i].hash, description));
-            // Only what the model actually produced is remembered: caching an
-            // empty result would make one bad response that image's permanent
-            // description.
-            cache?.store(
-              pending
-                .map((p, i) => ({ hash: p.hash, description: fresh[i] ?? "" }))
-                .filter((e) => e.description.trim() !== ""),
-            );
+            cache?.store(stored);
           }
           // Re-stamp the hits only once the pre-pass actually succeeded, so a
           // failed run does not extend the life of entries it never used.
@@ -308,7 +374,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.nested", `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
               const started = Date.now();
               const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: this.stageRequestPayload(stageReq), calls: [] };
-              const sub = await r.executor.invoke(stageReq, childOverrides, { ...opts, stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog });
+              const sub = await r.executor.invoke(stageReq, childOverrides, { ...opts, stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog, maxAttachmentBytes: attachmentLimit });
               wrapper.calls = sub.attemptPath as ServiceCall[];
               wrapper.latencyMs = Date.now() - started;
               calls.push(wrapper);
@@ -326,7 +392,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -338,7 +404,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -368,7 +434,9 @@ export class MicroAgent extends ModelService {
       }
       // Report the agent's total usage across all stages on the returned response.
       const response = buildResponse(chosen.family, { ...chosen.response.data(), usage });
-      const value: InvokeValue = { ...chosen, response };
+      // Carry the last stage's wire body for the request log; the per-stage
+      // bodies were deliberately released above.
+      const value: InvokeValue = { ...chosen, upstreamRequest: lastUpstreamRequest, response };
       prog?.record("agent", "agent.complete", `micro agent completed: ${calls.length} call(s), ${usage.totalTokens} tokens`, { calls: calls.length, totalTokens: usage.totalTokens });
       return { result: { ok: true, value }, attemptPath: calls, attempts: countAttempts(calls) };
     } catch (e) {
@@ -388,8 +456,9 @@ export class MicroAgent extends ModelService {
     timeoutMs: number | undefined,
     prog: ProgressRecorder | null = null,
     hosted?: InvokeOptions["hosted"],
+    maxAttachmentBytes?: number,
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted }, () => this.resolveLogMaxChars());
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {

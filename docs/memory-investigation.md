@@ -130,3 +130,42 @@ its external dependencies resolve).
 
 Build two bundles and point `BUNDLE` at each in turn to compare; run at least
 three repetitions, because a single pair cannot resolve anything under ~20%.
+
+## Update: image traffic
+
+The sweep above held the traffic text-dominated. Images change the numbers,
+because an image request body is mostly base64 and the wire formats
+re-materialize those bytes several times.
+
+Measured over **real HTTP** (`app.listen` + `fetch`, not `app.inject` -- the
+light-my-request harness retains request payloads and reads as a leak that the
+server does not have), one in-flight request carrying a 4 MB image peaks around
+**55 MB of RSS**, and 20 concurrent ones take the process to **~1.1 GB**. The
+floor is structural: the raw body, the canonical `source.data`, the rendered
+`data:...;base64,...` URL and the `JSON.stringify` wire body are four copies of
+the same bytes; the micro agent used to add one more per stage. At the 25 MB
+body limit that is ~250-300 MB per in-flight request, so a 4 GB container is
+exhausted by roughly **15 concurrent large-image requests**.
+
+Fixed since:
+
+- **Container-sized heap** (`util/heap.ts`): Node derives its default ceiling
+  from the host, and managed node eggs often pin a small one. On boot the server
+  reads the cgroup limit and re-execs with `--max-old-space-size` at that size
+  (`NODE_HEAP_PERCENT`, default 100).
+- **OCR batching** (`microAgent.ts`): the pre-pass sends bounded batches (32
+  images / 8 MiB) instead of every image in one call, so the peak is one batch's
+  wire body rather than the whole request's.
+- **Per-stage body retention** (`microAgent.ts`): a stage's full rendered body
+  is kept only for the last stage, not every one.
+- **Early release** (`transport/proxyController.ts`): the rendered upstream
+  body is captured to its bounded log string and dropped before the response is
+  sent.
+- **Per-service attachment budget** (`execution/fileFetch.ts` plus service
+  definitions): the proxy sets no aggregate limit of its own -- a relay should
+  not decide what a user may attach -- but a Model Service / Micro Agent can set
+  `maxAttachmentBytes` for the URL attachments it inlines.
+
+Still on the table, as a larger change: streaming the upstream request body
+instead of `JSON.stringify`-ing it whole would remove one more full copy per
+attempt, and is the remaining lever that touches every request.

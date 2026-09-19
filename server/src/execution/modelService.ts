@@ -52,6 +52,8 @@ export interface InvokeOptions {
   stack?: string[];
   /** Progress recorder for emitting real-time events (null = no tracking). */
   progress?: ProgressRecorder | null;
+  /** Aggregate URL-attachment budget (bytes) inherited from an enclosing agent. */
+  maxAttachmentBytes?: number;
 }
 
 /**
@@ -95,7 +97,7 @@ export class ModelService {
     merged: Request,
     family: Family,
     prog: ProgressRecorder | null,
-    opts: { timeoutMs: number; signal?: AbortSignal },
+    opts: { timeoutMs: number; signal?: AbortSignal; maxTotalBytes?: number },
   ): Promise<Request> {
     if (!needsUrlFileInlining(merged, family)) return merged;
     prog?.record("llm", "llm.files", `downloading URL attachment(s) to inline for ${family}`, { family });
@@ -117,7 +119,11 @@ export class ModelService {
       // A URL attachment this family cannot carry is downloaded and inlined
       // first (see fileFetch). Resolved per step, because the very same request
       // needs no pre-pass at all on a family that takes URLs natively.
-      const ready = await this.inlineFiles(merged, t.family, prog, { timeoutMs, signal: opts.signal });
+      const ready = await this.inlineFiles(merged, t.family, prog, {
+        timeoutMs,
+        signal: opts.signal,
+        maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
+      });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
@@ -210,7 +216,11 @@ export class ModelService {
       const t = res.target;
       const merged = this.merge(request, step, overrides);
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
-      const ready = await this.inlineFiles(merged, t.family, prog, { timeoutMs, signal: opts.signal });
+      const ready = await this.inlineFiles(merged, t.family, prog, {
+        timeoutMs,
+        signal: opts.signal,
+        maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
+      });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
         upstreamModel: t.upstreamModel,
