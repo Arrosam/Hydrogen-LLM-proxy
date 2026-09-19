@@ -10,11 +10,19 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, method: string, body?: unknown): Promise<T> {
+  // Every mutating call carries an explicit JSON body. A POST/PUT/PATCH sent
+  // with no body and no Content-Type is answered with 415 Unsupported Media Type
+  // by some fronting proxies, and a body sent without a Content-Type is rejected
+  // by the server's own parser; "{}" makes the request well-formed either way,
+  // and the endpoints that take no input (logout, restart, reveal-secret) simply
+  // ignore it.
+  const mutating = method === "POST" || method === "PUT" || method === "PATCH";
+  const payload: unknown = body !== undefined ? body : mutating ? {} : undefined;
   const res = await fetch(`/admin/api${path}`, {
     method,
     credentials: "same-origin",
-    headers: body ? { "content-type": "application/json" } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    headers: payload !== undefined ? { "content-type": "application/json" } : {},
+    body: payload !== undefined ? JSON.stringify(payload) : undefined,
   });
   const text = await res.text();
   let data: unknown = undefined;
