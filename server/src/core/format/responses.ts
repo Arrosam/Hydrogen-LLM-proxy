@@ -569,6 +569,31 @@ export class OpenAIResponsesResponse extends Response {
       });
     }
 
+    // A provider-executed round trip is ONE item on this wire, not a call block
+    // plus a result block: `web_search_call` carries the action and the sources
+    // it used, and the API runs it — there is nothing for the client to answer.
+    // Only the entry URLs fit: this wire's source shape is `{ type: "url", url }`.
+    for (const p of this.content) {
+      if (p.type !== "server_tool_result") continue;
+      const queries = (p.input as { queries?: unknown } | null)?.queries;
+      const query = (p.input as { query?: unknown } | null)?.query;
+      const sources = p.content
+        .map(entry => (entry !== null && typeof entry === "object" ? (entry as { url?: unknown }).url : undefined))
+        .filter((url): url is string => typeof url === "string" && url.length > 0)
+        .map(url => ({ type: "url", url }));
+      output.push({
+        id: p.id,
+        type: "web_search_call",
+        status: p.errorCode !== undefined ? "failed" : "completed",
+        action: {
+          type: "search",
+          ...(Array.isArray(queries) && queries.every(q => typeof q === "string") ? { queries } : {}),
+          ...(typeof query === "string" ? { query } : {}),
+          ...(sources.length ? { sources } : {}),
+        },
+      });
+    }
+
     const text = textOf(this.content);
     if (text) {
       output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
@@ -952,6 +977,35 @@ export class OpenAIResponsesResponse extends Response {
             tc.args += ev.delta;
             yield frame("response.function_call_arguments.delta", { item_id: tc.itemId, output_index: tc.index, delta: ev.delta });
           }
+          break;
+        }
+        // A provider-executed round trip is ONE item on this wire. The call and
+        // its result arrive together, so the item is emitted whole once the
+        // result is known — there is no client-side execution to open first.
+        case "server_tool_result": {
+          yield* closeReasoning();
+          yield* closeMessage();
+          const queries = (ev as { input?: { queries?: unknown } }).input?.queries;
+          const query = (ev as { input?: { query?: unknown } }).input?.query;
+          const sources = ev.content
+            .map(entry => (entry !== null && typeof entry === "object" ? (entry as { url?: unknown }).url : undefined))
+            .filter((url): url is string => typeof url === "string" && url.length > 0)
+            .map(url => ({ type: "url", url }));
+          const item = {
+            id: ev.id,
+            type: "web_search_call",
+            status: ev.errorCode !== undefined ? "failed" : "completed",
+            action: {
+              type: "search",
+              ...(Array.isArray(queries) && queries.every(q => typeof q === "string") ? { queries } : {}),
+              ...(typeof query === "string" ? { query } : {}),
+              ...(sources.length ? { sources } : {}),
+            },
+          };
+          const index = outputIndex++;
+          yield frame("response.output_item.added", { output_index: index, item: { ...item, status: "in_progress" } });
+          yield frame("response.output_item.done", { output_index: index, item });
+          output.push(item);
           break;
         }
         case "tool_stop": {

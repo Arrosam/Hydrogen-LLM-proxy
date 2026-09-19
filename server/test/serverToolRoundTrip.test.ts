@@ -98,11 +98,12 @@ describe("server-side tool round trip over HTTP", () => {
     const types = (body.content as Record<string, unknown>[]).map(b => b.type);
     expect(types).toEqual(["server_tool_use", "web_search_result", "text"]);
 
-    expect(body.content[0]).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] } });
+    expect(body.content[0]).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] }, caller: { type: "direct" } });
     // Entries pass through verbatim; only the enclosing block carries the envelope.
     expect(body.content[1]).toEqual({
       type: "web_search_result",
       tool_use_id: "toolu_1",
+      caller: { type: "direct" },
       content: [{ url: "https://example.com/a", title: "A", snippet: "first" }, { url: "https://example.com/b", title: "B", snippet: "second" }],
     });
     expect(body.content[2]).toEqual({ type: "text", text: "answer" });
@@ -128,11 +129,49 @@ describe("server-side tool round trip over HTTP", () => {
     expect(adapter).not.toHaveBeenCalled();
   });
 
+  // The failure this pins: prepending the round trip to the final response
+  // returned the call, the result and only the LAST round's answer, silently
+  // dropping what the first round said before it reached for the tool.
+  it("keeps every round in order, including the text before the call", async () => {
+    outputs.push(
+      [{ type: "text", text: "Let me search." }, searchCall],
+      [{ type: "text", text: "Here is the answer." }],
+    );
+    const response = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]) });
+    const content = response.json().content as Record<string, unknown>[];
+    expect(content.map(b => b.type)).toEqual(["text", "server_tool_use", "web_search_result", "text"]);
+    expect(content[0]).toEqual({ type: "text", text: "Let me search." });
+    expect(content[3]).toEqual({ type: "text", text: "Here is the answer." });
+  });
+
+  it("hands a Responses client one web_search_call carrying the source urls", async () => {
+    outputs.push([searchCall], [{ type: "text", text: "Here is the answer." }]);
+    const response = await app.inject({ method: "POST", url: "/v1/responses", headers: headers(), payload: { model: "svc", input: "q", tools: [{ type: "web_search" }] } });
+    expect(response.statusCode).toBe(200);
+    // The declaration is what a Responses client uses for a provider-executed
+    // tool, so it must be matched the same way the Anthropic spelling is.
+    const body = response.json();
+    expect(body.output.map((item: Record<string, unknown>) => item.type)).toEqual(["web_search_call", "message"]);
+    expect(body.output[0]).toMatchObject({
+      type: "web_search_call",
+      status: "completed",
+      action: {
+        type: "search",
+        sources: [{ type: "url", url: "https://example.com/a" }, { type: "url", url: "https://example.com/b" }],
+      },
+    });
+  });
+
   it("flags a broken adapter result instead of reporting an empty search", async () => {
     adapter.mockResolvedValueOnce({ status: 200, headers: {}, body: Readable.from(["{}"]) });
     outputs.push([searchCall], [{ type: "text", text: "answer" }]);
     const response = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]) });
     const body = response.json();
-    expect(body.content[1]).toMatchObject({ type: "web_search_result", content: [], is_error: true });
+    // The protocol models failure as its own content object, so a broken
+    // adapter can never look like a search that returned nothing.
+    expect(body.content[1]).toMatchObject({
+      type: "web_search_result",
+      content: { type: "web_search_tool_result_error", error_code: "unavailable" },
+    });
   });
 });

@@ -147,16 +147,20 @@ function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPa
       case "web_search_tool_result":
       case "server_tool_result": {
         const id = String(b.tool_use_id ?? "");
+        // This wire reports failure as its own object rather than an entry
+        // array, so the code survives a replay as a code, not as empty results.
+        const error = b.content !== null && typeof b.content === "object" && !Array.isArray(b.content)
+          ? (b.content as { error_code?: unknown }).error_code : undefined;
         const content = Array.isArray(b.content) ? b.content : [];
         const use = pending.get(id);
         if (use) {
           use.blockType = String(b.type);
           use.content = content;
-          use.isError = b.is_error === true ? true : undefined;
+          use.errorCode = typeof error === "string" ? error : undefined;
           // The result half belongs to the assistant turn that made the call.
           if (!parts.includes(use)) parts.push(use);
         } else {
-          parts.push({ type: "server_tool_result", family: "anthropic", id: id || genId("srv"), name: "server_tool", input: {}, blockType: String(b.type), content, ...(b.is_error === true ? { isError: true } : {}) });
+          parts.push({ type: "server_tool_result", family: "anthropic", id: id || genId("srvtoolu"), name: "server_tool", input: {}, blockType: String(b.type), content, ...(typeof error === "string" ? { errorCode: error } : {}) });
         }
         break;
       }
@@ -562,10 +566,21 @@ export class AnthropicResponse extends Response {
       else if (p.type === "tool_use") content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
       else if (p.type === "server_tool_result") {
         // Two blocks, in the order this wire defines: the call the provider made,
-        // then its result. `blockType` comes from the tool's own contract, so
-        // this renderer carries any result shape an adapter and operator agree on.
-        content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {} });
-        content.push({ type: p.blockType, tool_use_id: p.id, content: p.content, ...(p.isError ? { is_error: true } : {}) });
+        // then its result in the SAME assistant turn, paired by tool_use_id.
+        // `blockType` comes from the tool's own contract, so this renderer
+        // carries any result shape an adapter and operator agree on.
+        content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } });
+        // This wire models failure as its own content object, not as an array:
+        // an error can therefore never be mistaken for an empty result set. The
+        // code comes from the adapter when it named one.
+        content.push({
+          type: p.blockType,
+          tool_use_id: p.id,
+          caller: { type: "direct" },
+          content: p.errorCode !== undefined
+            ? { type: "web_search_tool_result_error", error_code: p.errorCode }
+            : p.content,
+        });
       }
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
@@ -851,7 +866,7 @@ export class AnthropicResponse extends Response {
           if (textOpen) { yield frame("content_block_stop", { index: textIndex }); textOpen = false; }
           const idx = nextIndex++;
           serverToolIndexes.set(ev.id, idx);
-          yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {} } });
+          yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {}, caller: { type: "direct" } } });
           break;
         }
         case "server_tool_result": {
@@ -859,7 +874,12 @@ export class AnthropicResponse extends Response {
           if (serverToolIndexes.has(ev.id)) yield frame("content_block_stop", { index: idx });
           serverToolIndexes.delete(ev.id);
           const resultIndex = nextIndex++;
-          yield frame("content_block_start", { index: resultIndex, content_block: { type: ev.blockType, tool_use_id: ev.id, content: ev.content, ...(ev.isError ? { is_error: true } : {}) } });
+          yield frame("content_block_start", { index: resultIndex, content_block: {
+            type: ev.blockType,
+            tool_use_id: ev.id,
+            caller: { type: "direct" },
+            content: ev.errorCode !== undefined ? { type: "web_search_tool_result_error", error_code: ev.errorCode } : ev.content,
+          } });
           yield frame("content_block_stop", { index: resultIndex });
           break;
         }

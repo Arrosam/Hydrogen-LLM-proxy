@@ -9,7 +9,7 @@ import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
-import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts } from "../execution/serverTools";
+import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { ProgressRecorder } from "../observability/progressRecorder";
@@ -242,7 +242,11 @@ export class ResponsesController {
       let output = initial;
       let served: InvokeValue | undefined;
       const envelope = { ...initial }; delete envelope.output; delete envelope.status; delete envelope.error; delete envelope.incomplete_details;
-      const live = flags.stream && !bound.length && family === "openai_responses"
+      // A declared server tool rules out the live path: it streams the model's
+      // turn straight through, which is exactly the turn the round trip has to be
+      // synthesized into. Those requests take the buffered path and fabricate
+      // their stream, so the client receives the same blocks either way.
+      const live = flags.stream && !bound.length && !serverTools.size && family === "openai_responses"
         ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition), serviceThinkingDelimiters(definition)) : undefined;
       try {
         abort.signal.throwIfAborted();
@@ -264,15 +268,19 @@ export class ResponsesController {
         if (serverTools.size) {
           const synthesisFamily = family === "openai_responses" ? "openai_responses" as const : family === "anthropic" ? "anthropic" as const : undefined;
           const parts = synthesisFamily ? serverToolParts(collectServerToolCalls(run.history, serverTools), synthesisFamily) : [];
-          // A model that read "search the web" may answer with the DECLARED name,
-          // which it was never offered: the declaration is replaced by the bound
-          // tool precisely because the client's form carries no parameters. Such a
-          // call reaches no adapter, so returning it would ask the client to run a
-          // tool it knows we run — and the round trip above already reports what
-          // actually happened. Drop it rather than pass the confusion on.
-          const declared = new Set([...serverTools.values()].map(entry => entry.declaration.name));
-          const content = parts.length ? final.content.filter(part => part.type !== "tool_use" || !declared.has(part.name)) : final.content;
-          if (parts.length) final = buildResponse(family, { ...final.data(), content: [...parts, ...content] });
+          if (parts.length) {
+            // The sequence comes from the history so every round survives, in
+            // this wire's order: a text block, the call, its result, the answer.
+            // A model that read "search the web" may also answer with the
+            // DECLARED name it was never offered (the declaration is replaced by
+            // the bound tool, whose form carries the parameters). Such a call
+            // reaches no adapter, so it is dropped rather than handed back as
+            // something for the client to run.
+            const declared = new Set([...serverTools.values()].map(entry => entry.declaration.name));
+            const content = serverToolResponseContent(run.history, parts, prefix.length)
+              .filter(part => part.type !== "tool_use" || !declared.has(part.name));
+            if (content.length) final = buildResponse(family, { ...final.data(), content });
+          }
         }
         const response = final.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
         const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };

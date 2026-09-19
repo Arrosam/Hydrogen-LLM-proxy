@@ -172,12 +172,44 @@ Anthropic 客户端声明 `web_search_20250305` 后，会收到：
 
 规则：
 
-- 一次请求里的**每一轮**工具往返都会返回，不只最后一轮。
+- 一次请求里的**每一轮**工具往返都会返回，不只最后一轮；顺序为「文字 → 调用 → 结果 → 最终答案」，与上游各轮一致，同一 assistant 轮内。
 - 声明里的名称与绑定的工具名可以不同（客户端声明 `web_search`，你绑定 `search`），Hydrogen 按契约里的 `name` 匹配。
-- `resultPath` 选不到数组时，结果块带 `is_error: true` 且内容为空 —— 这是"适配器出错"，不会被伪装成"搜索无结果"。
 - 模型偶尔会调用**声明名**而不是真实工具名。这种调用不会到达任何适配器，Hydrogen 会丢弃它，避免让客户端去执行一个本该由服务端执行的工具。
 - 客户端把收到的 `server_tool_use` / 结果块**回传**时会被保留，续接不会丢内容。
 - 暴露范围仍由绑定决定：只有绑定了该工具的 Model Service / Micro Agent 才有这个能力。
+- Responses 客户端声明 `{ "type": "web_search" }` 时，收到的是**单个 `web_search_call` item**（该协议的原生形态），来源 URL 放在 `action.sources`。
+
+## 错误由适配器声明
+
+失败**不是**用空数组表达，而是协议自己的错误对象。适配器通过同一个 `resultPath` 决定这件事：
+
+- 返回**数组** → 正常结果条目。
+- 返回**错误对象** → 采用你给的原因码：
+
+```json
+{ "results": { "type": "web_search_tool_result_error", "error_code": "max_uses_exceeded" } }
+```
+
+可用原因码（客户端协议定义的闭集，不能自造）：
+
+| error_code | 含义 |
+| --- | --- |
+| `invalid_tool_input` | 参数不合法 |
+| `unavailable` | 服务暂时不可用 |
+| `max_uses_exceeded` | 超出调用次数上限 |
+| `too_many_requests` | 被限流 |
+| `query_too_long` | 查询过长 |
+| `request_too_large` | 请求过大 |
+
+**适配器没有声明原因时，Hydrogen 才填 `unavailable`** —— 包括指针选不到数组、返回非数组、JSON 无法解析、调用超出预算这些情况。原因码写进请求日志，便于定位到底是配置错还是上游故障。
+
+绝不会有"失败被当成搜索无结果"的情况：Anthropic 线上失败是 `content` 位置的独立对象，Responses 线上是 `status: "failed"`。
+
+## 已知限制
+
+- **`encrypted_content` 无法产生。** Anthropic 的结果条目带一个不透明令牌，供模型复用上次检索而无需重搜；它是 Anthropic 生成的，Hydrogen 自己执行搜索时造不出该值。不读该字段的客户端（含 DeepSeek Harness 的搜索插件）不受影响。
+- **`citations` 不发送。** 它要求"模型实际引用的原文与字符区间"，适配器提供不了，因此不伪造；表现为客户端拿到标题与链接、没有摘要片段。
+- **服务端循环不会 `pause_turn`。** Hydrogen 在内部跑完整个工具循环；轮次上限到达时按失败处理，客户端没有"原样重发以续跑"的手段。
 
 命名阶段引用已绑定工具的服务时，会先完成该阶段的工具循环，再返回阶段输出；各阶段共享顶层调用预算。Micro Agent 自己绑定的工具作用于其输出轮次。已有阶段缓冲和路由规则仍生效。
 

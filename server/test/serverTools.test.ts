@@ -3,7 +3,7 @@ import { AnthropicRequest, AnthropicResponse, buildRequest, buildResponse } from
 import type { RenderTarget } from "../src/core/ir/request";
 import type { Message } from "../src/core/ir/content";
 import { fabricateStream } from "../src/core/ir/stream";
-import { HttpToolSchema, serverToolEntries, type HttpTool } from "../src/execution/toolHttp";
+import { HttpToolSchema, serverToolOutcome, type HttpTool } from "../src/execution/toolHttp";
 import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts, serverToolDeclaration } from "../src/execution/serverTools";
 
 const target = (extra: Partial<RenderTarget> = {}): RenderTarget => ({ upstreamModel: "up", ...extra });
@@ -69,15 +69,26 @@ describe("server tool declarations", () => {
 
 describe("adapter result selection", () => {
   it("selects the declared entry array", () => {
-    expect(serverToolEntries({ results: [{ url: "u" }] }, "/results")).toEqual([{ url: "u" }]);
+    expect(serverToolOutcome({ results: [{ url: "u" }] }, "/results")).toEqual({ content: [{ url: "u" }] });
   });
   it("takes the whole body when the pointer is empty", () => {
-    expect(serverToolEntries([{ url: "u" }], "")).toEqual([{ url: "u" }]);
+    expect(serverToolOutcome([{ url: "u" }], "")).toEqual({ content: [{ url: "u" }] });
   });
-  it("reports a pointer that selects a non-array instead of flattening it", () => {
-    expect(serverToolEntries({ results: { url: "u" } }, "/results")).toBeNull();
-    expect(serverToolEntries({ other: [] }, "/results")).toBeNull();
-    expect(serverToolEntries("not json", "")).toBeNull();
+  it("falls back to unavailable when the pointer selects something unusable", () => {
+    expect(serverToolOutcome({ results: { url: "u" } }, "/results")).toEqual({ content: [], errorCode: "unavailable" });
+    expect(serverToolOutcome({ other: [] }, "/results")).toEqual({ content: [], errorCode: "unavailable" });
+    expect(serverToolOutcome("not json", "")).toEqual({ content: [], errorCode: "unavailable" });
+  });
+
+  // The adapter owns the failure vocabulary: it says WHY, within the codes the
+  // client protocol already understands.
+  it("takes the error code the adapter chose", () => {
+    expect(serverToolOutcome({ results: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } }, "/results"))
+      .toEqual({ content: [], errorCode: "max_uses_exceeded" });
+  });
+  it("substitutes unavailable for a code the protocol does not define", () => {
+    expect(serverToolOutcome({ results: { error_code: "my_own_reason" } }, "/results"))
+      .toEqual({ content: [], errorCode: "unavailable" });
   });
 });
 
@@ -116,7 +127,7 @@ describe("round trip collection", () => {
     ];
     const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()]);
     const parts = serverToolParts(collectServerToolCalls(broken, matched), "anthropic");
-    expect(parts[0]!.isError).toBe(true);
+    expect(parts[0]!.errorCode).toBe("unavailable");
     expect(parts[0]!.content).toEqual([]);
   });
 });
@@ -135,9 +146,9 @@ describe("Anthropic server tool rendering", () => {
     const body = response.renderSelf("svc");
     const content = body.content as Record<string, unknown>[];
     expect(content.map(b => b.type)).toEqual(["server_tool_use", "web_search_result", "text"]);
-    expect(content[0]).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] } });
+    expect(content[0]).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] }, caller: { type: "direct" } });
     // The adapter's entries pass through verbatim: no field is renamed, added or dropped.
-    expect(content[1]).toEqual({ type: "web_search_result", tool_use_id: "toolu_1", content: [{ url: "https://e.com", title: "E", snippet: "s" }] });
+    expect(content[1]).toEqual({ type: "web_search_result", tool_use_id: "toolu_1", caller: { type: "direct" }, content: [{ url: "https://e.com", title: "E", snippet: "s" }] });
     expect(content[2]).toEqual({ type: "text", text: "answer" });
   });
 
@@ -153,13 +164,24 @@ describe("Anthropic server tool rendering", () => {
     const starts = parsed.filter(p => p.event === "content_block_start").map(p => p.data.content_block.type);
     expect(starts).toEqual(["server_tool_use", "web_search_result", "text"]);
     const call = parsed.find(p => p.event === "content_block_start" && p.data.content_block.type === "server_tool_use")!;
-    expect(call.data.content_block).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] } });
+    expect(call.data.content_block).toEqual({ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["tokyo"] }, caller: { type: "direct" } });
     const result = parsed.find(p => p.event === "content_block_start" && p.data.content_block.type === "web_search_result")!;
-    expect(result.data.content_block).toEqual({ type: "web_search_result", tool_use_id: "toolu_1", content: [{ url: "https://e.com", title: "E", snippet: "s" }] });
+    expect(result.data.content_block).toEqual({ type: "web_search_result", tool_use_id: "toolu_1", caller: { type: "direct" }, content: [{ url: "https://e.com", title: "E", snippet: "s" }] });
     // Every opened block must be closed, or a strict client drops the message.
     const opened = parsed.filter(p => p.event === "content_block_start").length;
     const closed = parsed.filter(p => p.event === "content_block_stop").length;
     expect(closed).toBe(opened);
+  });
+
+  it("renders one web_search_call item on the Responses wire", () => {
+    const response = buildResponse("openai_responses", { id: "resp_1", model: "svc", created: 0, content: [...parts, { type: "text", text: "answer" }], stopReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
+    const output = response.renderSelf("svc").output as Record<string, unknown>[];
+    expect(output.map(item => item.type)).toEqual(["web_search_call", "message"]);
+    expect(output[0]).toMatchObject({
+      type: "web_search_call",
+      status: "completed",
+      action: { type: "search", sources: [{ type: "url", url: "https://e.com" }] },
+    });
   });
 
   it("honours a contract that declares another result block type", () => {
@@ -174,19 +196,39 @@ describe("Anthropic server tool rendering", () => {
     expect((body.content as Record<string, unknown>[])[1]!.type).toBe("web_fetch_result");
   });
 
-  it("keeps the round trip when a client replays it back", () => {
-    const request = parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]);
+  // Anthropic's own shape: the result follows the call in the SAME assistant
+  // turn, so a client replaying what it received sends one message, not two.
+  it("keeps the round trip when a client replays the same-turn form back", () => {
     const replayed = AnthropicRequest.parse({
       model: "svc", max_tokens: 100,
       messages: [
-        { role: "assistant", content: [{ type: "server_tool_use", id: "toolu_1", name: "web_search", input: { queries: ["a"] } }] },
-        { role: "user", content: [{ type: "web_search_tool_result", tool_use_id: "toolu_1", content: [{ type: "web_search_result", url: "https://e.com" }] }] },
+        { role: "assistant", content: [
+          { type: "text", text: "Let me search." },
+          { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { queries: ["a"] } },
+          { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", url: "https://e.com" }] },
+        ] },
         { role: "user", content: "continue" },
       ],
     });
     const parts = replayed.messages[0]!.content.filter(p => p.type === "server_tool_result");
     expect(parts).toHaveLength(1);
+    expect((parts[0] as { id: string }).id).toBe("srvtoolu_1");
     expect((parts[0] as { blockType: string }).blockType).toBe("web_search_tool_result");
+    expect((parts[0] as { content: unknown[] }).content).toEqual([{ type: "web_search_result", url: "https://e.com" }]);
+    // The text that preceded the call is not lost either.
+    expect(replayed.messages[0]!.content.some(p => p.type === "text" && p.text === "Let me search.")).toBe(true);
+  });
+
+  it("still accepts the split form, where a result arrives in its own message", () => {
+    const replayed = AnthropicRequest.parse({
+      model: "svc", max_tokens: 100,
+      messages: [
+        { role: "assistant", content: [{ type: "server_tool_use", id: "srvtoolu_2", name: "web_search", input: {} }] },
+        { role: "user", content: [{ type: "web_search_tool_result", tool_use_id: "srvtoolu_2", content: [{ type: "web_search_result", url: "https://e.com" }] }] },
+      ],
+    });
+    const parts = replayed.messages[0]!.content.filter(p => p.type === "server_tool_result");
+    expect(parts).toHaveLength(1);
     expect((parts[0] as { content: unknown[] }).content).toEqual([{ type: "web_search_result", url: "https://e.com" }]);
   });
 });

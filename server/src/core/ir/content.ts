@@ -106,8 +106,16 @@ export interface ServerToolResultPart {
   blockType: string;
   /** The adapter's selected result entries, verbatim. */
   content: unknown[];
-  /** The adapter, schema, or call budget failed; `content` is empty. */
-  isError?: boolean;
+  /**
+   * Wire error code when the call failed, e.g. `unavailable`. The protocol
+   * renders its own error object from this rather than an array of entries, so
+   * "the search failed" can never be read as "the search found nothing".
+   *
+   * An ADAPTER may choose the code by returning one; only when it does not is
+   * `unavailable` substituted. The vocabulary is the client protocol's, so the
+   * adapter's choice is limited to it — see docs/server-tools.zh.md.
+   */
+  errorCode?: string;
 }
 
 export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart | ServerToolResultPart;

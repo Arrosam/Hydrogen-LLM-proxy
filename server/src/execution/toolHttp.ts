@@ -56,14 +56,38 @@ export type ServerTool = NonNullable<HttpTool["serverTool"]>;
  * adapter fault, surfaced to the operator instead of being flattened into an
  * empty result list.
  */
-export function serverToolEntries(selected: unknown, pointer: string): unknown[] | null {
+export type ServerToolOutcome = { content: unknown[]; errorCode?: undefined } | { content: []; errorCode: string };
+
+/**
+ * The error codes the client protocol understands. An adapter may choose one of
+ * these; our own substitution for an unusable response uses `unavailable`.
+ */
+const SERVER_TOOL_ERROR_CODES = new Set(["invalid_tool_input", "unavailable", "max_uses_exceeded", "too_many_requests", "query_too_long", "request_too_large"]);
+
+/**
+ * What the adapter's response yielded at `resultPath`: the result entries, or a
+ * failure carrying the wire error code the ADAPTER chose.
+ *
+ * The adapter decides both halves through the one pointer it already controls —
+ * return an array of entries, or return the protocol's error object. Anything
+ * else (a non-array, a missing path, unparsable JSON) becomes `unavailable`,
+ * because it must never reach the client as "the search found nothing".
+ */
+export function serverToolOutcome(selected: unknown, pointer: string): ServerToolOutcome {
   let value: unknown;
   if (pointer === "") value = selected;
   else {
     try { value = selectToolResult(selected, pointer); }
-    catch { return null; }
+    catch { return { content: [], errorCode: "unavailable" }; }
   }
-  return Array.isArray(value) ? value : null;
+  if (Array.isArray(value)) return { content: value };
+  if (value !== null && typeof value === "object") {
+    const block = value as { error_code?: unknown };
+    // Pass the adapter's own code through when it is one the client already
+    // understands. An unknown code is never invented onto the wire.
+    if (typeof block.error_code === "string" && SERVER_TOOL_ERROR_CODES.has(block.error_code)) return { content: [], errorCode: block.error_code };
+  }
+  return { content: [], errorCode: "unavailable" };
 }
 
 export interface ToolCallContext {

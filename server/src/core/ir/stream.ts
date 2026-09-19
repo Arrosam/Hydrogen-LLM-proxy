@@ -51,7 +51,7 @@ export type StreamEvent =
   /** The result half of a provider-executed round trip. `blockType` is the
    * client protocol's result block type (web_search_result, ...); `content` is
    * the adapter's entries, opaque here. */
-  | { type: "server_tool_result"; id: string; name: string; blockType: string; content: unknown[]; isError?: boolean }
+  | { type: "server_tool_result"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string }
   /** A cumulative accounting snapshot, retained even if the next read throws. */
   | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -397,7 +397,7 @@ export async function* fabricateStream(
       // bookkeeping to open. Pace them so the two blocks never race.
       yield { type: "server_tool_start", id: p.id, name: p.name, input: p.input ?? {} };
       await pace(2);
-      yield { type: "server_tool_result", id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.isError ? { isError: true } : {}) };
+      yield { type: "server_tool_result", id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}) };
       await pace(2);
     }
   }

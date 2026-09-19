@@ -1,7 +1,7 @@
 import { genId } from "../util/ids";
-import type { Message, ServerToolResultPart, Tool } from "../core/ir/content";
+import type { ContentPart, Message, ServerToolResultPart, Tool } from "../core/ir/content";
 import type { HttpTool } from "./toolHttp";
-import { serverToolEntries } from "./toolHttp";
+import { serverToolOutcome } from "./toolHttp";
 
 /**
  * Provider-executed ("server-side") tool round trips, in a protocol-agnostic
@@ -22,13 +22,19 @@ export interface ServerToolDeclaration {
 }
 
 /**
- * The server-tool declaration behind a parsed tool, if it is one. Anthropic
- * spells these as a `type` with no `input_schema` (web_search_20250305, bash,
- * computer use, ...); the request parser keeps the raw declaration because a
- * client tool with the same name must NOT be treated as one.
+ * The server-tool declaration behind a parsed tool, if it is one.
+ *
+ * Both wires spell provider-executed tools as a `type` with no schema, and the
+ * request parsers keep the raw declaration because a client tool with the same
+ * name must NOT be treated as one:
+ *
+ *   Anthropic  `{ type: "web_search_20250305", name: "web_search" }` — the name
+ *              is explicit and may be any provider tool spelling.
+ *   Responses  `{ type: "web_search" }` (or `web_search_2025_08_26`) — the type
+ *              IS the name; there is no separate field.
  */
 export function serverToolDeclaration(tool: Tool): ServerToolDeclaration | undefined {
-  if (!tool.raw || tool.raw.family !== "anthropic") return undefined;
+  if (!tool.raw || (tool.raw.family !== "anthropic" && tool.raw.family !== "openai_responses")) return undefined;
   const value = tool.raw.value as Record<string, unknown> | null;
   if (!value || typeof value !== "object") return undefined;
   const type = typeof value.type === "string" ? value.type : "";
@@ -112,6 +118,46 @@ function resultIsError(message: Message, toolUseId: string): boolean {
  * run — unlike the request trace, which is clipped for the log — so this is the
  * one place the client-facing result can be built from real data.
  */
+/**
+ * Rebuild the whole client-facing content sequence from the run's history.
+ *
+ * Prepending the round trip to the final response loses the turns in between: a
+ * first round that said "let me search" and then called a tool would reach the
+ * client as the call, the result, and only the LAST round's answer. This wire
+ * shape puts text, then the call, then its result, then the answer — in order,
+ * all inside one assistant turn — so the sequence has to come from the history
+ * that recorded every round, not from the final response.
+ *
+ * Each assistant turn is reduced the way the loop reduces the final one: drop
+ * the internal `tool_use` for a bound tool (the round trip replaces it) and drop
+ * redacted reasoning, which only a same-family Anthropic replay could restore.
+ * Every remaining part keeps its position.
+ */
+export function serverToolResponseContent(
+  history: Message[],
+  parts: ServerToolResultPart[],
+  prefix: number,
+): ContentPart[] {
+  const byId = new Map(parts.map(part => [part.id, part]));
+  const content: ContentPart[] = [];
+  for (const message of history.slice(prefix)) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.content) {
+      if (part.type === "reasoning" && part.redacted) continue;
+      if (part.type === "tool_use") {
+        // A client tool call stays a client tool call; only the calls this run
+        // executed on the model's behalf become the round trip.
+        const call = byId.get(part.id);
+        if (!call) content.push(part);
+        else if (!content.includes(call)) content.push(call);
+        continue;
+      }
+      content.push(part);
+    }
+  }
+  return content;
+}
+
 export function collectServerToolCalls(history: Message[], matched: Map<string, { tool: HttpTool; declaration: ServerToolDeclaration }>): ServerToolCall[] {
   const calls: ServerToolCall[] = [];
   for (let index = 0; index < history.length; index++) {
@@ -136,24 +182,26 @@ export function collectServerToolCalls(history: Message[], matched: Map<string, 
 
 /**
  * Turn collected calls into the canonical parts a renderer expands into the
- * client's own protocol blocks. A call whose adapter output does not match its
- * `serverTool.resultPath` still gets a part, flagged as an error: an empty or
- * invented result list would tell the client a search found nothing, which is a
- * different fact from a broken adapter.
+ * client's own protocol blocks.
+ *
+ * A failed call still gets a part, carrying an error code instead of entries: an
+ * empty or invented result list would tell the client the search found nothing,
+ * which is a different fact from a broken adapter. The code is the adapter's own
+ * when it named one, and `unavailable` when it did not.
  */
 export function serverToolParts(calls: ServerToolCall[], family: "anthropic" | "openai_responses"): ServerToolResultPart[] {
   return calls.map(call => {
     const contract = call.tool.serverTool!;
-    const entries = call.isError ? null : serverToolEntries(call.payload, contract.resultPath);
+    const outcome = call.isError ? { content: [] as [], errorCode: "unavailable" } : serverToolOutcome(call.payload, contract.resultPath);
     return {
       type: "server_tool_result",
       family,
-      id: call.id || genId("srv"),
+      id: call.id || genId("srvtoolu"),
       name: call.name,
       input: call.input ?? {},
       blockType: contract.resultType,
-      content: entries ?? [],
-      ...(entries === null ? { isError: true } : {}),
+      content: outcome.content,
+      ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
     };
   });
 }
