@@ -7,7 +7,7 @@ import type { Message } from "../core/ir/content";
 import { ZERO_USAGE } from "../core/ir/usage";
 import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
-import { parseService, isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
+import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
@@ -237,7 +237,7 @@ export class ResponsesController {
       let served: InvokeValue | undefined;
       const envelope = { ...initial }; delete envelope.output; delete envelope.status; delete envelope.error; delete envelope.incomplete_details;
       const live = flags.stream && !bound.length && family === "openai_responses"
-        ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition)) : undefined;
+        ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition), serviceThinkingDelimiters(definition)) : undefined;
       try {
         abort.signal.throwIfAborted();
         this.repo.transition(id, token.id, "in_progress", { ...initial, status: "in_progress" });
@@ -248,7 +248,7 @@ export class ResponsesController {
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
         if (Buffer.byteLength(JSON.stringify(run.history)) > 25 * 1024 * 1024) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
-        const response = run.value.response.withThinkingFormat(serviceThinkingFormat(definition));
+        const response = run.value.response.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
         const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
         // Let the renderer supply output, usage and incomplete_details; the envelope supplies state fields.
         delete extra.output; delete extra.error; delete extra.incomplete_details;

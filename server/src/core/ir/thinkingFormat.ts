@@ -54,12 +54,141 @@ export function isThinkingFormatActive(f: ThinkingFormat | undefined): f is Excl
 }
 
 /**
- * Tag names seen in the wild for the same thing. `think` is the DeepSeek-R1
- * convention every distill and most open-weight reasoners copied; `thinking`
- * and `reasoning` show up in prompt-templated variants.
+ * What a tag NAME has to look like to mean "reasoning".
+ *
+ * `think` is the DeepSeek-R1 convention every distill and most open-weight
+ * reasoners copied; `thinking`, `thought` and `reasoning` show up in
+ * prompt-templated variants, and templates wrap the stem freely
+ * (`chain_of_thought`, `thinking_process`, `deep_think`). Recognising the stem
+ * instead of a fixed list is the difference between reading the next model's
+ * block and delivering it to the client as the ANSWER, because a name this
+ * scanner does not know is a block it never lifts.
+ *
+ * Names like `analysis` are deliberately NOT included: structured-answer
+ * wrappers use them, and a tag at the head of a real answer is not thinking.
  */
-const TAG_NAMES = ["think", "thinking", "reasoning"] as const;
-const OPEN_RE = new RegExp(`^\\s*<(${TAG_NAMES.join("|")})\\s*>`, "i");
+const REASONING_NAME = /^[a-z_]*(?:think|reason|thought)[a-z_]*$/;
+
+/** Longest tag name worth recognising. Bounds the streaming hold below. */
+const MAX_NAME = 24;
+
+/** Whitespace a template may put AROUND a tag: `<think >`, `< think>`, or a
+ * newline before the bracket. `\s` in JavaScript already covers the space, the
+ * tab, the newline, NBSP, the ideographic space and the BOM. */
+const PAD = "\\s*";
+
+/**
+ * Zero-width characters a model may emit INSIDE a name without meaning to
+ * change it. Invisible in a client, fatal to an exact match -- and a tag
+ * Hydrogen does not recognise is a block the client renders as the answer.
+ */
+const ZW = "[\\u200b-\\u200d\\u2060]*";
+const ZW_RE = new RegExp(ZW, "g");
+
+/** One name letter, with the zero-width padding allowed beside it. */
+const NAME_CHAR = `[a-z_]${ZW}`;
+/** A whole name body, bounded so a pathological tag cannot hold the scan. */
+const NAME_BODY = `(?:${NAME_CHAR}){1,${MAX_NAME}}`;
+
+const OPEN_RE = new RegExp(`^${PAD}<${ZW}(${NAME_BODY})${PAD}>`, "i");
+
+/**
+ * The close tag accepts ANY reasoning-ish name, whichever one opened the block.
+ *
+ * Models mix them constantly: opening with one spelling and closing with
+ * another is ordinary behaviour, and the name a model closes with is not a
+ * promise about what it opened with. Binding the close to the opening name
+ * meant Hydrogen recognised NO close at all, so the block was never lifted and
+ * the whole answer travelled to the client as raw tagged text. Reading
+ * generously is the point of this scanner; nothing is gained by insisting the
+ * two names agree.
+ *
+ * Global because {@link findClose} walks it; that function owns `lastIndex`.
+ */
+const CLOSE_RE = new RegExp(`</${PAD}(${NAME_BODY})${PAD}>`, "gi");
+
+/** Whether a matched name is one of the spellings that means reasoning. */
+function isReasoningName(raw: string): boolean {
+  return REASONING_NAME.test(raw.replace(ZW_RE, "").toLowerCase());
+}
+
+/**
+ * An operator-declared boundary pair, for a model whose trace no scanner could
+ * guess from shape: the literal text that opens the block and the literal text
+ * that ends it.
+ *
+ * This is the escape hatch every serious implementation has, and for the same
+ * reason. vLLM exposes it as `--reasoning-config` (`reasoning_start_str` /
+ * `reasoning_end_str`), Open WebUI as a configurable "reasoning tag pair". It is
+ * the ONLY way to cover a model that does not delimit with an angle-bracket tag
+ * at all -- GPT-OSS's harmony channels (`<|channel|>analysis<|message|>` ...
+ * `<|channel|>final<|message|>`) are the standard example -- because no
+ * name-shape rule can recognise a marker that is not tag-shaped.
+ *
+ * Declaring the pair is itself a request to find it: a service that declares
+ * boundaries has its thinking separated even while its format is `original`,
+ * and the format then only decides how that thinking is presented.
+ */
+export interface ThinkingDelimiters {
+  /** Literal text that starts the thinking block. */
+  open: string;
+  /** Literal text that ends it, and the point the answer starts at. */
+  close: string;
+}
+
+/** How one response's block boundaries are found. */
+interface TagMatcher {
+  /** Length of an opening tag at the head of `text`, or undefined. */
+  open(text: string): number | undefined;
+  /** The first close-tag candidate in `text`, quoted or not. */
+  close(text: string): { index: number; length: number } | undefined;
+  /** Whether `buffered` could still grow into an opening tag. */
+  pending(buffered: string): boolean;
+}
+
+/** The built-in rules: a reasoning-ish tag name, read generously. */
+const BUILTIN_MATCHER: TagMatcher = {
+  open(text) {
+    const m = OPEN_RE.exec(text);
+    return m && isReasoningName(m[1]) ? m[0].length : undefined;
+  },
+  close(text) {
+    CLOSE_RE.lastIndex = 0;
+    for (let m = CLOSE_RE.exec(text); m; m = CLOSE_RE.exec(text)) {
+      if (isReasoningName(m[1])) return { index: m.index, length: m[0].length };
+    }
+    return undefined;
+  },
+  pending: couldStillOpen,
+};
+
+/** The operator's pair, matched literally. Exactness is the point: nothing is
+ * guessed, and the head is held only while it could still become that exact
+ * opening string. */
+function declaredMatcher(pair: ThinkingDelimiters): TagMatcher {
+  const open = pair.open.replace(ZW_RE, "");
+  const close = pair.close;
+  return {
+    open(text) {
+      const pad = /^\s*/.exec(text)?.[0].length ?? 0;
+      return text.slice(pad).replace(ZW_RE, "").startsWith(open) ? pad + open.length : undefined;
+    },
+    close(text) {
+      const index = text.indexOf(close);
+      return index < 0 ? undefined : { index, length: close.length };
+    },
+    pending(buffered) {
+      const s = buffered.replace(ZW_RE, "").replace(/^\s+/, "");
+      if (!s) return buffered.length <= MAX_PAD;
+      return s.length <= open.length && open.startsWith(s);
+    },
+  };
+}
+
+/** The matcher one response is scanned with. */
+function matcherFor(delimiters: ThinkingDelimiters | undefined): TagMatcher {
+  return delimiters ? declaredMatcher(delimiters) : BUILTIN_MATCHER;
+}
 
 /** The literal block `think_tags` emits. Reading is generous, writing is not:
  * one spelling out means a client only ever has to parse one. */
@@ -67,22 +196,126 @@ const OPEN_TAG = "<think>";
 const CLOSE_TAG = "</think>";
 
 /**
- * Longest run of leading characters that could still turn out to be an opening
- * tag: the longest tag plus its brackets, plus a little slack for the newline
- * or space a template may put in front of it. Once the buffer passes this
- * without matching, the answer has started and the scan is over.
+ * Longest run of NON-padding characters that could still turn out to be an
+ * opening tag. The name is recognised by shape rather than from a list, so any
+ * letters could in principle grow into a reasoning-ish name; this is the
+ * backstop that keeps the streaming hold bounded. Pure padding is bounded
+ * separately, by MAX_PAD.
  */
-const MAX_SCAN = "<reasoning>".length + 8;
+const MAX_SCAN = MAX_NAME + 8;
 
-/** Whether `buffered` could still grow into an opening tag. */
+/** How much invisible padding may precede a tag before it counts as content.
+ * Generous on purpose: a template's leading newlines are not the answer
+ * beginning, and a purely-padding run is the only thing this bounds. */
+const MAX_PAD = 512;
+
+/**
+ * Whether `buffered` could still grow into an opening tag.
+ *
+ * Anything this holds back, OPEN_RE can still accept, and the two agree on what
+ * counts as padding: zero-width characters are ignored, whitespace around a tag
+ * does not settle anything, and a long run of leading newlines is a chat
+ * template rather than the answer beginning. What DOES settle it is the answer
+ * starting: a non-`<` character, a name character that cannot be part of a tag
+ * (a space followed by more text means attributes), or a name that has already
+ * closed -- at which point OPEN_RE has had its say.
+ */
 function couldStillOpen(buffered: string): boolean {
-  const s = buffered.replace(/^\s+/, "");
-  if (!s) return true; // nothing but whitespace so far
-  const lower = s.toLowerCase();
-  return TAG_NAMES.some((name) => {
-    const tag = `<${name}>`;
-    return tag.startsWith(lower) || lower.startsWith(tag);
-  });
+  const compact = buffered.replace(ZW_RE, "").replace(/^\s+/, "");
+  if (!compact) return buffered.length <= MAX_PAD; // padding only so far
+  if (compact.length > MAX_SCAN) return false;
+  if (compact[0] !== "<") return false;
+  const body = compact.slice(1);
+  if (body.includes(">")) return false; // already closed: OPEN_RE decided it
+  return /^[a-z_]*$/i.test(body.replace(/\s+$/, ""));
+}
+
+/**
+ * Whether `index` sits inside a Markdown code span or fenced block.
+ *
+ * The close tag has to be found in the model's OWN WORDS, and a model reasoning
+ * about these tags writes them down: a close tag quoted in backticks, or a
+ * whole example of the block inside a fence. Those are quotations, not the end
+ * of the thinking. Taking one as the end is how the answer ends up inside the
+ * thinking region -- everything the model wrote after that point, the rest of
+ * its reasoning and its answer, is delivered as ordinary answer text, and a
+ * client that renders reasoning separately shows the reasoning as the answer.
+ *
+ * This is the judgement the opening scan already makes in spirit ("a tag
+ * further down an answer is the model writing about the tag, not using it"),
+ * applied where a wrong answer is expensive rather than merely untidy.
+ */
+function insideCode(text: string, index: number): boolean {
+  let fence: string | undefined; // the marker character of the open fence
+  let fenceLength = 0;
+  let span = 0; // backticks in the code span open at this point, 0 = none
+  let lineStart = 0;
+  let i = 0;
+  while (i < index) {
+    const ch = text[i];
+    if (ch === "\n") {
+      lineStart = i + 1;
+      span = 0; // a span cannot cross a line
+      i++;
+      continue;
+    }
+    if (ch !== "`" && ch !== "~") {
+      i++;
+      continue;
+    }
+    let run = 1;
+    while (i + run < text.length && text[i + run] === ch) run++;
+    // A fence opens and closes on a line of its own (three or more markers).
+    const atLineStart = text.slice(lineStart, i).trim() === "";
+    if (run >= 3 && atLineStart) {
+      if (fence === undefined) {
+        fence = ch;
+        fenceLength = run;
+      } else if (fence === ch && run >= fenceLength) {
+        fence = undefined;
+      }
+    } else if (fence === undefined && ch === "`") {
+      // Inside a span, only a run of the SAME length closes it.
+      span = span === 0 ? run : span === run ? 0 : span;
+    }
+    i += run;
+  }
+  return fence !== undefined || span !== 0;
+}
+
+/**
+ * The first close tag the model is USING rather than quoting: the first one
+ * {@link insideCode} does not place inside a code span or fence.
+ *
+ * A block whose only close tags are quotations is left unterminated, which
+ * every caller already treats as "this was the answer text" -- the safe
+ * direction, since it loses a thinking block rather than the answer.
+ */
+/**
+ * Whether a candidate is wrapped in backticks on BOTH sides, the inline way a
+ * model writes a tag it is only talking about.
+ *
+ * Checked separately from {@link insideCode} because span pairing there is
+ * CommonMark-exact while a model's reasoning is not Markdown: an unmatched
+ * backtick run still marks its neighbour as a quotation here. Both sides are
+ * required, so a real end followed by an answer that opens with a code fence
+ * is never mistaken for a quotation.
+ */
+function backtickQuoted(text: string, index: number, length: number): boolean {
+  return text[index - 1] === "`" && text[index + length] === "`";
+}
+
+function findClose(text: string, matcher: TagMatcher): { index: number; length: number } | undefined {
+  let from = 0;
+  while (from <= text.length) {
+    const found = matcher.close(text.slice(from));
+    if (!found) return undefined;
+    const at = from + found.index;
+    // Quoted candidates are skipped: a later one may be the real end.
+    if (!insideCode(text, at) && !backtickQuoted(text, at, found.length)) return { index: at, length: found.length };
+    from = at + found.length;
+  }
+  return undefined;
 }
 
 /**
@@ -97,21 +330,22 @@ function couldStillOpen(buffered: string): boolean {
  * block and never closed it is not a thinking block — turning the whole
  * remaining answer into reasoning would hand the client an empty response.
  */
-export function liftThinkTags(content: ContentPart[]): ContentPart[] {
+export function liftThinkTags(content: ContentPart[], delimiters?: ThinkingDelimiters): ContentPart[] {
   if (content.some((p) => p.type === "reasoning")) return content;
   const i = content.findIndex((p) => p.type === "text");
   if (i < 0) return content;
 
+  const matcher = matcherFor(delimiters);
   const part = content[i] as TextPart;
-  const open = OPEN_RE.exec(part.text);
-  if (!open) return content;
+  const at = matcher.open(part.text);
+  if (at === undefined) return content;
 
-  const rest = part.text.slice(open[0].length);
-  const close = new RegExp(`</${open[1]}\\s*>`, "i").exec(rest);
+  const rest = part.text.slice(at);
+  const close = findClose(rest, matcher);
   if (!close) return content;
 
   const thought = rest.slice(0, close.index);
-  const tail = rest.slice(close.index + close[0].length).replace(/^\s+/, "");
+  const tail = rest.slice(close.index + close.length).replace(/^\s+/, "");
   const replacement: ContentPart[] = [{ type: "reasoning", text: thought.trim() }];
   if (tail) replacement.push({ ...part, text: tail });
 
@@ -140,9 +374,13 @@ function inlineThinkTags(content: ContentPart[]): ContentPart[] {
 }
 
 /** Apply a format to complete canonical content. */
-export function applyThinkingFormat(content: ContentPart[], format: ThinkingFormat | undefined): ContentPart[] {
-  if (!isThinkingFormatActive(format)) return content;
-  const lifted = liftThinkTags(content);
+export function applyThinkingFormat(
+  content: ContentPart[],
+  format: ThinkingFormat | undefined,
+  delimiters?: ThinkingDelimiters,
+): ContentPart[] {
+  if (!isThinkingFormatActive(format) && !delimiters) return content;
+  const lifted = liftThinkTags(content, delimiters);
   if (format === "none") return lifted.filter((p) => p.type !== "reasoning");
   if (format === "think_tags") return inlineThinkTags(lifted);
   // `reasoning` and `reasoning_content` differ only in what the renderer calls
@@ -167,7 +405,8 @@ export function applyThinkingFormat(content: ContentPart[], format: ThinkingForm
  * text, opening tag included. An upstream that fills a structured reasoning
  * field never reaches this scanner, so its thinking still streams live.
  */
-async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
+async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimiters?: ThinkingDelimiters): AsyncGenerator<StreamEvent> {
+  const matcher = matcherFor(delimiters);
   /** Chunk size for replaying a held thought, so clients still see deltas. */
   const REPLAY_CHUNK = 24;
   let mode: "scan" | "inside" | "done" = "scan";
@@ -175,7 +414,6 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
   let held = "";
   /** Offset of the first thought character, i.e. just past the opening tag. */
   let thoughtFrom = 0;
-  let closeTag = CLOSE_TAG;
   /**
    * The blank line a model writes between a closing tag and its answer is a
    * separator, not content, and the buffered path drops it. Here it usually
@@ -233,13 +471,12 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
     held += ev.text;
 
     if (mode === "scan") {
-      const open = OPEN_RE.exec(held);
-      if (open) {
-        thoughtFrom = open[0].length;
-        closeTag = `</${open[1]}>`;
+      const at = matcher.open(held);
+      if (at !== undefined) {
+        thoughtFrom = at;
         mode = "inside";
         // Fall through: one delta may carry the opening AND the closing tag.
-      } else if (!couldStillOpen(held) || held.length > MAX_SCAN) {
+      } else if (!matcher.pending(held)) {
         yield { type: "text_delta", text: held };
         held = "";
         mode = "done";
@@ -251,11 +488,11 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
 
     // mode === "inside"
     const rest = held.slice(thoughtFrom);
-    const close = new RegExp(`${closeTag.slice(0, -1)}\\s*>`, "i").exec(rest);
+    const close = findClose(rest, matcher);
     if (!close) continue; // still buffering; emit nothing yet
     const at = thoughtFrom + close.index;
     const thought = held.slice(thoughtFrom, at);
-    const tail = held.slice(at + close[0].length).replace(/^\s+/, "");
+    const tail = held.slice(at + close.length).replace(/^\s+/, "");
     yield { type: "reasoning_start" };
     for (let i = 0; i < thought.length; i += REPLAY_CHUNK) {
       yield { type: "reasoning_delta", text: thought.slice(i, i + REPLAY_CHUNK) };
@@ -309,9 +546,10 @@ async function* inlineThinkTagsStream(events: AsyncGenerator<StreamEvent>): Asyn
 export function withThinkingFormat(
   events: AsyncGenerator<StreamEvent>,
   format: ThinkingFormat | undefined,
+  delimiters?: ThinkingDelimiters,
 ): AsyncGenerator<StreamEvent> {
-  if (!isThinkingFormatActive(format)) return events;
-  const lifted = liftThinkTagsStream(events);
+  if (!isThinkingFormatActive(format) && !delimiters) return events;
+  const lifted = liftThinkTagsStream(events, delimiters);
   if (format === "none") return withoutReasoning(lifted);
   if (format === "think_tags") return inlineThinkTagsStream(lifted);
   return lifted;

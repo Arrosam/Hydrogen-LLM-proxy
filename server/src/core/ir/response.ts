@@ -2,7 +2,7 @@ import type { Family } from "./params";
 import { reasoningOf, textOf, toolCallsOf, type ContentPart } from "./content";
 import type { Usage } from "./usage";
 import { fabricateStream, type ResponseData, type StreamContext } from "./stream";
-import { applyThinkingFormat, type ThinkingFormat } from "./thinkingFormat";
+import { applyThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "./thinkingFormat";
 import { buildResponse, serializeStream } from "../format/registry";
 
 export type { ResponseData };
@@ -87,8 +87,8 @@ export abstract class Response implements ResponseData {
    * out of `<think>` tags, inlined into the answer, or dropped. `original`
    * (and absence) returns `this` untouched -- see ir/thinkingFormat.ts.
    */
-  withThinkingFormat(format: ThinkingFormat | undefined): this {
-    const content = applyThinkingFormat(this.content, format);
+  withThinkingFormat(format: ThinkingFormat | undefined, delimiters?: ThinkingDelimiters): this {
+    const content = applyThinkingFormat(this.content, format, delimiters);
     if (content === this.content) return this;
     return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
   }

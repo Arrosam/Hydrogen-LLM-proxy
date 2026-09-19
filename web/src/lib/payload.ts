@@ -5,6 +5,21 @@
  * unrecognised.
  */
 
+/**
+ * The spellings a server may put its trace under, in the same order the
+ * server-side parser reads them (see core/format/completion.ts). First
+ * NON-EMPTY wins, so an empty `reasoning: ""` cannot mask a populated
+ * `reasoning_content` -- reading only the first present field, or only two
+ * of the four, is why a log row could show no thinking at all for a response
+ * whose trace arrived under `thinking` or `reasoning_text`.
+ */
+const REASONING_FIELDS = ["reasoning", "reasoning_content", "reasoning_text", "thinking"] as const;
+
+/** Whether a content part is the model's trace rather than its answer. */
+function isThinkingPart(type: unknown): boolean {
+  return type === "thinking" || type === "redacted_thinking" || type === "reasoning" || type === "reasoning_text";
+}
+
 export interface Turn {
   role: string;
   text: string;
@@ -25,6 +40,7 @@ function partsToText(content: unknown): string {
       if (typeof p === "string") return p;
       if (!p || typeof p !== "object") return "";
       const part = p as Record<string, unknown>;
+      if (isThinkingPart(part.type)) return ""; // shown as a separate "thinking" turn
       switch (part.type) {
         case "text":
         case "input_text":
@@ -37,9 +53,6 @@ function partsToText(content: unknown): string {
           return `[tool_use ${String(part.name ?? "")}(${JSON.stringify(part.input ?? {})})]`;
         case "tool_result":
           return `[tool_result${part.is_error ? " error" : ""}] ${partsToText(part.content)}`;
-        case "thinking":
-        case "redacted_thinking":
-          return ""; // shown as a separate "thinking" turn
         default:
           return typeof part.text === "string" ? part.text : "";
       }
@@ -48,20 +61,23 @@ function partsToText(content: unknown): string {
     .join("\n");
 }
 
-/** Thinking text of a content-block array (Anthropic "thinking" blocks). */
+/** Thinking text of a content-block array: An Anthropic thinking block, or a
+ * reasoning part from a server that sends its trace as content parts. */
 function thinkingOfParts(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
-    .filter((b): b is Record<string, unknown> => Boolean(b) && typeof b === "object" && (b as Record<string, unknown>).type === "thinking")
-    .map((b) => String(b.thinking ?? ""))
+    .filter((b): b is Record<string, unknown> => Boolean(b) && typeof b === "object" && isThinkingPart((b as Record<string, unknown>).type))
+    .map((b) => String(b.thinking ?? b.text ?? b.summary ?? ""))
     .filter(Boolean)
     .join("\n");
 }
 
 /** Reasoning attached to a message/response object, whatever the field style. */
 function reasoningOf(obj: Record<string, unknown>): string {
-  const direct = obj.reasoning ?? obj.reasoning_content;
-  if (typeof direct === "string" && direct) return direct;
+  for (const field of REASONING_FIELDS) {
+    const value = obj[field];
+    if (typeof value === "string" && value) return value;
+  }
   return thinkingOfParts(obj.content);
 }
 

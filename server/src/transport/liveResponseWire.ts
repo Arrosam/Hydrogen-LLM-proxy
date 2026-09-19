@@ -1,11 +1,11 @@
 import { serializeStream } from "../core/format/registry";
 import type { StreamEvent } from "../core/ir/stream";
-import type { ThinkingFormat } from "../core/ir/thinkingFormat";
+import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
 import { withThinkingFormat } from "../core/ir/thinkingFormat";
 import type { WireItem } from "../persistence/responseRepo";
 
 /** A single-slot rendezvous keeps live serialization bounded and applies backpressure. */
-export function liveResponseWire(model: string, envelope: WireItem, emit: (event: WireItem) => Promise<void>, thinkingFormat: ThinkingFormat) {
+export function liveResponseWire(model: string, envelope: WireItem, emit: (event: WireItem) => Promise<void>, thinkingFormat: ThinkingFormat, thinkingDelimiters?: ThinkingDelimiters) {
   let slot: { event: StreamEvent; consumed: () => void } | undefined;
   let wake: (() => void) | undefined;
   let ended = false;
@@ -22,7 +22,7 @@ export function liveResponseWire(model: string, envelope: WireItem, emit: (event
   }
   const done = (async () => {
     try {
-      for await (const frame of serializeStream("openai_responses", withThinkingFormat(input(), thinkingFormat), { model, thinkingFormat })) {
+      for await (const frame of serializeStream("openai_responses", withThinkingFormat(input(), thinkingFormat, thinkingDelimiters), { model, thinkingFormat })) {
         const data = frame.split("\n").find(line => line.startsWith("data: "));
         if (!data) continue;
         const event = JSON.parse(data.slice(6)) as WireItem;

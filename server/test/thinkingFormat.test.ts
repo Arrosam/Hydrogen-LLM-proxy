@@ -20,6 +20,7 @@ import {
   applyThinkingFormat,
   liftThinkTags,
   withThinkingFormat,
+  type ThinkingDelimiters,
   type ThinkingFormat,
 } from "../src/core/ir/thinkingFormat";
 import type { ContentPart } from "../src/core/ir/content";
@@ -406,5 +407,256 @@ describe("ST: streaming think_tags and none", () => {
     );
     expect(reasoningOf(fromTags)).toBe("");
     expect(textOf(fromTags)).toBe(ANSWER);
+  });
+});
+
+// --- EG: the spellings a model actually emits ------------------------------
+
+/** A tag spelled with `name`, so a case can pair any two spellings. */
+const openTag = (name: string): string => `<${name}>`;
+const closeTag = (name: string): string => `</${name}>`;
+
+/**
+ * Every one of these must be FOUND, and the buffered and streaming scans must
+ * agree on it: the same response has to reach a client the same way whether or
+ * not it streamed.
+ *
+ * The failure they pin was silent and looked like a client bug. When the scan
+ * did not recognise a tag, the block was never lifted and the raw tags went out
+ * as the ANSWER text -- which the client parses again, opening a thinking block
+ * that swallows the answer, so the user saw thinking and no output at all.
+ *
+ * Each of these is a real spelling: a template pads a tag (`<think >`), a model
+ * mixes the synonyms it opens and closes with, and a model occasionally emits a
+ * zero-width character inside a token. The close name used to be built from the
+ * OPENING tag's name, so a mixed pair matched nothing and nothing was lifted.
+ */
+describe("EG: the tag spellings a model actually emits", () => {
+  const SPELLINGS: Array<[string, string]> = [
+    ["a matched pair", `${openTag("think")}${THOUGHT}${closeTag("think")}`],
+    ["a close in another spelling", `${openTag("thinking")}${THOUGHT}${closeTag("reasoning")}`],
+    ["a close in the shortest spelling", `${openTag("thinking")}${THOUGHT}${closeTag("think")}`],
+    ["a space before the closing bracket", `${openTag("think ")}${THOUGHT}${closeTag("think ")}`],
+    ["a newline before the closing bracket", `${openTag("think\n")}${THOUGHT}${closeTag("think\n")}`],
+    ["a non-breaking space inside the tag", `${openTag("think\u00a0")}${THOUGHT}${closeTag("think\u00a0")}`],
+    ["a zero-width space inside the name", `${openTag("thi\u200bnk")}${THOUGHT}${closeTag("thi\u200bnk")}`],
+    ["leading newlines from a template", `${"\n".repeat(30)}${openTag("think")}${THOUGHT}${closeTag("think")}`],
+    ["a wide indent before the tag", `${" ".repeat(40)}${openTag("think")}${THOUGHT}${closeTag("think")}`],
+    // The name is recognised by its stem, so a template that wraps it still
+    // works -- and these are the cases a fixed three-name list missed, which
+    // delivered the whole block to the client as the ANSWER.
+    ["the thought spelling", `${openTag("thought")}${THOUGHT}${closeTag("thought")}`],
+    ["a wrapped name", `${openTag("chain_of_thought")}${THOUGHT}${closeTag("chain_of_thought")}`],
+    ["a prefixed name", `${openTag("thinking_process")}${THOUGHT}${closeTag("thinking_process")}`],
+    ["a stem in the middle of the name", `${openTag("deep_think")}${THOUGHT}${closeTag("deep_think")}`],
+    ["a wrapped name closed with a plain one", `${openTag("chain_of_thought")}${THOUGHT}${closeTag("reasoning")}`],
+  ];
+
+  for (const [name, head] of SPELLINGS) {
+    it(`${name} is found, buffered and streamed alike`, async () => {
+      const raw = `${head}\n\n${ANSWER}`;
+      const buffered = applyThinkingFormat(textOnly(raw), "reasoning_content");
+      expect(buffered).toEqual([
+        { type: "reasoning", text: THOUGHT },
+        { type: "text", text: ANSWER },
+      ]);
+
+      // One character at a time is the worst case: every tag lands across a
+      // chunk boundary, which is where an unsettled prefix has to be held.
+      for (const size of [1, 2, 3, 7, 500]) {
+        const out = await drain(
+          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
+        );
+        expect(reasoningOf(out)).toBe(THOUGHT);
+        expect(textOf(out)).toBe(ANSWER);
+      }
+    });
+  }
+
+  it("an unterminated block is still text, however its tags were spelled", async () => {
+    // The contract this scanner has always had: a block that never closed is
+    // the answer text, not a thought. Recognising more spellings must not turn
+    // a truncated answer into an empty response.
+    const raw = `${openTag("thinking")}${THOUGHT}`;
+    expect(liftThinkTags(textOnly(raw))).toEqual(textOnly(raw));
+    const out = await drain(withThinkingFormat(stream(...deltas(raw, 2)), "reasoning_content"));
+    expect(reasoningOf(out)).toBe("");
+    expect(textOf(out)).toBe(raw);
+  });
+
+  it("padding alone never settles the scan", async () => {
+    // A run of leading newlines is a chat template, not the answer beginning.
+    // Ending the scan on it left the tag in the answer text on the streaming
+    // path while the buffered path lifted it.
+    const out = await drain(
+      withThinkingFormat(
+        stream(...deltas(`${"\n".repeat(200)}${openTag("think")}${THOUGHT}${closeTag("think")}\n${ANSWER}`, 4), { type: "finish", stopReason: "stop" }),
+        "reasoning_content",
+      ),
+    );
+    expect(reasoningOf(out)).toBe(THOUGHT);
+    expect(textOf(out)).toBe(ANSWER);
+  });
+});
+
+/**
+ * The reasoning of a model that is thinking ABOUT these tags quotes them, and a
+ * quotation is not the end of the thought.
+ *
+ * This is the failure that reaches a user as "that is still the thinking, but
+ * my client showed it as the answer". The scanner took the FIRST close tag --
+ * the one the model had just written down inside a code span or a fence -- as
+ * the end of the block, so everything after it, the rest of the reasoning and
+ * the answer itself, was delivered as ordinary answer text.
+ */
+describe("EG: a close tag the model only quoted", () => {
+  const TICK = String.fromCharCode(96);
+  const FENCE = TICK.repeat(3);
+
+  /** The real-world shape: a quotation mid-reasoning, then a real end. */
+  const QUOTED: Array<[string, string]> = [
+    ["quoted in a code span", `The block ends at ${TICK}${closeTag("think")}${TICK}, normally.\nKeep going.`],
+    ["quoted in a code span, other spelling", `The block ends at ${TICK}${closeTag("reasoning")}${TICK}, normally.\nKeep going.`],
+    ["quoted in a fenced example", `Example:\n${FENCE}\n${closeTag("think")}\n${FENCE}\nAfter the example.`],
+  ];
+
+  for (const [name, body] of QUOTED) {
+    it(`${name} does not end the thought`, async () => {
+      const raw = `${openTag("think")}${body}${closeTag("think")}\n\n${ANSWER}`;
+      const buffered = applyThinkingFormat(textOnly(raw), "reasoning_content");
+      expect(buffered).toEqual([
+        { type: "reasoning", text: body },
+        { type: "text", text: ANSWER },
+      ]);
+      for (const size of [1, 2, 3, 7, 500]) {
+        const out = await drain(
+          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
+        );
+        expect(reasoningOf(out)).toBe(body);
+        expect(textOf(out)).toBe(ANSWER);
+      }
+    });
+  }
+
+  it("a block whose only close tags are quotations stays answer text", async () => {
+    // The safe direction, and the same contract as an unterminated block: a
+    // thought that never really ended is not worth losing the answer over.
+    const raw = `${openTag("think")}Only a quotation here: ${TICK}${closeTag("think")}${TICK} and no real end.`;
+    expect(liftThinkTags(textOnly(raw))).toEqual(textOnly(raw));
+    const out = await drain(withThinkingFormat(stream(...deltas(raw, 3)), "reasoning_content"));
+    expect(reasoningOf(out)).toBe("");
+    expect(textOf(out)).toBe(raw);
+  });
+});
+
+describe("DT: a tag at the head that is NOT thinking", () => {
+  // Recognising a name by its stem must not turn a real answer's own markup into
+  // thinking: these are wrappers models are asked to answer in, and `analysis`
+  // in particular is a structured-answer tag, not a trace.
+  const NOT_THINKING = [
+    `${openTag("div")}markup${closeTag("div")}`,
+    `${openTag("analysis")}a structured answer${closeTag("analysis")}`,
+    `${openTag("div class=\"box\"")}attributes${closeTag("div")}`,
+    `${openTag("result")}a structured answer${closeTag("result")}`,
+  ];
+
+  for (const [i, raw] of NOT_THINKING.entries()) {
+    it(`case ${i + 1} stays answer text`, async () => {
+      expect(liftThinkTags(textOnly(`${raw}\n\n${ANSWER}`))).toEqual(textOnly(`${raw}\n\n${ANSWER}`));
+      const out = await drain(withThinkingFormat(stream(...deltas(raw, 2), { type: "finish", stopReason: "stop" }), "reasoning_content"));
+      expect(reasoningOf(out)).toBe("");
+      expect(textOf(out)).toBe(raw);
+    });
+  }
+});
+
+/**
+ * The escape hatch every serious implementation of this ships: the operator
+ * states the boundaries outright. Scanning by tag SHAPE cannot cover a model
+ * that does not delimit its trace that way -- GPT-OSS's harmony channels are
+ * the standard example -- so a declared pair is matched literally instead.
+ * vLLM exposes the same thing as `--reasoning-config`, Open WebUI as a
+ * configurable reasoning tag pair.
+ */
+describe("EP: operator-declared boundaries", () => {
+  const CASES: Array<[string, ThinkingDelimiters]> = [
+    ["harmony channels", { open: "<|channel|>analysis<|message|>", close: "<|channel|>final<|message|>" }],
+    ["a bracket pair no name rule could guess", { open: "[reasoning]", close: "[/reasoning]" }],
+    ["a plain tag pair", { open: "<thinking>", close: "</thinking>" }],
+  ];
+
+  for (const [name, pair] of CASES) {
+    it(`${name}: lifted, buffered and streamed alike`, async () => {
+      const raw = `${pair.open}${THOUGHT}${pair.close}${ANSWER}`;
+      expect(applyThinkingFormat(textOnly(raw), "reasoning_content", pair)).toEqual([
+        { type: "reasoning", text: THOUGHT },
+        { type: "text", text: ANSWER },
+      ]);
+      // One character at a time: the declaration has to survive every chunk
+      // boundary, including one that lands inside the marker itself.
+      for (const size of [1, 2, 3, 7, 500]) {
+        const out = await drain(
+          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content", pair),
+        );
+        expect(reasoningOf(out)).toBe(THOUGHT);
+        expect(textOf(out)).toBe(ANSWER);
+      }
+    });
+  }
+
+  it("declaring the boundaries is enough, even while the format is `original`", async () => {
+    // A pair is a statement about the UPSTREAM, so it has to work on its own:
+    // the format only decides how the thinking is presented afterwards.
+    const pair: ThinkingDelimiters = { open: "<|channel|>analysis<|message|>", close: "<|channel|>final<|message|>" };
+    const raw = `${pair.open}${THOUGHT}${pair.close}${ANSWER}`;
+    const out = await drain(withThinkingFormat(stream(...deltas(raw, 4), { type: "finish", stopReason: "stop" }), "original", pair));
+    expect(reasoningOf(out)).toBe(THOUGHT);
+    expect(textOf(out)).toBe(ANSWER);
+  });
+
+  it("an unterminated declared block is still the answer", async () => {
+    const pair: ThinkingDelimiters = { open: "[reasoning]", close: "[/reasoning]" };
+    const raw = `${pair.open}${THOUGHT}`;
+    expect(applyThinkingFormat(textOnly(raw), "reasoning_content", pair)).toEqual(textOnly(raw));
+    const out = await drain(withThinkingFormat(stream(...deltas(raw, 2)), "reasoning_content", pair));
+    expect(reasoningOf(out)).toBe("");
+    expect(textOf(out)).toBe(raw);
+  });
+
+  it("a service with no pair is untouched by the feature", () => {
+    const raw = `[reasoning]${THOUGHT}[/reasoning]${ANSWER}`;
+    expect(applyThinkingFormat(textOnly(raw), "reasoning_content")).toEqual(textOnly(raw));
+  });
+});
+
+describe("EG: a tag quoted in prose, not only in code", () => {
+  // The reasoning of a model that is thinking ABOUT these tags writes them down
+  // in passing: `…` and then keeps thinking. Missing that quotation ends the
+  // block early, and everything after it -- the rest of the reasoning and the
+  // answer -- is delivered as the answer.
+  const QUOTED_INLINE = `${openTag("think")}To close it you write ${"`"}${closeTag("think")}${"`"} like that.\nKeep thinking.${closeTag("think")}\n\n${ANSWER}`;
+
+  it("a backtick-wrapped quotation is not the end", async () => {
+    const want = `To close it you write ${"`"}${closeTag("think")}${"`"} like that.\nKeep thinking.`;
+    expect(applyThinkingFormat(textOnly(QUOTED_INLINE), "reasoning_content")).toEqual([
+      { type: "reasoning", text: want },
+      { type: "text", text: ANSWER },
+    ]);
+    for (const size of [1, 3, 9, 500]) {
+      const out = await drain(
+        withThinkingFormat(stream(...deltas(QUOTED_INLINE, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
+      );
+      expect(reasoningOf(out)).toBe(want);
+      expect(textOf(out)).toBe(ANSWER);
+    }
+  });
+
+  it("a real end followed by a code fence still ends the block", async () => {
+    // Only ONE side is a backtick here, so it is a terminator rather than a
+    // quotation -- requiring both sides is what keeps this case working.
+    const raw = `${openTag("think")}Reasoning.${closeTag("think")}${"```"}js\ncode\n${"```"}`;
+    const out = await drain(withThinkingFormat(stream(...deltas(raw, 3), { type: "finish", stopReason: "stop" }), "reasoning_content"));
+    expect(reasoningOf(out)).toBe("Reasoning.");
+    expect(textOf(out)).toBe(`${"```"}js\ncode\n${"```"}`);
   });
 });

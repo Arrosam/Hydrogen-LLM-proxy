@@ -30,9 +30,34 @@ let dataDir: string;
 let secret: string;
 let upstream: http.Server;
 let baseUrl: string;
-/** "tags" = thinking inline in the content; "field" = a reasoning_content field. */
-let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" = "tags";
+/** "tags" = thinking inline in the content; "field" = a reasoning_content field;
+ * "mixed" = inline content whose two tag halves spell the tag differently;
+ * "harmony" = a channel-marker trace no name rule can recognise. */
+let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" | "mixed" | "harmony" = "tags";
 let finishReason = "stop";
+
+/** Tags are assembled from parts so a case can pair any two spellings. */
+const LT = String.fromCharCode(60);
+const GT = String.fromCharCode(62);
+const SLASH = String.fromCharCode(47);
+const tag = (name: string): string => `${LT}${name}${GT}`;
+const endTag = (name: string): string => `${LT}${SLASH}${name}${GT}`;
+
+/** One tag pair, two spellings: the model opens with `thinking` and closes with
+ * `reasoning`. Ordinary behaviour, and it must lift exactly like a matched pair. */
+const MIXED_TAGGED = `${tag("thinking")}${THOUGHT}${endTag("reasoning")}\n\n${ANSWER}`;
+
+/** GPT-OSS harmony markers: the trace lives in the `analysis` channel and the
+* answer in `final`, so there is no tag name to recognise -- a service has to
+* declare the pair. */
+const HARMONY_OPEN = "<|channel|>analysis<|message|>";
+const HARMONY_CLOSE = "<|channel|>final<|message|>";
+
+/** The content this upstream serves for the current style, inline styles only. */
+const inlineContent = (tagged: string): string =>
+  style === "mixed" ? MIXED_TAGGED
+    : style === "harmony" ? `${HARMONY_OPEN}${THOUGHT}${HARMONY_CLOSE}${ANSWER}`
+      : tagged;
 
 function startUpstream(): Promise<void> {
   return new Promise((resolve) => {
@@ -57,8 +82,9 @@ function startUpstream(): Promise<void> {
           } else if (style !== "empty") {
             // Three characters at a time: every tag lands across a boundary,
             // which is the only interesting case for a streamed scanner.
-            for (let i = 0; i < tagged.length; i += 3) {
-              chunk({ choices: [{ index: 0, delta: { content: tagged.slice(i, i + 3) }, finish_reason: null }] });
+            const served = inlineContent(tagged);
+            for (let i = 0; i < served.length; i += 3) {
+              chunk({ choices: [{ index: 0, delta: { content: served.slice(i, i + 3) }, finish_reason: null }] });
             }
           }
           chunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] });
@@ -71,7 +97,7 @@ function startUpstream(): Promise<void> {
           : style === "thinking-only" ? { role: "assistant", content: null, reasoning_content: THOUGHT }
           : style === "field"
           ? { role: "assistant", content: ANSWER, reasoning_content: THOUGHT }
-          : { role: "assistant", content: tagged };
+          : { role: "assistant", content: inlineContent(tagged) };
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
           id: "c1", object: "chat.completion", created: 1, model: "up",
@@ -88,12 +114,13 @@ function startUpstream(): Promise<void> {
 }
 
 /** One service per format, so a case never has to mutate a definition. */
-const SERVICES: Array<{ name: string; format?: string }> = [
+const SERVICES: Array<{ name: string; format?: string; delimiters?: { open: string; close: string } }> = [
   { name: "plain" },
   { name: "as-content", format: "reasoning_content" },
   { name: "as-reasoning", format: "reasoning" },
   { name: "as-tags", format: "think_tags" },
   { name: "hidden", format: "none" },
+  { name: "as-harmony", format: "reasoning_content", delimiters: { open: HARMONY_OPEN, close: HARMONY_CLOSE } },
 ];
 
 beforeAll(async () => {
@@ -115,7 +142,12 @@ beforeAll(async () => {
   for (const s of SERVICES) {
     c.services.create({
       name: s.name,
-      definition: { timeoutMs: 10_000, steps: [{ model: "m", provider: "p" }], ...(s.format ? { thinkingFormat: s.format } : {}) },
+      definition: {
+        timeoutMs: 10_000,
+        steps: [{ model: "m", provider: "p" }],
+        ...(s.format ? { thinkingFormat: s.format } : {}),
+        ...(s.delimiters ? { thinkingDelimiters: s.delimiters } : {}),
+      },
     });
   }
   secret = c.tokens.create({ name: "t" }).secret;
@@ -319,5 +351,65 @@ describe("blank response regressions", () => {
       expect(log.httpStatus).toBe(502);
       expect(log.completionTokens).toBe(9);
     }
+  });
+});
+
+describe("EG: a tag pair the model spelled two different ways", () => {
+  beforeAll(() => { style = "mixed"; });
+  afterAll(() => { style = "tags"; });
+
+  it("lifts like any matched pair, so the client gets the answer", async () => {
+    // Why this is the case worth pinning end to end: the close tag used to be
+    // matched against the name the block OPENED with, so a mixed pair matched
+    // nothing. Nothing was lifted, the raw tags travelled as the answer text,
+    // and a client that parses those tags itself showed a thinking block that
+    // had swallowed the answer -- reported as "only thinking, no output", with
+    // a 200 and no error anywhere to explain it.
+    const message = messageOf(await chat("as-content"));
+    expect(message.reasoning_content).toBe(THOUGHT);
+    expect(message.content).toBe(ANSWER);
+  });
+
+  it("...and the streamed answer is identical to the buffered one", async () => {
+    const out = streamed((await chat("as-content", true)).payload);
+    expect(out.reasoningContent).toBe(THOUGHT);
+    expect(out.reasoning).toBe("");
+    expect(out.content).toBe(ANSWER);
+  });
+
+  it("a service that hides thinking loses it rather than leaking it into the answer", async () => {
+    // Proves the block was really classified as thinking: `none` can only drop
+    // it if it was found. Left in the text, the tags would arrive here instead.
+    const message = messageOf(await chat("hidden"));
+    expect(message.content).toBe(ANSWER);
+    expect(message.reasoning).toBeUndefined();
+    expect(message.reasoning_content).toBeUndefined();
+  });
+});
+
+describe("EG: a service that declares its upstream's boundaries", () => {
+  beforeAll(() => { style = "harmony"; });
+  afterAll(() => { style = "tags"; });
+
+  it("buffered: the declared pair separates the trace from the answer", async () => {
+    // The whole point of the escape hatch: nothing about this trace is
+    // tag-shaped, so the scanner could never guess it. The pair is matched
+    // literally, and the marker that ends it is where the answer starts.
+    const message = messageOf(await chat("as-harmony"));
+    expect(message.reasoning_content).toBe(THOUGHT);
+    expect(message.content).toBe(ANSWER);
+  });
+
+  it("...and streaming agrees with it", async () => {
+    const out = streamed((await chat("as-harmony", true)).payload);
+    expect(out.reasoningContent).toBe(THOUGHT);
+    expect(out.content).toBe(ANSWER);
+  });
+
+  it("a service without the pair never scans those markers", async () => {
+    // Declared boundaries are opt-in per service: the same upstream through a
+    // service that declared nothing stays untouched.
+    const out = streamed((await chat("plain", true)).payload);
+    expect(out.content).toBe(`${HARMONY_OPEN}${THOUGHT}${HARMONY_CLOSE}${ANSWER}`);
   });
 });

@@ -25,8 +25,9 @@ import {
   ServiceCategorySchema,
   type ServiceCategory,
   type ServiceDef,
+  serviceThinkingDelimiters,
 } from "../execution/definition";
-import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { withThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { classifyError, type AttemptRecord, type AttemptResult } from "../execution/steps";
 import type { Request as CanonicalRequest } from "../core/ir/request";
 import { newAccumulator, tapStream } from "../core/ir/stream";
@@ -206,6 +207,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
     // the bench shows the real answer rather than a canonical one. A raw tuple
     // belongs to no service and therefore has no format to apply.
     let thinkingFormat: ThinkingFormat = "original";
+    let thinkingDelimiters: ThinkingDelimiters | undefined;
     if (target.kind === "service") {
       const loaded = loadService(c, target.serviceId);
       if (!loaded.ok) return reply.code(loaded.status).send({ error: loaded.message });
@@ -216,11 +218,12 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
       }
       label = loaded.name;
       thinkingFormat = serviceThinkingFormat(loaded.def);
+      thinkingDelimiters = serviceThinkingDelimiters(loaded.def);
     } else {
       label = `${target.model}@${target.provider}`;
     }
 
-    if (streaming) return runChatStream(c, reply, target, ingress, request, label, thinkingFormat, timeoutMs);
+    if (streaming) return runChatStream(c, reply, target, ingress, request, label, thinkingFormat, thinkingDelimiters, timeoutMs);
 
     // A slow chain can outlive an intermediary's idle timeout (Cloudflare 524s
     // a silent origin at ~100s); failures travel in-body, so committing 200
@@ -246,7 +249,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
         latencyMs,
         served: v.served,
         upstreamRequest: v.upstreamRequest,
-        response: v.response.withThinkingFormat(thinkingFormat).render(ingress, label, { thinkingFormat }),
+        response: v.response.withThinkingFormat(thinkingFormat, thinkingDelimiters).render(ingress, label, { thinkingFormat }),
         thinkingFormat,
         usage: v.response.usage,
         attemptPath: run.attemptPath,
@@ -427,6 +430,7 @@ async function runChatStream(
   request: CanonicalRequest,
   label: string,
   thinkingFormat: ThinkingFormat,
+  thinkingDelimiters: ThinkingDelimiters | undefined,
   timeoutMs: number | undefined,
 ): Promise<void> {
   const started = Date.now();
@@ -464,7 +468,7 @@ async function runChatStream(
       // share, no thinking tokens -- while the buffered run beside it shows
       // all three.
       const acc = newAccumulator();
-      const shaped = tapStream(withThinkingFormat(v.events, thinkingFormat), acc);
+      const shaped = tapStream(withThinkingFormat(v.events, thinkingFormat, thinkingDelimiters), acc);
       for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) reply.raw.write(frame);
       meta({
         ok: true,
@@ -513,7 +517,7 @@ async function runChatStream(
       return;
     }
     const acc = newAccumulator();
-    const shaped = tapStream(withThinkingFormat(relayed.events, thinkingFormat), acc);
+    const shaped = tapStream(withThinkingFormat(relayed.events, thinkingFormat, thinkingDelimiters), acc);
     for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) {
       reply.raw.write(frame);
     }

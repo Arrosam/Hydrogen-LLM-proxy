@@ -14,8 +14,8 @@ import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { missingAnswerReason, requireAnswer } from "../core/ir/answer";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
-import { isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
-import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
+import { withThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import { asMillis } from "../util/time";
@@ -35,6 +35,9 @@ interface RequestCtx {
   ingress: Family;
   /** How this service presents thinking to its client (ir/thinkingFormat.ts). */
   thinkingFormat: ThinkingFormat;
+  /** Literal thinking boundaries this service declares, when its upstream's
+   * model does not delimit its trace in a shape the scanner recognises. */
+  thinkingDelimiters?: ThinkingDelimiters;
 }
 
 /**
@@ -299,6 +302,7 @@ export class ProxyController {
     // Media passthrough categories (image/tts/embedding/...) have their own
     // endpoints; the chat pipeline serves chat and ocr services.
     let thinkingFormat: ThinkingFormat = "original";
+    let thinkingDelimiters: ThinkingDelimiters | undefined;
     try {
       const def = this.deps.services.def(service);
       const category = serviceCategory(def);
@@ -310,6 +314,7 @@ export class ProxyController {
         return this.replyError(reply, ingress, 400, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
       }
       thinkingFormat = serviceThinkingFormat(def);
+      thinkingDelimiters = serviceThinkingDelimiters(def);
     } catch { /* an unparsable definition falls through to the 500 below */ }
 
     const started = Date.now();
@@ -326,7 +331,7 @@ export class ProxyController {
       return this.replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
     }
 
-    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat };
+    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat, thinkingDelimiters };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
     const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
@@ -394,7 +399,7 @@ export class ProxyController {
     value.upstreamRequest = {};
     // Shape the client's copy: lift a `<think>` block out of the answer, inline
     // it into the answer, or drop it. `original` returns the same object.
-    const shapedResponse = value.response.withThinkingFormat(thinkingFormat);
+    const shapedResponse = value.response.withThinkingFormat(thinkingFormat, thinkingDelimiters);
     const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
       missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
     const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
@@ -566,7 +571,7 @@ export class ProxyController {
     const events = value.dropReasoning ? withoutReasoning(validated) : validated;
     // Shaped BEFORE the tap, so the log records the copy the client actually
     // received rather than a canonical form it never saw.
-    const shaped = withThinkingFormat(events, ctx.thinkingFormat);
+    const shaped = withThinkingFormat(events, ctx.thinkingFormat, ctx.thinkingDelimiters);
     const outGen = serializeStream(ctx.ingress, tapStream(requireAnswer(shaped), acc), {
       model: ctx.serviceName,
       thinkingFormat: ctx.thinkingFormat,

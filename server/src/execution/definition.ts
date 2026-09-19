@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
-import type { ThinkingFormat } from "../core/ir/thinkingFormat";
+import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -107,6 +107,18 @@ export const ThinkingLevelSchema = z.union([
  * worse contract than any of the individual formats.
  */
 export const ThinkingFormatSchema = z.enum(["original", "reasoning_content", "reasoning", "think_tags", "none"]);
+
+/**
+ * Operator-declared thinking boundaries, for a model whose trace is not
+ * tag-shaped at all (harmony channels, corner-bracket markers). The scanner
+ * matches these literally instead of guessing from shape, which is the only
+ * way to cover such a model -- vLLM ships the same escape hatch as
+ * `--reasoning-config`, Open WebUI as a configurable reasoning tag pair.
+ */
+export const ThinkingDelimitersSchema = z.object({
+  open: z.string().min(1).max(64),
+  close: z.string().min(1).max(64),
+});
 
 export const ResponseFormatSchema = z.union([
   z.object({ type: z.literal("text") }),
@@ -223,6 +235,9 @@ export const ServiceStepsSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this service's client. Omitted = "original". */
   thinkingFormat: ThinkingFormatSchema.optional(),
+  /** Literal thinking boundaries for this service's upstream, when its model
+   * does not delimit its trace with a tag shape the scanner can recognise. */
+  thinkingDelimiters: ThinkingDelimitersSchema.optional(),
   /**
    * Aggregate budget (bytes) for the URL attachments this service inlines.
    * Absent or 0 = unlimited. See {@link AttachmentBudgetSchema}.
@@ -331,6 +346,9 @@ export const AgentSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this agent's client (see ServiceStepsSchema). */
   thinkingFormat: ThinkingFormatSchema.optional(),
+  /** Literal thinking boundaries for this agent's upstreams (see
+   * ServiceStepsSchema). */
+  thinkingDelimiters: ThinkingDelimitersSchema.optional(),
   /**
    * Aggregate budget (bytes) for the URL attachments every call this agent
    * makes may inline. Absent or 0 = unlimited; inherited by stages that do not
@@ -368,6 +386,19 @@ export function isAgent(def: ServiceDef): def is AgentDef {
  */
 export function serviceThinkingFormat(def: ServiceDef): ThinkingFormat {
   return def.thinkingFormat ?? "original";
+}
+
+/**
+ * The literal thinking boundaries a definition declares, if any.
+ *
+ * Scanning by tag SHAPE cannot cover a model that does not delimit its trace
+ * that way (harmony's channel markers being the standard example), so the
+ * operator can state the pair outright and the scanner matches it literally.
+ * Read together with {@link serviceThinkingFormat}, which decides how that
+ * thinking is presented once it has been found.
+ */
+export function serviceThinkingDelimiters(def: ServiceDef): ThinkingDelimiters | undefined {
+  return def.thinkingDelimiters;
 }
 
 /** The effective category of a definition. Agents are always "chat". */

@@ -68,10 +68,36 @@ export function chatReasoningDetails(parts: ReasoningPart[]): unknown[] {
   return parts.map((p, index) => ({ type: "reasoning.encrypted", data: encodeReasoning(p), index }));
 }
 
+/**
+ * A reasoning_details item that is NOT one of our envelopes: the shape
+ * OpenRouter and compatible gateways use (`reasoning.text`, `reasoning.summary`,
+ * or a plain reasoning/thinking item). Reading only the envelope dropped every
+ * one of these, so a server that carries its trace solely in `reasoning_details`
+ * had its thinking thrown away -- and with `reasoning_details` present the plain
+ * `reasoning` field is not consulted either.
+ */
+function plainReasoningItem(item: Record<string, unknown>): ReasoningPart | null {
+  const type = typeof item.type === "string" ? item.type : "";
+  // The array is already the reasoning carrier, so a missing type is accepted;
+  // a DIFFERENT type is not, since some servers put non-reasoning items here.
+  if (type && !/reasoning|thinking|summary/i.test(type)) return null;
+  const text = [item.text, item.summary, item.reasoning, item.thinking].find((v): v is string => typeof v === "string" && v !== "");
+  if (!text) return null;
+  const itemId = typeof item.id === "string" ? item.id : undefined;
+  return { type: "reasoning", text, origin: "openai_completion", ...(itemId ? { itemId } : {}) };
+}
+
 export function parseChatReasoningDetails(value: unknown): ReasoningPart[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap(d => {
-    const p = typeof d?.data === "string" ? decodeReasoning(d.data) : null;
-    return p ? [p] : [];
+  return value.flatMap((d) => {
+    if (!d || typeof d !== "object") return [];
+    const item = d as Record<string, unknown>;
+    // Our own envelope first: it is the only form that carries signatures.
+    if (typeof item.data === "string") {
+      const p = decodeReasoning(item.data);
+      if (p) return [p];
+    }
+    const plain = plainReasoningItem(item);
+    return plain ? [plain] : [];
   });
 }

@@ -67,6 +67,27 @@ function stopToFinishReason(reason: StopReason): string {
   }
 }
 
+/**
+ * The first reasoning field on a body that actually carries text.
+ *
+ * Every server in this family spells the trace its own way -- `reasoning`
+ * (OpenRouter, Ollama's OpenAI-compatible endpoint), `reasoning_content`
+ * (DeepSeek, vLLM, llama.cpp), `reasoning_text`, or `thinking` (Ollama's own
+ * field name) -- and some send more than one. Picking the first field that is
+ * merely PRESENT lets an empty `reasoning: ""` mask a populated
+ * `reasoning_content`, which is thinking silently thrown away; DSH reads these
+ * fields the same way, first non-empty, and for the same reason.
+ */
+const REASONING_FIELDS = ["reasoning", "reasoning_content", "reasoning_text", "thinking"] as const;
+
+function firstReasoningField(source: Record<string, unknown>): string {
+  for (const field of REASONING_FIELDS) {
+    const value = source[field];
+    if (typeof value === "string" && value) return value;
+  }
+  return "";
+}
+
 // --- content coercion ----------------------------------------------------
 
 function coerceContentToParts(content: unknown): ContentPart[] {
@@ -100,9 +121,32 @@ function coerceContentToParts(content: unknown): ContentPart[] {
     } else if (t === "input_audio") {
       // No canonical audio type: keep verbatim for same-family replay.
       parts.push({ type: "opaque", family: "openai_completion", value: item });
+    } else if (t === "thinking" || t === "reasoning" || t === "reasoning_text") {
+      // Reasoning delivered as a content PART rather than a `reasoning` field:
+      // gateways that pass an Anthropic-shaped block through an OpenAI-shaped
+      // body do this, and so does a local server whose content is typed `any`.
+      // Dropping the part is how a response arrives with thinking and no answer.
+      const rec = item as Record<string, unknown>;
+      const text = String(rec.text ?? rec.thinking ?? "");
+      if (text) parts.push({ type: "reasoning", text });
     }
   }
   return parts;
+}
+
+/**
+ * The events for content that arrived as PARTS rather than a plain string.
+ *
+ * Streaming deltas carry `content` as a string almost everywhere, but the field
+ * is `any` in several servers' wire types and parts do show up mid-stream. A
+ * reasoning part among them is still reasoning, so it is classified here rather
+ * than thrown away with the rest of the array.
+ */
+function* contentPartEvents(parts: ContentPart[]): Generator<StreamEvent> {
+  for (const p of parts) {
+    if (p.type === "text" && p.text) yield { type: "text_delta", text: p.text };
+    else if (p.type === "reasoning" && p.text) yield { type: "reasoning_delta", text: p.text };
+  }
 }
 
 function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"]): unknown {
@@ -541,7 +585,7 @@ export class OpenAICompletionResponse extends Response {
     const message = (choice.message ?? {}) as Record<string, unknown>;
 
     const content: ContentPart[] = [];
-    const reasoning = String(message.reasoning ?? message.reasoning_content ?? message.reasoning_text ?? "");
+    const reasoning = firstReasoningField(message);
     const replay = parseChatReasoningDetails(message.reasoning_details);
     if (replay.length) content.push(...replay);
     else if (reasoning) content.push({ type: "reasoning", text: reasoning });
@@ -654,11 +698,19 @@ export class OpenAICompletionResponse extends Response {
       const choice = (choices[0] ?? {}) as Record<string, unknown>;
       const delta = (choice.delta ?? {}) as Record<string, unknown>;
 
-      if (typeof delta.content === "string" && delta.content) yield { type: "text_delta", text: delta.content };
+      // `content` is a string on every mainstream server, but it is typed `any`
+      // in several wire definitions and SOME deltas do carry parts. Reading only
+      // the string form silently dropped those deltas, which reads downstream as
+      // a model that answered with nothing.
+      if (typeof delta.content === "string") {
+        if (delta.content) yield { type: "text_delta", text: delta.content };
+      } else if (Array.isArray(delta.content)) {
+        yield* contentPartEvents(coerceContentToParts(delta.content));
+      }
       if (typeof delta.refusal === "string" && delta.refusal) yield { type: "text_delta", text: delta.refusal };
 
-      const reasoning = delta.reasoning ?? delta.reasoning_content ?? delta.reasoning_text;
-      if (typeof reasoning === "string" && reasoning) {
+      const reasoning = firstReasoningField(delta);
+      if (reasoning) {
         reasoningTextSeen = true;
         yield { type: "reasoning_delta", text: reasoning };
       }

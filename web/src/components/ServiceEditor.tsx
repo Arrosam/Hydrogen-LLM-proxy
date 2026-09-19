@@ -155,6 +155,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
   const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
+  const [thinkingOpen, setThinkingOpen] = useState("");
+  const [thinkingClose, setThinkingClose] = useState("");
   const [maxAttachmentMiB, setMaxAttachmentMiB] = useState(0);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
@@ -200,6 +202,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
       setThinkingFormat(service.steps?.thinkingFormat ?? "original");
+      setThinkingOpen(service.steps?.thinkingDelimiters?.open ?? "");
+      setThinkingClose(service.steps?.thinkingDelimiters?.close ?? "");
       setMaxAttachmentMiB(Math.round((service.steps?.maxAttachmentBytes ?? 0) / (1024 * 1024)));
     } else {
       const firstModel = models[0]?.name ?? "";
@@ -216,6 +220,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setCategory("chat");
       setReliableStreaming(false);
       setThinkingFormat("original");
+      setThinkingOpen("");
+      setThinkingClose("");
       setMaxAttachmentMiB(0);
     }
     setRaw(false);
@@ -225,10 +231,14 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   // "original" is the server's default, so it is left out entirely rather than
   // persisted -- a definition nobody configured stays as short as it was.
-  const thinkingFormatField = () =>
-    isChatPipelineCategory(kind === "chain" ? "chat" : category) && thinkingFormat !== "original"
-      ? { thinkingFormat }
-      : {};
+  const thinkingFormatField = () => {
+    if (!isChatPipelineCategory(kind === "chain" ? "chat" : category)) return {};
+    // Both halves or neither: half a pair is a declaration the scanner cannot
+    // use, and persisting it would read as configured when it is not.
+    const delimiters = thinkingOpen && thinkingClose ? { thinkingDelimiters: { open: thinkingOpen, close: thinkingClose } } : {};
+    if (thinkingFormat === "original") return delimiters;
+    return { thinkingFormat, ...delimiters };
+  };
 
   const buildDef = (): ServiceDef =>
     kind === "chain"
@@ -327,6 +337,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       setThinkingFormat(parsed.thinkingFormat ?? "original");
+      setThinkingOpen(parsed.thinkingDelimiters?.open ?? "");
+      setThinkingClose(parsed.thinkingDelimiters?.close ?? "");
       setMaxAttachmentMiB(Math.round((parsed.maxAttachmentBytes ?? 0) / (1024 * 1024)));
       setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
       return parsed;
@@ -505,6 +517,27 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               ))}
             </select>
             <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">{t("serviceEditor.thinkingOpen")}</label>
+                <input
+                  className="input"
+                  value={thinkingOpen}
+                  onChange={(e) => setThinkingOpen(e.target.value)}
+                  placeholder={t("serviceEditor.thinkingOpenPlaceholder")}
+                />
+              </div>
+              <div>
+                <label className="label">{t("serviceEditor.thinkingClose")}</label>
+                <input
+                  className="input"
+                  value={thinkingClose}
+                  onChange={(e) => setThinkingClose(e.target.value)}
+                  placeholder={t("serviceEditor.thinkingClosePlaceholder")}
+                />
+              </div>
+            </div>
+            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.thinkingDelimitersHint")}</p>
           </div>
         )}
 

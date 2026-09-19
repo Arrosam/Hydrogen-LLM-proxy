@@ -160,6 +160,17 @@ export type ThinkingFormat = "original" | "reasoning_content" | "reasoning" | "t
 
 export const THINKING_FORMATS: ThinkingFormat[] = ["original", "reasoning_content", "reasoning", "think_tags", "none"];
 
+/**
+ * Literal thinking boundaries, for a model whose trace is not tag-shaped
+ * (harmony channels, corner-bracket markers). Mirrors the server's
+ * ThinkingDelimitersSchema; the scanner matches these literally instead of
+ * guessing from shape.
+ */
+export interface ThinkingDelimiters {
+  open: string;
+  close: string;
+}
+
 export interface ServiceSteps {
   hostedTools?: HostedToolOptions;
   category?: ServiceCategory;
@@ -167,6 +178,7 @@ export interface ServiceSteps {
   steps: ServiceStep[];
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  thinkingDelimiters?: ThinkingDelimiters;
   /** Aggregate budget (bytes) for URL attachments inlined for this service. 0/absent = unlimited. */
   maxAttachmentBytes?: number;
 }
@@ -238,6 +250,7 @@ export interface AgentDef {
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  thinkingDelimiters?: ThinkingDelimiters;
   /** Aggregate budget (bytes) for URL attachments inlined by each call. 0/absent = unlimited. */
   maxAttachmentBytes?: number;
 }
