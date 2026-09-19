@@ -26,6 +26,7 @@ import type { ContentPart } from "../src/core/ir/content";
 import type { StreamEvent } from "../src/core/ir/stream";
 import { AnthropicResponse, OpenAICompletionResponse, OpenAIResponsesResponse } from "../src/core/format";
 import type { ResponseData } from "../src/core/ir/stream";
+import { requireAnswer } from "../src/core/ir/answer";
 
 const THOUGHT = "The user wants the capital. It is Paris.";
 const ANSWER = "Paris.";
@@ -317,24 +318,39 @@ describe("ST: a tag split across deltas is still recognised", () => {
   });
 });
 
-describe("EG: a stream that dies inside a thinking block", () => {
-  it("the block is closed rather than left open forever", async () => {
+describe("EG: a stream that dies inside a candidate thinking block", () => {
+  it("the held run goes out as text, matching the buffered path", async () => {
     const out = await drain(
       withThinkingFormat(stream(...deltas(`<think>${THOUGHT}`, 4)), "reasoning"),
     );
-    // Everything it managed to think is delivered, and the block is terminated.
-    expect(reasoningOf(out)).toBe(THOUGHT);
-    expect(out.filter((e) => e.type === "reasoning_stop")).toHaveLength(1);
+    // A block that never closed is the answer text, not a thought -- the same
+    // contract `liftThinkTags` documents. Nothing was emitted as reasoning.
+    expect(reasoningOf(out)).toBe("");
+    expect(textOf(out).endsWith(THOUGHT)).toBe(true);
+    expect(out.some((e) => e.type === "reasoning_stop")).toBe(false);
   });
 
-  it("a finish arriving mid-block closes it before the finish goes out", async () => {
+  it("a finish arriving mid-block releases the held run before the finish", async () => {
     const out = await drain(
       withThinkingFormat(stream({ type: "text_delta", text: "<think>half a thought" }, { type: "finish", stopReason: "length" }), "reasoning"),
     );
-    const stopAt = out.findIndex((e) => e.type === "reasoning_stop");
+    const textAt = out.findIndex((e) => e.type === "text_delta");
     const finishAt = out.findIndex((e) => e.type === "finish");
-    expect(stopAt).toBeGreaterThanOrEqual(0);
-    expect(stopAt).toBeLessThan(finishAt);
+    expect(textAt).toBeGreaterThanOrEqual(0);
+    expect(textAt).toBeLessThan(finishAt);
+    expect(out.some((e) => e.type === "reasoning_delta")).toBe(false);
+  });
+
+  it("a truncated tag block is not reported as thinking-with-no-answer", async () => {
+    // The exact regression: the relay validates the RAW stream, shapes it, then
+    // validates the SHAPED stream again. When shaping reclassified an
+    // unterminated block as reasoning, the second pass rejected an answer that
+    // was really there, and the client saw a thinking block with no content.
+    const raw = String.fromCharCode(60) + "think" + String.fromCharCode(62) + THOUGHT + " and then the stream died";
+    const shaped = withThinkingFormat(stream(...deltas(raw, 3), { type: "finish", stopReason: "stop" }), "reasoning_content");
+    const out = await drain(requireAnswer(shaped));
+    expect(out.find((e) => e.type === "finish")).not.toHaveProperty("error");
+    expect(textOf(out)).toBe(raw);
   });
 });
 

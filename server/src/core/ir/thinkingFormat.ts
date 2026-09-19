@@ -155,17 +155,29 @@ export function applyThinkingFormat(content: ContentPart[], format: ThinkingForm
  *
  * The opening tag arrives a character at a time like everything else, so the
  * scan holds text back until it can decide — at most a dozen characters, since
- * anything longer than the longest tag has already settled the question. Inside
- * a block it holds back only enough to recognise a closing tag split across two
- * deltas. Neither delay is perceptible; withholding the answer to wait for a
- * tag that might never arrive would be.
+ * anything longer than the longest tag has already settled the question.
+ *
+ * Once the opening tag matches, the candidate block is held WHOLE: nothing is
+ * emitted until the closing tag proves it really is thinking. That is forced by
+ * {@link liftThinkTags} -- a `reasoning_delta` already sent cannot be recalled,
+ * and a block that never closes is the answer text, not a thought. When the
+ * closing tag lands the held thought is replayed in small deltas (the bytes are
+ * already in hand, so clients still render it progressively); when the stream
+ * ends or a non-text event arrives first, the whole held run goes out as plain
+ * text, opening tag included. An upstream that fills a structured reasoning
+ * field never reaches this scanner, so its thinking still streams live.
  */
 async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
+  /** Chunk size for replaying a held thought, so clients still see deltas. */
+  const REPLAY_CHUNK = 24;
   let mode: "scan" | "inside" | "done" = "scan";
-  let buffer = "";
+  /** Raw text held since the start; while `inside` it still carries the open tag. */
+  let held = "";
+  /** Offset of the first thought character, i.e. just past the opening tag. */
+  let thoughtFrom = 0;
   let closeTag = CLOSE_TAG;
   /**
-   * The blank line a model writes between `</think>` and its answer is a
+   * The blank line a model writes between a closing tag and its answer is a
    * separator, not content, and the buffered path drops it. Here it usually
    * arrives in a LATER delta than the closing tag, so the suppression has to
    * survive across events -- otherwise the same response reaches the client
@@ -173,13 +185,18 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
    */
   let trimAfterBlock = false;
 
+  /** Release whatever is held as ordinary answer text and stop scanning. */
+  function* asText(): Generator<StreamEvent> {
+    if (held) yield { type: "text_delta", text: held };
+    held = "";
+    mode = "done";
+  }
+
   for await (const ev of events) {
     // The upstream used a structured field: it has told us where its thinking
     // is and the text is just the answer.
     if (ev.type === "reasoning_start" || ev.type === "reasoning_delta" || ev.type === "reasoning_stop") {
-      if (mode === "scan" && buffer) yield { type: "text_delta", text: buffer };
-      buffer = "";
-      mode = "done";
+      yield* asText();
       yield ev;
       continue;
     }
@@ -194,15 +211,9 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
 
     if (ev.type !== "text_delta") {
       // Anything else does end it: a tool call means the answer's structure has
-      // begun and no opening tag is coming. A stream that dies mid-block still
-      // closes it, so the client is not left with a block that never ended.
-      if (mode === "scan" && buffer) yield { type: "text_delta", text: buffer };
-      else if (mode === "inside") {
-        if (buffer) yield { type: "reasoning_delta", text: buffer };
-        yield { type: "reasoning_stop" };
-      }
-      buffer = "";
-      mode = "done";
+      // begun and no opening tag is coming, and a stream that dies mid-block
+      // never closed one. Either way what is held was never a thought.
+      yield* asText();
       yield ev;
       continue;
     }
@@ -219,18 +230,18 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
       continue;
     }
 
-    buffer += ev.text;
+    held += ev.text;
 
     if (mode === "scan") {
-      const open = OPEN_RE.exec(buffer);
+      const open = OPEN_RE.exec(held);
       if (open) {
+        thoughtFrom = open[0].length;
         closeTag = `</${open[1]}>`;
-        buffer = buffer.slice(open[0].length);
         mode = "inside";
-        yield { type: "reasoning_start" };
-      } else if (!couldStillOpen(buffer) || buffer.length > MAX_SCAN) {
-        yield { type: "text_delta", text: buffer };
-        buffer = "";
+        // Fall through: one delta may carry the opening AND the closing tag.
+      } else if (!couldStillOpen(held) || held.length > MAX_SCAN) {
+        yield { type: "text_delta", text: held };
+        held = "";
         mode = "done";
         continue;
       } else {
@@ -239,38 +250,27 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncG
     }
 
     // mode === "inside"
-    const close = new RegExp(`${closeTag.slice(0, -1)}\\s*>`, "i").exec(buffer);
-    if (close) {
-      const thought = buffer.slice(0, close.index);
-      const tail = buffer.slice(close.index + close[0].length).replace(/^\s+/, "");
-      if (thought) yield { type: "reasoning_delta", text: thought };
-      yield { type: "reasoning_stop" };
-      buffer = "";
-      mode = "done";
-      // Whitespace after the tag is consumed here when it came in the same
-      // delta, and by `trimAfterBlock` when it has not arrived yet.
-      trimAfterBlock = tail.length === 0;
-      if (tail) yield { type: "text_delta", text: tail };
-      continue;
+    const rest = held.slice(thoughtFrom);
+    const close = new RegExp(`${closeTag.slice(0, -1)}\\s*>`, "i").exec(rest);
+    if (!close) continue; // still buffering; emit nothing yet
+    const at = thoughtFrom + close.index;
+    const thought = held.slice(thoughtFrom, at);
+    const tail = held.slice(at + close[0].length).replace(/^\s+/, "");
+    yield { type: "reasoning_start" };
+    for (let i = 0; i < thought.length; i += REPLAY_CHUNK) {
+      yield { type: "reasoning_delta", text: thought.slice(i, i + REPLAY_CHUNK) };
     }
-    // Hold back just enough that a closing tag split across two deltas is still
-    // recognised when the second half lands.
-    // Keep an unfinished closing tag, including whitespace before its `>`.
-    const partialClose = new RegExp(`${closeTag.slice(0, -1)}\\s*$`, "i").exec(buffer);
-    const keepFrom = partialClose?.index ?? Math.max(0, buffer.length - closeTag.length + 1);
-    if (keepFrom > 0) {
-      const safe = buffer.slice(0, keepFrom);
-      buffer = buffer.slice(safe.length);
-      yield { type: "reasoning_delta", text: safe };
-    }
+    yield { type: "reasoning_stop" };
+    held = "";
+    mode = "done";
+    // Whitespace after the tag is consumed here when it came in the same
+    // delta, and by `trimAfterBlock` when it has not arrived yet.
+    trimAfterBlock = tail.length === 0;
+    if (tail) yield { type: "text_delta", text: tail };
   }
 
   // The generator ended without a terminal event (a truncated relay).
-  if (mode === "scan" && buffer) yield { type: "text_delta", text: buffer };
-  else if (mode === "inside") {
-    if (buffer) yield { type: "reasoning_delta", text: buffer };
-    yield { type: "reasoning_stop" };
-  }
+  yield* asText();
 }
 
 /** The streaming half of {@link inlineThinkTags}. */
