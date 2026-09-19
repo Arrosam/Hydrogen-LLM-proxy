@@ -127,6 +127,58 @@ Content-Type: application/json
 
 需要补齐所有待处理客户端工具的结果。使用续接 ID 时不要重复发送完整历史。客户端工具与托管工具不能同名。
 
+### 服务端工具往返（客户端协议）
+
+工具定义里的可选 `serverTool` 契约，让客户端以**服务端工具**的形式拿到完整的调用与结果。没有这个契约时行为不变：模型照样用它，客户端只看到最终回答。
+
+```json
+{
+  "name": "search",
+  "description": "Search up to five short queries...",
+  "parameters": { "type": "object", "properties": { "queries": { "type": "array" } } },
+  "url": "http://hydrogen-tools-adapter:8080/tools/search",
+  "bodyTemplate": { "...": "..." },
+  "serverTool": {
+    "name": "web_search",
+    "resultType": "web_search_result",
+    "resultPath": "/results"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `name` | 客户端声明时使用的名称。以它为名的服务端工具声明会被路由到这个工具。 |
+| `resultType` | 返回给客户端的结果块类型，默认 `web_search_result`。 |
+| `resultPath` | 结果条目数组在适配器 JSON 中的 JSON Pointer；留空表示适配器直接返回数组。 |
+
+**返回什么由你的适配器决定。** Hydrogen 不做字段映射、不认任何私有格式：它把 `resultPath` 选出的数组原样放进客户端协议要求的结果块里。字段名、条数、是否带摘要都归适配器。
+
+适配器返回示例（`resultPath: "/results"`）：
+
+```json
+{ "engine": "…", "results": [{ "url": "https://…", "title": "…", "snippet": "…" }] }
+```
+
+Anthropic 客户端声明 `web_search_20250305` 后，会收到：
+
+```json
+[
+  { "type": "server_tool_use", "id": "toolu_…", "name": "web_search", "input": { "queries": ["…"] } },
+  { "type": "web_search_result", "tool_use_id": "toolu_…", "content": [{ "url": "https://…", "title": "…", "snippet": "…" }] },
+  { "type": "text", "text": "最终回答" }
+]
+```
+
+规则：
+
+- 一次请求里的**每一轮**工具往返都会返回，不只最后一轮。
+- 声明里的名称与绑定的工具名可以不同（客户端声明 `web_search`，你绑定 `search`），Hydrogen 按契约里的 `name` 匹配。
+- `resultPath` 选不到数组时，结果块带 `is_error: true` 且内容为空 —— 这是"适配器出错"，不会被伪装成"搜索无结果"。
+- 模型偶尔会调用**声明名**而不是真实工具名。这种调用不会到达任何适配器，Hydrogen 会丢弃它，避免让客户端去执行一个本该由服务端执行的工具。
+- 客户端把收到的 `server_tool_use` / 结果块**回传**时会被保留，续接不会丢内容。
+- 暴露范围仍由绑定决定：只有绑定了该工具的 Model Service / Micro Agent 才有这个能力。
+
 命名阶段引用已绑定工具的服务时，会先完成该阶段的工具循环，再返回阶段输出；各阶段共享顶层调用预算。Micro Agent 自己绑定的工具作用于其输出轮次。已有阶段缓冲和路由规则仍生效。
 
 ## 三种流式方式

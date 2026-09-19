@@ -44,6 +44,14 @@ export type StreamEvent =
   | { type: "tool_start"; index: number; id: string; name: string }
   | { type: "tool_args_delta"; index: number; delta: string }
   | { type: "tool_stop"; index: number }
+  /** A provider-executed call the proxy ran itself. Distinct from `tool_start`:
+   * the client is not being asked to run anything, so it must not appear in a
+   * client's pending-tool bookkeeping. */
+  | { type: "server_tool_start"; id: string; name: string; input: unknown }
+  /** The result half of a provider-executed round trip. `blockType` is the
+   * client protocol's result block type (web_search_result, ...); `content` is
+   * the adapter's entries, opaque here. */
+  | { type: "server_tool_result"; id: string; name: string; blockType: string; content: unknown[]; isError?: boolean }
   /** A cumulative accounting snapshot, retained even if the next read throws. */
   | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -383,6 +391,14 @@ export async function* fabricateStream(
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };
       yield { type: "tool_stop", index: toolIndex };
       toolIndex++;
+    } else if (p.type === "server_tool_result") {
+      // The call and its result arrive together: the proxy already ran the
+      // tool, so there is nothing to stream in between and no client-side
+      // bookkeeping to open. Pace them so the two blocks never race.
+      yield { type: "server_tool_start", id: p.id, name: p.name, input: p.input ?? {} };
+      await pace(2);
+      yield { type: "server_tool_result", id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.isError ? { isError: true } : {}) };
+      await pace(2);
     }
   }
   yield { type: "finish", stopReason: data.stopReason, usage: data.usage };

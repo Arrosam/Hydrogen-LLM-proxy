@@ -46,6 +46,12 @@ Limits: 32 active jobs per process, 25 MiB context/event growth. Retention runs 
 
 Supported stateful input items are messages, function calls/results and reasoning. Unsupported Conversation item types and provider-stored prompt templates are rejected. This feature does not implement every provider's built-in tool or every Responses extension. Tool adapters return one JSON body; adapter-side streaming is outside this contract.
 
+## Client-protocol round trips
+
+A tool may declare an optional `serverTool` contract: the name a client declares, the result block type that client protocol expects, and the JSON Pointer to the entry array in the adapter's response. A client that declares that name as a provider-executed tool (Anthropic `web_search_20250305`, or the Responses equivalent) then receives the full round trip — the call and its result — instead of only the model's final prose. Every round of a multi-round run is returned.
+
+The proxy stays ignorant of any particular tool or adapter format: the adapter decides what an entry contains, and the selected array is passed through verbatim into the block type the contract names. Entries that do not match the configured pointer produce an error-flagged block rather than an empty result list, and a call to the declared name that never reached an adapter is dropped rather than returned as a client tool. Exposure remains governed by the existing per-service and per-agent bindings.
+
 ## References
 
 - [OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)

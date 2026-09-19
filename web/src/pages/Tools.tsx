@@ -6,7 +6,7 @@ import { PageHeader } from "../components/Layout";
 import { Modal } from "../components/Modal";
 import { ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { useToast } from "../components/Toast";
-import type { HostedTool } from "../types";
+import type { HostedTool, ServerToolContract } from "../types";
 
 const sampleSchema = { type: "object", properties: { query: { type: "string", description: "Search query" } }, required: ["query"], additionalProperties: false };
 const sampleBody = { tool: "{{tool.name}}", arguments: "{{arguments}}", session_id: "{{session.id}}", call_id: "{{call.id}}" };
@@ -42,6 +42,12 @@ function ToolEditor({ tool, onClose, onSaved }: { tool: HostedTool | null; onClo
   const [timeoutMs, setTimeoutMs] = useState(tool?.timeoutMs ?? 30000);
   const [maxResultBytes, setMaxResultBytes] = useState(tool?.maxResultBytes ?? 65536);
   const [enabled, setEnabled] = useState(tool?.enabled ?? true);
+  // A tool declares the client-side contract it answers; absent, the tool keeps
+  // the plain behaviour (the model uses it, the client sees only the answer).
+  const [serverToolOn, setServerToolOn] = useState(tool?.serverTool !== undefined);
+  const [serverToolName, setServerToolName] = useState(tool?.serverTool?.name ?? "");
+  const [serverToolResultType, setServerToolResultType] = useState(tool?.serverTool?.resultType ?? "web_search_result");
+  const [serverToolResultPath, setServerToolResultPath] = useState(tool?.serverTool?.resultPath ?? "");
   const [argumentsJson, setArgumentsJson] = useState('{"query":"example"}');
   const [resultJson, setResultJson] = useState('{"result":{"answer":"example"}}');
   const [preview, setPreview] = useState("");
@@ -50,7 +56,11 @@ function ToolEditor({ tool, onClose, onSaved }: { tool: HostedTool | null; onClo
   const save = async () => {
     setBusy(true); setError("");
     try {
-      const value = { name, description, url, parameters: JSON.parse(schema), bodyTemplate: JSON.parse(template), resultPath, timeoutMs, maxResultBytes, enabled,
+      const serverTool: ServerToolContract | undefined = serverToolOn
+        ? { name: serverToolName.trim(), resultType: serverToolResultType.trim() || "web_search_result", resultPath: serverToolResultPath.trim() }
+        : undefined;
+      if (serverTool && !serverTool.name) throw new Error(zh ? "服务端工具契约需要一个客户端声明的名称" : "The server-tool contract needs the name a client declares");
+      const value = { name, description, url, parameters: JSON.parse(schema), bodyTemplate: JSON.parse(template), resultPath, timeoutMs, maxResultBytes, enabled, ...(serverTool ? { serverTool } : {}),
         ...(headers.trim() ? { headers: JSON.parse(headers) } : tool ? {} : { headers: {} }) };
       if (tool) await api.patch(`/tools/${tool.id}`, value); else await api.post("/tools", value);
       toast.success(zh ? "工具已保存" : "Tool saved"); onSaved(); onClose();
@@ -70,6 +80,21 @@ function ToolEditor({ tool, onClose, onSaved }: { tool: HostedTool | null; onClo
       <div className="grid gap-4 lg:grid-cols-2">{area(zh ? "工具参数 JSON Schema（draft 7）" : "Parameter JSON Schema (draft 7)", schema, setSchema, 10)}{area(zh ? "POST JSON 请求模板" : "POST JSON request template", template, setTemplate, 10)}</div>
       <p className="rounded-lg bg-ink-800 p-3 text-xs leading-relaxed text-ink-300">{zh ? "可引用 {{arguments}}、{{arguments.query}}、{{tool.name}}、{{session.id}} 和 {{call.id}}。完整占位符保留 JSON 类型；嵌入字符串只接受标量。" : "Use {{arguments}}, {{arguments.query}}, {{tool.name}}, {{session.id}} and {{call.id}}. Whole placeholders preserve JSON types; string interpolation accepts scalars."}</p>
       <div className="grid gap-4 sm:grid-cols-3"><label><span className="label">{zh ? "结果 JSON Pointer" : "Result JSON Pointer"}</span><input className="input" placeholder="/result" value={resultPath} onChange={e => setResultPath(e.target.value)} /><p className="mt-1 text-xs text-ink-500">{zh ? "留空返回完整 JSON" : "Empty returns the full JSON"}</p></label><label><span className="label">{zh ? "超时（毫秒）" : "Timeout (ms)"}</span><input className="input" type="number" min={100} max={600000} value={timeoutMs} onChange={e => setTimeoutMs(Number(e.target.value))} /></label><label><span className="label">{zh ? "最大响应字节" : "Maximum response bytes"}</span><input className="input" type="number" min={1} max={1048576} value={maxResultBytes} onChange={e => setMaxResultBytes(Number(e.target.value))} /></label></div>
+      <details className="rounded-lg border border-ink-700 p-4">
+        <summary className="cursor-pointer text-sm font-medium">{zh ? "服务端工具往返（客户端协议）" : "Server-side tool round trip (client protocol)"}</summary>
+        <p className="mt-2 text-xs leading-relaxed text-ink-500">{zh ? "开启后，以服务端工具形式声明此名称的客户端会收到调用与结果两块。工具返回什么由你的适配器决定；这里只说明结果条目数组在适配器 JSON 中的位置。" : "Enabled, a client that declares this name as a server tool receives both the call and its result. What an entry contains is your adapter's decision; this only says where the entry array lives in its JSON."}</p>
+        <div className="mt-3">
+          <Toggle checked={serverToolOn} onChange={setServerToolOn} label={zh ? "以服务端工具形式往返" : "Round-trip as a server tool"} />
+        </div>
+        {serverToolOn && <div className="mt-3 space-y-4">
+          <label className="block"><span className="label">{zh ? "客户端声明的名称" : "Name the client declares"}</span><input className="input w-full font-mono" maxLength={64} placeholder="web_search" value={serverToolName} onChange={e => setServerToolName(e.target.value)} /></label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label><span className="label">{zh ? "结果块类型" : "Result block type"}</span><input className="input w-full font-mono" maxLength={128} placeholder="web_search_result" value={serverToolResultType} onChange={e => setServerToolResultType(e.target.value)} /></label>
+            <label><span className="label">{zh ? "结果条目 JSON Pointer" : "Result entries JSON Pointer"}</span><input className="input w-full font-mono" placeholder="/results" value={serverToolResultPath} onChange={e => setServerToolResultPath(e.target.value)} /><p className="mt-1 text-xs text-ink-500">{zh ? "留空表示适配器直接返回条目数组" : "Empty when the adapter returns the entry array directly"}</p></label>
+          </div>
+          <p className="rounded-lg bg-ink-800 p-3 text-xs leading-relaxed text-ink-300">{zh ? "示例：Anthropic 客户端声明 web_search_20250305 时，把客户端名称填 web_search、结果块类型填 web_search_result，即可收到 server_tool_use 与 web_search_tool_result。" : "Example: for an Anthropic client declaring web_search_20250305, set the declared name to web_search and the result block type to web_search_result to receive server_tool_use and web_search_tool_result."}</p>
+        </div>}
+      </details>
       <details className="rounded-lg border border-ink-700 p-4"><summary className="cursor-pointer text-sm font-medium">{zh ? "预览参数映射（不会发送 HTTP 请求）" : "Preview mapping (no HTTP request is sent)"}</summary><div className="mt-4 space-y-3"><div className="grid gap-4 sm:grid-cols-2">{area(zh ? "示例工具参数" : "Sample tool arguments", argumentsJson, setArgumentsJson, 3)}{area(zh ? "示例 API 响应" : "Sample API response", resultJson, setResultJson, 3)}</div><button className="btn-secondary" disabled={busy} onClick={() => void tryPreview()}>{zh ? "预览" : "Preview"}</button>{preview && <pre className="overflow-auto rounded bg-ink-950 p-3 text-xs">{preview}</pre>}</div></details>
       <Toggle checked={enabled} onChange={setEnabled} label={zh ? "启用工具" : "Enable tool"} />
       {error && <ErrorNote message={error} />}<div className="flex justify-end gap-3"><button className="btn-secondary" onClick={onClose}>{zh ? "取消" : "Cancel"}</button><button className="btn-primary" disabled={busy} onClick={() => void save()}>{zh ? "保存工具" : "Save tool"}</button></div>

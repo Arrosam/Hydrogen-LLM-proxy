@@ -2,13 +2,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { Family } from "../core/format/family";
-import { buildRequest, parseRequest } from "../core/format/registry";
+import { buildRequest, buildResponse, parseRequest } from "../core/format/registry";
 import type { Message } from "../core/ir/content";
 import { ZERO_USAGE } from "../core/ir/usage";
 import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
+import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { ProgressRecorder } from "../observability/progressRecorder";
@@ -209,7 +210,12 @@ export class ResponsesController {
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
     if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
     const bound = this.tools.forService(service.id);
-    if (request.tools?.some(t => bound.some(b => b.name === t.name))) throw new ResponseStateError("Client and hosted tool names must be distinct", 400);
+    // A client may DECLARE a provider-executed tool by name. When a bound tool
+    // opts into that contract, the declaration is an instruction to run it, not
+    // a client tool that would collide with the hosted one.
+    const serverTools = hostedServerTools(request.tools, bound);
+    if (request.tools?.some(t => !serverTools.has(t.name) && bound.some(b => b.name === t.name))) throw new ResponseStateError("Client and hosted tool names must be distinct", 400);
+    const tools = rewriteServerTools(request.tools, serverTools);
     const executor = this.deps.factory.forRow(service).executor;
     const id = genId("resp"), created = Math.floor(Date.now() / 1000), started = Date.now();
     const sessionId = conversationId ?? previousSession ?? id;
@@ -242,13 +248,33 @@ export class ResponsesController {
         abort.signal.throwIfAborted();
         this.repo.transition(id, token.id, "in_progress", { ...initial, status: "in_progress" });
         if (family === "openai_responses") await emit({ type: "response.in_progress", response: { ...initial, status: "in_progress" } });
-        const run = await runHostedTools(executor, request, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
+        // Declared server tools are rewritten into the bound tools the model can
+        // actually call; every other request is passed through untouched.
+        const effective = serverTools.size ? buildRequest(family, { ...request.data(), tools }) : request;
+        const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
           progress, emit: flags.stream ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
         if (Buffer.byteLength(JSON.stringify(run.history)) > 25 * 1024 * 1024) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
-        const response = run.value.response.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
+        let final = run.value.response;
+        // Give the client the provider-executed round trips it asked for. The
+        // parts come from the run's UNTRUNCATED history, not the clipped trace,
+        // and carry no knowledge of any particular tool or adapter.
+        if (serverTools.size) {
+          const synthesisFamily = family === "openai_responses" ? "openai_responses" as const : family === "anthropic" ? "anthropic" as const : undefined;
+          const parts = synthesisFamily ? serverToolParts(collectServerToolCalls(run.history, serverTools), synthesisFamily) : [];
+          // A model that read "search the web" may answer with the DECLARED name,
+          // which it was never offered: the declaration is replaced by the bound
+          // tool precisely because the client's form carries no parameters. Such a
+          // call reaches no adapter, so returning it would ask the client to run a
+          // tool it knows we run — and the round trip above already reports what
+          // actually happened. Drop it rather than pass the confusion on.
+          const declared = new Set([...serverTools.values()].map(entry => entry.declaration.name));
+          const content = parts.length ? final.content.filter(part => part.type !== "tool_use" || !declared.has(part.name)) : final.content;
+          if (parts.length) final = buildResponse(family, { ...final.data(), content: [...parts, ...content] });
+        }
+        const response = final.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
         const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
         // Let the renderer supply output, usage and incomplete_details; the envelope supplies state fields.
         delete extra.output; delete extra.error; delete extra.incomplete_details;

@@ -8,6 +8,7 @@ import {
   type FileSource,
   type ImagePart,
   type Message,
+  type ServerToolResultPart,
   type StopReason,
   type TextPart,
   type Tool,
@@ -82,7 +83,7 @@ function imageSourceToBlock(source: ImagePart["source"]): unknown {
   return { type: "base64", media_type: source.mediaType, data: source.data };
 }
 
-function blocksToParts(content: unknown): ContentPart[] {
+function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPart> = new Map()): ContentPart[] {
   if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
   if (!Array.isArray(content)) return [];
   const parts: ContentPart[] = [];
@@ -126,11 +127,39 @@ function blocksToParts(content: unknown): ContentPart[] {
         parts.push({
           type: "tool_result",
           toolUseId: String(b.tool_use_id ?? ""),
-          content: blocksToParts(b.content).filter((p): p is TextPart | ImagePart => p.type === "text" || p.type === "image"),
+          content: blocksToParts(b.content, pending).filter((p): p is TextPart | ImagePart => p.type === "text" || p.type === "image"),
           isError: b.is_error === true ? true : undefined,
           ...cc,
         });
         break;
+      // A provider-executed pair replayed by a client that received it from us.
+      // Kept so a continuation (previous_response_id / full-history resend) does
+      // not lose, or silently reduce to text, what the client is showing.
+      case "server_tool_use": {
+        const part: ServerToolResultPart = { type: "server_tool_result", family: "anthropic", id: String(b.id ?? genId("srv")), name: String(b.name ?? ""), input: b.input ?? {}, blockType: "web_search_result", content: [] };
+        pending.set(part.id, part);
+        parts.push(part);
+        break;
+      }
+      // Any provider-executed result block. Its own `type` is the contract, so a
+      // tool configured for another result shape replays without this wire
+      // needing to know that shape in advance.
+      case "web_search_tool_result":
+      case "server_tool_result": {
+        const id = String(b.tool_use_id ?? "");
+        const content = Array.isArray(b.content) ? b.content : [];
+        const use = pending.get(id);
+        if (use) {
+          use.blockType = String(b.type);
+          use.content = content;
+          use.isError = b.is_error === true ? true : undefined;
+          // The result half belongs to the assistant turn that made the call.
+          if (!parts.includes(use)) parts.push(use);
+        } else {
+          parts.push({ type: "server_tool_result", family: "anthropic", id: id || genId("srv"), name: "server_tool", input: {}, blockType: String(b.type), content, ...(b.is_error === true ? { isError: true } : {}) });
+        }
+        break;
+      }
     }
   }
   return parts;
@@ -329,11 +358,14 @@ export class AnthropicRequest extends Request {
   static parse(body: Record<string, unknown>): AnthropicRequest {
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const messages: Message[] = [];
+    // Server-tool uses and their results are separate messages, so pairing them
+    // needs the whole request, not one message's block list.
+    const pendingServerTools = new Map<string, ServerToolResultPart>();
     for (const raw of rawMessages) {
       if (!raw || typeof raw !== "object") continue;
       const m = raw as Record<string, unknown>;
       const role = m.role === "assistant" ? "assistant" : "user";
-      messages.push({ role, content: blocksToParts(m.content) });
+      messages.push({ role, content: blocksToParts(m.content, pendingServerTools) });
     }
     return new AnthropicRequest({
       requestedService: String(body.model ?? ""),
@@ -528,6 +560,13 @@ export class AnthropicResponse extends Response {
       }
       else if (p.type === "text") content.push({ type: "text", text: p.text });
       else if (p.type === "tool_use") content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+      else if (p.type === "server_tool_result") {
+        // Two blocks, in the order this wire defines: the call the provider made,
+        // then its result. `blockType` comes from the tool's own contract, so
+        // this renderer carries any result shape an adapter and operator agree on.
+        content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+        content.push({ type: p.blockType, tool_use_id: p.id, content: p.content, ...(p.isError ? { is_error: true } : {}) });
+      }
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
     return {
@@ -692,6 +731,9 @@ export class AnthropicResponse extends Response {
     let reasoningRedacted = false;
     let reasoningText = "";
     const toolMap = new Map<number, number>();
+    // Client-declared server tools are identified by call id, not by an index
+    // the client assigned: the proxy ran them, so there is no request-side index.
+    const serverToolIndexes = new Map<string, number>();
 
     const frame = (event: string, data: Record<string, unknown>): string =>
       `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`;
@@ -802,6 +844,23 @@ export class AnthropicResponse extends Response {
             yield frame("content_block_stop", { index: idx });
             toolMap.delete(ev.index);
           }
+          break;
+        }
+        case "server_tool_start": {
+          if (reasoningOpen) { yield frame("content_block_stop", { index: reasoningIndex }); reasoningOpen = false; }
+          if (textOpen) { yield frame("content_block_stop", { index: textIndex }); textOpen = false; }
+          const idx = nextIndex++;
+          serverToolIndexes.set(ev.id, idx);
+          yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {} } });
+          break;
+        }
+        case "server_tool_result": {
+          const idx = serverToolIndexes.get(ev.id) ?? nextIndex++;
+          if (serverToolIndexes.has(ev.id)) yield frame("content_block_stop", { index: idx });
+          serverToolIndexes.delete(ev.id);
+          const resultIndex = nextIndex++;
+          yield frame("content_block_start", { index: resultIndex, content_block: { type: ev.blockType, tool_use_id: ev.id, content: ev.content, ...(ev.isError ? { is_error: true } : {}) } });
+          yield frame("content_block_stop", { index: resultIndex });
           break;
         }
         case "finish":

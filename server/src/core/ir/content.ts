@@ -83,7 +83,34 @@ export interface ReasoningPart {
   redacted?: boolean;
 }
 
-export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart;
+/**
+ * One complete server-side tool round trip, as the client protocol needs to see
+ * it: the provider-executed call AND the result it produced. The proxy runs the
+ * call internally, so without this part the client would receive only the
+ * model's final prose and could never tell a tool ran at all.
+ *
+ * `input` and `content` stay opaque to the canonical layer: the user's adapter
+ * decides what goes inside the result entries, and the tool's own configured
+ * block type decides which protocol block carries them. Same-family replay only;
+ * the other families drop it rather than invent a shape they do not have.
+ */
+export interface ServerToolResultPart {
+  type: "server_tool_result";
+  family: "anthropic" | "openai_responses";
+  /** Provider-executed call id, referenced by the result half of the pair. */
+  id: string;
+  /** Name the CLIENT declared for the server tool. */
+  name: string;
+  input: unknown;
+  /** Client-facing result block type, e.g. `web_search_result`. */
+  blockType: string;
+  /** The adapter's selected result entries, verbatim. */
+  content: unknown[];
+  /** The adapter, schema, or call budget failed; `content` is empty. */
+  isError?: boolean;
+}
+
+export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart | ServerToolResultPart;
 
 export interface Message {
   role: "user" | "assistant";

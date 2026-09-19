@@ -386,6 +386,17 @@ export interface HostedToolOptions {
   maxRounds: number;
   maxCalls: number;
 }
+/**
+ * Opt a tool into provider-executed ("server-side") round trips. A client that
+ * declares `name` as a server tool receives the call and its result; the tool's
+ * adapter decides what an entry contains, and `resultPath` says where the entry
+ * array sits in the adapter's JSON.
+ */
+export interface ServerToolContract {
+  name: string;
+  resultType: string;
+  resultPath: string;
+}
 export interface HostedTool {
   id: number;
   name: string;
@@ -399,4 +410,5 @@ export interface HostedTool {
   enabled: boolean;
   headerNames: string[];
   hasHeaders: boolean;
+  serverTool?: ServerToolContract;
 }

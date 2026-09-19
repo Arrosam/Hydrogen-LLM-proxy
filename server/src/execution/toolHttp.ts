@@ -24,9 +24,47 @@ export const HttpToolSchema = z.object({
   timeoutMs: z.number().int().min(100).max(600_000).default(30_000),
   maxResultBytes: z.number().int().min(1).max(1_048_576).default(65_536),
   enabled: z.boolean().default(true),
+  /**
+   * Opt this tool into provider-executed ("server-side") round trips on the
+   * client protocols. Absent, the tool behaves exactly as before: it reaches the
+   * model, and only the model's final turn comes back.
+   *
+   * Present, a client that DECLARES `name` as a server tool (Anthropic
+   * `tools:[{type:"web_search_20250305", name}]}`, or the Responses equivalent)
+   * receives the full round trip. Nothing here names a search engine or assumes
+   * an adapter's private JSON: `resultType` is the block type the client
+   * protocol requires, and `resultPath` is where the adapter puts the entries.
+   */
+  serverTool: z.object({
+    /** Name a client declares. Matched against the incoming server-tool declaration. */
+    name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    /** Result block type the client protocol expects, e.g. `web_search_result`. */
+    resultType: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).default("web_search_result"),
+    /** JSON Pointer into the adapter's JSON selecting the result entry array. */
+    resultPath: z.string().max(1_024).default("")
+      .refine(path => path === "" || (path.startsWith("/") && !/~(?![01])/.test(path)), "Use a JSON Pointer such as /results"),
+  }).optional(),
 });
 
 export type HttpTool = z.infer<typeof HttpToolSchema>;
+export type ServerTool = NonNullable<HttpTool["serverTool"]>;
+
+/**
+ * The adapter's result entries for a server-tool round trip. The adapter decides
+ * what an entry contains; this only says where the array is. A pointer that
+ * selects something else, a non-array, or unparsable JSON is a configuration or
+ * adapter fault, surfaced to the operator instead of being flattened into an
+ * empty result list.
+ */
+export function serverToolEntries(selected: unknown, pointer: string): unknown[] | null {
+  let value: unknown;
+  if (pointer === "") value = selected;
+  else {
+    try { value = selectToolResult(selected, pointer); }
+    catch { return null; }
+  }
+  return Array.isArray(value) ? value : null;
+}
 
 export interface ToolCallContext {
   arguments: Record<string, unknown>;
