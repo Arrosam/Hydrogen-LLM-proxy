@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -203,6 +204,15 @@ describe("imageHash", () => {
     const b: ImagePart = { type: "image", source: { kind: "base64", mediaType: "image/png", data: b64("B") } };
     expect(imageHash(a)).toBe(imageHash(a2));
     expect(imageHash(a)).not.toBe(imageHash(b));
+  });
+
+  it("hashes a large image in bounded slices, byte-identical to a whole decode", () => {
+    const data = Buffer.alloc(2 * 1024 * 1024, 42).toString("base64");
+    const img: ImagePart = { type: "image", source: { kind: "base64", mediaType: "image/png", data } };
+    const expected = crypto.createHash("sha256")
+      .update("hydrogen-image-v1").update("\n").update("b64\n").update("image/png").update("\n")
+      .update(Buffer.from(data, "base64")).digest("hex");
+    expect(imageHash(img)).toBe(expected);
   });
 
   it("separates a URL image from base64 content and from other URLs", () => {

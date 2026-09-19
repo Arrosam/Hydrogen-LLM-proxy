@@ -37,6 +37,18 @@ const HASH_VERSION = "hydrogen-image-v1";
  * the price of not downloading every referenced image, and the LRU budget bounds
  * how long such an entry can linger.
  */
+/** How much base64 is decoded per hash update. The slice boundary is a
+ * multiple of 4, so the decoded bytes are byte-for-byte what a whole-string
+ * decode produces -- the point is that a large image never has to be
+ * materialized as one big Buffer just to be content-addressed. */
+const HASH_DECODE_CHUNK = 256 * 1024;
+
+function updateWithBase64(h: crypto.Hash, data: string): void {
+  for (let i = 0; i < data.length; i += HASH_DECODE_CHUNK) {
+    h.update(Buffer.from(data.slice(i, i + HASH_DECODE_CHUNK), "base64"));
+  }
+}
+
 export function imageHash(img: ImagePart): string {
   const h = crypto.createHash("sha256");
   h.update(HASH_VERSION);
@@ -48,7 +60,7 @@ export function imageHash(img: ImagePart): string {
     h.update("b64\n");
     h.update(img.source.mediaType);
     h.update("\n");
-    h.update(Buffer.from(img.source.data, "base64"));
+    updateWithBase64(h, img.source.data);
   }
   return h.digest("hex");
 }
