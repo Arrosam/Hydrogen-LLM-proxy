@@ -526,13 +526,18 @@ export class OpenAIResponsesResponse extends Response {
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
     const cachedInputTokens = openAiCachedTokens(usage);
     const reasoningTokens = numOrUndef(((usage.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
+    // This wire has no "paused" status: a turn that asks to be continued is
+    // `incomplete` with its own reason, and only that reason distinguishes it
+    // from a token-limit stop.
+    const incompleteReason = ((body.incomplete_details ?? {}) as Record<string, unknown>).reason;
+    const paused = body.status === "incomplete" && incompleteReason === "pause_turn";
     const incomplete = body.status === "incomplete";
     return new OpenAIResponsesResponse({
       id: String(body.id ?? genId("resp")),
       model: String(body.model ?? ""),
       created: numOrUndef(body.created_at) ?? 0,
       content,
-      stopReason: incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
+      stopReason: paused ? "pause_turn" : incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
       usage: {
         promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
         ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
@@ -574,7 +579,7 @@ export class OpenAIResponsesResponse extends Response {
     // it used, and the API runs it — there is nothing for the client to answer.
     // Only the entry URLs fit: this wire's source shape is `{ type: "url", url }`.
     for (const p of this.content) {
-      if (p.type !== "server_tool_result") continue;
+      if (p.type !== "server_tool_result" || p.notExecuted) continue;
       const queries = (p.input as { queries?: unknown } | null)?.queries;
       const query = (p.input as { query?: unknown } | null)?.query;
       const sources = p.content
@@ -609,14 +614,17 @@ export class OpenAIResponsesResponse extends Response {
       output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text: "", annotations: [] }] });
     }
 
+    const paused = this.stopReason === "pause_turn";
     const incomplete = this.stopReason === "length";
     return {
       id: genId("resp"),
       object: "response",
       created_at: this.created,
-      status: incomplete ? "incomplete" : "completed",
+      status: paused || incomplete ? "incomplete" : "completed",
       error: null,
-      incomplete_details: incomplete ? { reason: "max_output_tokens" } : null,
+      // The client resumes a paused turn by sending the response back, so the
+      // reason has to say which kind of "not finished" this is.
+      incomplete_details: paused ? { reason: "pause_turn" } : incomplete ? { reason: "max_output_tokens" } : null,
       model,
       output,
       usage: {
@@ -812,7 +820,10 @@ export class OpenAIResponsesResponse extends Response {
               if (item && typeof item === "object") yield* finishItem(item as Record<string, unknown>, index);
             }
           }
-          yield { type: "finish", stopReason: type === "response.incomplete" ? "length" : sawToolCall ? "tool_use" : "stop", usage };
+          // An incomplete turn says WHY it stopped; only the reason tells a
+          // paused loop apart from a token limit.
+          const why = ((r.incomplete_details ?? {}) as Record<string, unknown>).reason;
+          yield { type: "finish", stopReason: type === "response.incomplete" ? (why === "pause_turn" ? "pause_turn" : "length") : sawToolCall ? "tool_use" : "stop", usage };
           return;
         }
         default:
@@ -983,6 +994,7 @@ export class OpenAIResponsesResponse extends Response {
         // its result arrive together, so the item is emitted whole once the
         // result is known — there is no client-side execution to open first.
         case "server_tool_result": {
+          if (ev.notExecuted) break;
           yield* closeReasoning();
           yield* closeMessage();
           const queries = (ev as { input?: { queries?: unknown } }).input?.queries;
@@ -1032,6 +1044,7 @@ export class OpenAIResponsesResponse extends Response {
             output.push(item);
           }
           tools.clear();
+          const paused = ev.stopReason === "pause_turn";
           const incomplete = ev.stopReason === "length";
           const usage = ev.usage
             ? { input_tokens: ev.usage.promptTokens, output_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
@@ -1039,10 +1052,10 @@ export class OpenAIResponsesResponse extends Response {
                 ...(ev.usage.reasoningTokens != null ? { output_tokens_details: { reasoning_tokens: ev.usage.reasoningTokens } } : {}),
               }
             : undefined;
-          yield frame(incomplete ? "response.incomplete" : "response.completed", {
-            response: response(incomplete ? "incomplete" : "completed", {
+          yield frame(paused || incomplete ? "response.incomplete" : "response.completed", {
+            response: response(paused || incomplete ? "incomplete" : "completed", {
               output,
-              ...(incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+              ...(paused ? { incomplete_details: { reason: "pause_turn" } } : incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
               ...(usage ? { usage } : {}),
             }),
           });

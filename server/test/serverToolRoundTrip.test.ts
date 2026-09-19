@@ -34,7 +34,7 @@ import { UsageMeter } from "../src/observability/usageMeter";
 
 let db: OpenedDatabase, dir: string, app: FastifyInstance, tokens: TokenRepo, repo: ResponseRepo, services: ServiceRepo, tools: HostedToolRepo;
 let owner: ReturnType<TokenRepo["create"]>, adapter: ReturnType<typeof vi.fn>;
-let outputs: ContentPart[][], seen: Request[];
+let outputs: ContentPart[][], seen: Request[], limit: (options: Record<string, unknown>) => void;
 const headers = () => ({ authorization: `Bearer ${owner.secret}` });
 
 /** What the operator's adapter returns: its own shape, entries under /results. */
@@ -83,6 +83,9 @@ beforeEach(() => {
   }));
   tools.bind(serviceId, [tool.id]);
   services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], hostedTools: HostedToolOptionsSchema.parse({}) } });
+  // The loop's own ceilings are the only thing standing between a long run and
+  // an error, so tests drive them explicitly.
+  limit = (options: Record<string, unknown>) => services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], hostedTools: HostedToolOptionsSchema.parse(options) } });
 });
 afterEach(async () => { await app.close(); db.sqlite.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
@@ -142,6 +145,56 @@ describe("server-side tool round trip over HTTP", () => {
     expect(content.map(b => b.type)).toEqual(["text", "server_tool_use", "web_search_result", "text"]);
     expect(content[0]).toEqual({ type: "text", text: "Let me search." });
     expect(content[3]).toEqual({ type: "text", text: "Here is the answer." });
+  });
+
+  // Running out of budget must be a continuation, not an error: the client can
+  // send the paused turn back and the loop picks up exactly where it stopped.
+  it("pauses instead of failing when the round budget runs out, then resumes", async () => {
+    // One round is enough for the model's first turn and not for the tool it
+    // asks for, so the run pauses instead of failing.
+    limit({ maxRounds: 1 });
+    outputs.push([{ type: "text", text: "Let me search." }, searchCall]);
+    const payload = declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]);
+
+    const first = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload });
+    expect(first.statusCode).toBe(200);
+    const paused = first.json();
+    expect(paused.stop_reason).toBe("pause_turn");
+    // What the model already said survives; the call it asked for is reported as
+    // still pending (the call block with no result), not as a failure it never
+    // had; and the adapter was never asked to run it.
+    expect(paused.content.map((b: Record<string, unknown>) => b.type)).toEqual(["text", "server_tool_use"]);
+    expect(paused.content[0]).toEqual({ type: "text", text: "Let me search." });
+    expect(adapter).not.toHaveBeenCalled();
+
+    // The client resumes by sending the paused turn back, unchanged.
+    const resumePayload = {
+      ...declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]),
+      messages: [{ role: "user", content: "q" }, { role: "assistant", content: paused.content }],
+    };
+    const second = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: resumePayload });
+    expect(second.statusCode).toBe(200);
+    const resumed = second.json();
+    expect(resumed.stop_reason).toBe("end_turn");
+    expect(resumed.content.map((b: Record<string, unknown>) => b.type)).toEqual(["text", "server_tool_use", "web_search_result", "text"]);
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  // The CALL budget is a per-call verdict, not a stopped turn: the model gets
+  // told which calls it may not make and can adjust on the spot.
+  it("reports a call the budget refused, without ending the turn", async () => {
+    limit({ maxCalls: 1 });
+    const second: ContentPart = { type: "tool_use", id: "toolu_2", name: "search", input: { queries: ["kyoto"] } };
+    outputs.push([searchCall, second], [{ type: "text", text: "answer" }]);
+    const response = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]) });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.stop_reason).toBe("end_turn");
+    expect(body.content.map((b: Record<string, unknown>) => b.type)).toEqual(["server_tool_use", "web_search_result", "server_tool_use", "web_search_result", "text"]);
+    // Only the call with budget left reached the adapter; the refused one is
+    // reported as refused.
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(body.content[3]).toMatchObject({ content: { error_code: "unavailable" } });
   });
 
   it("hands a Responses client one web_search_call carrying the source urls", async () => {

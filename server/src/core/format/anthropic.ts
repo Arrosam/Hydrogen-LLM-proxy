@@ -8,11 +8,11 @@ import {
   type FileSource,
   type ImagePart,
   type Message,
-  type ServerToolResultPart,
   type StopReason,
   type TextPart,
   type Tool,
   type ToolChoice,
+  type ToolUsePart,
 } from "../ir/content";
 import type { GenerationParams, ThinkingLevel } from "../ir/params";
 import { ThinkingPolicy } from "../ir/thinking";
@@ -39,6 +39,8 @@ function stopReasonToStop(reason: string | null | undefined): StopReason {
       return "tool_use";
     case "refusal":
       return "content_filter";
+    case "pause_turn":
+      return "pause_turn";
     default:
       return reason ? "stop" : null;
   }
@@ -52,6 +54,8 @@ function stopToAnthropic(reason: StopReason): string {
       return "tool_use";
     case "content_filter":
       return "refusal";
+    case "pause_turn":
+      return "pause_turn";
     default:
       return "end_turn";
   }
@@ -83,7 +87,7 @@ function imageSourceToBlock(source: ImagePart["source"]): unknown {
   return { type: "base64", media_type: source.mediaType, data: source.data };
 }
 
-function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPart> = new Map()): ContentPart[] {
+function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> = new Map()): ContentPart[] {
   if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
   if (!Array.isArray(content)) return [];
   const parts: ContentPart[] = [];
@@ -127,7 +131,7 @@ function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPa
         parts.push({
           type: "tool_result",
           toolUseId: String(b.tool_use_id ?? ""),
-          content: blocksToParts(b.content, pending).filter((p): p is TextPart | ImagePart => p.type === "text" || p.type === "image"),
+          content: blocksToParts(b.content, pendingUses).filter((p): p is TextPart | ImagePart => p.type === "text" || p.type === "image"),
           isError: b.is_error === true ? true : undefined,
           ...cc,
         });
@@ -136,9 +140,12 @@ function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPa
       // Kept so a continuation (previous_response_id / full-history resend) does
       // not lose, or silently reduce to text, what the client is showing.
       case "server_tool_use": {
-        const part: ServerToolResultPart = { type: "server_tool_result", family: "anthropic", id: String(b.id ?? genId("srv")), name: String(b.name ?? ""), input: b.input ?? {}, blockType: "web_search_result", content: [] };
-        pending.set(part.id, part);
-        parts.push(part);
+        // Back from a client as a pending call: the proxy executes it. It pairs
+        // with the result block below when one is present, and is a plain
+        // provider-executed call when the turn paused before any result existed.
+        const call: ToolUsePart = { type: "tool_use", id: String(b.id ?? genId("srv")), name: String(b.name ?? ""), input: b.input ?? {}, serverTool: true };
+        pendingUses.set(call.id, call);
+        parts.push(call);
         break;
       }
       // Any provider-executed result block. Its own `type` is the contract, so a
@@ -152,16 +159,19 @@ function blocksToParts(content: unknown, pending: Map<string, ServerToolResultPa
         const error = b.content !== null && typeof b.content === "object" && !Array.isArray(b.content)
           ? (b.content as { error_code?: unknown }).error_code : undefined;
         const content = Array.isArray(b.content) ? b.content : [];
-        const use = pending.get(id);
-        if (use) {
-          use.blockType = String(b.type);
-          use.content = content;
-          use.errorCode = typeof error === "string" ? error : undefined;
-          // The result half belongs to the assistant turn that made the call.
-          if (!parts.includes(use)) parts.push(use);
-        } else {
-          parts.push({ type: "server_tool_result", family: "anthropic", id: id || genId("srvtoolu"), name: "server_tool", input: {}, blockType: String(b.type), content, ...(typeof error === "string" ? { errorCode: error } : {}) });
-        }
+        const call = pendingUses.get(id);
+        // A result with no call still carries the round trip: the call it refers
+        // to was already parsed, and this is the other half of the pair.
+        parts.push({
+          type: "server_tool_result",
+          family: "anthropic",
+          id: id || genId("srvtoolu"),
+          name: call?.name ?? "server_tool",
+          input: call?.input ?? {},
+          blockType: String(b.type),
+          content,
+          ...(typeof error === "string" ? { errorCode: error } : {}),
+        });
         break;
       }
     }
@@ -364,7 +374,7 @@ export class AnthropicRequest extends Request {
     const messages: Message[] = [];
     // Server-tool uses and their results are separate messages, so pairing them
     // needs the whole request, not one message's block list.
-    const pendingServerTools = new Map<string, ServerToolResultPart>();
+    const pendingServerTools = new Map<string, ToolUsePart>();
     for (const raw of rawMessages) {
       if (!raw || typeof raw !== "object") continue;
       const m = raw as Record<string, unknown>;
@@ -563,13 +573,19 @@ export class AnthropicResponse extends Response {
         else content.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.origin && p.origin !== "anthropic" ? encodeReasoning(p) : p.signature } : {}) });
       }
       else if (p.type === "text") content.push({ type: "text", text: p.text });
-      else if (p.type === "tool_use") content.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+      else if (p.type === "tool_use") content.push(p.serverTool
+        ? { type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } }
+        : { type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
       else if (p.type === "server_tool_result") {
         // Two blocks, in the order this wire defines: the call the provider made,
         // then its result in the SAME assistant turn, paired by tool_use_id.
         // `blockType` comes from the tool's own contract, so this renderer
         // carries any result shape an adapter and operator agree on.
         content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } });
+        // A call a pause declined to run stays pending: the call block with no
+        // result after it is the shape a client continues from, and inventing an
+        // outcome would name a failure that never happened.
+        if (p.notExecuted) continue;
         // This wire models failure as its own content object, not as an array:
         // an error can therefore never be mistaken for an empty result set. The
         // code comes from the adapter when it named one.
@@ -873,6 +889,7 @@ export class AnthropicResponse extends Response {
           const idx = serverToolIndexes.get(ev.id) ?? nextIndex++;
           if (serverToolIndexes.has(ev.id)) yield frame("content_block_stop", { index: idx });
           serverToolIndexes.delete(ev.id);
+          if (ev.notExecuted) break;
           const resultIndex = nextIndex++;
           yield frame("content_block_start", { index: resultIndex, content_block: {
             type: ev.blockType,

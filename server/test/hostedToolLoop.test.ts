@@ -96,7 +96,12 @@ describe("hosted model/tool loop", () => {
     const t = transport();
     await expect(runHostedTools(executor([[call], [call]]), request, [tool], t, { sessionId: "s" })).rejects.toThrow("repeated");
     expect(t.postStream).toHaveBeenCalledTimes(1);
-    await expect(runHostedTools(executor([[call]]), request, [tool], transport(), { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1 }) })).rejects.toThrow("round limit");
+    // The round ceiling is a pause, not a failure: the client continues the
+    // turn with the same request instead of losing what the model already said.
+    const paused = await runHostedTools(executor([[call]]), request, [tool], transport(), { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1 }) });
+    expect(paused.value.response.stopReason).toBe("pause_turn");
+    expect(paused.value.response.toolCalls()).toHaveLength(1);
+    expect(paused.declined).toEqual(["c1"]);
     const e = executor([]);
     await expect(runHostedTools(e, buildRequest(request.family, { ...request.data(), tools: [{ name: "lookup", parameters: {} }] }), [tool], t, { sessionId: "s" })).rejects.toThrow("conflicts");
     expect(e.invoke).not.toHaveBeenCalled();

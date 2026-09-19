@@ -65,6 +65,13 @@ export type ServerToolOutcome = { content: unknown[]; errorCode?: undefined } | 
 const SERVER_TOOL_ERROR_CODES = new Set(["invalid_tool_input", "unavailable", "max_uses_exceeded", "too_many_requests", "query_too_long", "request_too_large"]);
 
 /**
+ * Internal marker for a call a pause declined to run. It never reaches a client
+ * as a result: a paused turn reports the call as still pending, which is what
+ * "server_tool_use with no result" means on this wire.
+ */
+export const PAUSED_TOOL_MARKER = "tool_call_limit";
+
+/**
  * What the adapter's response yielded at `resultPath`: the result entries, or a
  * failure carrying the wire error code the ADAPTER chose.
  *

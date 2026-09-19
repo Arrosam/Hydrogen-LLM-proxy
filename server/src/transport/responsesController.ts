@@ -9,7 +9,7 @@ import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
-import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
+import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { ProgressRecorder } from "../observability/progressRecorder";
@@ -214,7 +214,11 @@ export class ResponsesController {
     // opts into that contract, the declaration is an instruction to run it, not
     // a client tool that would collide with the hosted one.
     const serverTools = hostedServerTools(request.tools, bound);
-    if (request.tools?.some(t => !serverTools.has(t.name) && bound.some(b => b.name === t.name))) throw new ResponseStateError("Client and hosted tool names must be distinct", 400);
+    // A tool a client declares by the name a bound tool's OWN contract names is an
+    // instruction to run that tool, not a collision. Any other name a hosted tool
+    // answers to still is one: the model would see two definitions of it.
+    const declaredNames = new Set(bound.flatMap(tool => tool.serverTool ? [tool.serverTool.name] : []));
+    if (request.tools?.some(tool => !declaredNames.has(tool.name) && bound.some(b => b.name === tool.name))) throw new ResponseStateError("Client and hosted tool names must be distinct", 400);
     const tools = rewriteServerTools(request.tools, serverTools);
     const executor = this.deps.factory.forRow(service).executor;
     const id = genId("resp"), created = Math.floor(Date.now() / 1000), started = Date.now();
@@ -256,7 +260,8 @@ export class ResponsesController {
         // actually call; every other request is passed through untouched.
         const effective = serverTools.size ? buildRequest(family, { ...request.data(), tools }) : request;
         const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
-          progress, emit: flags.stream ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars });
+          progress, emit: flags.stream ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+          declaredNames: serverTools.size ? new Map([...declaredServerTools(serverTools)].map(([declared, entry]) => [declared, entry.tool.name])) : undefined });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
@@ -277,7 +282,7 @@ export class ResponsesController {
             // reaches no adapter, so it is dropped rather than handed back as
             // something for the client to run.
             const declared = new Set([...serverTools.values()].map(entry => entry.declaration.name));
-            const content = serverToolResponseContent(run.history, parts, prefix.length)
+            const content = serverToolResponseContent(run.history, parts, prefix.length, new Set(run.declined))
               .filter(part => part.type !== "tool_use" || !declared.has(part.name));
             if (content.length) final = buildResponse(family, { ...final.data(), content });
           }

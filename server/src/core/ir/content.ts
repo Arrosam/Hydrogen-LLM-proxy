@@ -56,6 +56,12 @@ export interface ToolUsePart {
   name: string;
   input: unknown;
   cacheControl?: unknown;
+  /**
+   * This call is the client's copy of a provider-executed one: it renders as
+   * `server_tool_use` rather than `tool_use`, and it is the shape a resumed
+   * `pause_turn` hands back for the proxy to run.
+   */
+  serverTool?: boolean;
 }
 
 export interface ToolResultPart {
@@ -116,6 +122,12 @@ export interface ServerToolResultPart {
    * adapter's choice is limited to it — see docs/server-tools.zh.md.
    */
   errorCode?: string;
+  /**
+   * A pause declined to run this call, so there is no outcome to report. The
+   * renderer emits the call alone: "a pending server tool use with no result" is
+   * exactly the shape a client continues from.
+   */
+  notExecuted?: boolean;
 }
 
 export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart | ServerToolResultPart;
@@ -149,7 +161,12 @@ export type ToolChoice =
   | { type: "required" }
   | { type: "tool"; name: string };
 
-export type StopReason = "stop" | "length" | "tool_use" | "content_filter" | null;
+/**
+ * `pause_turn` is the server-side loop asking to be continued: the provider
+ * executed part of the work and stopped without an error. A client resumes by
+ * sending the response back, which is why the partial turn must survive intact.
+ */
+export type StopReason = "stop" | "length" | "tool_use" | "content_filter" | "pause_turn" | null;
 
 // --- content helpers -------------------------------------------------------
 

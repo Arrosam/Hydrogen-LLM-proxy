@@ -227,9 +227,30 @@ describe("Anthropic server tool rendering", () => {
         { role: "user", content: [{ type: "web_search_tool_result", tool_use_id: "srvtoolu_2", content: [{ type: "web_search_result", url: "https://e.com" }] }] },
       ],
     });
-    const parts = replayed.messages[0]!.content.filter(p => p.type === "server_tool_result");
+    const parts = replayed.messages[1]!.content.filter(p => p.type === "server_tool_result");
     expect(parts).toHaveLength(1);
     expect((parts[0] as { content: unknown[] }).content).toEqual([{ type: "web_search_result", url: "https://e.com" }]);
+  });
+
+  // A paused turn hands back its call with no result after it: that pending call
+  // is what a resume must recognise and run.
+  it("keeps a paused call as a pending provider-executed call", () => {
+    const replayed = AnthropicRequest.parse({
+      model: "svc", max_tokens: 100,
+      messages: [
+        { role: "user", content: "q" },
+        { role: "assistant", content: [
+          { type: "text", text: "Let me search." },
+          { type: "server_tool_use", id: "srvtoolu_3", name: "web_search", input: { queries: ["a"] } },
+        ] },
+      ],
+    });
+    const calls = replayed.messages[1]!.content.filter(p => p.type === "tool_use");
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { serverTool?: boolean }).serverTool).toBe(true);
+    expect((calls[0] as { id: string }).id).toBe("srvtoolu_3");
+    // No result half exists yet, which is exactly the resume signal.
+    expect(replayed.messages[1]!.content.some(p => p.type === "server_tool_result")).toBe(false);
   });
 });
 

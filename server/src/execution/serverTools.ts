@@ -1,7 +1,7 @@
 import { genId } from "../util/ids";
 import type { ContentPart, Message, ServerToolResultPart, Tool } from "../core/ir/content";
 import type { HttpTool } from "./toolHttp";
-import { serverToolOutcome } from "./toolHttp";
+import { PAUSED_TOOL_MARKER, serverToolOutcome } from "./toolHttp";
 
 /**
  * Provider-executed ("server-side") tool round trips, in a protocol-agnostic
@@ -96,6 +96,8 @@ export interface ServerToolCall {
   payload: unknown;
   /** True when the adapter, the schema, or the call budget failed. */
   isError: boolean;
+  /** True when a pause stopped the run before this call was sent anywhere. */
+  notExecuted?: boolean;
 }
 
 /** The tool_use a hosted round produced, and the adapter output it returned. */
@@ -119,6 +121,34 @@ function resultIsError(message: Message, toolUseId: string): boolean {
  * one place the client-facing result can be built from real data.
  */
 /**
+ * Hosted calls a paused turn left unexecuted, paired with their bound tools.
+ *
+ * A resumed request still carries that turn, so these have to run before the
+ * model is asked again — they are the work the pause declined to do. A `tool_use`
+ * is pending exactly when no `tool_result` anywhere in the request refers to it.
+ */
+export function pendingHostedResults(history: Message[], named: Map<string, HttpTool>): ContentPart[] {
+  const answered = new Set<string>();
+  for (const message of history) for (const part of message.content) if (part.type === "tool_result") answered.add(part.toolUseId);
+  const results: ContentPart[] = [];
+  for (const message of history) {
+    for (const part of message.content) {
+      // Only a DECLARED provider-executed call is work the proxy owes. A client
+      // tool that happens to share a bound tool's name is the client's to run,
+      // and re-running it here would report an execution nobody asked for.
+      if (part.type !== "tool_use" || part.serverTool !== true || answered.has(part.id) || !named.has(part.name)) continue;
+      results.push({
+        type: "tool_result",
+        toolUseId: part.id,
+        content: [{ type: "text", text: JSON.stringify({ error: { code: PAUSED_TOOL_MARKER, message: "The previous turn ended before this tool ran; it was not executed" } }) }],
+        isError: true,
+      });
+    }
+  }
+  return results;
+}
+
+/**
  * Rebuild the whole client-facing content sequence from the run's history.
  *
  * Prepending the round trip to the final response loses the turns in between: a
@@ -137,6 +167,7 @@ export function serverToolResponseContent(
   history: Message[],
   parts: ServerToolResultPart[],
   prefix: number,
+  notExecuted: ReadonlySet<string> = new Set(),
 ): ContentPart[] {
   const byId = new Map(parts.map(part => [part.id, part]));
   const content: ContentPart[] = [];
@@ -145,13 +176,17 @@ export function serverToolResponseContent(
     for (const part of message.content) {
       if (part.type === "reasoning" && part.redacted) continue;
       if (part.type === "tool_use") {
-        // A client tool call stays a client tool call; only the calls this run
-        // executed on the model's behalf become the round trip.
+        // A call this run executed becomes the round trip that replaced it; a
+        // client tool call, and a call a pause declined, keep their own shape.
+        // "Does a round trip exist for this id" is the only honest test: a name
+        // that matches a bound tool does not by itself mean the proxy ran it.
         const call = byId.get(part.id);
         if (!call) content.push(part);
-        else if (!content.includes(call)) content.push(call);
+        else if (!content.includes(call)) content.push(notExecuted.has(part.id) ? { ...call, notExecuted: true } : call);
         continue;
       }
+      // The result half of a pair whose call was already emitted travels with it.
+      if (part.type === "server_tool_result" && content.some(c => c.type === "server_tool_result" && c.id === part.id)) continue;
       content.push(part);
     }
   }
@@ -173,8 +208,9 @@ export function collectServerToolCalls(history: Message[], matched: Map<string, 
       const isError = next ? resultIsError(next, part.id) : true;
       try { payload = text === undefined ? undefined : JSON.parse(text); }
       catch { payload = text; }
+      const notExecuted = (payload as { error?: { code?: unknown } } | null)?.error?.code === PAUSED_TOOL_MARKER;
       // The client sees the name it declared, not the operator's bound name.
-      calls.push({ name: hit.declaration.name, id: part.id, input: part.input, tool: hit.tool, payload, isError });
+      calls.push({ name: hit.declaration.name, id: part.id, input: part.input, tool: hit.tool, payload, isError, notExecuted });
     }
   }
   return calls;
