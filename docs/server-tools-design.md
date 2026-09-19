@@ -48,9 +48,13 @@ Supported stateful input items are messages, function calls/results and reasonin
 
 ## Client-protocol round trips
 
-A tool may declare an optional `serverTool` contract: the name a client declares, the result block type that client protocol expects, and the JSON Pointer to the entry array in the adapter's response. A client that declares that name as a provider-executed tool (Anthropic `web_search_20250305`, or the Responses equivalent) then receives the full round trip — the call and its result — instead of only the model's final prose. Every round of a multi-round run is returned.
+A tool may declare an optional `serverTool` contract: the name a client declares, the result block type that client protocol expects, and the JSON Pointer to the entry array in the adapter's response. A client that declares that name as a provider-executed tool (Anthropic `web_search_20250305`, or Responses `{"type":"web_search"}`) then receives the full round trip — the call and its result — instead of only the model's final prose. Every round of a multi-round run is returned, rebuilt from the run's history so the sequence keeps each round's own text ahead of its call.
 
-The proxy stays ignorant of any particular tool or adapter format: the adapter decides what an entry contains, and the selected array is passed through verbatim into the block type the contract names. Entries that do not match the configured pointer produce an error-flagged block rather than an empty result list, and a call to the declared name that never reached an adapter is dropped rather than returned as a client tool. Exposure remains governed by the existing per-service and per-agent bindings.
+The proxy stays ignorant of any particular tool or adapter format: the adapter decides what an entry contains, and the selected array is passed through verbatim into the block type the contract names. Exposure remains governed by the existing per-service and per-agent bindings.
+
+Each wire gets its own shape rather than one shape bent to fit both. Anthropic pairs `server_tool_use` with a following result block in the same assistant turn, both carrying the required `caller`, and models failure as the result's own content object (`web_search_tool_result_error` with an `error_code`) so it can never be read as an empty result set. Responses has no separate result block: a provider-executed call is one `web_search_call` item carrying the action and its source URLs. The error code is the adapter's choice, expressed through the same result pointer; `unavailable` is only substituted when the adapter names nothing usable, and a call to the declared name that never reached an adapter is dropped rather than returned as a client tool.
+
+Limits worth stating: `encrypted_content` is Anthropic's own opaque replay token and cannot be produced by a proxy that runs its own search, and citations are not fabricated because the adapter cannot supply the quoted original text.
 
 ## References
 
