@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { parseCgroupLimit, containerMemoryMb, heapAlreadySized, ensureHeapSized } from "../src/util/heap";
+import { parseCgroupLimit, containerMemoryMb, heapAlreadySized, ensureHeapSized, inContainer } from "../src/util/heap";
 
 describe("cgroup memory parsing", () => {
   it("reads a real byte limit as MiB", () => {
@@ -77,6 +77,30 @@ describe("ensureHeapSized", () => {
       argv: ["node"], execArgv: ["-e", "fetch(process.env.HEALTH)"], env: {},
       read: () => "4294967296", spawnFn, onExit: () => undefined,
     });
+    expect(respawned).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("detects a container from /.dockerenv or the cgroup path", () => {
+    expect(inContainer((p) => (p === "/.dockerenv" ? "" : undefined))).toBe(true);
+    expect(inContainer((p) => (p === "/proc/1/cgroup" ? "0::/docker/abc" : undefined))).toBe(true);
+    expect(inContainer(() => undefined)).toBe(false);
+  });
+
+  // A plain docker run without --memory leaves memory.max at "max", so Node
+  // keeps its own ~half-the-host default -- the artificial cap that made the
+  // container abort long before the RAM the operator allocated.
+  it("falls back to the host RAM inside a container with no cgroup limit", () => {
+    const { calls, spawnFn } = fakeSpawn();
+    const read = (p: string) => (p === "/.dockerenv" ? "" : p === "/sys/fs/cgroup/memory.max" ? "max" : undefined);
+    const respawned = ensureHeapSized({ ...base, env: {}, read, totalMemMb: 3915, spawnFn, onExit: () => undefined });
+    expect(respawned).toBe(true);
+    expect(calls[0].args).toContain("--max-old-space-size=3915");
+  });
+
+  it("does not size from host memory outside a container", () => {
+    const { calls, spawnFn } = fakeSpawn();
+    const respawned = ensureHeapSized({ ...base, env: {}, read: () => undefined, totalMemMb: 3915, spawnFn, onExit: () => undefined });
     expect(respawned).toBe(false);
     expect(calls).toHaveLength(0);
   });

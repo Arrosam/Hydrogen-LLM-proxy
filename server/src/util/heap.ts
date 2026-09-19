@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 
 /**
@@ -9,7 +10,9 @@ import { spawn } from "node:child_process";
  * host has more RAM, so V8 grows until the kernel OOM-kills it) or, on many
  * managed-node eggs, too small (a fixed --max-old-space-size left over from a
  * 256 MB plan, which aborts far below the memory the operator actually paid
- * for). Either way the number that matters is the container's.
+ * for). Either way the number that matters is the container's -- and a
+ * container with no explicit limit at all may use the host's whole RAM, which
+ * is far more than Node's own half-the-host default.
  *
  * Node cannot change its own heap ceiling after start, so when the limit is
  * detected and no ceiling was configured we re-exec once with the matching
@@ -60,6 +63,24 @@ function defaultRead(path: string): string | undefined {
   }
 }
 
+/**
+ * Whether we run inside a container. A plain `docker run` without `--memory`
+ * leaves `memory.max` at "max", so there is no cgroup number to read and Node
+ * keeps its own default ceiling (~half the host) -- exactly the artificial cap
+ * this module exists to remove. Inside a container, the host's RAM is the right
+ * ceiling to fall back to.
+ */
+export function inContainer(read: (path: string) => string | undefined = defaultRead): boolean {
+  if (read("/.dockerenv") != null) return true;
+  const cgroup = read("/proc/1/cgroup");
+  return typeof cgroup === "string" && /docker|containerd|kubepods|libpod/.test(cgroup);
+}
+
+/** The host's total RAM in MiB: what a container with no explicit limit may use. */
+export function hostMemoryMb(): number {
+  return Math.max(1, Math.floor(os.totalmem() / (1024 * 1024)));
+}
+
 /** Whether a heap ceiling was already requested by the operator. */
 export function heapAlreadySized(execArgv: string[], nodeOptions: string | undefined): boolean {
   return execArgv.some((a) => a.startsWith("--max-old-space-size")) ||
@@ -72,6 +93,8 @@ export interface HeapAutosizeOptions {
   execArgv?: string[];
   argv?: string[];
   spawnFn?: typeof spawn;
+  /** Test seam: host RAM in MiB, used when no cgroup limit is set. */
+  totalMemMb?: number;
   /** Test seam: called instead of exiting the parent. */
   onExit?: (code: number) => void;
 }
@@ -94,8 +117,10 @@ export function ensureHeapSized(opts: HeapAutosizeOptions = {}): boolean {
   const argv = opts.argv ?? process.argv;
   if (!argv[1] || execArgv.some((a) => a === "-e" || a === "--eval" || a === "-p" || a === "--print")) return false;
 
-  const mb = containerMemoryMb(opts.read);
-  if (mb == null) return false;
+  const cgroupMb = containerMemoryMb(opts.read);
+  const source: "container" | "host" | undefined = cgroupMb != null ? "container" : inContainer(opts.read) ? "host" : undefined;
+  const mb = cgroupMb ?? (source === "host" ? (opts.totalMemMb ?? hostMemoryMb()) : undefined);
+  if (mb == null || source == null) return false;
 
   const rawPercent = Number(env.NODE_HEAP_PERCENT ?? "100");
   const percent = Number.isFinite(rawPercent) && rawPercent > 0 && rawPercent <= 100 ? rawPercent : 100;
@@ -117,6 +142,6 @@ export function ensureHeapSized(opts: HeapAutosizeOptions = {}): boolean {
   child.on("exit", (code, signal) => (opts.onExit ?? process.exit)(signal ? 1 : code ?? 0));
 
   // eslint-disable-next-line no-console
-  console.log(`hydrogen: container memory ${mb} MiB -> node --max-old-space-size=${sizeMb} (${percent}%)`);
+  console.log(`hydrogen: ${source} memory ${mb} MiB -> node --max-old-space-size=${sizeMb} (${percent}%)`);
   return true;
 }
