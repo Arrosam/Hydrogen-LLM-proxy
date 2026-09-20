@@ -124,7 +124,6 @@ const EnvSchema = z.object({
     .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
 });
 
-export type RawEnv = z.infer<typeof EnvSchema>;
 
 export interface AppConfig {
   nodeEnv: "development" | "production" | "test";

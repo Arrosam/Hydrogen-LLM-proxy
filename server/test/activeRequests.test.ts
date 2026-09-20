@@ -39,14 +39,14 @@ describe("ActiveRequestRegistry", () => {
 
   it("flags requests as blocked after the threshold", () => {
     reg.start({ traceId: "trace-blocked", tokenId: null, serviceId: null, serviceName: null, ingress: "openai_completion", streaming: false });
-    // Manually backdate the startedAt to simulate elapsed time.
-    const entry = reg.get("trace-blocked")!;
-    entry.startedAt = Date.now() - (BLOCK_THRESHOLD_MS + 5000);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + BLOCK_THRESHOLD_MS + 5000);
     const active = reg.listActive();
     expect(active[0]).toBeDefined();
     // blocked is computed in the API serializer, not stored; but we can check elapsed
     const elapsed = Date.now() - active[0].startedAt;
     expect(elapsed).toBeGreaterThan(BLOCK_THRESHOLD_MS);
+    clock.mockRestore();
   });
 
   it("retains only the last N completed requests (ring buffer)", () => {

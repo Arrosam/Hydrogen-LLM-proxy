@@ -1,3 +1,4 @@
+import { tokenAllowsService } from "../auth/authorization";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
@@ -178,7 +179,7 @@ export class ResponsesController {
     if ((request.params.n ?? 1) > 1) throw new ResponseStateError("n > 1 is unsupported", 400);
     const service = this.deps.services.getByName(request.requestedService);
     if (!service || !service.enabled) throw new ResponseStateError("Model service not found");
-    if (token.scopeServices?.length && !token.scopeServices.includes(service.id)) throw new ResponseStateError("API key does not allow this service", 403);
+    if (!tokenAllowsService(token, service.id)) throw new ResponseStateError("API key does not allow this service", 403);
     const definition = parseService(service.definition);
     if (!isChatPipeline(serviceCategory(definition))) throw new ResponseStateError("Use the service's dedicated endpoint", 400);
     let prefix: Message[] = [];

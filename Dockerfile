@@ -10,10 +10,10 @@ RUN apt-get update \
 WORKDIR /app
 
 # Install workspace deps first for better layer caching.
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
-RUN npm install
+RUN npm ci
 
 # Build both workspaces (web -> web/dist, server -> server/dist/server.cjs).
 COPY . .
@@ -24,27 +24,31 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
-WORKDIR /app/server
+WORKDIR /app
 
 # Install ONLY the server's production dependencies (fastify, drizzle,
 # better-sqlite3, argon2, ...). The server bundle keeps packages external.
-COPY server/package.json ./package.json
+COPY package.json package-lock.json ./
+COPY server/package.json server/package.json
+COPY web/package.json web/package.json
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
- && npm install --omit=dev \
+ && npm ci --omit=dev --workspace server \
  && apt-get purge -y python3 make g++ \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # App artifacts.
-COPY --from=build /app/server/dist ./dist
-COPY --from=build /app/server/drizzle ./drizzle
+COPY --from=build /app/server/dist ./server/dist
+COPY --from=build /app/server/drizzle ./server/drizzle
 COPY --from=build /app/web/dist /app/web/dist
 
 WORKDIR /app
 # Bake the commit into the image so /healthz can report which build is running.
 ARG GIT_SHA=dev
 ENV GIT_SHA=${GIT_SHA}
+ARG APP_VERSION=
+ENV APP_VERSION=${APP_VERSION}
 ENV PORT=8080
 ENV DATA_DIR=/data
 VOLUME ["/data"]

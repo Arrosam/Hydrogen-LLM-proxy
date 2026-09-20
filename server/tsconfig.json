@@ -1,9 +1,13 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "noEmit": true
   },
-  "include": ["src", "drizzle.config.ts"],
-  "exclude": ["legacy"]
+  "include": [
+    "src",
+    "drizzle.config.ts"
+  ]
 }

@@ -73,7 +73,7 @@ export function fuzzyRewriteUrl(
   if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
   // Never touch the dashboard, its API, health, or static assets.
-  if (path.startsWith("/admin") || path === "/healthz" || /\.[a-zA-Z0-9]+$/.test(path)) {
+  if ((path === "/admin" || path.startsWith("/admin/")) || path === "/healthz" || /\.[a-zA-Z0-9]+$/.test(path)) {
     return url;
   }
   if (KNOWN.has(path) || path.startsWith("/v1/videos/")) return path + query;

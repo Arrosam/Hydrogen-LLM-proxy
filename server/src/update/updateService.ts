@@ -154,6 +154,7 @@ export class UpdateService {
   private readonly cacheTtlMs: number;
   readonly restartSupported: boolean;
   private cached: UpdateStatus | null = null;
+  private inflight: Promise<UpdateStatus> | null = null;
 
   constructor(opts: UpdateServiceOptions) {
     this.repo = opts.repo;
@@ -165,13 +166,17 @@ export class UpdateService {
 
   /** Latest-release status, cached. `force` refetches (the "Check now" button). */
   async check(force = false): Promise<UpdateStatus> {
-    if (!force && this.cached && Date.now() - this.cached.checkedAt < this.cacheTtlMs) {
+    if (this.inflight) return this.inflight;
+    if (this.cached?.error && Date.now() - this.cached.checkedAt < 30_000) return this.cached;
+    if (!force && this.cached && !this.cached.error && Date.now() - this.cached.checkedAt < this.cacheTtlMs) {
       return this.cached;
     }
-    const status = await this.fetchStatus();
-    // A failed check is not worth caching: the next click should retry.
-    if (!status.error) this.cached = status;
-    return status;
+    this.inflight = this.fetchStatus();
+    try {
+      const status = await this.inflight;
+      this.cached = status;
+      return status;
+    } finally { this.inflight = null; }
   }
 
   private base(): UpdateStatus {
@@ -288,8 +293,9 @@ export class UpdateService {
     const t = setTimeout(() => {
       try {
         process.kill(process.pid, "SIGTERM");
-      } catch {
-        process.exit(0);
+      } catch (error) {
+        console.error("restart signal failed; exiting unsuccessfully", error);
+        process.exit(1);
       }
     }, delayMs);
     t.unref?.();

@@ -18,7 +18,7 @@ import type { GenerationParams, ThinkingLevel } from "../ir/params";
 import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
-import { applyNonCanonical, collectPassthrough, num, numOrUndef } from "./wire";
+import { applyNonCanonical, collectPassthrough, num, numOrUndef, safeJsonParse } from "./wire";
 import { FormatConversionError } from "./errors";
 import { foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage";
 import { registerFormat } from "./registry";
@@ -95,7 +95,7 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
     if (!raw || typeof raw !== "object") continue;
     const b = raw as Record<string, unknown>;
     const cc = b.cache_control != null ? { cacheControl: b.cache_control } : {};
-    switch (b.type) {
+    switch (typeof b.type === "string" && b.type.endsWith("_tool_result") ? "server_tool_result" : b.type) {
       case "thinking":
         parts.push((typeof b.signature === "string" ? decodeReasoning(b.signature) : null) ?? { type: "reasoning", origin: "anthropic", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
         break;
@@ -121,7 +121,9 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
         else if (src.type === "file" && typeof src.file_id === "string" && src.file_id) {
           parts.push({ type: "file", source: { kind: "file_id", id: src.file_id, family: "anthropic" }, name: title, ...cc });
         }
+        else if (src.type !== "base64") throw new FormatConversionError(`unsupported Anthropic document source: ${String(src.type)}`);
         else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? "application/pdf"), data: String(src.data) }, name: title, ...cc });
+        else throw new FormatConversionError("Anthropic base64 document source is missing data");
         break;
       }
       case "tool_use":
@@ -151,6 +153,7 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
       // Any provider-executed result block. Its own `type` is the contract, so a
       // tool configured for another result shape replays without this wire
       // needing to know that shape in advance.
+      case "web_search_result":
       case "web_search_tool_result":
       case "server_tool_result": {
         const id = String(b.tool_use_id ?? "");
@@ -160,6 +163,8 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
           ? (b.content as { error_code?: unknown }).error_code : undefined;
         const content = Array.isArray(b.content) ? b.content : [];
         const call = pendingUses.get(id);
+        const callIndex = parts.findIndex(p => p.type === "tool_use" && p.serverTool && p.id === id);
+        if (callIndex >= 0) parts.splice(callIndex, 1);
         // A result with no call still carries the round trip: the call it refers
         // to was already parsed, and this is the other half of the pair.
         parts.push({
@@ -230,10 +235,17 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
           ...cc(p),
         });
         break;
+      case "server_tool_result":
+        if (p.family === "anthropic") {
+          blocks.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input });
+          if (!p.notExecuted) blocks.push({ type: p.blockType, tool_use_id: p.id, content: p.errorCode !== undefined ? { type: `${p.blockType.includes("_tool_") ? p.blockType : p.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: p.errorCode } : p.content });
+        }
+        break;
       case "opaque":
+        if (p.family === "anthropic") blocks.push(p.value);
         break; // another family's private part; nothing Anthropic can carry
       case "tool_use":
-        blocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
+        blocks.push({ type: p.serverTool ? "server_tool_use" : "tool_use", id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
         break;
       case "tool_result":
         blocks.push({ type: "tool_result", tool_use_id: p.toolUseId, content: partsToBlocks(p.content), ...(p.isError ? { is_error: true } : {}), ...cc(p) });
@@ -537,7 +549,7 @@ export class AnthropicResponse extends Response {
 
   static parse(body: Record<string, unknown>): AnthropicResponse {
     const content = blocksToParts(body.content).filter(
-      (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning",
+      (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning" || p.type === "server_tool_result",
     );
     const usage = (body.usage ?? {}) as Record<string, unknown>;
     const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
@@ -594,7 +606,7 @@ export class AnthropicResponse extends Response {
           tool_use_id: p.id,
           caller: { type: "direct" },
           content: p.errorCode !== undefined
-            ? { type: "web_search_tool_result_error", error_code: p.errorCode }
+            ? { type: `${p.blockType.includes("_tool_") ? p.blockType : p.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: p.errorCode }
             : p.content,
         });
       }
@@ -633,6 +645,8 @@ export class AnthropicResponse extends Response {
     // request billed a cache write invisibly when it streamed.
     let cacheCreationInputTokens: number | undefined;
     const toolBlocks = new Set<number>();
+    const serverBlocks = new Map<number, { id: string; name: string; input: unknown; args: string }>();
+    const serverNames = new Map<string, string>();
     // Thinking blocks stream their signature in a trailing signature_delta;
     // hold it per block and attach it to the reasoning_stop. A redacted block is
     // the exception: its opaque bytes arrive whole in content_block_start.data
@@ -667,7 +681,15 @@ export class AnthropicResponse extends Response {
         case "content_block_start": {
           const index = num(data.index);
           const block = (data.content_block ?? {}) as Record<string, unknown>;
-          if (block.type === "tool_use") {
+          if (block.type === "server_tool_use") {
+            const call = { id: String(block.id ?? genId("srv")), name: String(block.name ?? ""), input: block.input ?? {}, args: "" };
+            serverBlocks.set(index, call);
+            serverNames.set(call.id, call.name);
+          } else if (typeof block.type === "string" && (block.type.endsWith("_tool_result") || block.type === "web_search_result" || block.type === "server_tool_result")) {
+            const id = String(block.tool_use_id ?? "");
+            const errorCode = (block.content as { error_code?: unknown } | null)?.error_code;
+            yield { type: "server_tool_result", family: "anthropic", id, name: serverNames.get(id) ?? "server_tool", blockType: String(block.type), content: Array.isArray(block.content) ? block.content : [], ...(typeof errorCode === "string" ? { errorCode } : {}) };
+          } else if (block.type === "tool_use") {
             toolBlocks.add(index);
             yield { type: "tool_start", index, id: String(block.id ?? genId("toolu")), name: String(block.name ?? "") };
           } else if (block.type === "text") {
@@ -690,12 +712,20 @@ export class AnthropicResponse extends Response {
             const tb = thinkingBlocks.get(index);
             if (tb) tb.signature = (tb.signature ?? "") + delta.signature;
           }
-          else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") yield { type: "tool_args_delta", index, delta: delta.partial_json };
+          else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            const call = serverBlocks.get(index);
+            if (call) call.args += delta.partial_json;
+            else yield { type: "tool_args_delta", index, delta: delta.partial_json };
+          }
           break;
         }
         case "content_block_stop": {
           const index = num(data.index);
-          if (toolBlocks.has(index)) {
+          if (serverBlocks.has(index)) {
+            const call = serverBlocks.get(index)!;
+            serverBlocks.delete(index);
+            yield { type: "server_tool_start", family: "anthropic", id: call.id, name: call.name, input: call.args ? safeJsonParse(call.args) : call.input };
+          } else if (toolBlocks.has(index)) {
             toolBlocks.delete(index);
             yield { type: "tool_stop", index };
           } else if (thinkingBlocks.has(index)) {
@@ -769,6 +799,18 @@ export class AnthropicResponse extends Response {
     const frame = (event: string, data: Record<string, unknown>): string =>
       `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`;
 
+    function* closeText(): Generator<string> {
+      if (!textOpen) return;
+      yield frame("content_block_stop", { index: textIndex });
+      textOpen = false;
+    }
+    function* closeReasoning(): Generator<string> {
+      if (!reasoningOpen) return;
+      yield frame("content_block_stop", { index: reasoningIndex });
+      reasoningOpen = false;
+      reasoningRedacted = false;
+    }
+
     for await (const ev of events) {
       switch (ev.type) {
         case "start":
@@ -788,10 +830,7 @@ export class AnthropicResponse extends Response {
           break;
         case "text_delta":
           if (!textOpen) {
-            if (reasoningOpen) {
-              yield frame("content_block_stop", { index: reasoningIndex });
-              reasoningOpen = false;
-            }
+            yield* closeReasoning();
             textIndex = nextIndex++;
             textOpen = true;
             yield frame("content_block_start", { index: textIndex, content_block: { type: "text", text: "" } });
@@ -799,10 +838,7 @@ export class AnthropicResponse extends Response {
           yield frame("content_block_delta", { index: textIndex, delta: { type: "text_delta", text: ev.text } });
           break;
         case "reasoning_start":
-          if (textOpen) {
-            yield frame("content_block_stop", { index: textIndex });
-            textOpen = false;
-          }
+          yield* closeText();
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
@@ -817,10 +853,7 @@ export class AnthropicResponse extends Response {
           }
           break;
         case "reasoning_delta":
-          if (textOpen) {
-            yield frame("content_block_stop", { index: textIndex });
-            textOpen = false;
-          }
+          yield* closeText();
           if (!reasoningOpen) {
             reasoningIndex = nextIndex++;
             reasoningOpen = true;
@@ -851,14 +884,8 @@ export class AnthropicResponse extends Response {
           // Close any open thinking/text block first; overlapping content blocks
           // make a strict Anthropic client drop the unclosed one (e.g. the
           // thinking block on a text-less, tool-only response).
-          if (reasoningOpen) {
-            yield frame("content_block_stop", { index: reasoningIndex });
-            reasoningOpen = false;
-          }
-          if (textOpen) {
-            yield frame("content_block_stop", { index: textIndex });
-            textOpen = false;
-          }
+          yield* closeReasoning();
+          yield* closeText();
           const idx = nextIndex++;
           toolMap.set(ev.index, idx);
           yield frame("content_block_start", { index: idx, content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} } });
@@ -878,8 +905,8 @@ export class AnthropicResponse extends Response {
           break;
         }
         case "server_tool_start": {
-          if (reasoningOpen) { yield frame("content_block_stop", { index: reasoningIndex }); reasoningOpen = false; }
-          if (textOpen) { yield frame("content_block_stop", { index: textIndex }); textOpen = false; }
+          yield* closeReasoning();
+          yield* closeText();
           const idx = nextIndex++;
           serverToolIndexes.set(ev.id, idx);
           yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {}, caller: { type: "direct" } } });
@@ -895,7 +922,7 @@ export class AnthropicResponse extends Response {
             type: ev.blockType,
             tool_use_id: ev.id,
             caller: { type: "direct" },
-            content: ev.errorCode !== undefined ? { type: "web_search_tool_result_error", error_code: ev.errorCode } : ev.content,
+            content: ev.errorCode !== undefined ? { type: `${ev.blockType.includes("_tool_") ? ev.blockType : ev.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: ev.errorCode } : ev.content,
           } });
           yield frame("content_block_stop", { index: resultIndex });
           break;
@@ -904,16 +931,12 @@ export class AnthropicResponse extends Response {
           // A truncated upstream must not be dressed up as a finished answer:
           // no message_delta, no message_stop. relay() aborts the connection.
           if (ev.incomplete || ev.error) return;
-          if (reasoningOpen) {
-            yield frame("content_block_stop", { index: reasoningIndex });
-            reasoningOpen = false;
-          }
-          if (textOpen) {
-            yield frame("content_block_stop", { index: textIndex });
-            textOpen = false;
-          }
+          yield* closeReasoning();
+          yield* closeText();
           for (const idx of toolMap.values()) yield frame("content_block_stop", { index: idx });
           toolMap.clear();
+          for (const idx of serverToolIndexes.values()) yield frame("content_block_stop", { index: idx });
+          serverToolIndexes.clear();
           if (ev.usage) {
             inputTokens = uncachedPromptTokens(ev.usage);
             outputTokens = ev.usage.completionTokens;

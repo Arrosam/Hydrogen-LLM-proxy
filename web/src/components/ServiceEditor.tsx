@@ -149,6 +149,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const stepKeys = useListKeys(steps.length);
   const [category, setCategory] = useState<ServiceCategory>("chat");
   const [kind, setKind] = useState<"resilience" | "chain">("resilience");
+  const [listRevision, setListRevision] = useState(0);
   const [stages, setStages] = useState<AgentStage[]>([]);
   const [output, setOutput] = useState("");
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
@@ -321,6 +322,8 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const syncFromRaw = (): ServiceDef | null => {
     try {
       const parsed = JSON.parse(rawText) as ServiceDef;
+      stepKeys.reset();
+      setListRevision(v => v + 1);
       setTimeoutMs(parsed.timeoutMs ?? 60000);
       if (isAgentDef(parsed)) {
         setKind("chain");
@@ -573,7 +576,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           <div className="space-y-4">
             <OcrEditor ocr={ocr} onChange={setOcr} services={services.filter((m) => m.id !== service?.id)} />
             <AsrEditor asr={asr} onChange={setAsr} services={services.filter((m) => m.id !== service?.id)} />
-            <StageEditor
+            <StageEditor key={listRevision}
               stages={stages}
               output={output}
               onChange={(s, o) => {

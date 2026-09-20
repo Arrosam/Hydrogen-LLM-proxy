@@ -1,3 +1,4 @@
+import { requireAdmin } from "../auth/authorization";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { idParam, parse } from "../util/validate";
@@ -50,7 +51,7 @@ export async function proxyRoutes(app: FastifyInstance, c: Container): Promise<v
   app.get("/", async () => ({ proxies: c.proxies.list().map((p) => c.proxies.toPublic(p)) }));
 
   app.post("/", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can create proxies" });
+    if (!requireAdmin(req, reply, "create proxies")) return reply;
     const parsed = parse(ProxyCreate, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     if (c.proxies.getByName(parsed.data.name)) {
@@ -60,7 +61,7 @@ export async function proxyRoutes(app: FastifyInstance, c: Container): Promise<v
   });
 
   app.patch("/:id", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can modify proxies" });
+    if (!requireAdmin(req, reply, "modify proxies")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const before = c.proxies.get(id);
@@ -88,7 +89,7 @@ export async function proxyRoutes(app: FastifyInstance, c: Container): Promise<v
   });
 
   app.delete("/:id", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can delete proxies" });
+    if (!requireAdmin(req, reply, "delete proxies")) return reply;
     const id = idParam(req);
     if (!id) return reply.code(400).send({ error: "invalid id" });
     const row = c.proxies.get(id);
@@ -119,7 +120,7 @@ export async function proxyRoutes(app: FastifyInstance, c: Container): Promise<v
    * otherwise discover as a broken provider.
    */
   app.post("/test", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "only an admin can test proxies" });
+    if (!requireAdmin(req, reply, "test proxies")) return reply;
     const parsed = parse(ProxyTest, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
 

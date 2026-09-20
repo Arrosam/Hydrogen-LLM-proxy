@@ -150,3 +150,11 @@ hydrogen-secrets.json
 .dbg/
 debug-proxy-stream-502.md
 .trae/
+
+# Local tooling caches and generated agent state
+.npm-cache/
+.graphflow/
+.graphflow-cache/
+graphflow-out/
+PearAI/
+.DS_Store

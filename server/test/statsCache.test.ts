@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -124,7 +124,21 @@ describe("StatsCache", () => {
     // Amending a row that is not a 200 changes nothing.
     expect(logger.amendDeliveryFailure("live", "socket reset")).toBe(false);
     expect(cache.summary().errors).toBe(before + 1);
-    cache.flush(); // don't leave the delayed-save timer pending across tests
+    const restarted = new StatsCache(queries, settings);
+    restarted.init();
+    expect(restarted.summary()).toEqual(cache.summary());
+    expectMatchesSql(restarted);
+    cache.flush();
+  });
+
+  it("rolls back both SQL demotion and cached counters when persistence fails", () => {
+    logs.insert(row({traceId:"rollback"}));
+    const cache = new StatsCache(queries, settings);cache.init();
+    const before=cache.summary();
+    const spy=vi.spyOn(settings,"set").mockImplementationOnce(()=>{throw new Error("disk full");});
+    expect(()=>new RequestLogger(logs,1000,cache).amendDeliveryFailure("rollback","failed")).toThrow("disk full");
+    spy.mockRestore();expect(cache.summary()).toEqual(before);expectMatchesSql(cache);
+    expect(sqlite.prepare("SELECT http_status FROM request_logs WHERE trace_id = 'rollback'").get()).toEqual({http_status:200});
   });
 
   it("catches up rows the last flush never saw (simulated crash), without double counting", () => {

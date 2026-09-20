@@ -1871,7 +1871,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         // Function replacer, not a string: a value like a backup filename can
         // contain $&, $', $` sequences that String.replace would otherwise treat
         // as special patterns and mangle the interpolated text.
-        raw = raw.replace(new RegExp(`\\{${k}\\}`, "g"), () => String(v));
+        raw = raw.split(`{${k}}`).join(String(v));
       }
     }
     return raw;

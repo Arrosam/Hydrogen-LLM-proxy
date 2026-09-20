@@ -7,4 +7,6 @@ import pkg from "../../package.json";
  * confident wrong answer at exactly the moment someone is trying to work out
  * which version wrote the file they are restoring.
  */
-export const APP_VERSION: string = pkg.version;
+const releaseVersion = process.env.APP_VERSION?.replace(/^v/, "");
+const revision = process.env.GIT_SHA;
+export const APP_VERSION: string = releaseVersion || `${pkg.version}-dev${revision && revision !== "dev" ? `.${revision.slice(0, 12)}` : ""}`;

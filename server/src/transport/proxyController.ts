@@ -1,3 +1,4 @@
+import { tokenAllowsService } from "../auth/authorization";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -63,11 +64,7 @@ function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpReq
   return info;
 }
 
-function tokenAllowsService(token: Token, serviceId: number): boolean {
-  const scope = token.scopeServices;
-  if (!Array.isArray(scope) || scope.length === 0) return true; // unscoped = all
-  return scope.includes(serviceId);
-}
+
 
 /**
  * Resolve once the response has actually finished writing, or false if the
@@ -334,114 +331,120 @@ export class ProxyController {
     const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat, thinkingDelimiters };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
-    const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
-    prog.record("init", "request.received", `request received: ${ingress} -> ${serviceName}`, { streaming: request.stream });
-    prog.record("init", "request.parsed", "request body parsed and service resolved");
+    try {
+      const prog = new ProgressRecorder(this.deps.activeRequests, traceId);
+      prog.record("init", "request.received", `request received: ${ingress} -> ${serviceName}`, { streaming: request.stream });
+      prog.record("init", "request.parsed", "request body parsed and service resolved");
 
-    // A client that abandons the connection aborts the upstream work: nobody
-    // will receive the answer, so every further retry only burns quota — and
-    // the log row must end up saying 499, not 200.
-    const clientGone = new AbortController();
-    reply.raw.once("close", () => {
-      if (!reply.raw.writableFinished) clientGone.abort();
-    });
+      // A client that abandons the connection aborts the upstream work: nobody
+      // will receive the answer, so every further retry only burns quota — and
+      // the log row must end up saying 499, not 200.
+      const clientGone = new AbortController();
+      reply.raw.once("close", () => {
+        if (!reply.raw.writableFinished) clientGone.abort();
+      });
 
-    if (request.stream) {
-      // Keep bytes flowing while the executor works: commit the SSE response
-      // after the grace window and ping until the outcome arrives.
-      const keepalive = new SseKeepalive(
-        reply, ingress,
-        this.deps.streamCommitGraceMs ?? 2_500,
+      if (request.stream) {
+        // Keep bytes flowing while the executor works: commit the SSE response
+        // after the grace window and ping until the outcome arrives.
+        const keepalive = new SseKeepalive(
+          reply, ingress,
+          this.deps.streamCommitGraceMs ?? 2_500,
+          this.deps.streamPingIntervalMs ?? 10_000,
+        );
+        const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => keepalive.stop());
+        keepalive.stop();
+        if (!outcome.result.ok) {
+          if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
+          if (keepalive.committed) {
+            // The 200 is already on the wire; the failure travels in-stream.
+            return this.replyFailureInStream(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
+          }
+          this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
+          return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
+        }
+        this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath, committed: keepalive.committed });
+        return; // relay hijacks the reply and writes asynchronously
+      }
+
+      // Keep bytes flowing on the JSON response too: an OCR/vision answer can
+      // take minutes, and a silent connection dies at the first intermediary.
+      const jsonKeepalive = new JsonKeepalive(
+        reply,
+        this.deps.jsonCommitGraceMs ?? 30_000,
         this.deps.streamPingIntervalMs ?? 10_000,
       );
-      const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal });
-      keepalive.stop();
+      const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => jsonKeepalive.stop());
+      jsonKeepalive.stop();
       if (!outcome.result.ok) {
-        if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
-        if (keepalive.committed) {
-          // The 200 is already on the wire; the failure travels in-stream.
-          return this.replyFailureInStream(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
-        }
+        if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, false, outcome);
         this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
-        return this.replyFailure(reply, ctx, outcome.result, { streaming: true, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
-      }
-      this.relay(reply, ctx, outcome.result.value, { attempts: outcome.attempts, attemptPath: outcome.attemptPath, committed: keepalive.committed });
-      return; // relay hijacks the reply and writes asynchronously
-    }
-
-    // Keep bytes flowing on the JSON response too: an OCR/vision answer can
-    // take minutes, and a silent connection dies at the first intermediary.
-    const jsonKeepalive = new JsonKeepalive(
-      reply,
-      this.deps.jsonCommitGraceMs ?? 30_000,
-      this.deps.streamPingIntervalMs ?? 10_000,
-    );
-    const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal });
-    jsonKeepalive.stop();
-    if (!outcome.result.ok) {
-      if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, false, outcome);
-      this.deps.activeRequests.finish(traceId, failureStatus(outcome.result), failureMessage(outcome.result));
-      if (jsonKeepalive.committed) {
-        // The 200 (and heartbeat whitespace) is already on the wire; the
-        // failure travels as the error JSON body.
-        return this.replyFailureInBody(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
-      }
-      return this.replyFailure(reply, ctx, outcome.result, { streaming: false, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
-    }
-
-    const value = outcome.result.value;
-    // Capture the exact wire body sent upstream NOW and drop the reference.
-    // Rendering it produced a complete second copy of the conversation -- every
-    // base64 image in it -- and the delivery below can take a long time for a
-    // slow client. The size-bounded string is all the request log ever needed,
-    // so the full body has no reason to stay live across the send.
-    const upstreamPayload = this.deps.logger.capture(value.upstreamRequest);
-    value.upstreamRequest = {};
-    // Shape the client's copy: lift a `<think>` block out of the answer, inline
-    // it into the answer, or drop it. `original` returns the same object.
-    const shapedResponse = value.response.withThinkingFormat(thinkingFormat, thinkingDelimiters);
-    const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
-      missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
-    const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
-      : shapedResponse.render(ingress, serviceName, { thinkingFormat });
-    // Deliver first, then log what actually happened: writing the 200 row
-    // before send() is how a response nobody received was recorded as success.
-    const socket = reply.raw.socket;
-    const settled = responseFlushed(reply.raw);
-    if (jsonKeepalive.committed) {
-      // Headers + whitespace already sent; append the JSON document and end.
-      try {
-        if (!reply.raw.destroyed && !reply.raw.writableEnded) {
-          reply.raw.write(JSON.stringify(clientBody));
-          reply.raw.end();
+        if (jsonKeepalive.committed) {
+          // The 200 (and heartbeat whitespace) is already on the wire; the
+          // failure travels as the error JSON body.
+          return this.replyFailureInBody(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
         }
-      } catch { /* the connection died first; responseFlushed reports it */ }
-    } else {
-      reply.code(emptyReason ? 502 : 200).send(clientBody);
-    }
-    const flushed = await settled;
-    const status = flushed ? (emptyReason ? 502 : 200) : 499;
-    const error = flushed ? emptyReason ?? null : "connection closed before the response was fully sent";
-    prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
-    this.deps.activeRequests.finish(traceId, status, error ?? undefined);
-    this.deps.logger.record({
-      traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
-      servedModel: value.modelName, servedProvider: value.providerName,
-      ingress, egress: value.family, streaming: false, httpStatus: status, http,
-      upstreamPayload,
-      responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
-      usage: value.response.usage, latencyMs: Date.now() - started,
-      attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
-    });
-    // The upstream consumed these tokens whether or not the delivery landed.
-    this.deps.usage.record(token.id, value.response.usage.totalTokens);
-    if (status === 200 && socket) {
-      watchDelivery(socket, (reason) => {
-        this.deps.logger.amendDeliveryFailure(traceId, reason);
-        this.deps.activeRequests.amendCompleted(traceId, 499, reason);
+        return this.replyFailure(reply, ctx, outcome.result, { streaming: false, attemptPath: outcome.attemptPath, attempts: outcome.attempts });
+      }
+
+      const value = outcome.result.value;
+      // Capture the exact wire body sent upstream NOW and drop the reference.
+      // Rendering it produced a complete second copy of the conversation -- every
+      // base64 image in it -- and the delivery below can take a long time for a
+      // slow client. The size-bounded string is all the request log ever needed,
+      // so the full body has no reason to stay live across the send.
+      const upstreamPayload = this.deps.logger.capture(value.upstreamRequest);
+      value.upstreamRequest = {};
+      // Shape the client's copy: lift a `<think>` block out of the answer, inline
+      // it into the answer, or drop it. `original` returns the same object.
+      const shapedResponse = value.response.withThinkingFormat(thinkingFormat, thinkingDelimiters);
+      const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
+        missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
+      const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
+        : shapedResponse.render(ingress, serviceName, { thinkingFormat });
+      // Deliver first, then log what actually happened: writing the 200 row
+      // before send() is how a response nobody received was recorded as success.
+      const socket = reply.raw.socket;
+      const settled = responseFlushed(reply.raw);
+      if (jsonKeepalive.committed) {
+        // Headers + whitespace already sent; append the JSON document and end.
+        try {
+          if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+            reply.raw.write(JSON.stringify(clientBody));
+            reply.raw.end();
+          }
+        } catch { /* the connection died first; responseFlushed reports it */ }
+      } else {
+        reply.code(emptyReason ? 502 : 200).send(clientBody);
+      }
+      const flushed = await settled;
+      const status = flushed ? (emptyReason ? 502 : 200) : 499;
+      const error = flushed ? emptyReason ?? null : "connection closed before the response was fully sent";
+      prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
+      this.deps.activeRequests.finish(traceId, status, error ?? undefined);
+      this.deps.logger.record({
+        traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
+        servedModel: value.modelName, servedProvider: value.providerName,
+        ingress, egress: value.family, streaming: false, httpStatus: status, http,
+        upstreamPayload,
+        responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
+        usage: value.response.usage, latencyMs: Date.now() - started,
+        attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
       });
+      // The upstream consumed these tokens whether or not the delivery landed.
+      this.deps.usage.record(token.id, value.response.usage.totalTokens);
+      if (status === 200 && socket) {
+        watchDelivery(socket, (reason) => {
+          this.deps.logger.amendDeliveryFailure(traceId, reason);
+          this.deps.activeRequests.amendCompleted(traceId, 499, reason);
+        });
+      }
+      return reply;
+    } catch (error) {
+      this.deps.activeRequests.finish(traceId, 500, error instanceof Error ? error.message : String(error));
+      if (reply.raw.headersSent && !reply.raw.writableEnded) reply.raw.destroy();
+      throw error;
     }
-    return reply;
   }
 
   /** The client hung up while the upstream work was still running; the work was

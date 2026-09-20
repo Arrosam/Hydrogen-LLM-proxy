@@ -52,6 +52,7 @@ interface Entry {
 
 export class EgressProxyPool {
   private readonly entries = new Map<string, Entry>();
+  private readonly retiring = new Set<Dispatcher>();
 
   /**
    * The dispatcher for this proxy, building and validating it on first use.
@@ -77,7 +78,7 @@ export class EgressProxyPool {
 
     const addresses = await resolveProxyHost(proxy);
 
-    if (existing) {
+    if (existing && this.entries.get(key) === existing) {
       // Same proxy, stale pin: refresh the addresses in place. The dispatcher
       // (and its pooled sockets) is still valid -- the lookup closure reads
       // this entry, so updating it is what re-points any reconnect.
@@ -151,12 +152,11 @@ export class EgressProxyPool {
       if (oldest == null) return;
       const victim = this.entries.get(oldest);
       this.entries.delete(oldest);
-      // Not awaited, and destroy() rather than close(): close() waits for
-      // in-flight requests to drain, and this runs on a request path. The
-      // victim is the least recently USED entry, so it is the least likely to
-      // have anything in flight -- but this can still abort a long stream on an
-      // installation with more than MAX_DISPATCHERS proxies in rotation.
-      void victim?.dispatcher.destroy().catch(() => undefined);
+      // Gracefully retire the pool without aborting responses already in flight.
+      if (victim) {
+        this.retiring.add(victim.dispatcher);
+        void victim.dispatcher.close().catch(() => undefined).finally(() => this.retiring.delete(victim.dispatcher));
+      }
     }
   }
 
@@ -178,10 +178,11 @@ export class EgressProxyPool {
 
   /** Shut every pooled dispatcher down. Called once, on process shutdown. */
   async closeAll(): Promise<void> {
-    const all = [...this.entries.values()];
+    const all = [...this.entries.values()].map(e => e.dispatcher).concat([...this.retiring]);
+    this.retiring.clear();
     this.entries.clear();
     // destroy(), not close(): shutdown must not block on a stream that is
     // still draining.
-    await Promise.allSettled(all.map((e) => e.dispatcher.destroy()));
+    await Promise.allSettled(all.map((dispatcher) => dispatcher.destroy()));
   }
 }

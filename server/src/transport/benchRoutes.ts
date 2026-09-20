@@ -1,3 +1,4 @@
+import { FAMILIES } from "../core/ir/params";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import crypto from "node:crypto";
 import { z } from "zod";
@@ -59,7 +60,7 @@ import { withJsonHeartbeat } from "./jsonKeepalive";
  * model work".
  */
 
-const FamilySchema = z.enum(["openai_completion", "anthropic", "openai_responses"]);
+const FamilySchema = z.enum(FAMILIES);
 
 const TargetSchema = z.discriminatedUnion("kind", [
   /** A saved Model Service or Micro Agent, run exactly as production runs it. */

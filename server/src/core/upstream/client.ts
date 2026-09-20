@@ -148,8 +148,7 @@ export class UpstreamClient implements Transport {
   private combineSignals(timeoutMs: number, external?: AbortSignal): AbortSignal {
     const timeout = AbortSignal.timeout(timeoutMs);
     if (!external) return timeout;
-    const anyFn = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
-    return anyFn ? anyFn([timeout, external]) : timeout;
+    return AbortSignal.any([timeout, external]);
   }
 
   /** POST a JSON body and read the full JSON (or text) response. */
@@ -245,7 +244,7 @@ export class UpstreamClient implements Transport {
       method: "GET",
       headers,
       dispatcher,
-      signal: opts.signal,
+      signal: this.combineSignals(opts.timeoutMs, opts.signal),
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
@@ -269,6 +268,7 @@ export class UpstreamClient implements Transport {
     try {
       json = text ? JSON.parse(text) : undefined;
     } catch {
+      if (res.statusCode >= 200 && res.statusCode < 300) throw new Error("upstream returned invalid JSON");
       json = undefined;
     }
     return { status: res.statusCode, headers: res.headers, json, text };

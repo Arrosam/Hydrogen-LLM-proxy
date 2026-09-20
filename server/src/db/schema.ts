@@ -1,3 +1,4 @@
+import { FAMILIES } from "../core/ir/params";
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, uniqueIndex, index } from "drizzle-orm/sqlite-core";
 import type { Message } from "../core/ir/content";
@@ -64,7 +65,7 @@ export const providers = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     name: text("name").notNull(),
-    type: text("type", { enum: ["openai_completion", "openai_responses", "anthropic"] }).notNull(),
+    type: text("type", { enum: FAMILIES }).notNull(),
     baseUrl: text("base_url").notNull(),
     keyCiphertext: text("key_ciphertext"),
     keyIv: text("key_iv"),
@@ -268,8 +269,8 @@ export const requestLogs = sqliteTable(
     /** The provider that actually served the request (winning attempt). */
     servedProvider: text("served_provider"),
 
-    ingressFormat: text("ingress_format", { enum: ["openai_completion", "anthropic", "openai_responses"] }).notNull(),
-    egressFormat: text("egress_format", { enum: ["openai_completion", "anthropic", "openai_responses"] }),
+    ingressFormat: text("ingress_format", { enum: FAMILIES }).notNull(),
+    egressFormat: text("egress_format", { enum: FAMILIES }),
     streaming: integer("streaming", { mode: "boolean" }).notNull().default(false),
     httpStatus: integer("http_status").notNull(),
 
@@ -374,4 +375,3 @@ export type ModelProvider = typeof modelProviders.$inferSelect;
 export type ModelServiceRow = typeof modelServices.$inferSelect;
 export type Token = typeof tokens.$inferSelect;
 export type RequestLog = typeof requestLogs.$inferSelect;
-export type ImageCacheRow = typeof imageCache.$inferSelect;

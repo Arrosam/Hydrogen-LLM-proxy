@@ -43,6 +43,17 @@ export function requireSession(users: UserRepo, sessionFloorMs: () => number = (
       await reply.code(401).send({ error: "unauthorized" });
       return;
     }
+    if (user.mustChangePassword || session.passwordChangeOnly) {
+      const setupRoute = req.routeOptions.url;
+      if (setupRoute !== "/admin/api/me" && setupRoute !== "/admin/api/change-password") {
+        await reply.code(403).send({ error: "password change required" });
+        return;
+      }
+      if (session.passwordChangeOnly && !user.mustChangePassword) {
+        await reply.code(401).send({ error: "session expired, please sign in again" });
+        return;
+      }
+    }
     req.user = { uid: user.id, username: user.username, role: user.role };
   };
 }

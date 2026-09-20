@@ -10,7 +10,7 @@
     "web"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12 <23"
   },
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
@@ -20,10 +20,19 @@
     "build:server": "npm run build --workspace server",
     "build:web": "npm run build --workspace web",
     "db:generate": "npm run db:generate --workspace server",
-    "test": "npm run test --workspace server",
-    "typecheck": "npm run typecheck --workspace server"
+    "test": "npm run test --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "lint": "eslint server/src server/test web/src web/test"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "@typescript-eslint/eslint-plugin": "^8.70.0",
+    "@typescript-eslint/parser": "^8.70.0",
+    "concurrently": "^9.1.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "drizzle-orm": "^0.45.2"
+  },
+  "overrides": {
+    "esbuild": "^0.28.2"
   }
 }

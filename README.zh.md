@@ -147,7 +147,7 @@ Hydrogen 已上架雨云云应用商店，无需自行构建。
 5. **环境变量**都是可选的。如需自定义首次登录凭据可设置 `ADMIN_USERNAME` / `ADMIN_PASSWORD`；
    `PROXY_MASTER_KEY` 和 `SESSION_SECRET` **留空**即可，Hydrogen 会自动生成并持久化。
    不要用雨云的随机字符串生成器填充主密钥——生成的不会是有效的 32 字节 base64 密钥，应用会拒绝启动。
-6. **打开分配的 URL** 并登录。如果 `ADMIN_PASSWORD` 留空，首次登录凭据为 `admin` / `password`，
+6. **打开分配的 URL** 并登录。如果 `ADMIN_PASSWORD` 留空，首次登录用户名为 `admin`，随机临时密码见服务端启动日志，
    登录后会强制要求设置新密码。
 
 **绑定自定义域名（HTTPS）。** 在已部署的应用中，**服务 → 新增服务 → 类型「HTTPS网站服务」**，
@@ -210,7 +210,7 @@ Caddy 需要端口 **80 和 443** 空闲，且 `A` 记录已指向该机器，**
 
 ### 3. 源码构建
 
-需要 **Node 20+**（Docker 镜像使用 Node 22 构建）。
+需要 **Node 22 (22.12 or newer within 22.x)**（Docker 镜像使用 Node 22 构建）。
 
 ```bash
 git clone https://github.com/Arrosam/Hydrogen-LLM-proxy.git
@@ -315,10 +315,13 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 | `DATA_DIR` | `/data` | SQLite + `hydrogen-secrets.json`。**必须持久化** |
 | `PROXY_MASTER_KEY` | *自动生成* | 32 字节 base64。加密供应商密钥（AES-256-GCM） |
 | `SESSION_SECRET` | *自动生成* | 签名仪表板会话 cookie |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *（空）* | 首个管理员。密码为空 ⇒ 首次登录 `admin`/`password`，强制修改 |
+| `HOST` | `0.0.0.0` | Listener interface |
+| `JSON_COMMIT_GRACE_MS` | `30000` | Non-streaming JSON heartbeat grace period in ms; 0 disables |
+| `UPDATE_REPO` | `arrosam/hydrogen-llm-proxy` | GitHub repository used for release checks |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *（空）* | 首个管理员。密码为空 ⇒ 随机临时密码见启动日志，强制修改 |
 | `SESSION_TTL` | `12h` | 仪表板会话有效期 |
 | `COOKIE_SECURE` | `auto` | `auto` 根据 `X-Forwarded-Proto` 判断；`false` 用于纯 HTTP；`true` 强制 |
-| `LOG_PAYLOAD_MAX_CHARS` | `2000000` | 每条日志记录的请求/响应体上限。`0` = 不限（数据库无限增长） |
+| `LOG_PAYLOAD_MAX_CHARS` | `100000` | 每条日志记录的请求/响应体上限。`0` = 不限（数据库无限增长） |
 | `ALLOW_PRIVATE_UPSTREAMS` | `false` | 允许供应商 Base URL 指向回环/内网地址（如本地 Ollama）。链路本地元数据地址始终被拒绝 |
 | `SIMULATED_STREAMING_TOKEN_RATE` | `2000` | 缓冲流的重放速率（tokens/秒） |
 | `IMAGE_CACHE_MAX_BYTES` | `67108864` | OCR 图像描述的 LRU 缓存预算。`0` 禁用 |
@@ -411,3 +414,7 @@ web/      React + Vite + Tailwind 仪表板（Bootstrap Icons），英文 + 中�
 ## 许可证
 
 [MIT](LICENSE)
+
+Local source builds require Node 22 and a native build toolchain (Python, make, C++ compiler) when prebuilt native modules are unavailable. For a traceable local image, run `GIT_SHA=$(git rev-parse HEAD) docker compose build`.
+
+发行镜像的 `APP_VERSION` 由 CI 的 `v*` 标签注入，`GIT_SHA` 记录提交。未打标签和本地构建显示为 `<package-version>-dev[.<sha>]`，避免误报正式版本。

@@ -11,7 +11,9 @@ export interface ClosableServer {
  * hold the process open. At the deadline all HTTP connections are destroyed and
  * the promise resolves so the caller can close local resources and exit.
  *
- * Returns true when the deadline had to force the drain.
+ * Returns true when the deadline had to force the drain. Async handlers may
+ * still be pending then: the caller MUST perform only synchronous cleanup and
+ * immediately exit, without yielding back to the event loop.
  */
 export async function closeWithDeadline(app: ClosableServer, graceMs: number): Promise<boolean> {
   let forced = false;

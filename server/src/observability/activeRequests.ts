@@ -156,17 +156,17 @@ export class ActiveRequestRegistry {
 
   /** All currently in-flight requests (snapshot copy). */
   listActive(): ActiveRequest[] {
-    return Array.from(this.active.values());
+    return structuredClone(Array.from(this.active.values()));
   }
 
   /** Recently completed requests (newest first). */
   listCompleted(limit = 50): ActiveRequest[] {
-    return this.completed.slice(-limit).reverse();
+    return structuredClone(this.completed.slice(-limit).reverse());
   }
 
   /** A single request by traceId (active or completed). */
   get(traceId: string): ActiveRequest | undefined {
-    return this.active.get(traceId) ?? this.completed.find((r) => r.traceId === traceId);
+    return structuredClone(this.active.get(traceId) ?? this.completed.find((r) => r.traceId === traceId));
   }
 
   /** Total events recorded (for performance tests). */

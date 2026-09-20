@@ -65,6 +65,9 @@ export interface LogSummary {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  reasoningTokens: number;
   latencyMs: number;
   attempts: number;
   error: string | null;
@@ -91,6 +94,8 @@ export class RequestLogRepo {
    * after the row was written. Only a 200 row is amended — a failure status
    * already tells the truth.
    */
+  transaction<T>(run: () => T): T { return this.db.transaction(() => run()); }
+
   markDeliveryFailed(traceId: string, error: string): boolean {
     const res = this.db
       .update(requestLogs)

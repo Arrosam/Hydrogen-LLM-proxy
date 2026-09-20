@@ -1,3 +1,4 @@
+import { THINKING_FORMATS } from "../core/ir/thinkingFormat";
 import { z } from "zod";
 import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
 import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
@@ -106,7 +107,7 @@ export const ThinkingLevelSchema = z.union([
  * answered differently depending on which step happened to win would be a
  * worse contract than any of the individual formats.
  */
-export const ThinkingFormatSchema = z.enum(["original", "reasoning_content", "reasoning", "think_tags", "none"]);
+export const ThinkingFormatSchema = z.enum(THINKING_FORMATS);
 
 /**
  * Operator-declared thinking boundaries, for a model whose trace is not
@@ -361,16 +362,12 @@ export type Trigger = z.infer<typeof TriggerSchema>;
 export type AdvanceTrigger = z.infer<typeof AdvanceTriggerSchema>;
 export type BackoffConfig = z.infer<typeof BackoffSchema>;
 export type RetryConfig = z.infer<typeof RetrySchema>;
-export type ThinkingLevelConfig = z.infer<typeof ThinkingLevelSchema>;
 export type Overrides = z.infer<typeof OverridesSchema>;
 export type ServiceStep = z.infer<typeof StepSchema>;
 export type ServiceSteps = z.infer<typeof ServiceStepsSchema>;
-export type AgentContextBlock = z.infer<typeof AgentContextBlockSchema>;
 export type AgentCondition = z.infer<typeof AgentConditionSchema>;
-export type AgentTransition = z.infer<typeof AgentTransitionSchema>;
 export type AgentStage = z.infer<typeof AgentStageSchema>;
 export type AgentOcr = z.infer<typeof AgentOcrSchema>;
-export type AgentAsr = z.infer<typeof AgentAsrSchema>;
 export type AgentDef = z.infer<typeof AgentSchema>;
 export type ServiceDef = AgentDef | ServiceSteps;
 

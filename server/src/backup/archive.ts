@@ -1,3 +1,5 @@
+import { isTable, getTableName } from "drizzle-orm";
+import * as schema from "../db/schema";
 import type Database from "better-sqlite3";
 import { STATS_CACHE_SETTINGS_KEY } from "../persistence/statsCache";
 import { decryptSecret, encryptSecret } from "../security/crypto";
@@ -59,6 +61,11 @@ const TABLES = [
   "settings",
   "image_cache",
 ] as const;
+
+const schemaTables = Object.values(schema).filter(isTable).map(getTableName).sort();
+if (JSON.stringify(schemaTables) !== JSON.stringify([...TABLES].sort())) {
+  throw new Error("Backup table manifest is out of sync with the database schema");
+}
 
 type TableName = (typeof TABLES)[number];
 

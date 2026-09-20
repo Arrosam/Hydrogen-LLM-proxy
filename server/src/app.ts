@@ -82,6 +82,15 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
 
+  app.addHook("onSend", async (req, reply, payload) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Referrer-Policy", "same-origin");
+    if (req.method === "GET" && !req.url.startsWith("/v1") && !req.url.startsWith("/admin/api")) {
+      reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+    }
+    return payload;
+  });
   await registerWebDashboard(app);
 
   return app;

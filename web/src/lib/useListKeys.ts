@@ -13,6 +13,7 @@ import { useRef } from "react";
  */
 export function useListKeys(length: number): {
   keys: number[];
+  reset: () => void;
   insert: (at: number) => void;
   remove: (at: number) => void;
   move: (from: number, to: number) => void;
@@ -24,6 +25,7 @@ export function useListKeys(length: number): {
   }
   return {
     keys: ids.current,
+    reset() { ids.current = Array.from({ length }, () => nextId.current++); },
     insert(at: number) {
       ids.current = [...ids.current.slice(0, at), nextId.current++, ...ids.current.slice(at)];
     },

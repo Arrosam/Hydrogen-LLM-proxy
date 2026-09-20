@@ -26,8 +26,3 @@ export class ProgressRecorder {
     return this.registry !== null;
   }
 }
-
-/** A null recorder for contexts without progress tracking (tests, dry-runs). */
-export function nullRecorder(): ProgressRecorder {
-  return new ProgressRecorder(null, "");
-}

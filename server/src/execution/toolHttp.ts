@@ -47,7 +47,6 @@ export const HttpToolSchema = z.object({
 });
 
 export type HttpTool = z.infer<typeof HttpToolSchema>;
-export type ServerTool = NonNullable<HttpTool["serverTool"]>;
 
 /**
  * The adapter's result entries for a server-tool round trip. The adapter decides

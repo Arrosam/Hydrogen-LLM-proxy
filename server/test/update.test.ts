@@ -146,7 +146,7 @@ describe("UpdateService.check", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("surfaces a rate-limit response as an error and does not cache it", async () => {
+  it("cools down rate-limit errors before retrying", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(new Response("{}", { status: 403 }))
@@ -156,8 +156,11 @@ describe("UpdateService.check", () => {
     expect(first.error).toMatch(/rate limit/i);
     expect(first.updateAvailable).toBe(false);
     expect(first.current).toBe("1.4.1"); // current is still reported on failure
-    // A failed check must not stick: the next call retries and succeeds.
+    expect((await service.check(true)).error).toMatch(/rate limit/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(first.checkedAt + 30_001);
     const second = await service.check();
+    clock.mockRestore();
     expect(second.error).toBeUndefined();
     expect(second.updateAvailable).toBe(true);
   });

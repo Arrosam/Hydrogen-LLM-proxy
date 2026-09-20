@@ -1,3 +1,4 @@
+import { requireAdmin } from "../auth/authorization";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Container } from "../composition/container";
@@ -6,7 +7,7 @@ import { HttpToolSchema, renderToolBody, selectToolResult } from "../execution/t
 /** Registered beneath the existing authenticated admin scope. */
 export async function hostedToolRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.addHook("preHandler", async (req, reply) => {
-    if (req.user?.role !== "admin") return reply.code(403).send({ error: "Only an admin can configure hosted tools" });
+    if (!requireAdmin(req, reply, "configure hosted tools")) return reply;
   });
   const id = (params: unknown) => z.object({ id: z.coerce.number().int().positive() }).parse(params).id;
   app.get("/", () => ({ tools: c.hostedTools.list() }));

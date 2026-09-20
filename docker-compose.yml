@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     image: hydrogen-llm-proxy:latest
     container_name: hydrogen
     restart: unless-stopped
@@ -27,6 +29,15 @@ services:
       # A process restart reuses this container's current image; keep remote
       # restart disabled and recreate it with `docker compose up -d` to update.
       UPDATE_RESTART_ENABLED: ${UPDATE_RESTART_ENABLED:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      ALLOW_PRIVATE_UPSTREAMS: ${ALLOW_PRIVATE_UPSTREAMS:-false}
+      SIMULATED_STREAMING_TOKEN_RATE: ${SIMULATED_STREAMING_TOKEN_RATE:-2000}
+      IMAGE_CACHE_MAX_BYTES: ${IMAGE_CACHE_MAX_BYTES:-67108864}
+      STREAM_COMMIT_GRACE_MS: ${STREAM_COMMIT_GRACE_MS:-2500}
+      STREAM_PING_INTERVAL_MS: ${STREAM_PING_INTERVAL_MS:-10000}
+      JSON_COMMIT_GRACE_MS: ${JSON_COMMIT_GRACE_MS:-30000}
+      UPDATE_REPO: ${UPDATE_REPO:-arrosam/hydrogen-llm-proxy}
+      HOST: ${HOST:-0.0.0.0}
     volumes:
       - hydrogen-data:/data
 

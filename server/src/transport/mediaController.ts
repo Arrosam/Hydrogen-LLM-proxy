@@ -1,3 +1,4 @@
+import { tokenAllowsService } from "../auth/authorization";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import {
@@ -85,11 +86,7 @@ function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpReq
   return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, bodyPayload: capture(body) };
 }
 
-function tokenAllowsService(token: Token, serviceId: number): boolean {
-  const scope = token.scopeServices;
-  if (!Array.isArray(scope) || scope.length === 0) return true;
-  return scope.includes(serviceId);
-}
+
 
 /**
  * Video job ids are returned to the client with a routing suffix so polling
@@ -148,6 +145,7 @@ export class MediaController {
 
   /** Resolve + authorize the target service for a category, or reply an error. */
   private loadService(
+    req: FastifyRequest,
     reply: FastifyReply,
     token: Token,
     serviceName: string,
@@ -163,6 +161,8 @@ export class MediaController {
       return null;
     }
     if (!tokenAllowsService(token, service.id)) {
+      this.deps.logger.record({ traceId: genId("req"), tokenId: token.id, serviceId: service.id, requestedService: service.name,
+        ingress: "openai_completion", streaming: false, httpStatus: 403, http: httpInfo(req, value => this.deps.logger.capture(value)), latencyMs: 0, error: "service out of token scope" });
       this.replyError(reply, 403, `This token is not allowed to use '${serviceName}'.`);
       return null;
     }
@@ -259,7 +259,7 @@ export class MediaController {
     const token = req.clientToken!;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const serviceName = String(body.model ?? "");
-    const loaded = this.loadService(reply, token, serviceName, category);
+    const loaded = this.loadService(req, reply, token, serviceName, category);
     if (!loaded) return reply;
     const { service, def } = loaded;
 
@@ -306,7 +306,7 @@ export class MediaController {
     const token = req.clientToken!;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const serviceName = String(body.model ?? "");
-    const loaded = this.loadService(reply, token, serviceName, "tts");
+    const loaded = this.loadService(req, reply, token, serviceName, "tts");
     if (!loaded) return reply;
     const { service, def } = loaded;
 
@@ -359,7 +359,7 @@ export class MediaController {
       return this.replyError(reply, 400, "Expected a multipart/form-data body.");
     }
     const serviceName = readMultipartField(raw, contentType, "model");
-    const loaded = this.loadService(reply, token, serviceName ?? "", "stt");
+    const loaded = this.loadService(req, reply, token, serviceName ?? "", "stt");
     if (!loaded) return reply;
     const { service, def } = loaded;
 
@@ -432,6 +432,8 @@ export class MediaController {
     const service = this.deps.services.get(parsed.serviceId);
     if (!service || !service.enabled) return this.replyError(reply, 404, "The service that created this video no longer exists.");
     if (!tokenAllowsService(token, service.id)) {
+      this.deps.logger.record({ traceId: genId("req"), tokenId: token.id, serviceId: service.id, requestedService: service.name,
+        ingress: "openai_completion", streaming: false, httpStatus: 403, http: httpInfo(req, value => this.deps.logger.capture(value)), latencyMs: 0, error: "service out of token scope" });
       return this.replyError(reply, 403, `This token is not allowed to use '${service.name}'.`);
     }
     const provider = this.deps.providers.get(parsed.providerId);

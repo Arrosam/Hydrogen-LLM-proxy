@@ -4,6 +4,6 @@ export const selectAll = (e: React.SyntheticEvent<HTMLInputElement>) => e.curren
 
 /** Digits-only text input -> integer clamped to `min`; `fallback` when empty. */
 export function intInput(raw: string, fallback: number, min = 0): number {
-  const n = Number(raw.replace(/\D/g, ""));
-  return Math.max(min, n || fallback);
+  const n = raw.trim() ? Number(raw) : NaN;
+  return Math.max(min, Number.isFinite(n) ? Math.trunc(n) : fallback);
 }

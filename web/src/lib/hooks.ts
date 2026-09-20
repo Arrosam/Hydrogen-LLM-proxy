@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface AsyncState<T> {
   data: T | null;
@@ -13,18 +13,17 @@ export function useAsync<T>(fn: () => Promise<T>): AsyncState<T> {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const loader = useRef(fn);
+  loader.current = fn;
+  const generation = useRef(0);
   const reload = useCallback(() => {
+    const id = ++generation.current;
     setLoading(true);
-    fn()
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    Promise.resolve().then(() => loader.current())
+      .then(d => { if (id === generation.current) { setData(d); setError(null); } })
+      .catch((e: unknown) => { if (id === generation.current) setError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (id === generation.current) setLoading(false); });
   }, []);
-
-  useEffect(reload, [reload]);
+  useEffect(() => { reload(); return () => { generation.current++; }; }, [reload]);
   return { data, loading, error, reload };
 }

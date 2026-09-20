@@ -40,13 +40,13 @@ import { withoutReasoning, type StreamEvent } from "./stream";
  */
 export type ThinkingFormat = "original" | "reasoning_content" | "reasoning" | "think_tags" | "none";
 
-export const THINKING_FORMATS: readonly ThinkingFormat[] = [
+export const THINKING_FORMATS = [
   "original",
   "reasoning_content",
   "reasoning",
   "think_tags",
   "none",
-];
+] as const;
 
 /** Whether a format asks for anything at all. `original` and absence do not. */
 export function isThinkingFormatActive(f: ThinkingFormat | undefined): f is Exclude<ThinkingFormat, "original"> {
@@ -346,7 +346,7 @@ export function liftThinkTags(content: ContentPart[], delimiters?: ThinkingDelim
 
   const thought = rest.slice(0, close.index);
   const tail = rest.slice(close.index + close.length).replace(/^\s+/, "");
-  const replacement: ContentPart[] = [{ type: "reasoning", text: thought.trim() }];
+  const replacement: ContentPart[] = thought.trim() ? [{ type: "reasoning", text: thought.trim() }] : [];
   if (tail) replacement.push({ ...part, text: tail });
 
   const out = [...content];

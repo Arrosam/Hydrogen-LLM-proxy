@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "../auth";
-import { api } from "../api";
 import { HydrogenLogo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 
@@ -11,21 +10,6 @@ export function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [hint, setHint] = useState<{ username: string; password: string } | null>(null);
-
-  useEffect(() => {
-    api
-      .get<{ initial: { username: string; password: string } | null }>("/setup-info")
-      .then((r) => {
-        if (r.initial) {
-          setHint(r.initial);
-          setUsername((u) => u || r.initial!.username);
-          setPassword((p) => p || r.initial!.password);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -49,17 +33,6 @@ export function Login() {
             <p className="text-sm text-ink-500">{t("login.subtitle")}</p>
           </div>
         </div>
-
-        {hint && (
-          <div className="mb-4 flex items-start gap-2 rounded-lg border border-brand-700/40 bg-brand-700/10 px-3 py-2.5 text-sm text-ink-200">
-            <i className="bi bi-info-circle-fill mt-0.5 text-brand-400" />
-            <div>
-              {t("login.hint.firstTimePrefix")}
-              <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.username}</code>{t("login.hint.andPassword")}
-              <code className="rounded bg-ink-950 px-1 font-mono text-brand-400">{hint.password}</code>{t("login.hint.setPasswordNext")}
-            </div>
-          </div>
-        )}
 
         <form onSubmit={submit} className="card card-pad space-y-4">
           <div>

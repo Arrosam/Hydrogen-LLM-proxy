@@ -17,8 +17,10 @@ export function parse<S extends z.ZodTypeAny>(
 
 /** Parse a positive integer route/query param; returns null when invalid. */
 export function toId(v: unknown): number | null {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  if (!/^[1-9]\d*$/.test(String(v))) return null;
   const n = Number(v);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
 /** Parse the `:id` route param of a request; null when missing/invalid. */

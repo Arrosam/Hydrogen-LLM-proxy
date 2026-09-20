@@ -159,7 +159,8 @@ export class StatsCache {
   }
 
   /** A logged 200 was demoted to 499 after the fact: one more error. */
-  recordDeliveryFailure(): void {
+  recordDeliveryFailure(persistImmediately = false): void {
+    const previous = persistImmediately ? structuredClone(this.state) : undefined;
     this.state.errors += 1;
     // Also on today's day bucket, so the chart's error curve and the Overview
     // error card cannot drift apart. The original request is dated by when it
@@ -171,7 +172,10 @@ export class StatsCache {
       errors: 1,
       latencySumMs: 0,
     });
-    this.scheduleFlush();
+    if (persistImmediately) {
+      try { this.settings.set(STATS_CACHE_SETTINGS_KEY, JSON.stringify(this.state)); }
+      catch (error) { this.state = previous!; throw error; }
+    } else this.scheduleFlush();
   }
 
   // --- readers (the /stats endpoints; no SQL) --------------------------------

@@ -58,6 +58,7 @@ export class JsonKeepalive {
   /** The outcome has arrived: stop the grace/ping timers. */
   stop(): void {
     if (this.graceTimer) clearTimeout(this.graceTimer);
+    this.graceTimer = null;
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
@@ -67,6 +68,7 @@ export class JsonKeepalive {
   /** Finish a committed response with the handler's JSON body. Returns true
    * when it wrote (the caller must NOT also return the body to Fastify). */
   finish(body: unknown): boolean {
+    this.stop();
     if (!this.committed) return false;
     const raw = this.reply.raw;
     try {
@@ -95,6 +97,12 @@ export async function withJsonHeartbeat<T>(
   let body: T;
   try {
     body = await run();
+  } catch (error) {
+    if (keepalive.finish({ error: "request failed" })) {
+      reply.log.error({ err: error }, "JSON heartbeat handler failed");
+      return undefined;
+    }
+    throw error;
   } finally {
     keepalive.stop();
   }

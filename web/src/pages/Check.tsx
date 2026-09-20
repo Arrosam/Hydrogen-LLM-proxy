@@ -15,10 +15,8 @@ interface KeyStatus {
 
 interface CheckResult {
   key: {
-    id: number;
     name: string;
-    keyPrefix: string;
-    scopeServices: number[] | null;
+    scopeServiceCount: number;
     maxRequests: number | null;
     maxTokens: number | null;
     usedRequests: number;
@@ -53,7 +51,7 @@ async function checkKey(apiKey: string): Promise<CheckResult> {
 
 function ProgressBar({ used, max, label }: { used: number; max: number | null; label: string }) {
   const { t } = useI18n();
-  const pct = max && max > 0 ? Math.min(100, (used / max) * 100) : 0;
+  const pct = max == null ? 0 : max <= 0 ? 100 : Math.min(100, (used / max) * 100);
   const remaining = max != null ? Math.max(0, max - used) : null;
   return (
     <div>
@@ -185,7 +183,7 @@ export function Check() {
             <div className="card card-pad flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <code className="rounded bg-ink-950 px-2 py-1 font-mono text-xs text-brand-400">
-                  {key?.keyPrefix ?? submittedKey.slice(0, 14)}...
+                  {submittedKey.slice(0, 14)}...
                 </code>
                 {key && <span className="text-sm text-ink-300">{key.name}</span>}
               </div>
@@ -268,9 +266,9 @@ export function Check() {
                     <div className="flex justify-between">
                       <dt className="text-ink-400">{t("check.details.scope")}</dt>
                       <dd className="text-ink-100">
-                        {!key.scopeServices || key.scopeServices.length === 0
+                        {key.scopeServiceCount === 0
                           ? t("check.details.allServices")
-                          : t("check.details.serviceCount", { count: key.scopeServices.length })}
+                          : t("check.details.serviceCount", { count: key.scopeServiceCount })}
                       </dd>
                     </div>
                     <div className="flex justify-between">

@@ -101,11 +101,9 @@ export async function openWithPassphrase(sealed: SealedPayload, passphrase: stri
   ) {
     throw new PassphraseError("invalid key-derivation parameters in this backup");
   }
-  let salt: Buffer;
-  try {
-    salt = Buffer.from(sealed.salt, "base64");
-  } catch {
-    throw new PassphraseError("malformed backup: unreadable salt");
+  const salt = Buffer.from(sealed.salt, "base64");
+  if (salt.length !== 16 || salt.toString("base64") !== sealed.salt) {
+    throw new PassphraseError("malformed backup: invalid salt");
   }
   let key: Buffer;
   try {

@@ -1,3 +1,4 @@
+import { msToLocalInput, editedExpiry } from "../lib/tokenForm";
 import { useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
@@ -36,13 +37,6 @@ const EMPTY: FormState = {
   enabled: true,
 };
 
-/** Convert epoch ms to a value suitable for <input type="datetime-local">. */
-function msToLocalInput(ms: number | null | undefined): string {
-  if (!ms) return "";
-  const d = new Date(ms);
-  const off = d.getTimezoneOffset();
-  return new Date(ms - off * 60000).toISOString().slice(0, 16);
-}
 
 function formFromToken(t: Token): FormState {
   return {
@@ -85,7 +79,7 @@ export function Tokens() {
         scopeServices: form.scopeAll ? null : form.scopeServices,
         maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
         maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
-        expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
+        expiresAt: editedExpiry(form.expiresAt),
         enabled: form.enabled,
       };
       const r = await api.post<{ secret: string }>("/tokens", payload);
@@ -108,7 +102,7 @@ export function Tokens() {
         scopeServices: form.scopeAll ? null : form.scopeServices,
         maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
         maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
-        expiresAt: form.expiresAt ? new Date(form.expiresAt).getTime() : null,
+        expiresAt: editedExpiry(form.expiresAt, data?.tokens.find(token => token.id === editingId)?.expiresAt),
         enabled: form.enabled,
       };
       await api.patch(`/tokens/${editingId}`, payload);
@@ -231,10 +225,10 @@ export function Tokens() {
                     )}
                   </td>
                   <td className="text-xs text-ink-300">
-                    {formatNumber(t.usedRequests)}{t.maxRequests ? ` / ${formatNumber(t.maxRequests)}` : ""}
+                    {formatNumber(t.usedRequests)}{t.maxRequests != null ? ` / ${formatNumber(t.maxRequests)}` : ""}
                   </td>
                   <td className="text-xs text-ink-300">
-                    {formatNumber(t.usedTokens)}{t.maxTokens ? ` / ${formatNumber(t.maxTokens)}` : ""}
+                    {formatNumber(t.usedTokens)}{t.maxTokens != null ? ` / ${formatNumber(t.maxTokens)}` : ""}
                   </td>
                   <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")}</td>
                   <td>

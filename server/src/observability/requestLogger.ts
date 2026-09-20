@@ -80,10 +80,11 @@ export class RequestLogger {
 
   /** Demote a logged 200 to 499 after late evidence that delivery failed. */
   amendDeliveryFailure(traceId: string, error: string): boolean {
-    const changed = this.repo.markDeliveryFailed(traceId, error);
-    // The row was folded into the stats as a success when it was written.
-    if (changed) this.stats?.recordDeliveryFailure();
-    return changed;
+    return this.repo.transaction(() => {
+      const changed = this.repo.markDeliveryFailed(traceId, error);
+      if (changed) this.stats?.recordDeliveryFailure(true);
+      return changed;
+    });
   }
 
   record(p: LogParams): void {

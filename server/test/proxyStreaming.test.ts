@@ -157,7 +157,8 @@ function makeTokenRepo(): ProxyDeps["tokens"] {
 }
 
 /** A minimal RequestLogger that captures the last logged entry. */
-class CapturingLogger implements ProxyDeps["logger"] {
+type LoggerPort = ProxyDeps["logger"];
+class CapturingLogger implements LoggerPort {
   lastEntry: LogParams | null = null;
   /** Payloads captured early, in call order, so a test can assert that the
    * controller serialized before releasing the object rather than after. */

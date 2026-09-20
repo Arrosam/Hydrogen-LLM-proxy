@@ -47,11 +47,11 @@ export type StreamEvent =
   /** A provider-executed call the proxy ran itself. Distinct from `tool_start`:
    * the client is not being asked to run anything, so it must not appear in a
    * client's pending-tool bookkeeping. */
-  | { type: "server_tool_start"; id: string; name: string; input: unknown }
+  | { type: "server_tool_start"; family?: "anthropic" | "openai_responses"; id: string; name: string; input: unknown }
   /** The result half of a provider-executed round trip. `blockType` is the
    * client protocol's result block type (web_search_result, ...); `content` is
    * the adapter's entries, opaque here. */
-  | { type: "server_tool_result"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean }
+  | { type: "server_tool_result"; family?: "anthropic" | "openai_responses"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean }
   /** A cumulative accounting snapshot, retained even if the next read throws. */
   | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -225,7 +225,9 @@ export async function collectStream(
   let currentReasoning: ReasoningPart | null = null;
   let stopReason: StopReason = null;
   let usage: Usage | undefined;
-  let incomplete = false;
+  let incomplete = true;
+  const serverCalls = new Map<string, Extract<StreamEvent, { type: "server_tool_start" }>>();
+  const serverContent: ContentPart[] = [];
   const toolByIndex = new Map<number, { id: string; name: string; args: string }>();
   const toolOrder: number[] = [];
 
@@ -235,7 +237,23 @@ export async function collectStream(
         id = ev.id || id;
         model = ev.model || model;
         created = ev.created || created;
+        if (ev.inputTokens != null || ev.cachedInputTokens != null || ev.cacheCreationInputTokens != null) {
+          usage = { promptTokens: ev.inputTokens ?? 0, completionTokens: 0, totalTokens: ev.inputTokens ?? 0,
+            ...(ev.cachedInputTokens != null ? { cachedInputTokens: ev.cachedInputTokens } : {}),
+            ...(ev.cacheCreationInputTokens != null ? { cacheCreationInputTokens: ev.cacheCreationInputTokens } : {}), incomplete: true };
+        }
         break;
+      case "server_tool_start":
+        serverCalls.set(ev.id, ev);
+        break;
+      case "server_tool_result": {
+        const call = serverCalls.get(ev.id);
+        serverContent.push({ type: "server_tool_result", family: ev.family ?? call?.family ?? "anthropic",
+          id: ev.id, name: ev.name, input: call?.input ?? {}, blockType: ev.blockType, content: ev.content,
+          ...(ev.errorCode !== undefined ? { errorCode: ev.errorCode } : {}), ...(ev.notExecuted ? { notExecuted: true } : {}) });
+        serverCalls.delete(ev.id);
+        break;
+      }
       case "text_delta":
         text += ev.text;
         break;
@@ -285,7 +303,8 @@ export async function collectStream(
     }
   }
 
-  const content: ContentPart[] = [];
+  const content: ContentPart[] = [...serverContent];
+  for (const call of serverCalls.values()) content.push({ type: "tool_use", id: call.id, name: call.name, input: call.input, serverTool: true });
   // A redacted block is kept on its `redacted` flag alone: its text is empty by
   // definition, and dropping it would silently break the next tool-call turn,
   // which has to replay the block back to the upstream that issued it.
@@ -303,7 +322,7 @@ export async function collectStream(
       created,
       content,
       stopReason,
-      usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      usage: { ...(usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 }), ...(incomplete ? { incomplete: true } : {}) },
     },
     incomplete,
   };
@@ -386,6 +405,8 @@ export async function* fabricateStream(
         await pace(piece.length);
       }
       yield { type: "reasoning_stop", id: p.itemId, origin: p.origin, signature: p.signature, ...(redacted ? { redacted: true } : {}) };
+    } else if (p.type === "tool_use" && p.serverTool) {
+      yield { type: "server_tool_start", id: p.id, name: p.name, input: p.input };
     } else if (p.type === "tool_use") {
       yield { type: "tool_start", index: toolIndex, id: p.id, name: p.name };
       yield { type: "tool_args_delta", index: toolIndex, delta: JSON.stringify(p.input ?? {}) };
@@ -395,9 +416,9 @@ export async function* fabricateStream(
       // The call and its result arrive together: the proxy already ran the
       // tool, so there is nothing to stream in between and no client-side
       // bookkeeping to open. Pace them so the two blocks never race.
-      yield { type: "server_tool_start", id: p.id, name: p.name, input: p.input ?? {} };
+      yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input ?? {} };
       await pace(2);
-      yield { type: "server_tool_result", id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}), ...(p.notExecuted ? { notExecuted: true } : {}) };
+      yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}), ...(p.notExecuted ? { notExecuted: true } : {}) };
       await pace(2);
     }
   }

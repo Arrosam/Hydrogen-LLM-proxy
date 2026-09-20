@@ -58,12 +58,6 @@ export class UserRepo {
     return this.db.select().from(users).all().length;
   }
 
-  /** If an account still has the forced default password, hint its username on the login page. */
-  initialCredentialHint(): { username: string } | null {
-    const u = this.db.select().from(users).where(eq(users.mustChangePassword, true)).limit(1).get();
-    return u ? { username: u.username } : null;
-  }
-
   async create(input: {
     username: string;
     password: string;
@@ -85,14 +79,12 @@ export class UserRepo {
       .get();
   }
 
-  /** Change a user's own password. Forced first-login change skips the current-password check. */
+  /** Change a user's own password only after proving knowledge of the current credential. */
   async changeOwnPassword(userId: number, newPassword: string, currentPassword?: string): Promise<ChangePasswordResult> {
     const user = this.get(userId);
     if (!user) return "not_found";
-    if (!user.mustChangePassword) {
-      if (!currentPassword || !(await verifyPassword(user.passwordHash, currentPassword))) {
-        return "wrong_current";
-      }
+    if (!currentPassword || !(await verifyPassword(user.passwordHash, currentPassword))) {
+      return "wrong_current";
     }
     const passwordHash = await hashPassword(newPassword);
     this.db.update(users).set({ passwordHash, mustChangePassword: false }).where(eq(users.id, userId)).run();

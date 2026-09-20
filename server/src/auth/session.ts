@@ -5,6 +5,8 @@ export const SESSION_COOKIE = "hydrogen_session";
 
 export interface SessionPayload {
   uid: number;
+  /** Setup-only sessions cannot become privileged after another session changes the password. */
+  passwordChangeOnly?: boolean;
   username: string;
   role: "admin" | "manager";
   /** Issued-at, seconds since epoch (set by jwt on sign; present after verify).
@@ -25,6 +27,7 @@ export function verifySession(token: string): SessionPayload | null {
     if (typeof decoded.uid !== "number") return null;
     return {
       uid: decoded.uid,
+      passwordChangeOnly: decoded.passwordChangeOnly === true,
       username: String(decoded.username),
       role: decoded.role === "admin" ? "admin" : "manager",
       iat: typeof decoded.iat === "number" ? decoded.iat : undefined,

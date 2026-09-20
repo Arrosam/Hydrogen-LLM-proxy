@@ -88,8 +88,11 @@ async function download(
   if (!transport.getStream) {
     throw new FormatConversionError(`cannot inline the file at ${url}: this transport cannot fetch URLs`);
   }
+  const signal = AbortSignal.any([AbortSignal.timeout(opts.timeoutMs), ...(opts.signal ? [opts.signal] : [])]);
+  opts = { ...opts, signal };
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    signal.throwIfAborted();
     const res = await transport.getStream(current, { accept: "*/*" }, opts);
     if (res.status >= 300 && res.status < 400) {
       const next = locationOf(res.headers);
@@ -106,20 +109,30 @@ async function download(
     }
     const chunks: Buffer[] = [];
     let received = 0;
-    for await (const chunk of res.body) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-      received += buf.length;
-      if (received > MAX_DOWNLOAD_BYTES) {
-        // Stop reading before buffering more: destroy the stream so the
-        // connection does not drain a huge body nobody will use.
-        res.body?.destroy?.();
-        throw new FormatConversionError(
-          `cannot inline the file at ${url}: it exceeds the ${MAX_DOWNLOAD_BYTES}-byte download limit`,
-        );
+    const abort = () => res.body.destroy(signal.reason instanceof Error ? signal.reason : new Error("download aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      signal.throwIfAborted();
+      for await (const chunk of res.body) {
+        signal.throwIfAborted();
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        received += buf.length;
+        if (received > MAX_DOWNLOAD_BYTES) {
+          // Stop reading before buffering more: destroy the stream so the
+          // connection does not drain a huge body nobody will use.
+          res.body?.destroy?.();
+          throw new FormatConversionError(
+            `cannot inline the file at ${url}: it exceeds the ${MAX_DOWNLOAD_BYTES}-byte download limit`,
+          );
+        }
+        chunks.push(buf);
       }
-      chunks.push(buf);
+      signal.throwIfAborted();
+      return { data: Buffer.concat(chunks).toString("base64"), mediaType: mediaTypeOf(res.headers) };
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (signal.aborted) res.body.destroy();
     }
-    return { data: Buffer.concat(chunks).toString("base64"), mediaType: mediaTypeOf(res.headers) };
   }
   throw new FormatConversionError(`cannot inline the file at ${url}: more than ${MAX_REDIRECTS} redirects`);
 }
