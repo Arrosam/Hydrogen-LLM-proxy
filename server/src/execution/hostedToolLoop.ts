@@ -11,6 +11,7 @@ import type { ModelService, InvokeOptions } from "./modelService";
 import type { InvokeValue } from "./outcome";
 import { HostedToolOptionsSchema, type HostedToolOptions } from "./definition";
 import { callHttpTool, type HttpTool } from "./toolHttp";
+import { callFishballSearch } from "./fishballSearch";
 import { pendingHostedResults } from "./serverTools";
 import { toolValidator } from "./toolSchema";
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
@@ -48,7 +49,7 @@ export async function runHostedTools(
   executor: Pick<ModelService, "invoke" | "stream">,
   request: Request,
   tools: HttpTool[],
-  transport: Pick<Transport, "postStream">,
+  transport: Pick<Transport, "postStream" | "getStream">,
   options: InvokeOptions & {
     sessionId: string;
     config?: HostedToolOptions;
@@ -65,7 +66,8 @@ export async function runHostedTools(
   },
 ): Promise<HostedRun> {
   const config = options.config ?? HostedToolOptionsSchema.parse({});
-  const named = new Map(tools.filter(t => t.enabled).map(t => [t.name, t]));
+  const rankers = new Set(tools.flatMap(t => t.adapter?.rerankTool ? [t.adapter.rerankTool] : []));
+  const named = new Map(tools.filter(t => t.enabled && !rankers.has(t.name)).map(t => [t.name, t]));
   const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
   const logMaxChars = context.logMaxChars ?? (() => 100_000);
   const invokeOptions = { ...options, hosted: context };
@@ -133,6 +135,8 @@ export async function runHostedTools(
         ? { output: JSON.stringify({ error: { code: "tool_call_limit", message: "Hosted tool call budget exhausted" } }), isError: true, durationMs: 0 }
         : !validate(call.input)
           ? { output: JSON.stringify({ error: { code: "invalid_tool_arguments", message: "Arguments do not match the tool parameter schema" } }), isError: true, durationMs: 0 }
+          : tool.adapter?.kind === "fishball_search_v1"
+            ? await callFishballSearch(tool, call.input, tools, transport, options.signal)
           : await callHttpTool(tool, { arguments: call.input as Record<string, unknown>, tool: { name: tool.name }, call: { id: callId }, session: { id: options.sessionId } }, transport, options.signal);
       context.remainingCalls--;
       results.push({ type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError });

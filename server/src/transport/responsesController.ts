@@ -8,6 +8,8 @@ import { ZERO_USAGE } from "../core/ir/usage";
 import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
+import { FISHBALL_SEARCH, searchParameters } from "../execution/fishballSearch";
+import { HostedToolOptionsSchema } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
 import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
@@ -17,6 +19,7 @@ import { genId } from "../util/ids";
 import type { ProxyDeps } from "./deps";
 import { JsonKeepalive } from "./jsonKeepalive";
 import { messagesToItems, responseWire } from "./responseWire";
+import { fishballAnswerStream } from "./fishballAnswerStream";
 import { liveResponseWire } from "./liveResponseWire";
 import type { InvokeValue } from "../execution/outcome";
 
@@ -43,6 +46,11 @@ export class ResponsesController {
   }
 
   register(app: FastifyInstance): void {
+    app.post("/v1/fishball/messages", { preHandler: requireClientToken(this.deps.tokens, "anthropic") }, (req, reply) => {
+      const body = req.body as WireItem | undefined;
+      if ((body?.hydrogen as WireItem | undefined)?.search !== FISHBALL_SEARCH) return reply.code(400).send(buildErrorBody("anthropic", 400, "fishball_search_v1 is required"));
+      return this.create(req, reply, "anthropic");
+    });
     void app.register(async scoped => {
       scoped.setErrorHandler((error, req, reply) => {
         const status = error instanceof ResponseStateError ? error.statusCode : error instanceof z.ZodError ? 400 : 500;
@@ -161,7 +169,9 @@ export class ResponsesController {
     const flags = z.object({ stream: z.boolean().default(false), store: z.boolean().default(true), background: z.boolean().default(false), previous_response_id: z.string().nullable().optional(), conversation: z.union([z.string(), z.object({ id: z.string() })]).nullable().optional(), metadata: metadata.default({}) }).parse(body);
     if (flags.background && (!flags.store || family !== "openai_responses")) throw new ResponseStateError("Background requires Responses with store:true", 400);
     if (this.jobs.size >= 32) throw new ResponseStateError("Too many active response jobs", 429);
-    const extension = z.object({ previous_response_id: z.string().optional() }).parse(body.hydrogen ?? {});
+    const extension = z.object({ search: z.literal(FISHBALL_SEARCH).optional(), previous_response_id: z.string().optional() }).parse(body.hydrogen ?? {});
+    const fishball = extension.search === FISHBALL_SEARCH;
+    if (fishball && (family !== "anthropic" || !flags.store || flags.background)) throw new ResponseStateError("Fishball requires stored foreground Anthropic messages", 400);
     const previousId = flags.previous_response_id ?? extension.previous_response_id;
     const conversationId = typeof flags.conversation === "string" ? flags.conversation : flags.conversation?.id;
     if (previousId && conversationId) throw new ResponseStateError("previous_response_id and conversation cannot be combined", 400);
@@ -209,7 +219,21 @@ export class ResponsesController {
     }
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
     if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
-    const bound = this.tools.forService(service.id);
+    const configured = this.tools.forService(service.id);
+    const searchTool = configured.find(t => t.adapter?.kind === FISHBALL_SEARCH);
+    const searchRankers = new Set(configured.flatMap(t => t.adapter?.rerankTool ? [t.adapter.rerankTool] : []));
+    // The new adapter is opt-in. Old clients keep their ordinary client-owned search.
+    let bound = configured.filter(t => !t.adapter && !searchRankers.has(t.name));
+    if (fishball) {
+      if (!searchTool) throw new ResponseStateError("fishball_search_v1 is unavailable for this model; configure its search binding", 409);
+      if (previousId) {
+        const previous = this.repo.response(previousId, token.id)!;
+        if ((previous.response.hydrogen as WireItem | undefined)?.search !== FISHBALL_SEARCH || previous.serviceId !== service.id) throw new ResponseStateError("Incompatible search continuation", 409);
+      }
+      // Name and schema are the versioned product contract, not administrator defaults.
+      bound = request.tools?.some(t => t.name === "search") ? [{ ...searchTool, name: "search", parameters: searchParameters, description: "Search the web. Results include status and publisher trust tier. Failed search must never be replaced by model knowledge." }, ...configured.filter(t => t.name === searchTool.adapter?.rerankTool)] : [];
+      request = buildRequest(family, { ...request.data(), tools: request.tools?.filter(t => t.name !== "search") });
+    }
     // A client may DECLARE a provider-executed tool by name. When a bound tool
     // opts into that contract, the declaration is an instruction to run it, not
     // a client tool that would collide with the hosted one.
@@ -240,7 +264,7 @@ export class ResponsesController {
       if (job.bytes > 25 * 1024 * 1024) throw new ResponseStateError("Response event log exceeds 25 MiB", 413);
       this.repo.addEvent(id, token.id, event);
     };
-    this.repo.addEvent(id, token.id, family === "openai_responses" ? { type: "response.created", response: initial } : { type: "hydrogen.session", response_id: id });
+    this.repo.addEvent(id, token.id, family === "openai_responses" ? { type: "response.created", response: initial } : { type: "hydrogen.session", response_id: id, ...(fishball ? { search: FISHBALL_SEARCH } : {}) });
     job.done = Promise.resolve().then(async () => {
       let usage = { ...ZERO_USAGE }, calls: unknown = [], attempts = 0, status = 200, error: string | null = null;
       let output = initial;
@@ -250,6 +274,7 @@ export class ResponsesController {
       // turn straight through, which is exactly the turn the round trip has to be
       // synthesized into. Those requests take the buffered path and fabricate
       // their stream, so the client receives the same blocks either way.
+      const fishballLive = fishball && flags.stream ? fishballAnswerStream(id, service.name, emit) : undefined;
       const live = flags.stream && !bound.length && !serverTools.size && family === "openai_responses"
         ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition), serviceThinkingDelimiters(definition)) : undefined;
       try {
@@ -259,9 +284,19 @@ export class ResponsesController {
         // Declared server tools are rewritten into the bound tools the model can
         // actually call; every other request is passed through untouched.
         const effective = serverTools.size ? buildRequest(family, { ...request.data(), tools }) : request;
-        const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
-          progress, emit: flags.stream ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+        const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: fishball ? HostedToolOptionsSchema.parse({ ...definition.hostedTools, streamMode: "progress" }) : definition.hostedTools,
+          progress, emit: fishball ? async event => {
+            if (event.type === "hydrogen.tool.started") await emit({ type: "hydrogen.search.started" });
+            if (event.type === "hydrogen.tool.completed") {
+              const result = JSON.parse(String(event.output)) as WireItem;
+              const status = typeof result.status === "string" ? result.status : "failed";
+              const hits = Array.isArray(result.hits) ? result.hits.map(({ url, title, snippet, engine, account }) => ({ url, title, snippet, engine, account })) : [];
+              await emit({ type: "hydrogen.search", id: event.model_call_id, status, queries: result.queries ?? [], hits });
+              if (status === "failed" || event.isError) throw new ResponseStateError("Search failed; no model-knowledge fallback was served", 502);
+            }
+          } : flags.stream ? emit : undefined, onModelEvent: fishballLive?.send ?? live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
           declaredNames: serverTools.size ? new Map([...declaredServerTools(serverTools)].map(([declared, entry]) => [declared, entry.tool.name])) : undefined });
+        if (fishball && run.paused) throw new ResponseStateError("Search round budget exhausted; retry the turn", 409);
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
@@ -288,7 +323,7 @@ export class ResponsesController {
           }
         }
         const response = final.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
-        const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
+        const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, ...(fishball ? { search: FISHBALL_SEARCH } : { tool_calls: run.traces }) } };
         // Let the renderer supply output, usage and incomplete_details; the envelope supplies state fields.
         delete extra.output; delete extra.error; delete extra.incomplete_details;
         const streamed = await live?.close();
@@ -298,14 +333,17 @@ export class ResponsesController {
         abort.signal.throwIfAborted();
         output = wire.body;
         const terminal = wire.events.filter(event => ["response.completed", "response.incomplete", "message_stop"].includes(String(event.type)));
-        for (const event of wire.events) if (!terminal.includes(event)) await emit(event);
+        for (const event of wire.events) if (!terminal.includes(event)) {
+          if (fishballLive?.started && ["message_start", "content_block_start", "content_block_delta", "content_block_stop"].includes(String(event.type))) continue;
+          await emit(event);
+        }
         if (job.bytes + Buffer.byteLength(JSON.stringify(terminal)) + Buffer.byteLength(JSON.stringify(output)) > 25 * 1024 * 1024) throw new ResponseStateError("Response event log exceeds 25 MiB", 413);
         abort.signal.throwIfAborted();
         const completed = this.repo.transition(id, token.id, response.stopReason === "length" ? "incomplete" : "completed", output, run.history,
           conversationId ? messagesToItems(run.history.slice(prefix.length)) : undefined);
         if (completed) {
           for (const event of terminal) this.repo.addEvent(id, token.id, event);
-          if (family === "anthropic") this.repo.addEvent(id, token.id, { type: "hydrogen.response.completed", response: output });
+          if (family === "anthropic") this.repo.addEvent(id, token.id, fishball ? { type: "hydrogen.response.completed", response_id: id, search: FISHBALL_SEARCH } : { type: "hydrogen.response.completed", response: output });
         } else output = this.repo.response(id, token.id)?.response ?? output;
       } catch (caught) {
         await live?.close().catch(() => undefined);

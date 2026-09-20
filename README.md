@@ -437,3 +437,5 @@ web/      React + Vite + Tailwind dashboard (Bootstrap Icons), English + 中文
 ## License
 
 [MIT](LICENSE)
+
+Fishball Android deployments: see [server-owned search and rollout](docs/fishball-search.md) for the versioned compact search contract and SearXNG binding.

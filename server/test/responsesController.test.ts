@@ -44,10 +44,10 @@ beforeEach(() => {
       response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
   };
   adapter = vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from(['{"result":"found"}']) }));
-  const deps = { services, tokens, transport: { postStream: adapter }, factory: { forRow: () => ({ executor: { invoke, stream: async (request: Request) => {
+  const deps = { services, tokens, transport: { postStream: adapter, getStream: adapter }, factory: { forRow: () => ({ executor: { invoke, stream: async (request: Request) => {
     const inv = await invoke(request); if (!inv.result.ok) throw new Error("fixture");
     const data = inv.result.value.response.data();
-    async function* events() { for await (const event of fabricateStream(data, Infinity)) { yield event; if (event.type === "text_delta" && streamGate) await streamGate; } }
+    async function* events() { for await (const event of fabricateStream(data, Infinity)) { yield event; if ((event.type === "text_delta" || event.type === "tool_args_delta") && streamGate) await streamGate; } }
     return { ...inv, result: { ok: true, value: { ...inv.result.value, dropReasoning: false, events: events() } } };
   } } }) }, logger: { capture: JSON.stringify, record: vi.fn() }, usage: new UsageMeter(tokens), activeRequests: new ActiveRequestRegistry() } as unknown as ProxyDeps;
   app = Fastify(); const controller = new ResponsesController(deps, repo, tools);
@@ -135,5 +135,94 @@ describe("Responses and Conversations HTTP API", () => {
     const body = first.json(); expect(body.type).toBe("message"); expect(body.content).toHaveLength(1); expect(body.content[0].name).toBe("local");
     const next = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: { model: "svc", max_tokens: 20, hydrogen: { previous_response_id: body.hydrogen.response_id }, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "local1", content: "local result" }] }] } });
     expect(next.statusCode).toBe(200); expect(requests[1].messages).toHaveLength(4); expect(adapter).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("Fishball compact hosted contract", () => {
+  const request = (extra: Record<string, unknown> = {}) => app.inject({ method: "POST", url: "/v1/fishball/messages", headers: headers(), payload: {
+    model: "svc", max_tokens: 200, stream: true, hydrogen: { search: "fishball_search_v1" },
+    messages: [{ role: "user", content: "search for 药物" }], tools: [{ name: "search", input_schema: { type: "object" } }, { name: "read_page", input_schema: { type: "object" } }], ...extra,
+  } });
+  function searchBinding() {
+    const tool = tools.create(HttpToolSchema.parse({ name: "fish-search", parameters: { type: "object" }, url: "https://searx.test/search", bodyTemplate: {}, adapter: { kind: "fishball_search_v1" } }));
+    tools.bind(serviceId, [tool.id]);
+    adapter.mockImplementation(async () => ({ status: 200, headers: {}, body: Readable.from([JSON.stringify({ results: [{ url: "https://who.int/a", title: "A", content: "source words" }], raw_engine_payload: "x".repeat(10000) })]) }));
+  }
+  const searchCall: ContentPart = { type: "tool_use", id: "search1", name: "search", input: { queries: ["药物"] } };
+  it("executes model-search-model in one mobile request and never returns raw tool rounds", async () => {
+    searchBinding(); outputs.push([searchCall]);
+    const response = await request();
+    expect(response.statusCode).toBe(200); expect(requests).toHaveLength(2); expect(adapter).toHaveBeenCalledTimes(1);
+    expect(response.body).toContain('"type":"hydrogen.search"'); expect(response.body).toContain('"status":"success"');
+    expect(response.body).toContain("Hello world"); expect(response.body).not.toContain("hydrogen.tool.completed"); expect(response.body).not.toContain("tool_calls"); expect(response.body).not.toContain("raw_engine_payload");
+    const legacyBytes = Buffer.byteLength(JSON.stringify({ tool_call: searchCall })) + Buffer.byteLength(JSON.stringify({ results: [{ url: "https://who.int/a", title: "A", content: "source words" }], raw_engine_payload: "x".repeat(10000) })) + Buffer.byteLength(JSON.stringify(requests[1].messages));
+    const compactBytes = Buffer.byteLength(response.body);
+    expect(compactBytes).toBeLessThan(legacyBytes);
+    console.log(JSON.stringify({ measurement: "one-search deterministic fixture, response plus search leg", legacyRequests: 3, hostedRequests: 1, legacyBytes, compactBytes }));
+  });
+  it("continues local tools by token-owned pointer with the server search context intact", async () => {
+    searchBinding(); outputs.push([searchCall], [{ type: "tool_use", id: "page1", name: "read_page", input: { url: "https://who.int/a" } }]);
+    const first = await request({ stream: false }); const id = first.json().hydrogen.response_id;
+    expect(first.json().content[0].name).toBe("read_page");
+    const next = await request({ stream: false, hydrogen: { search: "fishball_search_v1", previous_response_id: id }, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "page1", content: "page body" }] }] });
+    expect(next.statusCode).toBe(200); expect(adapter).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("source words");
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("page body");
+  });
+  it("fails before answering when search fails, including authorization and malformed upstream", async () => {
+    searchBinding();
+    for (const status of [403, 200]) {
+      adapter.mockImplementation(async () => ({ status, headers: {}, body: Readable.from(['{}']) })); outputs.push([searchCall]);
+      const before = requests.length; const result = await request();
+      expect(result.body).toContain('"status":"failed"'); expect(result.body).toContain("hydrogen.response.failed"); expect(result.body).not.toContain("Hello world"); expect(requests.length - before).toBe(1);
+    }
+  });
+  it("streams the final answer before the model finishes, with no duplicated arguments", async () => {
+    searchBinding(); outputs.push([searchCall], [{ type: "tool_use", id: "answer1", name: "answer", input: { text: "FINAL-LIVE" } }]);
+    let release!: () => void; streamGate = new Promise(resolve => { release = resolve; });
+    // Let the search tool arguments pass; gate only the final answer's stream.
+    streamGate = undefined;
+    adapter.mockImplementation(async () => {
+      streamGate = new Promise(resolve => { release = resolve; });
+      return { status: 200, headers: {}, body: Readable.from(['{"results":[]}']) };
+    });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const response = await fetch(`${address}/v1/fishball/messages`, { method: "POST", headers: { ...headers(), "content-type": "application/json" }, body: JSON.stringify({ model: "svc", max_tokens: 200, stream: true, hydrogen: { search: "fishball_search_v1" }, messages: [{ role: "user", content: "q" }], tools: [{ name: "search", input_schema: { type: "object" } }, { name: "answer", input_schema: { type: "object" } }] }) });
+    const reader = response.body!.getReader(); let received = "";
+    try {
+      await vi.waitFor(async () => { received += new TextDecoder().decode((await reader.read()).value); expect(received).toContain("FINAL-LIVE"); }, { timeout: 2000 });
+      expect(received).not.toContain("hydrogen.response.completed");
+    } finally { release(); }
+    while (true) { const next = await reader.read(); if (next.done) break; received += new TextDecoder().decode(next.value); }
+    expect(received.match(/FINAL-LIVE/g)).toHaveLength(1);
+    expect(received).toContain("hydrogen.response.completed");
+  });
+  it("cancels server search on mobile disconnect without another model call", async () => {
+    searchBinding(); outputs.push([searchCall]);
+    let aborted = false;
+    adapter.mockImplementation(async (_url: string, _headers: unknown, opts: { signal: AbortSignal }) => {
+      await new Promise((_resolve, reject) => {
+        const cancel = () => { aborted = true; reject(opts.signal.reason); };
+        if (opts.signal.aborted) cancel(); else opts.signal.addEventListener("abort", cancel, { once: true });
+      });
+    });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const response = await fetch(`${address}/v1/fishball/messages`, { method: "POST", headers: { ...headers(), "content-type": "application/json" }, body: JSON.stringify({ model: "svc", max_tokens: 200, stream: true, hydrogen: { search: "fishball_search_v1" }, messages: [{ role: "user", content: "q" }], tools: [{ name: "search", input_schema: { type: "object" } }] }) });
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledTimes(1));
+    await response.body!.cancel();
+    await vi.waitFor(() => expect(aborted).toBe(true));
+    expect(requests).toHaveLength(1);
+    app.server.closeAllConnections();
+  });
+  it("requires a compatible binding and contract, and authenticates the dedicated endpoint", async () => {
+    expect((await request()).statusCode).toBe(409); expect(requests).toHaveLength(0);
+    expect((await request({ hydrogen: { search: "unknown" } })).statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url: "/v1/fishball/messages", payload: {} })).statusCode).toBe(401);
+  });
+  it("keeps old clients on client search when the new binding is installed", async () => {
+    searchBinding(); outputs.push([searchCall]);
+    const old = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: { model: "svc", max_tokens: 200, messages: [{ role: "user", content: "q" }], tools: [{ name: "search", input_schema: { type: "object" } }] } });
+    expect(old.statusCode).toBe(200); expect(old.json().content[0].name).toBe("search"); expect(adapter).not.toHaveBeenCalled();
   });
 });

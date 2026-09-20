@@ -1,0 +1,992 @@
+{
+  "version": 5,
+  "updated": "2026-08-30",
+  "model": "publisher-first",
+  "default": "LOW",
+  "notes": {
+    "model": "The publisher is the source. A domain is only a shortcut for identifying one. Platforms (Baijiahao, WeChat Official Accounts, Zhihu ...) are venues and carry no tier of their own: a national health authority posting on Baijiahao is still that authority, and an anonymous account on the authority own platform would not be.",
+    "verification": "On a platform, a publisher may only rise above the platform floor when the result carries a verification signal or the account is listed in that publisher accounts array. Name resemblance is NEVER sufficient.",
+    "accounts": "Registry account lists start near-empty on purpose. Populate them from observed search results during Phase 1 rather than guessing; a wrong entry here grants AUTHORITATIVE to an impostor.",
+    "region": "Calibrated for mainland simplified-Chinese sources, but search.areel.org currently returns Hong Kong traditional-Chinese results almost exclusively (see docs/05-search-reality-check.md). Hong Kong entries added; full recalibration pending the region decision.",
+    "language": "Codebase and documentation are English. displayName, explanation and accounts are product text for a Chinese-speaking user and stay Chinese by design."
+  },
+  "resolution": [
+    "1. Is the domain a platform? → identify the publishing account → verified or in registry? → that publisher's tier, capped at INSTITUTIONAL. Else platform.defaultTier.",
+    "2. Does the domain belong to a registry publisher? → that publisher's tier.",
+    "3. Does the domain match a publisherPattern? → that pattern's tier.",
+    "4. Does the registrable name match a brand named in the query? → scopeRule R3-brand-official.",
+    "5. Otherwise → LOW (promotable to INSTITUTIONAL with a stated reason, per spec R2)."
+  ],
+  "tiers": {
+    "AUTHORITATIVE": "联合国及其机构、重大学术院所、PubMed、主要学术期刊",
+    "HIGH": "政府部门及其发布、官方媒体、维基百科、厂商说明自家产品参数",
+    "MEDIUM": "主流新闻机构、主流自媒体、百度百科、一般机构与数据库",
+    "LOW": "个人发帖，以及其余一切"
+  },
+  "publisherPatterns": [
+    {
+      "match": "*.gov.cn",
+      "tier": "HIGH",
+      "displayName": "中国政府机构"
+    },
+    {
+      "match": "*.edu.cn",
+      "tier": "HIGH",
+      "displayName": "中国高校"
+    },
+    {
+      "match": "*.gov",
+      "tier": "HIGH",
+      "displayName": "美国政府机构",
+      "explanation": "美国政府部门"
+    },
+    {
+      "match": "*.gov.hk",
+      "tier": "HIGH",
+      "displayName": "香港政府机构",
+      "explanation": "香港特区政府部门"
+    },
+    {
+      "match": "*.edu.hk",
+      "tier": "HIGH",
+      "displayName": "香港高校"
+    },
+    {
+      "match": "*.gov.uk",
+      "tier": "HIGH",
+      "displayName": "英国政府机构",
+      "explanation": "英国政府部门"
+    },
+    {
+      "match": "*.go.jp",
+      "tier": "HIGH",
+      "displayName": "日本政府机构",
+      "explanation": "日本政府部门"
+    },
+    {
+      "match": "*.edu",
+      "tier": "HIGH",
+      "displayName": "美国高校"
+    },
+    {
+      "match": "*.ac.uk",
+      "tier": "HIGH",
+      "displayName": "英国高校"
+    },
+    {
+      "match": "*.int",
+      "tier": "AUTHORITATIVE",
+      "displayName": "国际组织"
+    }
+  ],
+  "publishers": [
+    {
+      "id": "nhc",
+      "displayName": "国家卫生健康委员会",
+      "tier": "HIGH",
+      "domains": [
+        "nhc.gov.cn"
+      ],
+      "accounts": [
+        "健康中国"
+      ],
+      "topics": [
+        "health",
+        "medicine",
+        "public-health"
+      ]
+    },
+    {
+      "id": "nmpa",
+      "displayName": "国家药品监督管理局",
+      "tier": "HIGH",
+      "domains": [
+        "nmpa.gov.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "drugs",
+        "medical-devices",
+        "cosmetics"
+      ]
+    },
+    {
+      "id": "chinacdc",
+      "displayName": "中国疾控中心",
+      "tier": "HIGH",
+      "domains": [
+        "chinacdc.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "infectious-disease",
+        "vaccines",
+        "public-health"
+      ]
+    },
+    {
+      "id": "stats-cn",
+      "displayName": "国家统计局",
+      "tier": "HIGH",
+      "domains": [
+        "stats.gov.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "statistics",
+        "economy"
+      ]
+    },
+    {
+      "id": "samr",
+      "displayName": "国家市场监督管理总局",
+      "tier": "HIGH",
+      "domains": [
+        "samr.gov.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "product-quality",
+        "food-safety"
+      ]
+    },
+    {
+      "id": "pbc",
+      "displayName": "中国人民银行",
+      "tier": "HIGH",
+      "domains": [
+        "pbc.gov.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "finance",
+        "interest-rates"
+      ]
+    },
+    {
+      "id": "csrc",
+      "displayName": "中国证监会",
+      "tier": "HIGH",
+      "domains": [
+        "csrc.gov.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "securities",
+        "investment"
+      ]
+    },
+    {
+      "id": "cma",
+      "displayName": "中华医学会",
+      "tier": "HIGH",
+      "domains": [
+        "cma.org.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "medicine",
+        "clinical-guidelines"
+      ]
+    },
+    {
+      "id": "cas",
+      "displayName": "中国科学院",
+      "tier": "AUTHORITATIVE",
+      "domains": [
+        "cas.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "cae",
+      "displayName": "中国工程院",
+      "tier": "AUTHORITATIVE",
+      "domains": [
+        "cae.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "who",
+      "displayName": "世界卫生组织",
+      "tier": "AUTHORITATIVE",
+      "explanation": "联合国下属的全球卫生机构",
+      "domains": [
+        "who.int"
+      ],
+      "accounts": [],
+      "topics": [
+        "health",
+        "disease",
+        "vaccines"
+      ]
+    },
+    {
+      "id": "worldbank",
+      "displayName": "世界银行",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际金融与发展机构",
+      "domains": [
+        "worldbank.org"
+      ],
+      "accounts": [],
+      "topics": [
+        "economy",
+        "poverty",
+        "development"
+      ]
+    },
+    {
+      "id": "imf",
+      "displayName": "国际货币基金组织",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际金融机构",
+      "domains": [
+        "imf.org"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "un",
+      "displayName": "联合国",
+      "tier": "AUTHORITATIVE",
+      "domains": [
+        "un.org"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "fao",
+      "displayName": "联合国粮农组织",
+      "tier": "AUTHORITATIVE",
+      "explanation": "联合国下属的粮食与农业机构",
+      "domains": [
+        "fao.org"
+      ],
+      "accounts": [],
+      "topics": [
+        "food",
+        "agriculture",
+        "nutrition"
+      ]
+    },
+    {
+      "id": "nih",
+      "displayName": "美国国家卫生研究院",
+      "tier": "HIGH",
+      "explanation": "美国政府的医学研究机构",
+      "domains": [
+        "nih.gov"
+      ],
+      "accounts": [],
+      "topics": [
+        "health",
+        "medical-research"
+      ]
+    },
+    {
+      "id": "cdc-us",
+      "displayName": "美国疾控中心",
+      "tier": "HIGH",
+      "explanation": "美国政府的疾病防控机构",
+      "domains": [
+        "cdc.gov"
+      ],
+      "accounts": [],
+      "topics": [
+        "infectious-disease",
+        "vaccines"
+      ]
+    },
+    {
+      "id": "fda",
+      "displayName": "美国食品药品监督管理局",
+      "tier": "HIGH",
+      "explanation": "美国政府的药品与食品监管机构",
+      "domains": [
+        "fda.gov"
+      ],
+      "accounts": [],
+      "topics": [
+        "drugs",
+        "food"
+      ]
+    },
+    {
+      "id": "ema",
+      "displayName": "欧洲药品管理局",
+      "tier": "HIGH",
+      "explanation": "欧盟的药品监管机构",
+      "domains": [
+        "ema.europa.eu"
+      ],
+      "accounts": [],
+      "topics": [
+        "drugs"
+      ]
+    },
+    {
+      "id": "nature",
+      "displayName": "《自然》期刊",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级科学期刊",
+      "domains": [
+        "nature.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "science",
+      "displayName": "《科学》期刊",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级科学期刊",
+      "domains": [
+        "science.org"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "nejm",
+      "displayName": "《新英格兰医学杂志》",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级医学期刊",
+      "domains": [
+        "nejm.org"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "lancet",
+      "displayName": "《柳叶刀》",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级医学期刊",
+      "domains": [
+        "thelancet.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "cell",
+      "displayName": "《细胞》期刊",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级生命科学期刊",
+      "domains": [
+        "cell.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "bmj",
+      "displayName": "《英国医学杂志》",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际知名医学期刊",
+      "domains": [
+        "bmj.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "jama",
+      "displayName": "《美国医学会杂志》",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际顶级医学期刊",
+      "domains": [
+        "jamanetwork.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "pnas",
+      "displayName": "《美国科学院院报》",
+      "tier": "AUTHORITATIVE",
+      "explanation": "美国科学院的学术期刊",
+      "domains": [
+        "pnas.org"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "cochrane",
+      "displayName": "Cochrane 系统综述",
+      "tier": "AUTHORITATIVE",
+      "explanation": "国际公认的循证医学证据库，专门汇总同一问题的所有研究",
+      "domains": [
+        "cochranelibrary.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "medicine",
+        "efficacy"
+      ]
+    },
+    {
+      "id": "xinhua",
+      "displayName": "新华社",
+      "tier": "HIGH",
+      "domains": [
+        "xinhuanet.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "peoples-daily",
+      "displayName": "人民日报",
+      "tier": "HIGH",
+      "domains": [
+        "people.com.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "cctv",
+      "displayName": "央视",
+      "tier": "HIGH",
+      "domains": [
+        "cctv.com"
+      ],
+      "accounts": [
+        "央视新闻"
+      ]
+    },
+    {
+      "id": "chinadaily",
+      "displayName": "中国日报",
+      "tier": "MEDIUM",
+      "domains": [
+        "chinadaily.com.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "thepaper",
+      "displayName": "澎湃新闻",
+      "tier": "MEDIUM",
+      "domains": [
+        "thepaper.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "caixin",
+      "displayName": "财新",
+      "tier": "MEDIUM",
+      "domains": [
+        "caixin.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "southcn",
+      "displayName": "南方报业",
+      "tier": "MEDIUM",
+      "domains": [
+        "southcn.com",
+        "nfnews.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "bjnews",
+      "displayName": "新京报",
+      "tier": "MEDIUM",
+      "domains": [
+        "bjnews.com.cn"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "yicai",
+      "displayName": "第一财经",
+      "tier": "MEDIUM",
+      "domains": [
+        "yicai.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "business-finance",
+        "investment"
+      ]
+    },
+    {
+      "id": "stcn",
+      "displayName": "证券时报",
+      "tier": "MEDIUM",
+      "domains": [
+        "stcn.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "securities"
+      ]
+    },
+    {
+      "id": "chinasecurities",
+      "displayName": "中国证券报",
+      "tier": "MEDIUM",
+      "domains": [
+        "cs.com.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "securities"
+      ]
+    },
+    {
+      "id": "reuters",
+      "displayName": "路透社",
+      "tier": "MEDIUM",
+      "explanation": "国际通讯社",
+      "domains": [
+        "reuters.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "ap",
+      "displayName": "美联社",
+      "tier": "MEDIUM",
+      "explanation": "国际通讯社",
+      "domains": [
+        "apnews.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "bbc",
+      "displayName": "BBC",
+      "tier": "MEDIUM",
+      "explanation": "英国公共广播机构",
+      "domains": [
+        "bbc.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "bloomberg",
+      "displayName": "彭博社",
+      "tier": "MEDIUM",
+      "explanation": "国际财经媒体",
+      "domains": [
+        "bloomberg.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "business-finance"
+      ]
+    },
+    {
+      "id": "ft",
+      "displayName": "《金融时报》",
+      "tier": "MEDIUM",
+      "explanation": "英国财经媒体",
+      "domains": [
+        "ft.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "business-finance"
+      ]
+    },
+    {
+      "id": "wsj",
+      "displayName": "《华尔街日报》",
+      "tier": "MEDIUM",
+      "explanation": "美国财经媒体",
+      "domains": [
+        "wsj.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "business-finance"
+      ]
+    },
+    {
+      "id": "nikkei",
+      "displayName": "日经新闻",
+      "tier": "MEDIUM",
+      "explanation": "日本财经媒体",
+      "domains": [
+        "nikkei.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "dxy",
+      "displayName": "丁香园 / 丁香医生",
+      "tier": "MEDIUM",
+      "domains": [
+        "dxy.cn",
+        "dxy.com"
+      ],
+      "accounts": [
+        "丁香医生",
+        "丁香园"
+      ],
+      "topics": [
+        "health",
+        "medication",
+        "medicine"
+      ]
+    },
+    {
+      "id": "medsci",
+      "displayName": "梅斯医学",
+      "tier": "MEDIUM",
+      "domains": [
+        "medsci.cn"
+      ],
+      "accounts": [],
+      "topics": [
+        "medicine"
+      ]
+    },
+    {
+      "id": "gsmarena",
+      "displayName": "GSMArena",
+      "tier": "MEDIUM",
+      "explanation": "手机参数数据库",
+      "domains": [
+        "gsmarena.com"
+      ],
+      "accounts": [],
+      "topics": [
+        "phones",
+        "consumer-tech"
+      ]
+    },
+    {
+      "id": "wikipedia",
+      "displayName": "维基百科",
+      "tier": "HIGH",
+      "domains": [
+        "wikipedia.org"
+      ],
+      "accounts": [],
+      "note": "Crowd-edited but sourced and correctable. Route to the primary source; not the last word on a contested claim."
+    },
+    {
+      "id": "baidu-baike",
+      "displayName": "百度百科",
+      "tier": "MEDIUM",
+      "domains": [
+        "baike.baidu.com"
+      ],
+      "accounts": [],
+      "note": "Crowd-edited, sourcing thinner than Wikipedia's. Same caveat."
+    },
+    {
+      "id": "pubmed",
+      "displayName": "PubMed 文献库",
+      "tier": "AUTHORITATIVE",
+      "explanation": "美国的医学文献检索库",
+      "domains": [
+        "pubmed.ncbi.nlm.nih.gov",
+        "ncbi.nlm.nih.gov"
+      ],
+      "accounts": [],
+      "note": "Index, not a journal — beats the *.gov pattern by specificity. Promote only if the underlying journal is itself a registry publisher."
+    },
+    {
+      "id": "cnki",
+      "displayName": "中国知网",
+      "tier": "MEDIUM",
+      "domains": [
+        "cnki.net"
+      ],
+      "accounts": [],
+      "note": "Index spanning landmark work to padding."
+    },
+    {
+      "id": "arxiv",
+      "displayName": "arXiv 预印本",
+      "tier": "MEDIUM",
+      "explanation": "论文预印本平台，未经同行评审",
+      "domains": [
+        "arxiv.org"
+      ],
+      "accounts": [],
+      "note": "NOT peer reviewed. Never cite as settled science."
+    },
+    {
+      "id": "researchgate",
+      "displayName": "ResearchGate",
+      "tier": "MEDIUM",
+      "domains": [
+        "researchgate.net"
+      ],
+      "accounts": [],
+      "note": "Author-uploaded; may not match the published version."
+    },
+    {
+      "id": "ha-hk",
+      "displayName": "香港医院管理局",
+      "tier": "HIGH",
+      "explanation": "香港的公立医院管理机构",
+      "domains": [
+        "ha.org.hk"
+      ],
+      "accounts": [],
+      "topics": [
+        "medicine",
+        "health"
+      ]
+    },
+    {
+      "id": "rthk",
+      "displayName": "香港电台",
+      "tier": "MEDIUM",
+      "explanation": "香港公共广播机构",
+      "domains": [
+        "rthk.hk"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "hk01",
+      "displayName": "香港01",
+      "tier": "MEDIUM",
+      "explanation": "香港新闻媒体",
+      "domains": [
+        "hk01.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "stheadline",
+      "displayName": "星岛头条",
+      "tier": "MEDIUM",
+      "explanation": "香港报纸",
+      "domains": [
+        "stheadline.com"
+      ],
+      "accounts": []
+    },
+    {
+      "id": "mingpao",
+      "displayName": "明报",
+      "tier": "MEDIUM",
+      "explanation": "香港报纸",
+      "domains": [
+        "mingpao.com"
+      ],
+      "accounts": []
+    }
+  ],
+  "platforms": [
+    {
+      "domain": "baijiahao.baidu.com",
+      "displayName": "百家号",
+      "defaultTier": "LOW",
+      "verification": "Baidu verification (government / media / business)"
+    },
+    {
+      "domain": "mp.weixin.qq.com",
+      "displayName": "微信公众号",
+      "defaultTier": "LOW",
+      "verification": "WeChat verification (government / business / media)"
+    },
+    {
+      "domain": "toutiao.com",
+      "displayName": "今日头条",
+      "defaultTier": "LOW",
+      "verification": "Toutiao account verification"
+    },
+    {
+      "domain": "sohu.com",
+      "displayName": "搜狐号",
+      "defaultTier": "LOW",
+      "verification": "Sohu account verification"
+    },
+    {
+      "domain": "163.com",
+      "displayName": "网易号",
+      "defaultTier": "LOW",
+      "verification": "NetEase account verification"
+    },
+    {
+      "domain": "new.qq.com",
+      "displayName": "腾讯新闻 / 企鹅号",
+      "defaultTier": "LOW",
+      "verification": "Tencent Penguin account verification"
+    },
+    {
+      "domain": "csdn.net",
+      "displayName": "CSDN",
+      "defaultTier": "LOW",
+      "verification": "none",
+      "note": "Heavy reposting and plagiarism; the same text appears under many authors, so publisher identity is weak evidence here."
+    },
+    {
+      "domain": "jianshu.com",
+      "displayName": "简书",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "medium.com",
+      "displayName": "Medium",
+      "explanation": "国外的博客平台",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "zhidao.baidu.com",
+      "displayName": "百度知道",
+      "defaultTier": "LOW",
+      "verification": "none",
+      "note": "Answers are anonymous and unsourced; no publisher identity to resolve."
+    },
+    {
+      "domain": "zhihu.com",
+      "displayName": "知乎",
+      "defaultTier": "LOW",
+      "verification": "Zhihu verification (displayed professional credential)"
+    },
+    {
+      "domain": "weibo.com",
+      "displayName": "微博",
+      "defaultTier": "LOW",
+      "verification": "Weibo blue V (institution) / yellow V (verified individual)"
+    },
+    {
+      "domain": "bilibili.com",
+      "displayName": "B站",
+      "defaultTier": "LOW",
+      "verification": "Bilibili official account verification"
+    },
+    {
+      "domain": "xiaohongshu.com",
+      "displayName": "小红书",
+      "defaultTier": "LOW",
+      "verification": "Xiaohongshu professional account verification"
+    },
+    {
+      "domain": "tieba.baidu.com",
+      "displayName": "百度贴吧",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "douban.com",
+      "displayName": "豆瓣",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "v2ex.com",
+      "displayName": "V2EX",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "reddit.com",
+      "displayName": "Reddit",
+      "explanation": "国外的论坛",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "quora.com",
+      "displayName": "Quora",
+      "explanation": "国外的问答网站",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "stackoverflow.com",
+      "displayName": "Stack Overflow",
+      "explanation": "国外的程序员问答网站",
+      "defaultTier": "LOW",
+      "verification": "none"
+    },
+    {
+      "domain": "xueqiu.com",
+      "displayName": "雪球",
+      "defaultTier": "LOW",
+      "verification": "Xueqiu account verification",
+      "note": "Investment UGC. seller-efficacy applies often — many posters hold the position they are describing."
+    },
+    {
+      "domain": "tousu.sina.com.cn",
+      "displayName": "黑猫投诉",
+      "defaultTier": "LOW",
+      "verification": "Sina complaint board; complainants are ordinary users, merchants reply under their own name"
+    }
+  ],
+  "ownerGroups": {
+    "baidu": [
+      "baidu.com",
+      "baijiahao.baidu.com",
+      "zhidao.baidu.com",
+      "baike.baidu.com",
+      "tieba.baidu.com"
+    ],
+    "tencent": [
+      "qq.com",
+      "new.qq.com",
+      "mp.weixin.qq.com"
+    ],
+    "bytedance": [
+      "toutiao.com",
+      "douyin.com",
+      "ixigua.com"
+    ],
+    "sina": [
+      "sina.com.cn",
+      "weibo.com"
+    ],
+    "sohu": [
+      "sohu.com",
+      "chinaren.com"
+    ],
+    "netease": [
+      "163.com",
+      "126.com"
+    ],
+    "alibaba": [
+      "taobao.com",
+      "tmall.com",
+      "aliyun.com"
+    ]
+  },
+  "scopeRules": [
+    {
+      "id": "R3-brand-official",
+      "applies": "A domain whose registrable name matches the brand named in the query.",
+      "tier": "AUTHORITATIVE",
+      "limitedTo": [
+        "specifications",
+        "ingredients",
+        "price",
+        "availability",
+        "warranty"
+      ],
+      "otherwiseTier": "INSTITUTIONAL",
+      "note": "apple.com is AUTHORITATIVE for battery capacity and INSTITUTIONAL for whether the phone is any good. Covers unboundedly many manufacturers without listing them."
+    },
+    {
+      "id": "seller-efficacy",
+      "applies": "Any publisher that sells, or takes commission on, the thing being asked about.",
+      "tier": "LOW",
+      "limitedTo": [
+        "efficacy",
+        "health-benefit",
+        "weight-loss-claim"
+      ],
+      "note": "A seller page is never evidence its own product works. Can demote an otherwise AUTHORITATIVE publisher: a pharma company is AUTHORITATIVE for its drug ingredients and LOW for its drug efficacy."
+    },
+    {
+      "id": "platform-publisher-cap",
+      "applies": "A registry publisher identified on a platform rather than its own domain.",
+      "cap": "INSTITUTIONAL",
+      "note": "A secondary channel is never the primary record. An authority post on a social platform is strong; its own website is stronger. Also limits the damage if account identification is ever fooled."
+    },
+    {
+      "id": "no-promotion-by-name",
+      "applies": "Any platform account whose name resembles a registry publisher.",
+      "tier": "platform.defaultTier",
+      "note": "SECURITY RULE. Without a verification signal or a registry account match, resemblance grants nothing. On a medical app that promotion is the worst available failure."
+    }
+  ]
+}

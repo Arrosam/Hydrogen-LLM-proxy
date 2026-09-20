@@ -35,6 +35,10 @@ export const HttpToolSchema = z.object({
    * an adapter's private JSON: `resultType` is the block type the client
    * protocol requires, and `resultPath` is where the adapter puts the entries.
    */
+  adapter: z.object({
+    kind: z.literal("fishball_search_v1"),
+    rerankTool: z.string().optional(),
+  }).optional(),
   serverTool: z.object({
     /** Name a client declares. Matched against the incoming server-tool declaration. */
     name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
