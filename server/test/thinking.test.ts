@@ -46,6 +46,80 @@ describe("OpenAI reasoning_effort", () => {
   });
 });
 
+describe("DeepSeek native thinking on Chat Completions", () => {
+  const parse = (extra: Record<string, unknown> = {}) => OpenAICompletionRequest.parse({
+    model: "m", messages: [{ role: "user", content: "hi" }], max_tokens: 64, ...extra,
+  });
+
+  it("disables canonical thinking while retaining both documented DeepSeek signals", () => {
+    const request = parse({ thinking: { type: "disabled" } });
+    expect(request.params.thinking).toBe("disabled");
+    expect(request.render({ upstreamModel: "deepseek-v4-flash" })).toMatchObject({
+      thinking: { type: "disabled" }, reasoning_effort: "none", max_tokens: 64,
+    });
+    expect(request.render({ upstreamModel: "deepseek-v4-flash", providerMaxOutputTokens: 32 }).max_tokens).toBe(32);
+    expect(request.render({ upstreamModel: "deepseek-v4-flash", providerMaxOutputTokens: 2048 }).max_tokens).toBe(64);
+  });
+
+  it("preserves an enabled toggle without inventing a budget", () => {
+    const request = parse({ thinking: { type: "enabled" } });
+    expect(request.params.thinking).toBe("enabled");
+    expect(request.render({ upstreamModel: "m" })).toMatchObject({
+      thinking: { type: "enabled" }, reasoning_effort: "medium", max_tokens: 64,
+    });
+  });
+
+  it("keeps reasoning_effort precedence, including the existing budget fallback", () => {
+    for (const type of ["enabled", "disabled"]) {
+      const request = parse({ thinking: { type, budget_tokens: 2048 }, reasoning_effort: "high" });
+      expect(request.params.thinking).toBe("high");
+      expect(request.render({ upstreamModel: "m" }).reasoning_effort).toBe("high");
+    }
+    expect(parse({ thinking: { type: "enabled" }, reasoning_effort: "none" }).params.thinking).toBe("disabled");
+    expect(parse({ thinking: { type: "disabled" }, reasoning_effort: "unknown", max_completion_tokens: 128 }).params.thinking).toEqual({ budget: 128 });
+    expect(parse({ thinking: { type: "disabled" }, reasoning_effort: "unknown" }).params.thinking).toBe("disabled");
+  });
+
+  it("preserves the exact body when neither thinking field is supplied", () => {
+    expect(JSON.stringify(parse().render({ upstreamModel: "m" }))).toBe(
+      '{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":64}',
+    );
+  });
+
+  it.each([null, "disabled", [], {}, { type: "unknown", budget_tokens: 4096 }])(
+    "ignores unmodelled thinking %j canonically and preserves existing same-family passthrough", (thinking) => {
+      const request = parse({ thinking });
+      expect(request.params.thinking).toBeUndefined();
+      expect(JSON.stringify(request.render({ upstreamModel: "m" }))).toBe(JSON.stringify({
+        model: "m", messages: [{ role: "user", content: "hi" }], max_tokens: 64, thinking,
+      }));
+    },
+  );
+
+  it("translates across families without replaying native extension fields", () => {
+    const request = parse({ thinking: { type: "disabled", native_extension: true } });
+    const out = AnthropicRequest.construct(request).render({ upstreamModel: "claude-sonnet-4-6" });
+    expect(out.thinking).toEqual({ type: "disabled" });
+    expect(out.reasoning_effort).toBeUndefined();
+    expect(out.max_tokens).toBe(64);
+  });
+
+  it("carries an explicit budget to a family that can express it without enlarging the ceiling", () => {
+    const request = parse({ thinking: { type: "enabled", budget_tokens: 2048 }, max_tokens: 4096 });
+    expect(request.params.thinking).toEqual({ budget: 2048 });
+    const out = AnthropicRequest.construct(request).render({ upstreamModel: "claude-sonnet-4-6" });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+    expect(out.max_tokens).toBe(4096);
+    // OpenAI has no exact budget field: retain the existing budget-to-effort policy.
+    expect(request.render({ upstreamModel: "m" }).reasoning_effort).toBe("minimal");
+    expect(parse({ thinking: { type: "disabled", budget_tokens: 2048 } }).params.thinking).toBe("disabled");
+  });
+
+  it.each([null, "2048", 0, -1, NaN, Infinity])("does not fabricate a budget for %j", (budget_tokens) => {
+    expect(parse({ thinking: { type: "enabled", budget_tokens } }).params.thinking).toBe("enabled");
+  });
+});
+
 describe("Anthropic adaptive efforts and manual budgets", () => {
   it("a named effort crosses to Anthropic by name, thinking turned on adaptively", () => {
     for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {

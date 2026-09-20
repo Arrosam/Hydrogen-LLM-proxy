@@ -35,6 +35,7 @@ let baseUrl: string;
  * "harmony" = a channel-marker trace no name rule can recognise. */
 let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" | "mixed" | "harmony" = "tags";
 let finishReason = "stop";
+let lastUpstreamBody: Record<string, unknown>;
 
 /** Tags are assembled from parts so a case can pair any two spellings. */
 const LT = String.fromCharCode(60);
@@ -66,6 +67,7 @@ function startUpstream(): Promise<void> {
       req.on("data", (d) => (raw += d));
       req.on("end", () => {
         const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+        lastUpstreamBody = body;
         const tagged = `<think>${THOUGHT}${style === "tags-spaced" ? "</think \n >" : "</think>"}\n\n${ANSWER}`;
 
         if (body.stream === true) {
@@ -161,11 +163,11 @@ afterAll(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-const chat = (model: string, stream = false) =>
+const chat = (model: string, stream = false, extra: Record<string, unknown> = {}) =>
   app.inject({
     method: "POST",
     url: "/v1/chat/completions",
-    payload: { model, stream, messages: [{ role: "user", content: "capital of France?" }] } as never,
+    payload: { model, stream, messages: [{ role: "user", content: "capital of France?" }], ...extra } as never,
     headers: { authorization: `Bearer ${secret}` },
   });
 
@@ -312,6 +314,46 @@ describe("ST: the request log records the copy the client received", () => {
     expect(log.responseBody).toContain("reasoning_content");
     expect(log.responseBody).not.toContain("<think>");
   });
+});
+
+describe("native DeepSeek thinking disabled", () => {
+  beforeAll(() => { style = "field"; finishReason = "stop"; });
+  afterAll(() => { style = "tags"; finishReason = "stop"; });
+
+  for (const stream of [false, true]) {
+    it(`stream=${stream}: sends both off signals and drops upstream reasoning`, async () => {
+      // The upstream deliberately ignores the toggle: filtering must still work.
+      style = "field";
+      finishReason = "stop";
+      const r = await chat("plain", stream, { thinking: { type: "disabled" }, max_tokens: 64 });
+      expect(r.statusCode).toBe(200);
+      expect(lastUpstreamBody).toMatchObject({ thinking: { type: "disabled" }, reasoning_effort: "none", max_tokens: 64 });
+      expect(r.payload).not.toContain(THOUGHT);
+      expect(r.payload).not.toMatch(/"(?:reasoning|reasoning_content|reasoning_details|reasoning_text)"/);
+      if (stream) {
+        expect(streamed(r.payload)).toEqual({ content: ANSWER, reasoning: "", reasoningContent: "" });
+        expect(r.payload).toContain("[DONE]");
+      } else expect(messageOf(r).content).toBe(ANSWER);
+    });
+
+    it(`stream=${stream}: still errors on reasoning-only token exhaustion without leaking it`, async () => {
+      style = "thinking-only";
+      finishReason = "length";
+      const r = await chat("plain", stream, { thinking: { type: "disabled" }, max_tokens: 64 });
+      const message = "upstream exhausted the output token limit before producing an answer or tool call";
+      expect(r.payload).toContain(message);
+      expect(r.payload).not.toContain(THOUGHT);
+      expect(r.payload).not.toMatch(/"(?:reasoning|reasoning_content|reasoning_details|reasoning_text)"/);
+      if (stream) expect(r.payload).not.toContain("[DONE]");
+      else {
+        expect(r.statusCode).toBe(502);
+        expect(r.json().error.message).toBe(message);
+      }
+      const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
+      expect(log.httpStatus).toBe(502);
+      expect(log.completionTokens).toBe(9);
+    });
+  }
 });
 
 describe("blank response regressions", () => {
