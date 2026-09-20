@@ -251,6 +251,19 @@ served by an OpenAI provider, and vice versa — Hydrogen translates both ways.
 Since `/v1/models` returns Model Services, tools that populate a model picker will show your service
 names. That's the intent: `sonnet-any` *is* the model, as far as any client is concerned.
 
+### Chat Completions thinking controls
+
+The `/v1/chat/completions` entry accepts both `reasoning_effort` and DeepSeek-native `thinking`:
+
+- `thinking: {"type":"disabled"}` normalizes to disabled reasoning: the proxy sends the upstream off signal and removes reasoning from both buffered responses and streamed deltas, even if the upstream ignores it.
+- `thinking: {"type":"enabled"}` normalizes to `enabled` (an explicit toggle, not an invented token budget). OpenAI rendering uses the existing default effort mapping.
+- With `type: "enabled"`, a finite positive numeric `budget_tokens` becomes an explicit canonical budget. Families supporting manual budgets (such as Anthropic) receive it; OpenAI uses the existing approximate budget-to-effort mapping, not a guaranteed exact budget. Provider constraints still apply; Hydrogen does not enlarge your output ceiling or invent a valid budget.
+- Successfully parsed `reasoning_effort` always wins, including the existing `max_completion_tokens` budget fallback. Native `thinking` is consulted only when that parsing yields no level. Null, strings, arrays and unknown types create no canonical thinking setting; their existing same-family passthrough behavior is unchanged.
+
+Native `thinking` remains verbatim passthrough only to Chat Completions upstreams; other families receive canonical controls instead. For DeepSeek, disabled requests carry **both** `thinking: {"type":"disabled"}` and `reasoning_effort: "none"`, which its [API contract](https://api-docs.deepseek.com/api/create-chat-completion) supports. Avoid conflicting values: canonical effort precedence does not rewrite the native passthrough object.
+
+`max_tokens` (or `max_completion_tokens`) is never increased to accommodate thinking; it is only clamped to the provider output cap. If an upstream ignores disabled thinking and exhausts that ceiling without an answer or tool call, the request still fails with `upstream exhausted the output token limit before producing an answer or tool call`. Hiding reasoning cannot make that upstream support non-thinking mode.
+
 ## Step 6 — Watch it
 
 **Logs** shows every request: which service, which steps were attempted, status, latency, tokens,

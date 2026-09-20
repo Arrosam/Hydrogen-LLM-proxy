@@ -291,6 +291,8 @@ function responseFormatToOpenAI(rf: ResponseFormat): unknown {
 // --- thinking ------------------------------------------------------------
 
 function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined {
+  // Existing reasoning_effort parsing (including its legacy budget fallback)
+  // takes precedence; native DeepSeek thinking is only a fallback.
   const effort = body.reasoning_effort;
   if (effort === "none" || effort === "disabled") return "disabled";
   if (
@@ -306,12 +308,28 @@ function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined
   if (typeof body.max_completion_tokens === "number" && body.reasoning_effort != null) {
     return { budget: body.max_completion_tokens as number };
   }
+  const thinking = body.thinking;
+  if (thinking && typeof thinking === "object" && !Array.isArray(thinking)) {
+    const native = thinking as Record<string, unknown>;
+    if (native.type === "disabled") return "disabled";
+    if (native.type === "enabled") {
+      const budget = numOrUndef(native.budget_tokens);
+      if (budget !== undefined && budget > 0) return { budget };
+      // Preserve the explicit toggle without inventing a manual token budget.
+      return "enabled";
+    }
+  }
   return undefined;
 }
 
 // --- params --------------------------------------------------------------
 
-/** Every key this format models itself — parsed below, or emitted by `render`. */
+/** Every key this format models itself — parsed below, or emitted by `render`.
+ * Keep native `thinking` in same-family passthrough for DeepSeek compatibility.
+ * DeepSeek documents reasoning_effort: "none" as disabling thinking, so it can
+ * accompany thinking: { type: "disabled" }; cross-family hops use the IR only.
+ * https://api-docs.deepseek.com/api/create-chat-completion
+ */
 const RESERVED = new Set([
   "model",
   "messages",
@@ -547,8 +565,8 @@ export class OpenAICompletionRequest extends Request {
       out.stream_options = { include_usage: true };
     }
     if (p.thinking) {
-      // Reasoning is billed inside max_tokens on reasoning models, so the policy
-      // sizes the ceiling to hold the reasoning and still leave the answer room.
+      // Reasoning shares the client ceiling; the policy only clamps it to the
+      // provider cap, never grows it to make room for reasoning.
       const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap);
       out.reasoning_effort = tf.effort;
       if (tf.maxTokens != null) out[ceilingKey] = tf.maxTokens;

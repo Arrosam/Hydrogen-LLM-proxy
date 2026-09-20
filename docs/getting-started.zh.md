@@ -203,6 +203,19 @@ curl http://localhost:8080/v1/messages \
 
 因为 `/v1/models` 返回的就是模型服务，所以那些会自动拉取模型列表的工具，下拉框里显示的就是你的服务名。这正是设计意图：对任何客户端而言，`sonnet-any` **就是**模型本身。
 
+### Chat Completions 思考参数
+
+`/v1/chat/completions` 入口同时接受 `reasoning_effort` 与 DeepSeek 原生 `thinking`：
+
+- `thinking: {"type":"disabled"}` 归一化为关闭思考：代理向上游发送关闭信号，并从非流式响应与流式增量中移除推理内容，即使上游忽略了关闭信号。
+- `thinking: {"type":"enabled"}` 归一化为 `enabled`（保留显式开关，不凭空生成 token 预算）；OpenAI 出口沿用既有的默认 effort 映射。
+- `type: "enabled"` 下，有限正数 `budget_tokens` 会成为 canonical 显式预算。支持手动预算的协议（如 Anthropic）会收到它；OpenAI 沿用既有的预算到 effort 的近似映射，不保证精确预算。预算仍须符合上游约束，代理不会扩大输出上限或伪造合法预算。
+- `reasoning_effort` 成功解析时始终优先，包括既有的 `max_completion_tokens` 预算退化分支；解析不出级别时才回落到原生 `thinking`。null、字符串、数组及未知 type 不产生 canonical 思考设置，既有同族透传行为不变。
+
+原生 `thinking` 仅向 Chat Completions 同族上游原样透传；跨族走 canonical 参数转换。DeepSeek 关闭请求会**同时**携带 `thinking: {"type":"disabled"}` 与 `reasoning_effort: "none"`，其 [API 契约](https://api-docs.deepseek.com/api/create-chat-completion)支持这两个信号。请避免填写互相冲突的值：canonical effort 优先级不会改写原生透传对象。
+
+`max_tokens`（或 `max_completion_tokens`）不会为了给思考留空间而增大，只会按提供商输出上限取较小值。如果上游忽略关闭信号、耗尽上限且没有答案或工具调用，仍会报错 `upstream exhausted the output token limit before producing an answer or tool call`。隐藏推理内容不能让上游获得其本来不支持的非思考模式。
+
 ## 第 6 步 — 观察它
 
 **日志**记录每一次请求：走的哪个服务、尝试了哪些步骤、状态码、耗时、token 用量，以及请求/响应负载。回退真正触发的时候，就是在这里看到的。**活动请求**显示当前正在进行中的请求。
