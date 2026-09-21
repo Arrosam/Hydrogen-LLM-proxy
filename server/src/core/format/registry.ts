@@ -2,6 +2,7 @@ import type { Family } from "../ir/params";
 import type { Request, RequestData } from "../ir/request";
 import type { Response } from "../ir/response";
 import type { ResponseData, StreamContext, StreamEvent } from "../ir/stream";
+import { guardToolArguments } from "../ir/toolArguments";
 
 /**
  * Runtime registry of the format subclasses. The base Request/Response classes
@@ -65,7 +66,7 @@ export function buildResponse(family: Family, data: ResponseData): Response {
 
 /** Parse an upstream SSE stream (of `family`) into canonical events. */
 export function parseStream(family: Family, readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent> {
-  return responseClass(family).parseStream(readable);
+  return guardToolArguments(responseClass(family).parseStream(readable));
 }
 
 /** Serialize canonical events into a client SSE stream (of `family`). */

@@ -4,6 +4,7 @@ import type { Usage } from "./usage";
 import type { ThinkingFormat } from "./thinkingFormat";
 import { genId, nowSeconds } from "../../util/ids";
 import { num, safeJsonParse } from "../format/wire";
+import { MAX_SSE_FRAME_BYTES, UpstreamStreamError } from "./toolArguments";
 
 /**
  * Canonical streaming events. Every upstream SSE stream is parsed into this
@@ -74,36 +75,51 @@ export interface SSEFrame {
   data: string;
 }
 
-export async function* parseSSE(readable: AsyncIterable<Buffer | string>): AsyncGenerator<SSEFrame> {
-  const sep = /\r?\n\r?\n/;
+export async function* parseSSE(readable: AsyncIterable<Buffer | string>, maxFrameBytes = MAX_SSE_FRAME_BYTES): AsyncGenerator<SSEFrame> {
   // Chunk boundaries fall wherever TCP/undici put them, which is routinely in
   // the middle of a multi-byte character. `chunk.toString("utf8")` decodes each
   // chunk in isolation and replaces the split character with U+FFFD; the
   // StringDecoder carries the incomplete tail bytes into the next chunk instead.
   const decoder = new StringDecoder("utf8");
-  let buffer = "";
-  for await (const chunk of readable) {
-    buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
-    let m: RegExpExecArray | null;
-    while ((m = sep.exec(buffer))) {
-      const raw = buffer.slice(0, m.index);
-      buffer = buffer.slice(m.index + m[0].length);
-      if (raw.trim()) yield parseFrame(raw);
+  // Scan only NEW text for LF. Retain fragments and join each line once. A
+  // regexp over `buffer += chunk` rescanned and flattened the entire prefix on
+  // every read: multi-MiB Responses snapshots took seconds of quadratic work.
+  let fragments: string[] = [];
+  let event: string | undefined;
+  let data: string[] = [];
+  let frameBytes = 0;
+  let hasContent = false;
+  function* consume(text: string): Generator<SSEFrame> {
+    let start = 0;
+    while (start < text.length) {
+      const end = text.indexOf("\n", start);
+      const piece = text.slice(start, end < 0 ? text.length : end);
+      frameBytes += Buffer.byteLength(piece) + (end < 0 ? 0 : 1);
+      if (frameBytes > maxFrameBytes) throw new UpstreamStreamError("Upstream SSE frame exceeds the 25 MiB limit");
+      if (piece) fragments.push(piece);
+      if (end < 0) break;
+      let line = fragments.join(""); fragments = [];
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if (!line) {
+        if (hasContent) yield { event, data: data.join("\n") };
+        event = undefined; data = []; frameBytes = 0; hasContent = false;
+      } else {
+        hasContent ||= !!line.trim();
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+      }
+      start = end + 1;
     }
   }
-  buffer += decoder.end();
-  if (buffer.trim()) yield parseFrame(buffer);
-}
-
-function parseFrame(raw: string): SSEFrame {
-  let event: string | undefined;
-  const data: string[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (line.startsWith(":")) continue;
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+  for await (const chunk of readable) {
+    yield* consume(typeof chunk === "string" ? chunk : decoder.write(chunk));
   }
-  return { event, data: data.join("\n") };
+  yield* consume(decoder.end());
+  // Preserve support for compatible upstreams that omit the final blank line.
+  const tail = fragments.join("");
+  if (tail.startsWith("event:")) event = tail.slice(6).trim();
+  else if (tail.startsWith("data:")) data.push(tail.slice(5).replace(/^ /, ""));
+  if (hasContent || tail.trim()) yield { event, data: data.join("\n") };
 }
 
 export function safeParseJson(data: string): Record<string, unknown> | null {
