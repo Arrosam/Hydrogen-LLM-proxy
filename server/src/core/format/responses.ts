@@ -1,4 +1,5 @@
 import { Request, type RenderTarget } from "../ir/request";
+import { parseToolArguments } from "../ir/toolArguments";
 import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
@@ -517,7 +518,7 @@ export class OpenAIResponsesResponse extends Response {
         if (text) content.push({ type: "text", text });
       } else if (item.type === "function_call") {
         sawToolCall = true;
-        content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) });
+        content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? ""), input: parseToolArguments(item.arguments) });
       }
     }
 

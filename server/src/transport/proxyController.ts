@@ -12,6 +12,7 @@ import {
 } from "../core/ir/stream";
 import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { missingAnswerReason, requireAnswer } from "../core/ir/answer";
+import { UpstreamStreamError } from "../core/ir/toolArguments";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
 import { isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
@@ -600,6 +601,7 @@ export class ProxyController {
     // when the client disconnects mid-stream.
     (async () => {
       let streamError: string | null = null;
+      let protocolError = false;
       let clientDisconnected = false;
       try {
         for await (const chunk of outGen) {
@@ -627,6 +629,7 @@ export class ProxyController {
         }
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
+        protocolError = e instanceof UpstreamStreamError;
       } finally {
         // Capture the socket now: Node detaches it from the response on finish,
         // and the delivery watch below needs it after that point.
@@ -641,8 +644,8 @@ export class ProxyController {
           // chunked body is an error in every HTTP client.
           const answerIsShort = streamError !== null || acc.incomplete;
           try {
-            if (acc.error) {
-              raw.write(buildErrorFrame(ctx.ingress, 502, acc.error));
+            if (acc.error || protocolError) {
+              raw.write(buildErrorFrame(ctx.ingress, 502, acc.error ?? streamError!));
               raw.end();
             } else if (answerIsShort) raw.destroy();
             else raw.end();
@@ -659,7 +662,7 @@ export class ProxyController {
         if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
         let error = streamError;
         let status = 200;
-        if (streamError) status = 499;
+        if (streamError) status = protocolError ? 502 : 499;
         else if (clientDisconnected) {
           status = 499;
           error = "client disconnected before stream completed";

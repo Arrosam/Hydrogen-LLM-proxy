@@ -1,4 +1,5 @@
 import { chatReasoningDetails, parseChatReasoningDetails } from "./reasoningBridge";
+import { parseToolArguments } from "../ir/toolArguments";
 import type { ReasoningPart } from "../ir/content";
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
@@ -617,7 +618,7 @@ export class OpenAICompletionResponse extends Response {
       if (!tc || typeof tc !== "object") continue;
       const call = tc as Record<string, unknown>;
       const fn = (call.function ?? {}) as Record<string, unknown>;
-      content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: safeJsonParse(fn.arguments) });
+      content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: parseToolArguments(fn.arguments) });
     }
 
     if (typeof message.refusal === "string" && message.refusal) {

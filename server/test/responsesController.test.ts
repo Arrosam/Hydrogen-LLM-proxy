@@ -86,6 +86,25 @@ describe("Responses and Conversations HTTP API", () => {
     while (true) { const next = await reader.read(); if (next.done) break; received += new TextDecoder().decode(next.value); }
     expect(received).toContain('"type":"response.completed"');
   });
+  it.each([4, 8])("settles a %i MiB stateful client tool call, including the event-log limit", async mib => {
+    // Responses retains full argument snapshots as well as deltas. Its existing
+    // 25 MiB event/history budget is separate from the upstream SSE frame cap.
+    const input = { path: "large.txt", content: "x".repeat(mib * 1024 * 1024) };
+    outputs.push([{ type: "tool_use", id: "large", name: "write_file", input }]);
+    const response = await create({ stream: true });
+    const events = response.body.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+    const last = events.at(-1);
+    if (mib === 4) {
+      expect(last.type).toBe("response.completed");
+      expect(JSON.parse(last.response.output[0].arguments).content.length).toBe(input.content.length);
+      expect(events.filter(e => e.type === "response.function_call_arguments.done")).toHaveLength(1);
+    } else {
+      expect(last.type).toBe("response.failed");
+      expect(last.response.error.message).toContain("25 MiB");
+      expect(events.some(e => e.type === "response.completed")).toBe(false);
+    }
+    expect(adapter).not.toHaveBeenCalled();
+  }, 5000);
   it("isolates reads, deletes and continuation by Key and honors store:false", async () => {
     const body = (await create()).json();
     for (const method of ["GET", "DELETE"] as const) expect((await app.inject({ method, url: `/v1/responses/${body.id}`, headers: { authorization: `Bearer ${stranger.secret}` } })).statusCode).toBe(404);

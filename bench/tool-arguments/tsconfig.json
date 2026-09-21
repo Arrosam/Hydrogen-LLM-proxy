@@ -1,0 +1,9 @@
+{
+  "extends": "../../server/tsconfig.json",
+  "include": [
+    "../../server/src",
+    "../../server/test/largeToolArguments.test.ts",
+    "../../server/test/fixtures/toolCallHarness.ts",
+    "harness.ts"
+  ]
+}
