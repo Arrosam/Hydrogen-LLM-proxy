@@ -106,14 +106,14 @@ export class ProviderRepo {
     this.db.delete(providers).where(eq(providers.id, id)).run();
   }
 
-  toPublic(p: Provider): PublicProvider {
+  toPublic(p: Provider, includeHeaders = false): PublicProvider {
     return {
       id: p.id,
       name: p.name,
       type: p.type,
       baseUrl: p.baseUrl,
       hasKey: Boolean(p.keyCiphertext),
-      extraHeaders: p.extraHeaders ?? null,
+      extraHeaders: includeHeaders ? p.extraHeaders ?? null : null,
       maxOutputTokens: p.maxOutputTokens ?? null,
       altEndpoints: p.altEndpoints ?? null,
       proxyId: p.proxyId ?? null,

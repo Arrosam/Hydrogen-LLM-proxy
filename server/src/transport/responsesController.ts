@@ -1,3 +1,4 @@
+import { historyMessages, publicHistoryItem, hasPrivateHistoryField } from "../persistence/conversationHistory";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
@@ -12,6 +13,7 @@ import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
 import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
+import { bestEffortLogger } from "../observability/requestLogger";
 import { ProgressRecorder } from "../observability/progressRecorder";
 import { genId } from "../util/ids";
 import type { ProxyDeps } from "./deps";
@@ -31,7 +33,7 @@ type Job = { abort: AbortController; done: Promise<WireItem>; bytes: number; sta
 /** Durable, API-Key-owned orchestration; the regular proxy remains the stateless path. */
 export class ResponsesController {
   private readonly jobs = new Map<string, Job>();
-  constructor(private readonly deps: ProxyDeps, private readonly repo: ResponseRepo, private readonly tools: HostedToolRepo) {}
+  constructor(private readonly deps: ProxyDeps, private readonly repo: ResponseRepo, private readonly tools: HostedToolRepo) { this.deps = { ...deps, logger: bestEffortLogger(deps.logger) }; }
 
   accepts(body: unknown, family: Family): boolean {
     if (family === "openai_responses") return true;
@@ -81,7 +83,7 @@ export class ResponsesController {
     });
     app.get("/v1/responses/:id/input_items", { preHandler: auth }, req => {
       const row = owned(req), query = page.parse(req.query);
-      let data = [...row.inputItems];
+      let data = row.inputItems.map(publicHistoryItem);
       if (query.order === "desc") data.reverse();
       if (query.after) {
         const index = data.findIndex(item => item.id === query.after);
@@ -144,6 +146,7 @@ export class ResponsesController {
 
   private validateItems(input: WireItem[]): void {
     for (const item of input) {
+      if (hasPrivateHistoryField(item)) throw new ResponseStateError("Reserved conversation item field", 400);
       if (!["message", "function_call", "function_call_output", "reasoning"].includes(String(item.type ?? "message"))) throw new ResponseStateError("Unsupported conversation input item type", 400);
     }
   }
@@ -151,7 +154,7 @@ export class ResponsesController {
   async create(req: FastifyRequest, reply: FastifyReply, family: Family): Promise<unknown> {
     try { return await this.createOwned(req, reply, family); }
     catch (error) {
-      const status = error instanceof ResponseStateError || error instanceof HostedRunError ? error.statusCode : error instanceof z.ZodError ? 400 : 500;
+      const status = error instanceof Error && "statusCode" in error ? Number(error.statusCode) : error instanceof z.ZodError ? 400 : 500;
       return reply.code(status).send(buildErrorBody(family, status, status < 500 ? (error as Error).message : "Response execution failed"));
     }
   }
@@ -185,7 +188,7 @@ export class ResponsesController {
     let previousSession: string | undefined;
     const conversation = conversationId ? this.repo.conversation(conversationId, token.id) : undefined;
     if (conversationId && !conversation) throw new ResponseStateError("Conversation not found");
-    if (conversation) prefix = parseRequest("openai_responses", { model: service.name, input: this.repo.allItems(conversation.id, token.id) }).messages;
+    if (conversation) prefix = historyMessages(this.repo.allItems(conversation.id, token.id));
     if (previousId) {
       const previous = this.repo.response(previousId, token.id);
       if (!previous || previous.response.store === false) throw new ResponseStateError("Previous response not found");
@@ -199,7 +202,7 @@ export class ResponsesController {
     if (prefix.length) {
       const pending = new Set<string>();
       for (const message of prefix) for (const part of message.content) {
-        if (part.type === "tool_use") pending.add(part.id);
+        if (part.type === "tool_use" && !part.serverTool) pending.add(part.id);
         if (part.type === "tool_result") pending.delete(part.toolUseId);
       }
       for (const message of request.messages) for (const part of message.content) if (part.type === "tool_result") {
@@ -225,8 +228,12 @@ export class ResponsesController {
     const sessionId = conversationId ?? previousSession ?? id;
     const initial: WireItem = { id, object: "response", created_at: created, status: "queued", model: service.name, output: [], error: null, incomplete_details: null,
       background: flags.background, store: flags.store, previous_response_id: previousId ?? null, conversation: conversationId ? { id: conversationId } : null, metadata: flags.metadata };
-    const row = this.repo.createResponse({ id, tokenId: token.id, serviceId: service.id, previousResponseId: previousId, conversationId, status: "queued", background: flags.background, response: initial,
-      inputItems: messagesToItems(request.messages).map(item => ({ ...item, id: item.id ?? genId("item") })), history: request.messages }, conversation?.revision);
+    const releaseJob = this.deps.requestGate?.acquire();
+    const releaseQuota = req.quotaLease?.retain();
+    let row: StoredResponse;
+    try { row = this.repo.createResponse({ id, tokenId: token.id, serviceId: service.id, previousResponseId: previousId, conversationId, status: "queued", background: flags.background, response: initial,
+      inputItems: messagesToItems(request.messages).map(item => ({ ...item, id: item.id ?? genId("item") })), history: request.messages }, conversation?.revision); }
+    catch (error) { releaseJob?.(); releaseQuota?.(); throw error; }
     const traceId = genId("req"), abort = new AbortController();
     const http = { method: req.method, path: req.url.split("?")[0]!, query: "", headers: req.headers as Record<string, unknown>, bodyPayload: this.deps.logger.capture(body) };
     req.body = undefined;
@@ -240,7 +247,11 @@ export class ResponsesController {
       if (job.bytes > 25 * 1024 * 1024) throw new ResponseStateError("Response event log exceeds 25 MiB", 413);
       this.repo.addEvent(id, token.id, event);
     };
-    this.repo.addEvent(id, token.id, family === "openai_responses" ? { type: "response.created", response: initial } : { type: "hydrogen.session", response_id: id });
+    try { this.repo.addEvent(id, token.id, family === "openai_responses" ? { type: "response.created", response: initial } : { type: "hydrogen.session", response_id: id }); }
+    catch (error) {
+      this.jobs.delete(id); this.deps.activeRequests.finish(traceId, 500, "Response reservation failed");
+      releaseJob?.(); releaseQuota?.(); throw error;
+    }
     job.done = Promise.resolve().then(async () => {
       let usage = { ...ZERO_USAGE }, calls: unknown = [], attempts = 0, status = 200, error: string | null = null;
       let output = initial;
@@ -288,7 +299,8 @@ export class ResponsesController {
           }
         }
         const response = final.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
-        const extra: WireItem = { ...initial, status: response.stopReason === "length" ? "incomplete" : "completed", hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
+        const terminalStatus = ["length", "content_filter", "pause_turn"].includes(response.stopReason ?? "") ? "incomplete" : "completed";
+        const extra: WireItem = { ...initial, status: terminalStatus, hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
         // Let the renderer supply output, usage and incomplete_details; the envelope supplies state fields.
         delete extra.output; delete extra.error; delete extra.incomplete_details;
         const streamed = await live?.close();
@@ -301,7 +313,7 @@ export class ResponsesController {
         for (const event of wire.events) if (!terminal.includes(event)) await emit(event);
         if (job.bytes + Buffer.byteLength(JSON.stringify(terminal)) + Buffer.byteLength(JSON.stringify(output)) > 25 * 1024 * 1024) throw new ResponseStateError("Response event log exceeds 25 MiB", 413);
         abort.signal.throwIfAborted();
-        const completed = this.repo.transition(id, token.id, response.stopReason === "length" ? "incomplete" : "completed", output, run.history,
+        const completed = this.repo.transition(id, token.id, terminalStatus, output, run.history,
           conversationId ? messagesToItems(run.history.slice(prefix.length)) : undefined);
         if (completed) {
           for (const event of terminal) this.repo.addEvent(id, token.id, event);
@@ -318,13 +330,15 @@ export class ResponsesController {
         if (failed) this.repo.addEvent(id, token.id, { type: family === "anthropic" ? "hydrogen.response.failed" : `response.${failed.status}`, response: output });
       } finally {
         job.status = status; job.error = error;
+        this.deps.activeRequests.finish(traceId, status, error ?? undefined);
+        this.jobs.delete(id);
+        try {
         const tokenExists = !!this.deps.tokens.get(token.id);
         if (tokenExists) this.deps.usage.record(token.id, usage.totalTokens);
         this.deps.logger.record({ traceId, tokenId: tokenExists ? token.id : null, serviceId: this.deps.services.get(service.id) ? service.id : null, requestedService: service.name, ingress: family, streaming: flags.stream, httpStatus: status, http,
           servedModel: served?.modelName, servedProvider: served?.providerName, egress: served?.family, upstreamPayload: served ? this.deps.logger.capture(served.upstreamRequest) : undefined,
           responseBody: output, usage, latencyMs: Date.now() - started, attempts, attemptPath: calls, error });
-        this.deps.activeRequests.finish(traceId, status, error ?? undefined);
-        this.jobs.delete(id);
+        } finally { releaseJob?.(); releaseQuota?.(); }
       }
       return output;
     });
@@ -339,7 +353,11 @@ export class ResponsesController {
       if (flags.background) return initial;
       const heartbeat = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);
       let output;
-      try { output = await job.done; } finally { heartbeat.stop(); }
+      try { output = await job.done; }
+      catch (error) {
+        if (heartbeat.committed) { heartbeat.finish(buildErrorBody(family, 500, "Response execution failed")); return; }
+        throw error;
+      } finally { heartbeat.stop(); }
       if ((job.status ?? 200) >= 400) {
         output = { ...buildErrorBody(family, job.status!, job.error ?? "Response execution failed"), hydrogen: { response_id: id } };
         if (!heartbeat.committed) reply.code(job.status!);
@@ -360,6 +378,10 @@ export class ResponsesController {
     let lastPing = Date.now();
     try {
       while (!reply.raw.destroyed && !reply.raw.writableEnded) {
+        if (!this.repo.state(row.id, row.tokenId)) {
+          reply.raw.write(`event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: row.id, status: "failed", error: { code: "response_deleted", message: "Response was deleted during replay" } } })}\n\n`);
+          break;
+        }
         const events = this.repo.events(row.id, row.tokenId, after);
         for (const event of events) {
           if (!reply.raw.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)) {
@@ -369,7 +391,13 @@ export class ResponsesController {
           if (reply.raw.destroyed) break;
         }
         const current = this.repo.state(row.id, row.tokenId);
-        if (events.length < 200 && (!current || !active(current) && (!this.jobs.has(row.id) || current.status === "cancelled"))) break;
+        if (!current) {
+          if (!events.some(event => ["response.completed", "response.incomplete", "response.failed", "response.cancelled"].includes(String(event.type)))) {
+            reply.raw.write(`event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: row.id, status: "failed", error: { code: "response_deleted", message: "Response was deleted during replay" } } })}\n\n`);
+          }
+          break;
+        }
+        if (events.length < 200 && !active(current) && (!this.jobs.has(row.id) || current.status === "cancelled")) break;
         if (Date.now() - lastPing > 10_000) { reply.raw.write(": ping\n\n"); lastPing = Date.now(); }
         if (!events.length) await delay(50);
       }

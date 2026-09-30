@@ -24,6 +24,8 @@ export interface HostedContext {
   thinkingFormat?: ThinkingFormat;
   sessionId: string;
   remainingCalls: number;
+  /** Active nested ceilings; each real child call consumes every ancestor. */
+  callLimits?: Array<{ remaining: number }>;
   remainingRounds: number;
   traces: HostedEvent[];
   emit?: (event: HostedEvent) => Promise<void>;
@@ -67,6 +69,7 @@ export async function runHostedTools(
   const config = options.config ?? HostedToolOptionsSchema.parse({});
   const named = new Map(tools.filter(t => t.enabled).map(t => [t.name, t]));
   const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
+  const localLimit = { remaining: config.maxCalls };
   const logMaxChars = context.logMaxChars ?? (() => 100_000);
   const invokeOptions = { ...options, hosted: context };
   const calls: ServiceCall[] = [], traces: HostedEvent[] = context.traces;
@@ -129,12 +132,13 @@ export async function runHostedTools(
       const validate = toolValidator(tool.parameters);
       // A call the budget refuses is reported AS a call, with the reason. The
       // model can then adjust instead of the whole turn ending.
-      const result = context.remainingCalls <= 0
+      const result = context.remainingCalls <= 0 || context.callLimits?.some(limit => limit.remaining <= 0)
         ? { output: JSON.stringify({ error: { code: "tool_call_limit", message: "Hosted tool call budget exhausted" } }), isError: true, durationMs: 0 }
         : !validate(call.input)
           ? { output: JSON.stringify({ error: { code: "invalid_tool_arguments", message: "Arguments do not match the tool parameter schema" } }), isError: true, durationMs: 0 }
           : await callHttpTool(tool, { arguments: call.input as Record<string, unknown>, tool: { name: tool.name }, call: { id: callId }, session: { id: options.sessionId } }, transport, options.signal);
-      context.remainingCalls--;
+      context.remainingCalls = Math.max(0, context.remainingCalls - 1);
+      for (const limit of context.callLimits ?? []) limit.remaining = Math.max(0, limit.remaining - 1);
       results.push({ type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError });
       await emit({ type: "hydrogen.tool.completed", round, call_id: callId, model_call_id: call.id, name: call.name, ...result });
       options.progress?.record("llm", "tool.complete", `hosted tool ${call.name} ${result.isError ? "returned an error" : "completed"}`);
@@ -147,6 +151,7 @@ export async function runHostedTools(
   // the calls it never ran. Run them before asking the model anything: they are
   // the work the pause declined, and the model's next turn depends on them.
   const pending = pendingHostedResults(request.messages, named);
+  (context.callLimits ??= []).push(localLimit);
   try {
   if (pending.length) {
     const pendingCalls = request.messages.flatMap(message => message.content).filter((part): part is ToolUsePart => part.type === "tool_use" && pending.some(result => result.type === "tool_result" && result.toolUseId === part.id));
@@ -162,7 +167,9 @@ export async function runHostedTools(
     if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) fail("Tool-loop context exceeds 25 MiB", 413);
     const next = buildRequest(request.family, { ...request.data(), messages: [...history], tools: definitions,
       // A forced tool choice applies to the first turn, not forever.
-      toolChoice: round === 1 ? request.toolChoice : { type: "auto" } });
+      toolChoice: round === 1 && request.toolChoice?.type === "tool"
+        ? { type: "tool", name: options.declaredNames?.get(request.toolChoice.name) ?? request.toolChoice.name }
+        : round === 1 ? request.toolChoice : { type: "auto" } });
     let value: InvokeValue;
     if (options.onModelEvent || options.emit && config.streamMode === "all") {
       const started = Date.now();
@@ -184,7 +191,7 @@ export async function runHostedTools(
         for await (const event of events) {
           options.signal?.throwIfAborted();
           if (event.type === "usage" || event.type === "finish" && event.usage) roundUsage = event.usage!;
-          if (event.type === "finish" && (event.incomplete || event.error)) throw new Error(event.error ?? "Upstream stream was interrupted");
+          if (event.type === "finish" && (event.incomplete || event.error)) throw new HostedRunError(event.error ?? "Upstream stream was interrupted", event.failure?.status ?? 502, roundUsage, calls);
           pendingBytes += Buffer.byteLength(JSON.stringify(event));
           if (pendingBytes > 25 * 1024 * 1024) throw new Error("Model presentation buffer exceeds 25 MiB");
           pending.push(event);
@@ -203,7 +210,7 @@ export async function runHostedTools(
       let collected;
       try { collected = await collectStream(observe()); }
       catch (error) {
-        usage = addUsage(usage, roundUsage); call.usage = roundUsage; call.status = options.signal?.aborted ? 499 : 502;
+        usage = addUsage(usage, roundUsage); call.usage = roundUsage; call.status = options.signal?.aborted ? 499 : error instanceof HostedRunError ? error.statusCode : 502;
         call.latencyMs = Date.now() - started; call.error = error instanceof Error ? error.message : "Model stream failed";
         fail(call.error, call.status);
       }
@@ -268,5 +275,8 @@ export async function runHostedTools(
   } catch (error) {
     if (error instanceof HostedRunError) throw error;
     throw new HostedRunError(options.signal?.aborted ? "Response execution cancelled" : "Hosted tool execution failed", options.signal?.aborted ? 499 : 502, usage, calls);
+  } finally {
+    const index = context.callLimits?.indexOf(localLimit) ?? -1;
+    if (index >= 0) context.callLimits!.splice(index, 1);
   }
 }

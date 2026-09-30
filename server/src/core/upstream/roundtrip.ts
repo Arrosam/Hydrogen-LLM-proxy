@@ -1,4 +1,6 @@
-import { StringDecoder } from "node:string_decoder";
+import { providerFailure } from "./providerError";
+import { missingAnswerReason } from "../ir/answer";
+import { readBoundedBody, MAX_ERROR_BODY_BYTES } from "./body";
 import type { Request } from "../ir/request";
 import { buildResponse, parseResponse, parseStream } from "../format/registry";
 import { collectStream } from "../ir/stream";
@@ -21,16 +23,9 @@ import type { RelayResult, SendResult } from "./outcome";
  */
 
 async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown> {
-  // Decode across chunk boundaries: a per-chunk toString() mangles any multi-byte
-  // character split between two chunks.
-  const decoder = new StringDecoder("utf8");
   let text = "";
-  try {
-    for await (const chunk of body) text += typeof chunk === "string" ? chunk : decoder.write(chunk);
-    text += decoder.end();
-  } catch {
-    /* ignore */
-  }
+  try { text = await readBoundedBody(body, MAX_ERROR_BODY_BYTES, true); }
+  catch { /* an interrupted error body cannot change its HTTP status */ }
   try {
     return text ? JSON.parse(text) : text;
   } catch {
@@ -51,11 +46,14 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
     const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure upstream.
-      const { data, incomplete } = await collectStream(parseStream(req.family, r.body));
+      const { data, incomplete, failure, error } = await collectStream(parseStream(req.family, r.body));
+      if (failure || error) return { ok: false, status: failure?.status ?? 502, kind: "http", message: failure?.message ?? error!, retryable: failure?.retryable, usage: data.usage, sentBody };
+      const missing = missingAnswerReason(data.content, data.stopReason);
+      if (!incomplete && missing) return { ok: false, status: 502, kind: "http", message: missing, usage: data.usage, sentBody };
       // A truncated stream (no terminal event) is a failure, not a usage-less
       // "success" -- reported as 502 so a step's numeric 502 trigger matches it.
       if (incomplete) {
-        return { ok: false, status: 502, kind: "http", message: "upstream stream ended before completion (truncated)", sentBody };
+        return { ok: false, status: 502, kind: "http", message: "upstream stream ended before completion (truncated)", usage: data.usage, sentBody };
       }
       return { ok: true, response: buildResponse(req.family, data), sentBody };
     }
@@ -70,14 +68,17 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
       return { ok: false, status: 502, kind: "http", message: "upstream returned empty or invalid JSON body", sentBody };
     }
     if (body.error != null || (req.family === "openai_responses" && (body.status === "failed" || body.status === "cancelled" || body.status === "queued" || body.status === "in_progress"))) {
-      const error = body.error as Record<string, unknown> | undefined;
-      return { ok: false, status: 502, kind: "http", message: typeof error?.message === "string" ? error.message : "upstream response did not complete", body, sentBody };
+      const failure = providerFailure(body.error ?? { message: "upstream response did not complete" });
+      return { ok: false, kind: "http", ...failure, body, sentBody };
     }
     const hasEnvelope = req.family === "openai_completion" ? Array.isArray(body.choices) && body.choices.length > 0
       : req.family === "anthropic" ? Array.isArray(body.content)
       : Array.isArray(body.output);
     if (!hasEnvelope) return { ok: false, status: 502, kind: "http", message: `upstream returned invalid ${req.family} response`, body, sentBody };
-    return { ok: true, response: parseResponse(req.family, body), sentBody };
+    const response = parseResponse(req.family, body);
+    const missing = missingAnswerReason(response.content, response.stopReason);
+    if (missing) return { ok: false, status: 502, kind: "http", message: missing, usage: response.usage, sentBody };
+    return { ok: true, response, sentBody };
   }
   const errBody = r.json ?? r.text;
   return { ok: false, status: r.status, kind: "http", message: `upstream returned ${r.status}`, body: errBody, sentBody };

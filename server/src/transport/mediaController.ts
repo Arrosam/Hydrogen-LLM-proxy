@@ -1,3 +1,7 @@
+import { tokenAllowsService } from "../auth/authorization";
+import { observeDelivery } from "./delivery";
+import { createHmac, timingSafeEqual, randomBytes } from "node:crypto";
+import { readBoundedBody, MAX_ERROR_BODY_BYTES } from "../core/upstream/body";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { buildErrorBody, extractUpstreamMessage, failureMessage, failureStatus } from "../core/proxy/errors";
 import {
@@ -19,7 +23,7 @@ import { MEDIA_FAMILIES, type ResolvedTarget } from "../catalog/catalog";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import type { ModelServiceRow, Token } from "../db/schema";
-import type { HttpRequestInfo } from "../observability/requestLogger";
+import { bestEffortLogger, type HttpRequestInfo } from "../observability/requestLogger";
 import type { Usage } from "../core/ir/usage";
 import type { ProviderRepo } from "../persistence/providerRepo";
 import { JsonKeepalive } from "./jsonKeepalive";
@@ -85,38 +89,31 @@ function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpReq
   return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, bodyPayload: capture(body) };
 }
 
-function tokenAllowsService(token: Token, serviceId: number): boolean {
-  const scope = token.scopeServices;
-  if (!Array.isArray(scope) || scope.length === 0) return true;
-  return scope.includes(serviceId);
-}
 
 /**
- * Video job ids are returned to the client with a routing suffix so polling
- * endpoints (which carry no model name) can find the provider statelessly.
+ * Video job ids carry an HMAC-authenticated routing suffix bound to the creating
+ * token. Polling endpoints find the provider statelessly without trusting any
+ * client-supplied routing or sharing a capability across token owners.
  *
  * The suffix names the ENDPOINT too, not just the provider. A provider whose
  * primary is Anthropic can still serve video through a declared OpenAI
  * alternate; encoding only the provider would send the poll and the download to
  * the primary base URL -- a different host from the one holding the job.
  */
-function suffixVideoId(id: string, serviceId: number, providerId: number, endpointIndex: number): string {
-  return `${id}-h${serviceId}x${providerId}e${endpointIndex}`;
+function suffixVideoId(id: string, serviceId: number, providerId: number, endpointIndex: number, tokenId: number, key: string): string {
+  const route = `${id}-h${serviceId}x${providerId}e${endpointIndex}t${tokenId}`;
+  const mac = createHmac("sha256", key).update("hydrogen-video-v1\0" + route).digest("base64url");
+  return `${route}s${mac}`;
 }
 
-function parseVideoId(
-  id: string,
-): { upstreamId: string; serviceId: number; providerId: number; endpointIndex: number } | null {
-  // The endpoint group is optional: ids handed out before it existed always
-  // came from the primary endpoint, which is index 0.
-  const m = /^(.+)-h(\d+)x(\d+)(?:e(\d+))?$/.exec(id);
-  if (!m) return null;
-  return {
-    upstreamId: m[1],
-    serviceId: Number(m[2]),
-    providerId: Number(m[3]),
-    endpointIndex: m[4] != null ? Number(m[4]) : 0,
-  };
+function parseVideoId(id: string, tokenId: number, key: string): { upstreamId: string; serviceId: number; providerId: number; endpointIndex: number } | null {
+  const m = /^(.+)-h(\d+)x(\d+)e(\d+)t(\d+)s([A-Za-z0-9_-]{43})$/.exec(id);
+  if (!m || Number(m[5]) !== tokenId) return null;
+  const route = id.slice(0, -44);
+  const expected = createHmac("sha256", key).update("hydrogen-video-v1\0" + route).digest();
+  const supplied = Buffer.from(m[6], "base64url");
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
+  return { upstreamId: m[1], serviceId: Number(m[2]), providerId: Number(m[3]), endpointIndex: Number(m[4]) };
 }
 
 interface MediaHit {
@@ -128,18 +125,29 @@ interface MediaHit {
 }
 
 export class MediaController {
-  constructor(private readonly deps: MediaDeps) {}
+  private readonly videoKey: string;
+  constructor(private readonly deps: MediaDeps) {
+    this.deps = { ...deps, logger: bestEffortLogger(deps.logger) };
+    this.videoKey = deps.videoSigningKey ?? randomBytes(32).toString("base64url");
+  }
+
+  private async withWork(req: FastifyRequest, run: () => Promise<unknown>): Promise<unknown> {
+    const release = this.deps.requestGate?.acquire();
+    const releaseQuota = req.quotaLease?.retain();
+    try { return await run(); } finally { release?.(); releaseQuota?.(); }
+  }
 
   register(app: FastifyInstance): void {
     const pre = { preHandler: requireClientToken(this.deps.tokens, "openai_completion") };
-    app.post("/v1/embeddings", pre, (req, reply) => this.handleJson(req, reply, "embedding"));
-    app.post("/v1/rerank", pre, (req, reply) => this.handleJson(req, reply, "rerank"));
-    app.post("/v1/images/generations", pre, (req, reply) => this.handleJson(req, reply, "image"));
-    app.post("/v1/videos", pre, (req, reply) => this.handleJson(req, reply, "video"));
-    app.post("/v1/audio/speech", pre, (req, reply) => this.handleSpeech(req, reply));
-    app.post("/v1/audio/transcriptions", pre, (req, reply) => this.handleTranscription(req, reply));
-    app.get("/v1/videos/:id", pre, (req, reply) => this.handleVideoGet(req, reply, false));
-    app.get("/v1/videos/:id/content", pre, (req, reply) => this.handleVideoGet(req, reply, true));
+    app.post("/v1/embeddings", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "embedding")));
+    app.post("/v1/rerank", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "rerank")));
+    app.post("/v1/images/generations", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "image")));
+    app.post("/v1/videos", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "video")));
+    app.post("/v1/audio/speech", pre, (req, reply) => this.withWork(req, () => this.handleSpeech(req, reply)));
+    app.post("/v1/audio/transcriptions", pre, (req, reply) => this.withWork(req, () => this.handleTranscription(req, reply)));
+    const videoRead = { preHandler: requireClientToken(this.deps.tokens, "openai_completion", false) };
+    app.get("/v1/videos/:id", videoRead, (req, reply) => this.handleVideoGet(req, reply, false));
+    app.get("/v1/videos/:id/content", videoRead, (req, reply) => this.handleVideoGet(req, reply, true));
   }
 
   private replyError(reply: FastifyReply, status: number, message: string): FastifyReply {
@@ -214,6 +222,12 @@ export class MediaController {
     }, { signal });
   }
 
+  private recordOnDelivery(reply: FastifyReply, ctx: Parameters<MediaController["record"]>[0], outcome: RunOutput<MediaHit>, status: number, usage: Usage, sent: unknown, body?: unknown): void {
+    observeDelivery(reply, (failed, reason) => {
+      this.record(ctx, outcome, failed ? 499 : status, usage, sent, body, failed ? reason : undefined);
+    }, reason => { this.deps.logger.amendDeliveryFailure(ctx.traceId, reason); });
+  }
+
   private record(
     ctx: { traceId: string; token: Token; service: ModelServiceRow; serviceName: string; http: HttpRequestInfo; started: number },
     outcome: RunOutput<MediaHit>,
@@ -224,9 +238,12 @@ export class MediaController {
      * marker, because an embeddings vector or a base64 image is bulk rather
      * than evidence — a category whose body IS the answer passes it. */
     loggedResponse?: unknown,
+    deliveryError?: string,
   ): void {
     const ok = outcome.result.ok;
     const target = ok ? (outcome.result as { value: MediaHit }).value.target : null;
+    // Charge upstream usage independently of whether evidence can be persisted.
+    this.deps.usage.record(ctx.token.id, usage.totalTokens);
     this.deps.logger.record({
       traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
       servedModel: target?.modelName ?? null, servedProvider: target?.providerName ?? null,
@@ -241,9 +258,8 @@ export class MediaController {
         : ((outcome.result as { errorBody?: unknown }).errorBody as Record<string, unknown> | undefined) ?? null,
       usage, latencyMs: Date.now() - ctx.started,
       attempts: outcome.path.length, attemptPath: outcome.path,
-      error: ok ? null : failureMessage(outcome.result),
+      error: deliveryError ?? (ok ? null : failureMessage(outcome.result)),
     });
-    this.deps.usage.record(ctx.token.id, usage.totalTokens);
   }
 
   private abortOnClientClose(reply: FastifyReply): AbortSignal {
@@ -294,9 +310,9 @@ export class MediaController {
     const hit = outcome.result.value;
     let json = hit.json as Record<string, unknown> | undefined;
     if (category === "video" && json && typeof json.id === "string") {
-      json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId, hit.target.endpointIndex) };
+      json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId, hit.target.endpointIndex, token.id, this.videoKey) };
     }
-    this.record(ctx, outcome, hit.status, usageFrom(category, json), hit.sentBody);
+    this.recordOnDelivery(reply, ctx, outcome, hit.status, usageFrom(category, json), hit.sentBody);
     if (keepalive.finish(json ?? hit.text)) return;
     return reply.code(hit.status).send(json ?? hit.text);
   }
@@ -329,9 +345,8 @@ export class MediaController {
       }
       // Drain the error body so the failure carries the upstream message.
       let text = "";
-      try {
-        for await (const chunk of r.body) text += chunk.toString();
-      } catch { /* connection died mid-error; the status is enough */ }
+      try { text = await readBoundedBody(r.body, MAX_ERROR_BODY_BYTES, true); }
+      catch { /* connection died mid-error; the status is enough */ }
       let errJson: unknown;
       try { errJson = text ? JSON.parse(text) : undefined; } catch { errJson = text; }
       return { ok: false, status: r.status, kind: "http", message: extractUpstreamMessage(errJson) ?? `upstream ${r.status}`, errorBody: errJson };
@@ -344,7 +359,7 @@ export class MediaController {
     }
 
     const hit = outcome.result.value;
-    this.record(ctx, outcome, hit.status, zeroUsage(), hit.sentBody);
+    this.recordOnDelivery(reply, ctx, outcome, hit.status, zeroUsage(), hit.sentBody);
     const contentType = streamHeaders["content-type"];
     if (typeof contentType === "string") reply.header("content-type", contentType);
     return reply.code(hit.status).send(stream);
@@ -412,7 +427,7 @@ export class MediaController {
     const hit = outcome.result.value;
     // A transcript is one short line: the one media category where `{ ok: true }`
     // hid the only thing the log existed to show.
-    this.record(ctx, outcome, hit.status, zeroUsage(), hit.sentBody, hit.json ?? hit.text);
+    this.recordOnDelivery(reply, ctx, outcome, hit.status, zeroUsage(), hit.sentBody, hit.json ?? hit.text);
     if (hit.json !== undefined) {
       if (keepalive.finish(hit.json)) return;
       return reply.code(hit.status).send(hit.json);
@@ -421,11 +436,11 @@ export class MediaController {
     return reply.code(hit.status).type("text/plain; charset=utf-8").send(hit.text);
   }
 
-  /** Video poll/download: the job id's routing suffix names the provider. */
+  /** Video poll/download: only an authenticated owner-bound routing capability may select credentials. */
   private async handleVideoGet(req: FastifyRequest, reply: FastifyReply, content: boolean): Promise<unknown> {
     const token = req.clientToken!;
     const id = (req.params as { id: string }).id;
-    const parsed = parseVideoId(id);
+    const parsed = parseVideoId(id, token.id, this.videoKey);
     if (!parsed) {
       return this.replyError(reply, 404, "Unknown video id (expected an id returned by this proxy's POST /v1/videos).");
     }
@@ -437,11 +452,17 @@ export class MediaController {
     const provider = this.deps.providers.get(parsed.providerId);
     if (!provider || !provider.enabled) return this.replyError(reply, 404, "The provider that created this video no longer exists.");
 
-    let timeoutMs = 60_000;
+    let timeoutMs: number;
     try {
       const def = this.deps.services.def(service);
-      if (!isAgent(def)) timeoutMs = def.timeoutMs;
-    } catch { /* keep the default */ }
+      if (isAgent(def) || serviceCategory(def) !== "video") return this.replyError(reply, 403, "Video capability does not name a video service");
+      const allowed = def.steps.some(step => {
+        const resolved = this.deps.catalog.resolveWithin(step.model, step.provider, MEDIA_FAMILIES);
+        return resolved.ok && resolved.target.providerId === provider.id && resolved.target.endpointIndex === parsed.endpointIndex;
+      });
+      if (!allowed) return this.replyError(reply, 403, "Video provider is no longer mapped to its service");
+      timeoutMs = def.timeoutMs;
+    } catch { return this.replyError(reply, 404, "Invalid video service definition"); }
 
     // Route back to the endpoint that created the job. Its index was encoded
     // into the id; a provider edited since then can have dropped or retyped
@@ -473,7 +494,7 @@ export class MediaController {
     const r = await this.deps.transport.getJson(url, headers, { timeoutMs, proxy: upstream.proxy });
     let json = r.json as Record<string, unknown> | undefined;
     if (r.status < 400 && json && typeof json.id === "string") {
-      json = { ...json, id: suffixVideoId(json.id, service.id, provider.id, endpoint.index) };
+      json = { ...json, id: suffixVideoId(json.id, service.id, provider.id, endpoint.index, token.id, this.videoKey) };
     }
     return reply.code(r.status).send(json ?? r.text);
   }

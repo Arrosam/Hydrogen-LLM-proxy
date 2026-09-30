@@ -157,7 +157,8 @@ function makeTokenRepo(): ProxyDeps["tokens"] {
 }
 
 /** A minimal RequestLogger that captures the last logged entry. */
-class CapturingLogger implements ProxyDeps["logger"] {
+type LoggerPort = ProxyDeps["logger"];
+class CapturingLogger implements LoggerPort {
   lastEntry: LogParams | null = null;
   /** Payloads captured early, in call order, so a test can assert that the
    * controller serialized before releasing the object rather than after. */
@@ -179,7 +180,7 @@ function makeUsageMeter(): ProxyDeps["usage"] {
 function buildApp(
   frames: string[],
   opts?: { slowDelayMs?: number },
-): { app: FastifyInstance; logger: CapturingLogger } {
+): { app: FastifyInstance; logger: CapturingLogger; activeRequests: ActiveRequestRegistry; usage: ProxyDeps["usage"] } {
   const def: ServiceSteps = {
     timeoutMs: 30_000,
     steps: [{ model: "m", provider: "p" }],
@@ -198,7 +199,7 @@ function buildApp(
 
   const app = Fastify({ logger: false });
   new ProxyController(deps).register(app);
-  return { app, logger };
+  return { app, logger, activeRequests, usage };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,31 @@ function buildApp(
 // ---------------------------------------------------------------------------
 
 describe("ProxyController streaming — real Fastify integration", () => {
+  it("sends an HTTP 502 for a zero-frame short stream instead of resetting the socket", async () => {
+    const built = buildApp([]);
+    try {
+      const res = await built.app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer test" }, payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] } });
+      expect(res.statusCode).toBe(502); expect(res.json().error.message).toContain("truncated");
+      expect(built.logger.lastEntry?.httpStatus).toBe(502); expect(built.activeRequests.listActive()).toHaveLength(0);
+    } finally { await built.app.close(); }
+  });
+  it("finalizes active requests even if post-stream usage bookkeeping throws", async () => {
+    const built = buildApp(OK_FRAMES);
+    built.usage.record = () => { throw new Error("full disk"); };
+    try {
+      const res = await built.app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer test" }, payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] } });
+      expect(res.body).toContain("[DONE]"); expect(built.activeRequests.listActive()).toHaveLength(0);
+    } finally { await built.app.close(); }
+  });
+  it("a throwing capture/record logger cannot interrupt delivery", async () => {
+    const built = buildApp(OK_FRAMES);
+    built.logger.capture = () => { throw new Error("capture unavailable"); };
+    built.logger.record = () => { throw new Error("write unavailable"); };
+    try {
+      const res = await built.app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer test" }, payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] } });
+      expect(res.body).toContain("[DONE]"); expect(built.activeRequests.listActive()).toHaveLength(0);
+    } finally { await built.app.close(); }
+  });
   let app: FastifyInstance;
   let logger: CapturingLogger;
 

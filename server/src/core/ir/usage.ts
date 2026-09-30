@@ -78,6 +78,7 @@ export function addUsage(a: Usage, b: Usage): Usage {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
     totalTokens: a.totalTokens + b.totalTokens,
+    ...(a.incomplete || b.incomplete ? { incomplete: true } : {}),
     ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
     ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
     ...(reasoningTokens != null ? { reasoningTokens } : {}),

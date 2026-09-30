@@ -62,6 +62,17 @@ function bind(mode: "all" | "progress" | "final" = "progress") {
 const toolCall: ContentPart = { type: "tool_use", id: "call1", name: "lookup", input: {} };
 
 describe("Responses and Conversations HTTP API", () => {
+  it("conversation mode retains Anthropic signatures and redacted blocks for the next turn", async () => {
+    const conversation = await app.inject({ method: "POST", url: "/v1/conversations", headers: headers(), payload: {} });
+    outputs.push([{ type: "reasoning", origin: "anthropic", text: "signed thought", signature: "sig" }, { type: "reasoning", origin: "anthropic", text: "", signature: "opaque", redacted: true }, toolCall]);
+    const first = await create({ conversation: { id: conversation.json().id } }); expect(first.statusCode).toBe(200);
+    const next = await create({ conversation: { id: conversation.json().id }, input: [{ type: "function_call_output", call_id: "call1", output: "found" }] }); expect(next.statusCode).toBe(200);
+    const content = requests[1].messages.flatMap(message => message.content);
+    expect(content).toContainEqual({ type: "reasoning", origin: "anthropic", text: "signed thought", signature: "sig" });
+    expect(content).toContainEqual({ type: "reasoning", origin: "anthropic", text: "", signature: "opaque", redacted: true });
+    const listed = await app.inject({ url: `/v1/conversations/${conversation.json().id}/items`, headers: headers() });
+    expect(listed.payload).not.toContain("__hydrogenCanonicalMessages");
+  });
   it("stores stable response identity and restores messages without inheriting instructions", async () => {
     const first = await create({ instructions: "first-only" }); expect(first.statusCode).toBe(200);
     const body = first.json(); expect(body.status).toBe("completed"); expect(body.id).not.toBe("upstream-id");

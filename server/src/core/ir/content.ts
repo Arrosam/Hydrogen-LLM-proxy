@@ -15,6 +15,7 @@ export interface TextPart {
 
 export interface ImagePart {
   type: "image";
+  detail?: "auto" | "low" | "high";
   source: { kind: "base64"; mediaType: string; data: string } | { kind: "url"; url: string };
   cacheControl?: unknown;
 }

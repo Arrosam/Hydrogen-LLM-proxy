@@ -12,7 +12,7 @@ function missingAnswer(hasAnswer: boolean, hasThinking: boolean, stop: StopReaso
 /** A tool-only response is actionable. Thinking alone is not a final answer. */
 export function missingAnswerReason(content: ContentPart[], stop: StopReason): string | undefined {
   return missingAnswer(
-    content.some(p => p.type === "tool_use" || (p.type === "text" && p.text.trim().length > 0)),
+    content.some(p => p.type === "tool_use" || p.type === "server_tool_result" || (p.type === "text" && p.text.trim().length > 0)),
     content.some(p => p.type === "reasoning"), stop,
   );
 }
@@ -22,7 +22,7 @@ export async function* requireAnswer(events: AsyncGenerator<StreamEvent>): Async
   let hasAnswer = false;
   let hasThinking = false;
   for await (const ev of events) {
-    if (ev.type === "tool_start" || (ev.type === "text_delta" && ev.text.trim())) hasAnswer = true;
+    if (ev.type === "tool_start" || ev.type === "server_tool_start" || ev.type === "server_tool_result" || (ev.type === "text_delta" && ev.text.trim())) hasAnswer = true;
     if (ev.type === "reasoning_start" || ev.type === "reasoning_delta" || ev.type === "reasoning_stop") hasThinking = true;
     if (ev.type === "finish" && !ev.incomplete && !ev.error) {
       const error = missingAnswer(hasAnswer, hasThinking, ev.stopReason);

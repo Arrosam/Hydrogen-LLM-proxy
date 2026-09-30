@@ -321,6 +321,7 @@ const en: Dict = {
 
   "login.brand": "Hydrogen",
   "login.subtitle": "Sign in to the LLM proxy console",
+  "login.hint.serverLogs": "First login? Find the temporary credentials in your server's startup logs.",
   "login.hint.firstTimePrefix": "First time here? Sign in with username ",
   "login.hint.andPassword": " and password ",
   "login.hint.setPasswordNext": ". You'll set your own password next.",
@@ -769,7 +770,7 @@ const en: Dict = {
   "serviceEditor.noProvidersMapped": "(no providers mapped)",
   "serviceEditor.reliableStreamingDescription": "Streams the upstream response and buffers it (retrying a truncated stream under your retry rules), then replays the complete result — so a streaming client never gets a partial/truncated stream, and reasoning from stream-only providers is still captured. Costs first-token latency. Leave off to stream straight through.",
   "serviceEditor.maxAttachmentLabel": "Attachment inlining budget (MiB)",
-  "serviceEditor.maxAttachmentHint": "Optional. Caps the total bytes of URL attachments this service downloads and inlines into one request. 0 = no limit (the proxy sets none of its own).",
+  "serviceEditor.maxAttachmentHint": "Caps URL attachments downloaded and inlined into one request. 0 uses the safe 50 MiB default. At most 32 distinct URLs share one request deadline.",
   "serviceEditor.thinkingOpen": "Thinking starts with",
   "serviceEditor.thinkingOpenPlaceholder": "e.g. <|channel|>analysis<|message|>",
   "serviceEditor.thinkingClose": "Thinking ends with",
@@ -1231,6 +1232,7 @@ const zh: Dict = {
 
   "login.brand": "Hydrogen",
   "login.subtitle": "登录 LLM 代理控制台",
+  "login.hint.serverLogs": "首次登录？请从服务器启动日志中获取临时凭据。",
   "login.hint.firstTimePrefix": "首次使用？使用用户名 ",
   "login.hint.andPassword": " 和密码 ",
   "login.hint.setPasswordNext": " 登录，随后你会设置自己的密码。",
@@ -1679,7 +1681,7 @@ const zh: Dict = {
   "serviceEditor.noProvidersMapped": "（无已映射提供商）",
   "serviceEditor.reliableStreamingDescription": "流式获取上游响应并缓冲（在重试规则下重试被截断的流），然后回放完整结果——这样流式客户端永远不会收到部分/截断的流，且仅支持流式的提供商的推理也能被捕获。会增加首 token 延迟。关闭则直接透传流。",
   "serviceEditor.maxAttachmentLabel": "附件内联上限（MiB）",
-  "serviceEditor.maxAttachmentHint": "可选。限制本服务单次请求下载并内联的 URL 附件总字节数。0 = 不限制（代理本身不设限制）。",
+  "serviceEditor.maxAttachmentHint": "限制单次请求下载并内联的 URL 附件总字节数。0 使用安全默认上限 50 MiB；最多 32 个不同 URL 共享一次请求的超时期限。",
   "serviceEditor.thinkingOpen": "思考开始标记",
   "serviceEditor.thinkingOpenPlaceholder": "例如 <|channel|>analysis<|message|>",
   "serviceEditor.thinkingClose": "思考结束标记",
@@ -1868,10 +1870,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     let raw = DICTS[language][key] ?? DICTS.en[key] ?? key;
     if (params) {
       for (const [k, v] of Object.entries(params)) {
-        // Function replacer, not a string: a value like a backup filename can
-        // contain $&, $', $` sequences that String.replace would otherwise treat
-        // as special patterns and mangle the interpolated text.
-        raw = raw.replace(new RegExp(`\\{${k}\\}`, "g"), () => String(v));
+        // Treat both placeholder names and replacement values literally.
+        raw = raw.split(`{${k}}`).join(String(v));
       }
     }
     return raw;

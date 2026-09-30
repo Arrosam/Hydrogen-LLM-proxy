@@ -1,3 +1,4 @@
+import { readBoundedBody, MAX_ERROR_BODY_BYTES, MAX_JSON_BODY_BYTES } from "./body";
 import { Agent, request, type Dispatcher } from "undici";
 import type { LookupAddress, LookupOptions } from "node:dns";
 import type { Readable } from "node:stream";
@@ -65,11 +66,9 @@ export class UpstreamClient implements Transport {
    *
    * PROXIED (only when a caller passed a provider's `opts.proxy`): the socket
    * goes to the proxy, so it is the PROXY host that is resolved, checked and
-   * pinned; the target's address is resolved on the far side by the proxy and
-   * cannot be pinned here. Pinning it locally would also defeat the purpose --
-   * the usual reason to configure a proxy is that local resolution is the
-   * thing that does not work. The target still has to be a well-formed
-   * http/https URL, which is checked here rather than left to undici.
+   * pinned. Targets also undergo local SSRF validation; their remote DNS
+   * resolution cannot be pinned here. Proxy selection is admin-only, and the
+   * proxy itself must enforce destination ACLs against remote rebinding.
    */
   private async egress(url: string, opts: TransportOptions): Promise<Dispatcher> {
     if (!opts.proxy) {
@@ -79,15 +78,9 @@ export class UpstreamClient implements Transport {
     if (!this.egressPool) {
       throw new UpstreamUrlError("this provider is configured to use a proxy, but no proxy pool is available");
     }
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw new UpstreamUrlError(`invalid upstream URL: ${url}`);
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new UpstreamUrlError(`unsupported upstream URL scheme "${parsed.protocol}" (use http/https)`);
-    }
+    // Proxy routing never bypasses the target policy. Remote DNS cannot be
+    // pinned locally, so proxy selection also remains a privileged operation.
+    await this.ssrf.assertAllowed(url);
     return this.egressPool.dispatcherFor(opts.proxy);
   }
 
@@ -148,8 +141,7 @@ export class UpstreamClient implements Transport {
   private combineSignals(timeoutMs: number, external?: AbortSignal): AbortSignal {
     const timeout = AbortSignal.timeout(timeoutMs);
     if (!external) return timeout;
-    const anyFn = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
-    return anyFn ? anyFn([timeout, external]) : timeout;
+    return AbortSignal.any([timeout, external]);
   }
 
   /** POST a JSON body and read the full JSON (or text) response. */
@@ -173,7 +165,8 @@ export class UpstreamClient implements Transport {
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
-    const text = await res.body.text();
+    const isError = res.statusCode < 200 || res.statusCode >= 300;
+    const text = await readBoundedBody(res.body, isError ? MAX_ERROR_BODY_BYTES : MAX_JSON_BODY_BYTES, isError);
     let json: unknown = undefined;
     try {
       json = text ? JSON.parse(text) : undefined;
@@ -228,7 +221,8 @@ export class UpstreamClient implements Transport {
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
-    const text = await res.body.text();
+    const isError = res.statusCode < 200 || res.statusCode >= 300;
+    const text = await readBoundedBody(res.body, isError ? MAX_ERROR_BODY_BYTES : MAX_JSON_BODY_BYTES, isError);
     let json: unknown = undefined;
     try {
       json = text ? JSON.parse(text) : undefined;
@@ -245,7 +239,7 @@ export class UpstreamClient implements Transport {
       method: "GET",
       headers,
       dispatcher,
-      signal: opts.signal,
+      signal: this.combineSignals(opts.timeoutMs, opts.signal),
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
@@ -264,11 +258,13 @@ export class UpstreamClient implements Transport {
       headersTimeout: opts.timeoutMs,
       bodyTimeout: opts.timeoutMs,
     });
-    const text = await res.body.text();
+    const isError = res.statusCode < 200 || res.statusCode >= 300;
+    const text = await readBoundedBody(res.body, isError ? MAX_ERROR_BODY_BYTES : MAX_JSON_BODY_BYTES, isError);
     let json: unknown = undefined;
     try {
       json = text ? JSON.parse(text) : undefined;
     } catch {
+      if (res.statusCode >= 200 && res.statusCode < 300) throw new Error("upstream returned invalid JSON");
       json = undefined;
     }
     return { status: res.statusCode, headers: res.headers, json, text };

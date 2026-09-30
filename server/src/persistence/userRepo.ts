@@ -1,6 +1,8 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { DB } from "../db";
-import { users, type User } from "../db/schema";
+import { users, settings, type User } from "../db/schema";
+import { randomBytes } from "node:crypto";
+import { passwordSessionVersion } from "../auth/session";
 import { asMillis } from "../util/time";
 import { hashPassword, verifyPassword } from "../security/passwords";
 
@@ -58,10 +60,23 @@ export class UserRepo {
     return this.db.select().from(users).all().length;
   }
 
-  /** If an account still has the forced default password, hint its username on the login page. */
-  initialCredentialHint(): { username: string } | null {
-    const u = this.db.select().from(users).where(eq(users.mustChangePassword, true)).limit(1).get();
-    return u ? { username: u.username } : null;
+  /** Bootstrap credentials are local-only, never advertised to anonymous clients. */
+  initialCredentialHint(): null {
+    return null;
+  }
+
+  sessionVersion(user: User): string {
+    const revision = this.db.select().from(settings).where(eq(settings.key, `user_session_revision:${user.id}`)).get()?.value ?? "0";
+    return passwordSessionVersion(user.id, user.passwordHash, revision);
+  }
+
+  /** Logout is deliberately logout-all for this account. A persisted random
+   * revision invalidates copied cookies immediately, even in the same second,
+   * and remains effective after a process restart. Other users are unaffected. */
+  revokeSessions(userId: number): void {
+    const key = `user_session_revision:${userId}`;
+    const value = randomBytes(32).toString("base64url");
+    this.db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } }).run();
   }
 
   async create(input: {
@@ -85,18 +100,17 @@ export class UserRepo {
       .get();
   }
 
-  /** Change a user's own password. Forced first-login change skips the current-password check. */
+  /** Change a user's own password. Even a setup-only session must prove the current secret. */
   async changeOwnPassword(userId: number, newPassword: string, currentPassword?: string): Promise<ChangePasswordResult> {
     const user = this.get(userId);
     if (!user) return "not_found";
-    if (!user.mustChangePassword) {
-      if (!currentPassword || !(await verifyPassword(user.passwordHash, currentPassword))) {
-        return "wrong_current";
-      }
-    }
+    if (!currentPassword || !(await verifyPassword(user.passwordHash, currentPassword))) return "wrong_current";
     const passwordHash = await hashPassword(newPassword);
-    this.db.update(users).set({ passwordHash, mustChangePassword: false }).where(eq(users.id, userId)).run();
-    return "ok";
+    // Another password change may finish during either argon2 await. Do not
+    // let proof of the old secret overwrite the new credential.
+    const result = this.db.update(users).set({ passwordHash, mustChangePassword: false })
+      .where(and(eq(users.id, userId), eq(users.passwordHash, user.passwordHash))).run();
+    return result.changes ? "ok" : "wrong_current";
   }
 
   async update(id: number, input: { role?: Role; enabled?: boolean; password?: string }): Promise<User | undefined> {

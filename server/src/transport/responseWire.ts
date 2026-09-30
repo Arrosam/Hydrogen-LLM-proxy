@@ -1,5 +1,6 @@
+import { historyItems } from "../persistence/conversationHistory";
 import type { Family } from "../core/format/family";
-import { buildRequest, serializeStream } from "../core/format/registry";
+import { serializeStream } from "../core/format/registry";
 import type { Message } from "../core/ir/content";
 import type { Response } from "../core/ir/response";
 import { fabricateStream } from "../core/ir/stream";
@@ -7,7 +8,7 @@ import type { ThinkingFormat } from "../core/ir/thinkingFormat";
 import type { WireItem } from "../persistence/responseRepo";
 
 export function messagesToItems(messages: Message[]): WireItem[] {
-  return buildRequest("openai_responses", { requestedService: "history", messages, params: {}, stream: false }).render({ upstreamModel: "history" }).input as WireItem[];
+  return historyItems(messages);
 }
 
 /** Render once for both persistence and SSE so response/item identities agree. */

@@ -1,3 +1,4 @@
+import { requireAdmin } from "../auth/authorization";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import crypto from "node:crypto";
 import { z } from "zod";
@@ -188,6 +189,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
   // --- chat pipeline -------------------------------------------------------
 
   app.post("/chat", async (req, reply) => {
+    if (!requireAdmin(req, reply, "spend stored provider credentials in the bench")) return reply;
     const parsed = parse(ChatSchema, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { target, ingress, body, timeoutMs } = parsed.data;
@@ -260,6 +262,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
   // --- media passthrough ---------------------------------------------------
 
   app.post("/media", async (req, reply) => {
+    if (!requireAdmin(req, reply, "spend stored provider credentials in the bench")) return reply;
     const parsed = parse(MediaSchema, req.body);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const { target, category, body, file, timeoutMs } = parsed.data;
@@ -640,7 +643,7 @@ function transcriptionForm(
   parts.push(
     Buffer.from(
       `${delimiter}\r\nContent-Disposition: form-data; name="file"; filename="${file.name.replace(/["\r\n]/g, "")}"\r\n` +
-        `Content-Type: ${file.mediaType}\r\n\r\n`,
+        `Content-Type: ${file.mediaType.replace(/[\r\n]/g, "")}\r\n\r\n`,
       "utf8",
     ),
   );

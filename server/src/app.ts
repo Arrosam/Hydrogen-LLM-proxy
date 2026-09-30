@@ -1,4 +1,5 @@
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
+import { bestEffortLogger } from "./observability/requestLogger";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import fastifyRateLimit from "@fastify/rate-limit";
@@ -21,10 +22,11 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     bodyLimit: MAX_BODY_BYTES,
     // Honour X-Forwarded-* only as far as the operator declared (TRUST_PROXY).
     // Trusting unconditionally would let a directly exposed instance rotate
-    // its rate-limit key with a spoofed X-Forwarded-For. proxy-addr accepts a
-    // numeric hop count at runtime, but Fastify 5.12's ServerOptions type
-    // narrowed the union to boolean/string -- hence the cast.
-    trustProxy: cfg.trustProxy as FastifyServerOptions["trustProxy"],
+    // its rate-limit key with a spoofed X-Forwarded-For. Fastify 5.12 does
+    // not support numeric values: translate hop counts to its callback API.
+    trustProxy: typeof cfg.trustProxy === "number"
+      ? (_address: string, hop: number) => hop < (cfg.trustProxy as number)
+      : cfg.trustProxy,
     logger: { level: cfg.isProduction ? "info" : "debug" },
     // Fuzzy endpoint adapter: forgive doubled slashes, a missing /v1, or a
     // bare base URL by rewriting onto the canonical route before routing.
@@ -33,6 +35,24 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     },
   });
 
+  // Keep admitted handlers leased even if a client disconnects during an
+  // asynchronous password/KDF or model operation. Raw close alone is too early.
+  app.addHook("onRoute", route => {
+    if (route.url === "/admin/api/backup/restore") return;
+    const handler = route.handler;
+    route.handler = async function (req, reply) {
+      const release = c.requestGate?.acquire();
+      try { return await handler.call(this, req, reply); }
+      finally { release?.(); }
+    };
+  });
+  // Admission is locked synchronously before restore's asynchronous KDF.
+  // Detached response/model jobs acquire an additional lease until they settle.
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.url.split("?")[0] === "/admin/api/backup/restore") return;
+    const release = c.requestGate?.acquire();
+    if (release) { reply.raw.once("finish", release); reply.raw.once("close", release); }
+  });
   await app.register(fastifyCookie, { secret: cfg.sessionSecret });
   await app.register(fastifyRateLimit, { global: false, max: 100, timeWindow: "1 minute" });
 
@@ -68,7 +88,9 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
     tokens: c.tokens,
     catalog: c.catalog,
     transport: c.transport,
-    logger: c.requestLogger,
+    logger: bestEffortLogger(c.requestLogger),
+    requestGate: c.requestGate,
+    videoSigningKey: cfg.sessionSecret,
     usage: c.usageMeter,
     activeRequests: c.activeRequests,
     streamCommitGraceMs: cfg.streamCommitGraceMs,
@@ -82,6 +104,15 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
 
+  app.addHook("onSend", async (req, reply, payload) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Referrer-Policy", "same-origin");
+    if (req.method === "GET" && !req.url.startsWith("/v1") && !req.url.startsWith("/admin/api")) {
+      reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+    }
+    return payload;
+  });
   await registerWebDashboard(app);
 
   return app;

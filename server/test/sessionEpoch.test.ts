@@ -20,6 +20,7 @@ beforeAll(() => {
 });
 
 const users = {
+  sessionVersion: () => "test-version",
   get: (id: number) => (id === 1 ? { id: 1, username: "admin", role: "admin", enabled: true } : undefined),
 } as unknown as UserRepo;
 
@@ -42,7 +43,7 @@ const reqWith = (token: string): FastifyRequest => ({ cookies: { [SESSION_COOKIE
 
 describe("session epoch floor", () => {
   it("accepts a valid session when the floor is zero", async () => {
-    const token = signSession({ uid: 1, username: "admin", role: "admin" });
+    const token = signSession({ uid: 1, username: "admin", role: "admin", version: "test-version" });
     const req = reqWith(token);
     const { reply, status } = fakeReply();
     await requireSession(users, () => 0)(req, reply);
@@ -51,7 +52,7 @@ describe("session epoch floor", () => {
   });
 
   it("rejects a session issued before the floor", async () => {
-    const token = signSession({ uid: 1, username: "admin", role: "admin" });
+    const token = signSession({ uid: 1, username: "admin", role: "admin", version: "test-version" });
     // Floor set to the future: the token's iat is strictly before it.
     const floorMs = (Math.floor(Date.now() / 1000) + 5) * 1000;
     const { reply, status } = fakeReply();
@@ -64,7 +65,7 @@ describe("session epoch floor", () => {
   it("kills a session issued in the same second as the floor (no pre-restore survivor)", async () => {
     // A restore and a victim login can land in the same wall-clock second; the
     // security guarantee is that the session still dies.
-    const token = signSession({ uid: 1, username: "admin", role: "admin" });
+    const token = signSession({ uid: 1, username: "admin", role: "admin", version: "test-version" });
     const floorMs = Math.floor(Date.now() / 1000) * 1000;
     const { reply, status } = fakeReply();
     await requireSession(users, () => floorMs)(reqWith(token), reply);

@@ -166,11 +166,10 @@ describe("Anthropic max_tokens fit-under-cap (the 0.6.3 fix)", () => {
     expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
   });
 
-  it("does not silently change a manual budget or ceiling", () => {
-    // Let the upstream validate conflicting explicit limits.
+  it("fits a translated manual budget strictly below the unchanged ceiling", () => {
     const out = anthropic({ thinking: { budget: 32768 }, maxTokens: 20000 });
     expect(out.max_tokens).toBe(20000);
-    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 32768 });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 19999 });
   });
 
   it("even a ceiling far below the effort's old budget does not lower it", () => {

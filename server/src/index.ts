@@ -17,16 +17,18 @@ async function main(): Promise<void> {
   // takes effect without a restart.
   const pruneTick = (): void => {
     const days = Number(container.settings.get("log_retention_days") ?? 0);
-    if (!Number.isFinite(days) || days <= 0) return;
     try {
-      const n = container.pruner.pruneOlderThan(days);
+      const maxRows = Number(container.settings.get("log_max_rows") ?? 100_000);
+      const capped = container.pruner.capRows(Number.isSafeInteger(maxRows) && maxRows > 0 ? maxRows : 100_000);
+      if (capped) app.log.info(`log prune: removed ${capped} entries above the row budget`);
+      const n = Number.isFinite(days) && days > 0 ? container.pruner.pruneOlderThan(days) : 0;
       if (n) app.log.info(`log prune: removed ${n} entries older than ${days}d`);
     } catch (e) {
       app.log.error({ err: e }, "log prune failed");
     }
   };
   pruneTick();
-  const pruneTimer = setInterval(pruneTick, 24 * 60 * 60 * 1000);
+  const pruneTimer = setInterval(pruneTick, 60 * 60 * 1000);
   pruneTimer.unref?.();
 
   let shuttingDown = false;

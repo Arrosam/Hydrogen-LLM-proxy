@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
+import { GENERATION_PARAM_KEYS, mergeOverrides, type GenerationParams, type RequestOverrides } from "../core/ir/params";
 import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
 
 /**
@@ -143,6 +143,20 @@ export const OverridesSchema = z
     topK: z.number().int().min(0),
     minP: z.number().min(0).max(1),
     maxTokens: z.number().int().min(1).max(1_000_000),
+    completionTokenKey: z.enum(["max_tokens", "max_completion_tokens"]),
+    anthropicThinking: z.record(z.string(), z.unknown()),
+    responsesReasoning: z.record(z.string(), z.unknown()),
+    responsesText: z.record(z.string(), z.unknown()),
+    cacheHint: z.boolean(),
+    cacheTtlMinutes: z.number().int().min(1).max(60),
+    forwardHeaders: z.object({
+      family: z.enum(["openai_completion", "anthropic", "openai_responses"]),
+      headers: z.record(z.string(), z.string()),
+    }),
+    passthrough: z.object({
+      family: z.enum(["openai_completion", "anthropic", "openai_responses"]),
+      params: z.record(z.string(), z.unknown()),
+    }),
     stop: z.array(z.string()),
     frequencyPenalty: z.number().min(-2).max(2),
     presencePenalty: z.number().min(-2).max(2),
@@ -209,10 +223,9 @@ export type HostedToolOptions = z.infer<typeof HostedToolOptionsSchema>;
 
 /**
  * Optional aggregate budget (bytes) for the URL attachments a service inlines
- * into a request. The proxy imposes none of its own -- a relay should not
- * decide what a user may attach -- but an operator who knows their provider's
- * (or their box's) appetite can set one per Model Service / Micro Agent.
- * Absent or 0 means unlimited.
+ * into a request. Absent or 0 selects the safe 50 MiB aggregate default.
+ * A positive value sets an explicit per-service byte cap. A pass also has a
+ * 32-URL count cap and shares one wall-clock deadline across all downloads.
  */
 export const MAX_ATTACHMENT_LIMIT = 8 * 1024 * 1024 * 1024;
 export const AttachmentBudgetSchema = z.number().int().min(0).max(MAX_ATTACHMENT_LIMIT);
@@ -240,7 +253,7 @@ export const ServiceStepsSchema = z.object({
   thinkingDelimiters: ThinkingDelimitersSchema.optional(),
   /**
    * Aggregate budget (bytes) for the URL attachments this service inlines.
-   * Absent or 0 = unlimited. See {@link AttachmentBudgetSchema}.
+   * Absent or 0 = the safe 50 MiB default. See {@link AttachmentBudgetSchema}.
    */
   maxAttachmentBytes: AttachmentBudgetSchema.optional(),
 });
@@ -420,12 +433,7 @@ export function parseService(raw: unknown): ServiceDef {
 /** Canonical override keys that map 1:1 to a GenerationParams/stream/system
  * field. Anything else on an overrides object is treated as a provider-specific
  * param and folded into `extra` so it reaches the upstream wire body. */
-const CANONICAL_OVERRIDE_KEYS: ReadonlySet<string> = new Set<OverridableParam>([
-  "temperature", "topP", "topK", "minP", "maxTokens", "stop", "frequencyPenalty",
-  "presencePenalty", "repetitionPenalty", "seed", "n", "logprobs", "topLogprobs",
-  "logitBias", "responseFormat", "parallelToolCalls", "serviceTier", "user",
-  "verbosity", "thinking", "extra",
-]);
+const CANONICAL_OVERRIDE_KEYS: ReadonlySet<string> = new Set(Object.keys(GENERATION_PARAM_KEYS));
 
 /** Move any non-canonical keys on an overrides object into its `extra` record,
  * so vendor-specific / nested JSON keys are preserved and sent upstream instead

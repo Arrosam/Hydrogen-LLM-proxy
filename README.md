@@ -18,7 +18,7 @@
   <a href="https://github.com/Arrosam/Hydrogen-LLM-proxy/actions/workflows/docker-publish.yml"><img alt="Build" src="https://github.com/Arrosam/Hydrogen-LLM-proxy/actions/workflows/docker-publish.yml/badge.svg"></a>
   <br>
   <img alt="Wire formats" src="https://img.shields.io/badge/wire%20formats-OpenAI%20%2B%20Anthropic-a78bfa?labelColor=0c1219">
-  <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A5%2020-3c873a?logo=nodedotjs&logoColor=white&labelColor=0c1219">
+  <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A5%2022.12-3c873a?logo=nodedotjs&logoColor=white&labelColor=0c1219">
   <img alt="Database" src="https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white&labelColor=0c1219">
   <a href="https://github.com/Arrosam/Hydrogen-LLM-proxy/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Arrosam/Hydrogen-LLM-proxy?color=eab308&labelColor=0c1219"></a>
 </p>
@@ -153,8 +153,9 @@ Hydrogen is published as a Rainyun Cloud Application (雨云云应用), so there
    choose the first login; leave `PROXY_MASTER_KEY` and `SESSION_SECRET` **empty** so Hydrogen
    generates and persists them itself. Do not fill the master key with Rainyun's random-string
    generator — it will not be a valid 32-byte base64 key and the app will refuse to start.
-6. **Open the assigned URL** and sign in. With `ADMIN_PASSWORD` left empty the first login is
-   `admin` / `password`, and you are forced to set a real password before anything else loads.
+6. **Open the assigned URL** and sign in. With `ADMIN_PASSWORD` left empty, read the randomly
+   generated temporary password from the server startup logs. That session can only complete
+   password setup; dashboard administration is blocked until the password is changed.
 
 **Custom domain with HTTPS.** In the deployed app, **服务 → 新增服务 → 类型「HTTPS网站服务」**,
 container port `8080`, domain type 自定义域名, and your hostname. Rainyun issues and renews the
@@ -223,7 +224,7 @@ declares its own `/healthz` healthcheck, so `docker ps` tells you whether the ne
 
 ### 3. Build from source
 
-Requires **Node 20+** (the image builds on Node 22).
+Requires **Node 22.12+** (the image builds on Node 22).
 
 ```bash
 git clone https://github.com/Arrosam/Hydrogen-LLM-proxy.git
@@ -332,10 +333,10 @@ Every variable is optional; the defaults are what the container ships with.
 | `DATA_DIR` | `/data` | SQLite + `hydrogen-secrets.json`. **Persist this** |
 | `PROXY_MASTER_KEY` | *auto* | 32-byte base64. Encrypts provider keys (AES-256-GCM) |
 | `SESSION_SECRET` | *auto* | Signs dashboard session cookies |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(blank)* | First admin. Blank password ⇒ first login `admin`/`password`, forced change |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(blank)* | First admin. Blank password ⇒ random temporary secret printed in server startup logs; setup-only session until changed |
 | `SESSION_TTL` | `12h` | Dashboard session lifetime |
 | `COOKIE_SECURE` | `auto` | `auto` honours `X-Forwarded-Proto`; `false` behind plain HTTP; `true` to force |
-| `LOG_PAYLOAD_MAX_CHARS` | `2000000` | Payload captured per log row. `0` = unlimited (grows without bound) |
+| `LOG_PAYLOAD_MAX_CHARS` | `100000` | Payload captured per log row. `0` = unlimited (grows without bound) |
 | `ALLOW_PRIVATE_UPSTREAMS` | `false` | Allow provider base URLs on loopback/LAN (e.g. a local Ollama). Link-local metadata stays blocked either way |
 | `SIMULATED_STREAMING_TOKEN_RATE` | `2000` | Replay rate for buffered streams, tokens/second |
 | `IMAGE_CACHE_MAX_BYTES` | `67108864` | LRU budget for OCR image descriptions. `0` disables |
@@ -353,8 +354,9 @@ See [`.env.example`](.env.example) for the annotated version.
 ## Roles
 
 - **admin** — everything, including issuing API keys, managing users, and **Settings**.
-- **manager** — everything except issuing API keys and Settings, and cannot create or modify admin
-  accounts (no privilege escalation).
+- **manager** — model/service configuration and non-secret dashboard views. Provider credentials,
+  provider/proxy mutations, credential-spending Bench/test endpoints, token mutations, user management,
+  request payload logs, backups, and Settings are administrator-only.
 
 ---
 

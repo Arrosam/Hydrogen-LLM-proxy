@@ -55,7 +55,7 @@ export default function App() {
         <Route path="services" element={<ModelServices kind="resilience" />} />
         <Route path="micro-agents" element={<ModelServices kind="chain" />} />
         <Route path="tokens" element={<Tokens />} />
-        <Route path="bench" element={<ModelBench />} />
+        {user?.role === "admin" && <Route path="bench" element={<ModelBench />} />}
         <Route path="active-requests" element={<ActiveRequests />} />
         {/* Users, Settings, and Logs are admin-only. Hiding the nav link is
             presentation; this is what makes typing the URL not work. The server

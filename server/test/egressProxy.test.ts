@@ -229,7 +229,7 @@ describe("ST: every provider-addressed request carries the proxy", () => {
    * caller never set one.
    */
   it("the provider test builds an UpstreamProvider that carries a proxy", () => {
-    const src = code(fs.readFileSync(path.join(SRC, "transport/adminRoutes.ts"), "utf8"));
+    const src = code(fs.readFileSync(path.join(SRC, "transport/admin/providerRoutes.ts"), "utf8"));
     expect(src).toMatch(/discoverModels\(c\.transport, \{[^}]*\bproxy\b/);
   });
 });

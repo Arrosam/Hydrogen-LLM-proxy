@@ -1,3 +1,4 @@
+import { providerErrorEvent } from "../upstream/providerError";
 import { Request, type RenderTarget } from "../ir/request";
 import { parseToolArguments } from "../ir/toolArguments";
 import { Response, type RenderOptions } from "../ir/response";
@@ -6,6 +7,7 @@ import {
   stripStaleReasoning,
   textOf,
   type ContentPart,
+  type ServerToolResultPart,
   type FileSource,
   type Message,
   type Tool,
@@ -44,6 +46,19 @@ import { relayStream, sendBuffered } from "../upstream/roundtrip";
 
 // --- content -------------------------------------------------------------
 
+function parseSearchCall(item: Record<string, unknown>): ServerToolResultPart {
+  const action = (item.action ?? {}) as Record<string, unknown>;
+  return { type: "server_tool_result", family: "openai_responses", id: String(item.id ?? genId("ws")), name: "web_search",
+    input: action, blockType: "web_search_call", content: Array.isArray(action.sources) ? action.sources : [],
+    ...(item.status === "failed" ? { errorCode: "unavailable" } : {}),
+    ...(item.status === "in_progress" || item.status === "searching" ? { notExecuted: true } : {}) };
+}
+function renderSearchCall(p: ServerToolResultPart): Record<string, unknown> {
+  const action = (p.input ?? {}) as Record<string, unknown>;
+  return { id: p.id, type: "web_search_call", status: p.notExecuted ? "in_progress" : p.errorCode !== undefined ? "failed" : "completed",
+    action: { type: "search", ...action, ...(p.content.length ? { sources: p.content.filter((entry): entry is { url: string } => entry !== null && typeof entry === "object" && typeof (entry as { url?: unknown }).url === "string").map(entry => ({ type: "url", ...entry })) } : {}) } };
+}
+
 function contentToParts(content: unknown): ContentPart[] {
   if (content == null) return [];
   if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
@@ -61,7 +76,7 @@ function contentToParts(content: unknown): ContentPart[] {
       case "input_image": {
         const img = part.image_url;
         const url = typeof img === "string" ? img : String((img as Record<string, unknown>)?.url ?? "");
-        if (url) parts.push({ type: "image", source: parseDataUrl(url) });
+        if (url) parts.push({ type: "image", source: parseDataUrl(url), ...(part.detail === "auto" || part.detail === "low" || part.detail === "high" ? { detail: part.detail } : {}) });
         break;
       }
       case "input_file": {
@@ -322,6 +337,9 @@ export class OpenAIResponsesRequest extends Request {
             role: "assistant",
             content: [{ type: "tool_use", id: String(item.call_id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) }],
           });
+        } else if (type === "web_search_call") {
+          const p = parseSearchCall(item);
+          messages.push({ role: "assistant", content: [p.notExecuted ? { type: "tool_use", serverTool: true, id: p.id, name: p.name, input: p.input } : p] });
         } else if (type === "function_call_output") {
           messages.push({
             role: "user",
@@ -393,14 +411,17 @@ export class OpenAIResponsesRequest extends Request {
         if (p.type === "text") {
           parts.push({ type: m.role === "assistant" ? "output_text" : "input_text", text: p.text });
         } else if (p.type === "image") {
-          parts.push({ type: "input_image", image_url: imageUrlOf(p.source) });
+          parts.push({ type: "input_image", image_url: imageUrlOf(p.source), ...(p.detail ? { detail: p.detail } : {}) });
         } else if (p.type === "file") {
           parts.push({ type: "input_file", ...(p.name ? { filename: p.name } : {}), ...inputFileRef(p.source) });
         } else if (p.type === "opaque") {
           if (p.family === "openai_responses") parts.push(p.value as Record<string, unknown>);
+        } else if (p.type === "server_tool_result") {
+          if (p.family === "openai_responses") { flushParts(); input.push(renderSearchCall(p)); }
         } else if (p.type === "tool_use") {
           flushParts();
-          input.push({ type: "function_call", call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
+          input.push(p.serverTool ? renderSearchCall({ type: "server_tool_result", family: "openai_responses", id: p.id, name: p.name, input: p.input, blockType: "web_search_call", content: [], notExecuted: true })
+            : { type: "function_call", call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
         } else if (p.type === "tool_result") {
           flushParts();
           input.push({ type: "function_call_output", call_id: p.toolUseId, output: textOf(p.content) });
@@ -412,7 +433,7 @@ export class OpenAIResponsesRequest extends Request {
               role: "user",
               content: [
                 { type: "input_text", text: "(images returned by the tool result above)" },
-                ...images.map((img) => ({ type: "input_image", image_url: imageUrlOf((img as Extract<ContentPart, { type: "image" }>).source) })),
+                ...images.map((img) => ({ type: "input_image", image_url: imageUrlOf((img as Extract<ContentPart, { type: "image" }>).source), ...(img.type === "image" && img.detail ? { detail: img.detail } : {}) })),
               ],
             });
           }
@@ -516,6 +537,8 @@ export class OpenAIResponsesResponse extends Response {
       } else if (item.type === "message") {
         const text = textOf(contentToParts(item.content));
         if (text) content.push({ type: "text", text });
+      } else if (item.type === "web_search_call") {
+        content.push(parseSearchCall(item));
       } else if (item.type === "function_call") {
         sawToolCall = true;
         content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? ""), input: parseToolArguments(item.arguments) });
@@ -538,7 +561,7 @@ export class OpenAIResponsesResponse extends Response {
       model: String(body.model ?? ""),
       created: numOrUndef(body.created_at) ?? 0,
       content,
-      stopReason: paused ? "pause_turn" : incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
+      stopReason: paused ? "pause_turn" : incomplete && incompleteReason === "content_filter" ? "content_filter" : incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
       usage: {
         promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
         ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
@@ -580,24 +603,7 @@ export class OpenAIResponsesResponse extends Response {
     // it used, and the API runs it — there is nothing for the client to answer.
     // Only the entry URLs fit: this wire's source shape is `{ type: "url", url }`.
     for (const p of this.content) {
-      if (p.type !== "server_tool_result" || p.notExecuted) continue;
-      const queries = (p.input as { queries?: unknown } | null)?.queries;
-      const query = (p.input as { query?: unknown } | null)?.query;
-      const sources = p.content
-        .map(entry => (entry !== null && typeof entry === "object" ? (entry as { url?: unknown }).url : undefined))
-        .filter((url): url is string => typeof url === "string" && url.length > 0)
-        .map(url => ({ type: "url", url }));
-      output.push({
-        id: p.id,
-        type: "web_search_call",
-        status: p.errorCode !== undefined ? "failed" : "completed",
-        action: {
-          type: "search",
-          ...(Array.isArray(queries) && queries.every(q => typeof q === "string") ? { queries } : {}),
-          ...(typeof query === "string" ? { query } : {}),
-          ...(sources.length ? { sources } : {}),
-        },
-      });
+      if (p.type === "server_tool_result") output.push(renderSearchCall(p));
     }
 
     const text = textOf(this.content);
@@ -607,7 +613,8 @@ export class OpenAIResponsesResponse extends Response {
 
     for (const p of this.content) {
       if (p.type === "tool_use") {
-        output.push({ type: "function_call", id: genId("fc"), call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}), status: "completed" });
+        output.push(p.serverTool ? renderSearchCall({ type: "server_tool_result", family: "openai_responses", id: p.id, name: p.name, input: p.input, blockType: "web_search_call", content: [], notExecuted: true })
+          : { type: "function_call", id: genId("fc"), call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}), status: "completed" });
       }
     }
 
@@ -616,7 +623,7 @@ export class OpenAIResponsesResponse extends Response {
     }
 
     const paused = this.stopReason === "pause_turn";
-    const incomplete = this.stopReason === "length";
+    const incomplete = this.stopReason === "length" || this.stopReason === "content_filter";
     return {
       id: genId("resp"),
       object: "response",
@@ -625,7 +632,7 @@ export class OpenAIResponsesResponse extends Response {
       error: null,
       // The client resumes a paused turn by sending the response back, so the
       // reason has to say which kind of "not finished" this is.
-      incomplete_details: paused ? { reason: "pause_turn" } : incomplete ? { reason: "max_output_tokens" } : null,
+      incomplete_details: paused ? { reason: "pause_turn" } : incomplete ? { reason: this.stopReason === "content_filter" ? "content_filter" : "max_output_tokens" } : null,
       model,
       output,
       usage: {
@@ -690,7 +697,11 @@ export class OpenAIResponsesResponse extends Response {
       const itemId = String(item.id ?? item.call_id ?? (item.type === "reasoning" ? currentReasoningId : undefined) ?? outputIndex ?? "0");
       const key = String(item.type) + ":" + itemId;
       if (finishedItems.has(key)) return;
-      if (item.type === "reasoning") {
+      if (item.type === "web_search_call") {
+        const p = parseSearchCall(item);
+        yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input };
+        yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, errorCode: p.errorCode, notExecuted: p.notExecuted };
+      } else if (item.type === "reasoning") {
         if (!reasoningStarted.has(itemId)) {
           reasoningStarted.add(itemId);
           yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
@@ -703,6 +714,7 @@ export class OpenAIResponsesResponse extends Response {
         const replay = encrypted ? decodeReasoning(encrypted) : null;
         yield { type: "reasoning_stop", origin: replay?.origin ?? "openai_responses", id: replay?.itemId ?? itemId, signature: replay?.signature ?? encrypted, redacted: replay?.redacted };
         if (currentReasoningId === itemId) currentReasoningId = undefined;
+
       } else if (item.type === "function_call") {
         sawToolCall = true;
         let index = toolIndexByItem.get(itemId);
@@ -725,6 +737,10 @@ export class OpenAIResponsesResponse extends Response {
       const data = safeParseJson(frame.data);
       if (!data) continue;
       const type = frame.event ?? String(data.type ?? "");
+      if (type === "error" || data.error != null) {
+        yield providerErrorEvent(data.error ?? data, usage);
+        return;
+      }
 
       if (!started && type.startsWith("response.")) {
         const r = (data.response ?? {}) as Record<string, unknown>;
@@ -809,7 +825,7 @@ export class OpenAIResponsesResponse extends Response {
           // response. `incomplete` (max_output_tokens) is a legitimate length
           // stop and stays a normal finish.
           if (type === "response.failed") {
-            yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
+            yield providerErrorEvent(r.error ?? { message: "Upstream response failed" }, usage);
             return;
           }
           if (!started) {
@@ -824,14 +840,14 @@ export class OpenAIResponsesResponse extends Response {
           // An incomplete turn says WHY it stopped; only the reason tells a
           // paused loop apart from a token limit.
           const why = ((r.incomplete_details ?? {}) as Record<string, unknown>).reason;
-          yield { type: "finish", stopReason: type === "response.incomplete" ? (why === "pause_turn" ? "pause_turn" : "length") : sawToolCall ? "tool_use" : "stop", usage };
+          yield { type: "finish", stopReason: type === "response.incomplete" ? (why === "pause_turn" ? "pause_turn" : why === "content_filter" ? "content_filter" : "length") : sawToolCall ? "tool_use" : "stop", usage };
           return;
         }
         default:
           break;
       }
     }
-    if (!started) yield { type: "start", id: genId("resp"), model: "", created: nowSeconds() };
+    // With no upstream frames, do not fabricate a start that would commit 200.
     // Reached only when the stream ended without a terminal event -- truncated.
     yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
   }
@@ -848,6 +864,7 @@ export class OpenAIResponsesResponse extends Response {
       id, object: "response", created_at: created, status, error: null, incomplete_details: null, model, output: [], ...extra,
     });
 
+    const serverInputs = new Map<string, unknown>();
     const output: Record<string, unknown>[] = [];
     let outputIndex = 0;
 
@@ -994,27 +1011,15 @@ export class OpenAIResponsesResponse extends Response {
         // A provider-executed round trip is ONE item on this wire. The call and
         // its result arrive together, so the item is emitted whole once the
         // result is known — there is no client-side execution to open first.
+        case "server_tool_start":
+          serverInputs.set(ev.id, ev.input);
+          break;
         case "server_tool_result": {
-          if (ev.notExecuted) break;
           yield* closeReasoning();
           yield* closeMessage();
-          const queries = (ev as { input?: { queries?: unknown } }).input?.queries;
-          const query = (ev as { input?: { query?: unknown } }).input?.query;
-          const sources = ev.content
-            .map(entry => (entry !== null && typeof entry === "object" ? (entry as { url?: unknown }).url : undefined))
-            .filter((url): url is string => typeof url === "string" && url.length > 0)
-            .map(url => ({ type: "url", url }));
-          const item = {
-            id: ev.id,
-            type: "web_search_call",
-            status: ev.errorCode !== undefined ? "failed" : "completed",
-            action: {
-              type: "search",
-              ...(Array.isArray(queries) && queries.every(q => typeof q === "string") ? { queries } : {}),
-              ...(typeof query === "string" ? { query } : {}),
-              ...(sources.length ? { sources } : {}),
-            },
-          };
+          const item = renderSearchCall({ type: "server_tool_result", family: ev.family ?? "openai_responses", id: ev.id, name: ev.name,
+            input: serverInputs.get(ev.id), blockType: ev.blockType, content: ev.content, errorCode: ev.errorCode, notExecuted: ev.notExecuted });
+          serverInputs.delete(ev.id);
           const index = outputIndex++;
           yield frame("response.output_item.added", { output_index: index, item: { ...item, status: "in_progress" } });
           yield frame("response.output_item.done", { output_index: index, item });
@@ -1045,8 +1050,16 @@ export class OpenAIResponsesResponse extends Response {
             output.push(item);
           }
           tools.clear();
+          for (const [id, input] of serverInputs) {
+            const item = renderSearchCall({ type: "server_tool_result", family: "openai_responses", id, name: "web_search", input, blockType: "web_search_call", content: [], notExecuted: true });
+            const index = outputIndex++;
+            yield frame("response.output_item.added", { output_index: index, item });
+            yield frame("response.output_item.done", { output_index: index, item });
+            output.push(item);
+          }
+          serverInputs.clear();
           const paused = ev.stopReason === "pause_turn";
-          const incomplete = ev.stopReason === "length";
+          const incomplete = ev.stopReason === "length" || ev.stopReason === "content_filter";
           const usage = ev.usage
             ? { input_tokens: ev.usage.promptTokens, output_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
                 ...(ev.usage.cachedInputTokens != null ? { input_tokens_details: { cached_tokens: ev.usage.cachedInputTokens } } : {}),
@@ -1056,7 +1069,7 @@ export class OpenAIResponsesResponse extends Response {
           yield frame(paused || incomplete ? "response.incomplete" : "response.completed", {
             response: response(paused || incomplete ? "incomplete" : "completed", {
               output,
-              ...(paused ? { incomplete_details: { reason: "pause_turn" } } : incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+              ...(paused ? { incomplete_details: { reason: "pause_turn" } } : incomplete ? { incomplete_details: { reason: ev.stopReason === "content_filter" ? "content_filter" : "max_output_tokens" } } : {}),
               ...(usage ? { usage } : {}),
             }),
           });

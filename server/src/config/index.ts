@@ -24,7 +24,7 @@ function parseDuration(input: string): number {
 
 /**
  * Parse the TRUST_PROXY setting into Fastify's `trustProxy` value.
- * "true"/"1"/"yes"/"on" -> true (trust every hop: safe ONLY behind a reverse
+ * "true"/"yes"/"on" -> true (trust every hop: safe ONLY behind a reverse
  * proxy the operator controls). "false"/"0"/"no"/"off"/"" -> false (trust
  * nothing: req.ip is the socket address). A positive integer -> that many
  * trusted proxy hops. Anything else is a boot-stopping configuration error:
@@ -32,11 +32,11 @@ function parseDuration(input: string): number {
  */
 function parseTrustProxy(raw: string): boolean | number {
   const s = raw.trim().toLowerCase();
-  if (/^(1|true|yes|on)$/.test(s)) return true;
+  if (/^(true|yes|on)$/.test(s)) return true;
   if (/^(|0|false|no|off)$/.test(s)) return false;
   if (/^\d+$/.test(s)) {
     const n = Number(s);
-    if (n >= 1 && Number.isInteger(n)) return n;
+    if (n >= 1 && Number.isSafeInteger(n)) return n;
   }
   throw new Error(
     `Invalid TRUST_PROXY: "${raw}". Use "false" when the port is exposed directly (default), ` +

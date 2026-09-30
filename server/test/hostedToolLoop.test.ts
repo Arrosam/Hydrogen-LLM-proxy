@@ -34,6 +34,19 @@ function executor(outputs: ContentPart[][]) {
 const transport = () => ({ postStream: vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from(['{"result":{"answer":3}}']) })) });
 
 describe("hosted model/tool loop", () => {
+  it("enforces a nested service's smaller local maxCalls", async () => {
+    const e = executor([[call], [{ ...call, id: "c2" }]]), t = transport();
+    await runHostedTools(e, request, [tool], t, { sessionId: "shared", config: HostedToolOptionsSchema.parse({ maxCalls: 1 }),
+      hosted: { sessionId: "shared", remainingCalls: 16, remainingRounds: 128, traces: [] } });
+    expect(t.postStream).toHaveBeenCalledTimes(1);
+    expect(e.requests[2].messages.at(-1)?.content[0]).toMatchObject({ isError: true });
+  });
+  it("remaps a forced declared server-tool choice to its bound tool", async () => {
+    const e = executor([]);
+    const forced = buildRequest(request.family, { ...request.data(), toolChoice: { type: "tool", name: "web_search" } });
+    await runHostedTools(e, forced, [tool], transport(), { sessionId: "s", declaredNames: new Map([["web_search", "lookup"]]) });
+    expect(e.requests[0].toolChoice).toEqual({ type: "tool", name: "lookup" });
+  });
   it("hides thinking in process events while keeping the original for tool continuation", async () => {
     const e = executor([[{ type: "reasoning", text: "private trace", signature: "sig", origin: "anthropic" }, call]]);
     const events: unknown[] = [];

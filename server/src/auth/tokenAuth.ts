@@ -40,6 +40,13 @@ export function requireClientToken(tokens: TokenRepo, family: Family, enforceQuo
       return void (await fail(429, "Token usage quota exceeded."));
     }
 
+    if (enforceQuota && (token.maxRequests != null || token.maxTokens != null)) {
+      const lease = tokens.reserveQuota(token.id);
+      if (lease === "requests" || lease === "tokens") return void (await fail(429, lease === "requests" ? "API key request quota exceeded." : "Token usage quota exhausted or reserved by an active request."));
+      req.quotaLease = lease;
+      reply.raw.once("finish", () => lease.release());
+      reply.raw.once("close", () => lease.release());
+    }
     req.clientToken = token;
   };
 }

@@ -7,6 +7,7 @@ declare module "fastify" {
   interface FastifyRequest {
     user?: SessionPayload;
     clientToken?: Token;
+    quotaLease?: import("./quotaLease").QuotaLease;
   }
 }
 
@@ -34,7 +35,7 @@ export function requireSession(users: UserRepo, sessionFloorMs: () => number = (
     // second, and the security guarantee is that NO pre-restore session survives.
     // The floor is 0 until a restore sets it, so live sessions are untouched.
     const floorSec = Math.floor(sessionFloorMs() / 1000);
-    if (floorSec > 0 && session.iat != null && session.iat <= floorSec) {
+    if (floorSec > 0 && (session.iat == null || session.iat <= floorSec)) {
       await reply.code(401).send({ error: "session expired, please sign in again" });
       return;
     }
@@ -43,6 +44,17 @@ export function requireSession(users: UserRepo, sessionFloorMs: () => number = (
       await reply.code(401).send({ error: "unauthorized" });
       return;
     }
-    req.user = { uid: user.id, username: user.username, role: user.role };
+    if (session.version !== users.sessionVersion(user)) {
+      await reply.code(401).send({ error: "session expired, please sign in again" });
+      return;
+    }
+    if (user.mustChangePassword || session.passwordChangeOnly) {
+      const route = req.routeOptions.url;
+      if (!user.mustChangePassword || !["/admin/api/me", "/admin/api/change-password", "/admin/api/logout"].includes(route ?? "")) {
+        await reply.code(403).send({ error: "password change required" });
+        return;
+      }
+    }
+    req.user = { ...session, uid: user.id, username: user.username, role: user.role };
   };
 }

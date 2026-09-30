@@ -33,6 +33,7 @@ function v4IntBlocked(n: number, allowPrivate: boolean): boolean {
   if (inV4Cidr(n, "0.0.0.0", 8)) return true;
   if (inV4Cidr(n, "169.254.0.0", 16)) return true;
   if (inV4Cidr(n, "255.255.255.255", 32)) return true;
+  if (inV4Cidr(n, "224.0.0.0", 4)) return true; // multicast, never a unicast upstream
   if (allowPrivate) return false;
   return (
     inV4Cidr(n, "127.0.0.0", 8) ||
@@ -91,6 +92,20 @@ function ipv6ToHextets(addr: string): number[] | null {
 function isBlockedV6(ip: string, allowPrivate: boolean): boolean {
   const h = ipv6ToHextets(ip);
   if (!h) return true; // unparseable -> block
+  if (h.every((g) => g === 0)) return true; // unspecified
+  if (h.slice(0, 7).every((g) => g === 0) && h[7] === 1) return !allowPrivate;
+  if ((h[0] & 0xff00) === 0xff00) return true; // multicast, every scope
+  // RFC 6052 well-known NAT64 prefix embeds IPv4 in its last 32 bits.
+  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((g) => g === 0)) {
+    return v4IntBlocked(((h[6] << 16) >>> 0) + h[7], allowPrivate);
+  }
+  // RFC 8215 local-use translation prefix has operator-dependent layouts.
+  // We cannot prove the translated IPv4 destination: explicit allowlist only.
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return true;
+  if (h[0] === 0x2002) return v4IntBlocked(((h[1] << 16) >>> 0) + h[2], allowPrivate); // 6to4
+  if (h[0] === 0x2001 && h[1] === 0) return true; // Teredo tunnel, not provable here
+  if (h[0] === 0x2001 && h[1] === 0xdb8) return !allowPrivate; // documentation
+  if ((h[0] & 0xffc0) === 0xfec0) return !allowPrivate; // deprecated site-local
   // v4-mapped / v4-compatible carry an IPv4 in the low 32 bits, whatever the
   // spelling; evaluate the embedded IPv4 against the v4 rules.
   if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && (h[5] === 0xffff || h[5] === 0)) {
@@ -126,7 +141,10 @@ function entryMatchesIp(entry: string, addrs: string[]): boolean {
   }
   const v = net.isIP(entry);
   if (v === 4) return addrs.some((a) => net.isIP(a) === 4 && v4ToInt(a) === v4ToInt(entry));
-  if (v === 6) return addrs.some((a) => net.isIP(a) === 6 && a.toLowerCase() === entry);
+  if (v === 6) {
+    const expected = ipv6ToHextets(entry);
+    return addrs.some((a) => net.isIP(a) === 6 && ipv6ToHextets(a)?.every((g, i) => g === expected?.[i]));
+  }
   return false;
 }
 
@@ -143,6 +161,22 @@ function hostAllowed(host: string, addrs: string[], allowlist: string[]): boolea
     if (entryMatchesIp(entry, addrs)) return true;
   }
   return false;
+}
+
+/** Parse without silently accepting userinfo credentials or fragments. */
+export function parseUpstreamUrl(rawUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new UpstreamUrlError("invalid upstream URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new UpstreamUrlError(`unsupported upstream URL scheme "${url.protocol}" (use http/https)`);
+  }
+  if (url.username || url.password) throw new UpstreamUrlError("upstream URL credentials are not permitted; use configured headers");
+  if (url.hash) throw new UpstreamUrlError("upstream URL fragments are not permitted");
+  return url;
 }
 
 export interface SsrfGuardConfig {
@@ -198,16 +232,7 @@ export class SsrfGuard {
    * the addresses it is allowed to be connected on.
    */
   async resolveAllowed(rawUrl: string): Promise<UpstreamResolution> {
-    let url: URL;
-    try {
-      url = new URL(rawUrl);
-    } catch {
-      throw new UpstreamUrlError(`invalid upstream URL: ${rawUrl}`);
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new UpstreamUrlError(`unsupported upstream URL scheme "${url.protocol}" (use http/https)`);
-    }
-
+    const url = parseUpstreamUrl(rawUrl);
     let host = url.hostname.toLowerCase();
     if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1); // IPv6 literal
 

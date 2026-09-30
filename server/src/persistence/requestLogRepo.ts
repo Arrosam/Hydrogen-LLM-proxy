@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, lt, lte, sql, type SQL } from "drizzle-orm";
 import type { DB } from "../db";
 import type { Family } from "../core/format/family";
 import { asMillis } from "../util/time";
@@ -95,7 +95,7 @@ export class RequestLogRepo {
     const res = this.db
       .update(requestLogs)
       .set({ httpStatus: 499, error })
-      .where(and(eq(requestLogs.traceId, traceId), eq(requestLogs.httpStatus, 200)))
+      .where(and(eq(requestLogs.traceId, traceId), gte(requestLogs.httpStatus, 200), lt(requestLogs.httpStatus, 300)))
       .run();
     return (res.changes ?? 0) > 0;
   }

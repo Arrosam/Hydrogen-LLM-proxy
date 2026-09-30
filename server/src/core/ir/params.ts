@@ -10,7 +10,8 @@
  * exactly three, and a provider's type is one of them 1:1 (no separate
  * "openai_compatible": a compatible endpoint is just openai_completion).
  */
-export type Family = "openai_completion" | "anthropic" | "openai_responses";
+export const FAMILIES = ["openai_completion", "anthropic", "openai_responses"] as const;
+export type Family = typeof FAMILIES[number];
 
 /** Named reasoning-effort levels (OpenAI `reasoning_effort`; mapped to a token
  * budget on Anthropic upstreams). */
@@ -100,6 +101,18 @@ export interface GenerationParams {
 /** Every generation param a step/stage is allowed to override. */
 export type OverridableParam = keyof GenerationParams;
 
+/** Exhaustive canonical keys: definition folding must never serialize these
+ * internal controls as provider-specific wire parameters. */
+export const GENERATION_PARAM_KEYS = {
+  temperature: true, topP: true, topK: true, minP: true, maxTokens: true,
+  completionTokenKey: true, anthropicThinking: true, responsesReasoning: true,
+  responsesText: true, stop: true, frequencyPenalty: true, presencePenalty: true,
+  repetitionPenalty: true, seed: true, n: true, logprobs: true, topLogprobs: true,
+  logitBias: true, responseFormat: true, parallelToolCalls: true, serviceTier: true,
+  user: true, verbosity: true, thinking: true, extra: true, cacheHint: true,
+  cacheTtlMinutes: true, forwardHeaders: true, passthrough: true,
+} satisfies Record<OverridableParam, true>;
+
 /**
  * A partial patch a ModelService step or MicroAgent stage applies to the
  * outgoing request. Beyond the generation params it may force the transport
@@ -116,17 +129,17 @@ export interface RequestOverrides extends Partial<GenerationParams> {
  * The `extra` record (provider-specific nested params) is deep-merged so a
  * nested JSON object override never silently drops the base's keys. */
 export function mergeParams(base: GenerationParams, patch?: Partial<GenerationParams>): GenerationParams {
-  if (!patch) return base;
-  const out: GenerationParams = { ...base };
+  if (!patch) return structuredClone(base);
+  const out: GenerationParams = structuredClone(base);
   if (patch.thinking !== undefined) out.anthropicThinking = undefined;
   for (const key of Object.keys(patch) as OverridableParam[]) {
     const v = patch[key];
-    if (v === undefined) continue;
+    if (v === undefined || (key === "extra" && v === null)) continue;
     if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
       const baseExtra = (out.extra ?? {}) as Record<string, unknown>;
-      (out as Record<string, unknown>).extra = { ...baseExtra, ...(v as Record<string, unknown>) };
+      (out as Record<string, unknown>).extra = mergeExtra(baseExtra, v as Record<string, unknown>);
     } else {
-      (out as Record<string, unknown>)[key] = v;
+      (out as Record<string, unknown>)[key] = structuredClone(v);
     }
   }
   return out;
@@ -138,18 +151,28 @@ export function mergeParams(base: GenerationParams, patch?: Partial<GenerationPa
  * own config before handing them to the stage's Model Service.
  */
 export function mergeOverrides(base?: RequestOverrides, patch?: RequestOverrides): RequestOverrides | undefined {
-  if (!base) return patch;
-  if (!patch) return base;
-  const out: RequestOverrides = { ...base };
+  if (!base) return patch ? structuredClone(patch) : undefined;
+  if (!patch) return structuredClone(base);
+  const out: RequestOverrides = structuredClone(base);
   for (const key of Object.keys(patch) as (keyof RequestOverrides)[]) {
     const v = patch[key];
-    if (v === undefined) continue;
+    if (v === undefined || (key === "extra" && v === null)) continue;
     if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
       const baseExtra = (out.extra ?? {}) as Record<string, unknown>;
-      (out as Record<string, unknown>).extra = { ...baseExtra, ...(v as Record<string, unknown>) };
+      (out as Record<string, unknown>).extra = mergeExtra(baseExtra, v as Record<string, unknown>);
     } else {
-      (out as Record<string, unknown>)[key] = v;
+      (out as Record<string, unknown>)[key] = structuredClone(v);
     }
+  }
+  return out;
+}
+
+function mergeExtra(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out = structuredClone(base);
+  for (const [key, value] of Object.entries(patch)) {
+    const previous = out[key];
+    out[key] = value && typeof value === "object" && !Array.isArray(value) && previous && typeof previous === "object" && !Array.isArray(previous)
+      ? mergeExtra(previous as Record<string, unknown>, value as Record<string, unknown>) : structuredClone(value);
   }
   return out;
 }

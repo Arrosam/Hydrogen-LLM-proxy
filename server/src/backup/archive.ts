@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { isTable, getTableName } from "drizzle-orm";
+import * as schema from "../db/schema";
 import type Database from "better-sqlite3";
 import { STATS_CACHE_SETTINGS_KEY } from "../persistence/statsCache";
 import { decryptSecret, encryptSecret } from "../security/crypto";
@@ -24,7 +27,9 @@ import { openWithPassphrase, sealWithPassphrase, type SealedPayload } from "../s
  */
 
 /** Bumped only for a change that makes older packages unreadable. */
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
+/** A bounded export always fits the 512 MiB restore envelope, including escaping. */
+export const MAX_BACKUP_BYTES = 128 * 1024 * 1024;
 export const BACKUP_FORMAT = "hydrogen-backup";
 
 /**
@@ -59,6 +64,11 @@ const TABLES = [
   "settings",
   "image_cache",
 ] as const;
+
+const schemaTables = Object.values(schema).filter(isTable).map(getTableName).sort();
+if (JSON.stringify(schemaTables) !== JSON.stringify([...TABLES].sort())) {
+  throw new Error("Backup table manifest is out of sync with the database schema");
+}
 
 type TableName = (typeof TABLES)[number];
 
@@ -154,6 +164,7 @@ export interface BackupPackage {
 
 /** The shape sealed inside `secrets`. */
 interface SecretPayload {
+  integrity: string;
   toolHeaders?: { id: number; headers: string }[];
   providerKeys: { id: number; apiKey: string }[];
   /** Absent in packages written before v1.5.2. */
@@ -179,6 +190,8 @@ export async function exportBackup(
   masterKey: Buffer,
   opts: { passphrase: string; includeLogs: boolean; includeImageCache: boolean; appVersion: string },
 ): Promise<BackupPackage> {
+  let bytes = 0;
+  const createdAt = Date.now();
   const tables: Record<string, Row[]> = {};
   const counts: Record<string, number> = {};
   const providerKeys: SecretPayload["providerKeys"] = [];
@@ -189,7 +202,18 @@ export async function exportBackup(
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
     if (CACHE_TABLES.has(table) && !opts.includeImageCache) continue;
-    const rows = sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).all() as Row[];
+    // Reject a huge table before materializing even its first potentially huge
+    // payload row. JSON escaping is accounted for by the per-row check below.
+    const columns = sqlite.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as Array<{ name: string }>;
+    const measured = sqlite.prepare(`SELECT coalesce(sum(${columns.map(col => `coalesce(length(cast(${quoteIdent(col.name)} as blob)),0)`).join("+")}),0) AS bytes FROM ${quoteIdent(table)}`).get() as { bytes: number };
+    if (measured.bytes > MAX_BACKUP_BYTES / 2 - bytes) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
+    const rows: Row[] = [];
+    for (const raw of sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).iterate()) {
+      const row = raw as Row;
+      bytes += Buffer.byteLength(JSON.stringify(row)) + 1;
+      if (bytes > MAX_BACKUP_BYTES / 2) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
+      rows.push(row);
+    }
 
     if (table === "hosted_tools") {
       for (const row of rows) {
@@ -249,19 +273,30 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
+  const metadata = { format: BACKUP_FORMAT as typeof BACKUP_FORMAT, version: BACKUP_VERSION, createdAt, appVersion: opts.appVersion,
+    includesLogs: opts.includeLogs, includesImageCache: opts.includeImageCache, counts };
+  const integrity = backupDigest({ ...metadata, tables });
+  const secrets = await sealWithPassphrase(JSON.stringify({ integrity, providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
+  const pkg = { ...metadata, secrets, tables };
+  if (Buffer.byteLength(JSON.stringify(pkg)) > MAX_BACKUP_BYTES) throw new BackupError("Backup exceeds the safe export budget");
+  return pkg;
+}
 
-  return {
-    format: BACKUP_FORMAT,
-    version: BACKUP_VERSION,
-    createdAt: Date.now(),
-    appVersion: opts.appVersion,
-    includesLogs: opts.includeLogs,
-    includesImageCache: opts.includeImageCache,
-    counts,
-    secrets,
-    tables,
+/** Hash every table and all restore-affecting metadata. Sorting object keys
+ * makes round-tripping through a JSON formatter harmless; array order matters. */
+function backupDigest(pkg: Omit<BackupPackage, "secrets">): string {
+  const hash = createHash("sha256");
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { hash.update("["); for (const item of value) { visit(item); hash.update(","); } hash.update("]"); }
+    else if (value && typeof value === "object") {
+      hash.update("{");
+      for (const key of Object.keys(value).sort()) { hash.update(JSON.stringify(key)); hash.update(":"); visit((value as Row)[key]); hash.update(","); }
+      hash.update("}");
+    } else hash.update(JSON.stringify(value) ?? "null");
   };
+  visit({ format: pkg.format, version: pkg.version, createdAt: pkg.createdAt, appVersion: pkg.appVersion,
+    includesLogs: pkg.includesLogs, includesImageCache: pkg.includesImageCache, counts: pkg.counts, tables: pkg.tables });
+  return hash.digest("hex");
 }
 
 /** Reject anything that isn't a package we wrote, before touching the database. */
@@ -282,6 +317,9 @@ function validate(pkg: unknown): asserts pkg is BackupPackage {
   // and repopulate nothing -- reject before touching the database.
   for (const t of REQUIRED_TABLES) {
     if (!Array.isArray(p.tables[t])) throw new BackupError(`malformed backup: missing required table "${t}"`);
+  }
+  if (!p.tables.users?.some(row => row.role === "admin" && (row.enabled === 1 || row.enabled === true) && typeof row.password_hash === "string" && row.password_hash.startsWith("$argon2"))) {
+    throw new BackupError("malformed backup: at least one enabled admin with a valid password hash is required");
   }
 }
 
@@ -310,6 +348,7 @@ export async function restoreBackup(
   // Open the secrets first: a wrong passphrase must fail before we delete
   // anything, not after.
   const secrets = JSON.parse(await openWithPassphrase(pkg.secrets, passphrase)) as SecretPayload;
+  if (!secrets.integrity || secrets.integrity !== backupDigest(pkg)) throw new BackupError("Backup table data or metadata has been modified");
   const keyById = new Map<number, string>();
   for (const { id, apiKey } of secrets.providerKeys ?? []) keyById.set(id, apiKey);
   // Absent in pre-v1.5.2 packages: their tokens restore hash-only, exactly as
@@ -404,13 +443,17 @@ export async function restoreBackup(
       }
       restored[table] = written;
     }
+    // Invalidation is part of the restore transaction, not optional follow-up
+    // bookkeeping that can fail after replacing the accounts.
+    sqlite.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run("session_epoch", String(Date.now()));
   });
 
   run();
 
   return {
     restored,
-    includedLogs: Boolean(pkg.includesLogs),
+    includedLogs: Array.isArray(pkg.tables.request_logs),
     // The table's presence, not the flag: a hand-assembled package can carry the
     // rows without the metadata, and the caller has to re-check the budget
     // whenever rows actually landed.

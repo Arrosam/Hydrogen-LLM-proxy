@@ -157,5 +157,5 @@ it("treats HTTP 200 Responses failures as retryable failures", async () => {
     async postStream() { throw Error("unexpected stream"); },
   };
   const result = await OpenAIResponsesRequest.parse({ input: [], stream: false }).send(transport, { ...target, url: "http://unused", headers: {}, timeoutMs: 1000 });
-  expect(result).toMatchObject({ ok: false, status: 502, body, message: "generation failed" });
+  expect(result).toMatchObject({ ok: false, status: 503, retryable: true, body, message: "generation failed" });
 });

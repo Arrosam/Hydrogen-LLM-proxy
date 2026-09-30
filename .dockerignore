@@ -10,3 +10,15 @@ data
 !.env.example
 **/.vite
 **/coverage
+.review-*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/hydrogen-secrets.json
+.preview-data
+.test
+.trae
+.dbg
+deploy/**/data
+server/test
+web/test

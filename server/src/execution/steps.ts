@@ -22,6 +22,8 @@ export interface AttemptFailure {
   kind: FailureKind;
   message: string;
   errorBody?: unknown;
+  retryable?: boolean;
+  usage?: import("../core/ir/usage").Usage;
 }
 export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
 
@@ -55,6 +57,7 @@ export interface AttemptRecord {
   /** The raw upstream error body, serialized and bounded, for the shapes
    * `upstreamError` cannot read (HTML pages, vendor envelopes, bare strings). */
   errorBody?: string;
+  usage?: import("../core/ir/usage").Usage;
   /** Retry context for 499 and other retried failures. */
   retry?: {
     /** Monotonic retry index within this step (0 = first retry). */
@@ -141,6 +144,7 @@ function shouldAdvance(advanceOn: AdvanceTrigger[] | undefined, f: AttemptFailur
 export function classifyError(e: unknown): { kind: FailureKind; message: string } {
   const message = e instanceof Error ? e.message : String(e);
   const name = e instanceof Error ? e.name : "";
+  if (["UpstreamUrlError", "FormatConversionError", "UpstreamStreamError"].includes(name)) return { kind: "error", message };
   if (name === "TimeoutError" || name === "AbortError" || /timed out|timeout/i.test(message)) {
     return { kind: "timeout", message };
   }
@@ -257,7 +261,7 @@ export async function runSteps<T>(
       }
 
       // Determine whether a retry is permitted for THIS failure.
-      const triggerMatched = triggerMatches(retryOn, res);
+      const triggerMatched = res.retryable !== false && triggerMatches(retryOn, res);
       const is499 = res.status === 499;
       const four99Allowed = !is499 || is499Retryable(idempotency);
       const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
@@ -299,6 +303,7 @@ export async function runSteps<T>(
         kind: res.kind,
         latencyMs,
         error: res.message,
+        ...(res.usage ? { usage: res.usage } : {}),
         ...(upstreamError ? { upstreamError } : {}),
         ...(res.errorBody != null ? { errorBody: serializeForLog(res.errorBody, ERROR_BODY_MAX_CHARS) } : {}),
         retry: retryCtx,

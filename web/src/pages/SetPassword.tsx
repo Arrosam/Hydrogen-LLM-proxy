@@ -7,6 +7,7 @@ import type { User } from "../types";
 export function SetPassword() {
   const { t } = useI18n();
   const { user, setUser, logout } = useAuth();
+  const [currentPassword, setCurrentPassword] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +20,7 @@ export function SetPassword() {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.post<{ user: User }>("/change-password", { newPassword: password });
+      const r = await api.post<{ user: User }>("/change-password", { newPassword: password, currentPassword });
       setUser(r.user);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("setPassword.error.fallback"));
@@ -44,6 +45,10 @@ export function SetPassword() {
         </div>
 
         <form onSubmit={submit} className="card card-pad space-y-4">
+          <div>
+            <label className="label">{t("layout.currentPassword")}</label>
+            <input className="input" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" required />
+          </div>
           <div>
             <label className="label">{t("setPassword.form.newPassword")}</label>
             <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus placeholder={t("setPassword.form.newPasswordPlaceholder")} autoComplete="new-password" />

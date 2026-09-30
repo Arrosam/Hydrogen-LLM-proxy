@@ -1,6 +1,7 @@
 import { chatReasoningDetails, parseChatReasoningDetails } from "./reasoningBridge";
 import { parseToolArguments } from "../ir/toolArguments";
 import type { ReasoningPart } from "../ir/content";
+import { providerErrorEvent } from "../upstream/providerError";
 import { Request, type RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
@@ -104,7 +105,8 @@ function coerceContentToParts(content: unknown): ContentPart[] {
     } else if (t === "image_url") {
       const img = (item as Record<string, unknown>).image_url as Record<string, unknown> | string;
       const url = typeof img === "string" ? img : String(img?.url ?? "");
-      parts.push({ type: "image", source: parseDataUrl(url) });
+      const detail = typeof img === "object" && img ? img.detail : undefined;
+      parts.push({ type: "image", source: parseDataUrl(url), ...(detail === "auto" || detail === "low" || detail === "high" ? { detail } : {}) });
     } else if (t === "file") {
       const f = ((item as Record<string, unknown>).file ?? {}) as Record<string, unknown>;
       const name = f.filename != null ? String(f.filename) : undefined;
@@ -150,9 +152,9 @@ function* contentPartEvents(parts: ContentPart[]): Generator<StreamEvent> {
   }
 }
 
-function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"]): unknown {
+function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"], detail?: "auto" | "low" | "high"): unknown {
   const url = source.kind === "base64" ? `data:${source.mediaType};base64,${source.data}` : source.url;
-  return { type: "image_url", image_url: { url } };
+  return { type: "image_url", image_url: { url, ...(detail ? { detail } : {}) } };
 }
 
 /**
@@ -197,7 +199,7 @@ function openAiUserContent(parts: ContentPart[]): unknown {
   if (onlyText) return parts.map((p) => (p as TextPart).text).join("");
   const out: unknown[] = [];
   for (const p of parts) {
-    if (p.type === "image") out.push(imagePartToOpenAI(p.source));
+    if (p.type === "image") out.push(imagePartToOpenAI(p.source, p.detail));
     else if (p.type === "file") out.push(filePartToOpenAI(p));
     else if (p.type === "opaque") { if (p.family === "openai_completion") out.push(p.value); }
     else if (p.type === "text") out.push({ type: "text", text: p.text });
@@ -378,6 +380,7 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   set("presencePenalty", numOrUndef(body.presence_penalty));
   set("repetitionPenalty", numOrUndef(body.repetition_penalty));
   set("seed", numOrUndef(body.seed));
+  if (body.n !== undefined && (typeof body.n !== "number" || !Number.isSafeInteger(body.n) || body.n < 1)) throw new FormatConversionError("n must be a positive integer");
   set("n", numOrUndef(body.n));
   set("logprobs", boolOrUndef(body.logprobs));
   set("topLogprobs", numOrUndef(body.top_logprobs));
@@ -462,7 +465,7 @@ export class OpenAICompletionRequest extends Request {
         // Providers disagree on the field name: DeepSeek says reasoning_content,
         // OpenRouter-style gateways say reasoning, some v4 gateways say
         // reasoning_text. Accept them all.
-        const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? msg.reasoning_text ?? "");
+        const reasoning = firstReasoningField(msg);
         const replay = parseChatReasoningDetails(msg.reasoning_details);
         if (replay.length) content.unshift(...replay);
         else if (reasoning) content.push({ type: "reasoning", text: reasoning });
@@ -636,6 +639,7 @@ export class OpenAICompletionResponse extends Response {
       created: numOrUndef(body.created) ?? nowSeconds(),
       content,
       stopReason: finishReasonToStop(choice.finish_reason as string | null),
+      ...(choice.logprobs && typeof choice.logprobs === "object" ? { logprobs: choice.logprobs as Record<string, unknown> } : {}),
       usage: {
         promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
         ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
@@ -678,7 +682,7 @@ export class OpenAICompletionResponse extends Response {
       object: "chat.completion",
       created: this.created,
       model,
-      choices: [{ index: 0, message, logprobs: null, finish_reason: stopToFinishReason(this.stopReason) }],
+      choices: [{ index: 0, message, logprobs: this.logprobs ?? null, finish_reason: stopToFinishReason(this.stopReason) }],
       usage: {
         prompt_tokens: this.usage.promptTokens, completion_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens,
         ...(this.usage.cachedInputTokens != null ? { prompt_tokens_details: { cached_tokens: this.usage.cachedInputTokens } } : {}),
@@ -702,6 +706,10 @@ export class OpenAICompletionResponse extends Response {
       }
       const chunk = safeParseJson(frame.data);
       if (!chunk) continue;
+      if (chunk.error != null || frame.event === "error") {
+        yield providerErrorEvent(chunk.error ?? chunk, usage);
+        return;
+      }
 
       if (!started) {
         started = true;
@@ -716,6 +724,7 @@ export class OpenAICompletionResponse extends Response {
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       const choice = (choices[0] ?? {}) as Record<string, unknown>;
       const delta = (choice.delta ?? {}) as Record<string, unknown>;
+      if (choice.logprobs && typeof choice.logprobs === "object") yield { type: "logprobs", value: choice.logprobs as Record<string, unknown> };
 
       // `content` is a string on every mainstream server, but it is typed `any`
       // in several wire definitions and SOME deltas do carry parts. Reading only
@@ -755,6 +764,10 @@ export class OpenAICompletionResponse extends Response {
         if (typeof fn.arguments === "string" && fn.arguments) yield { type: "tool_args_delta", index, delta: fn.arguments };
       }
 
+      if (choice.finish_reason === "error") {
+        yield providerErrorEvent(choice.error ?? chunk.error ?? { message: "Upstream terminated generation with finish_reason:error" }, usage);
+        return;
+      }
       if (choice.finish_reason) {
         stopReason = finishReasonToStop(choice.finish_reason as string);
         terminated = true;
@@ -804,6 +817,9 @@ export class OpenAICompletionResponse extends Response {
           id = ev.id || id;
           created = ev.created || created;
           yield chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+          break;
+        case "logprobs":
+          yield chunk({ choices: [{ index: 0, delta: {}, logprobs: ev.value, finish_reason: null }] });
           break;
         case "text_delta":
           yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });

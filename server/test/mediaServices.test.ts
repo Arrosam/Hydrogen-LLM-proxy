@@ -314,7 +314,7 @@ describe("JSON passthrough (embedding / rerank / image / video)", () => {
     const id = created.json().id as string;
     // ...and the endpoint it was created on (e0 = the provider's primary), so a
     // poll cannot land on a different endpoint of a multi-endpoint provider.
-    expect(id).toBe(`video_abc-h${videoServiceId}x${providerId}e0`);
+    expect(id).toMatch(new RegExp(`^video_abc-h${videoServiceId}x${providerId}e0t\\d+s[A-Za-z0-9_-]{43}$`));
 
     upstream.setHandler(jsonHandler(200, { id: "video_abc", status: "completed" }));
     const polled = await app.inject({ method: "GET", url: `/v1/videos/${id}`, headers: auth() });
@@ -324,6 +324,17 @@ describe("JSON passthrough (embedding / rerank / image / video)", () => {
     expect(upstream.requests[1].url).toBe("/v1/videos/video_abc"); // suffix stripped upstream
   });
 
+  it("rejects a stolen or tampered signed video capability", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { id: "video_secure", status: "queued" }));
+    const created = await app.inject({ method: "POST", url: "/v1/videos", headers: auth(), payload: { model: "video-svc", prompt: "test" } });
+    const id = created.json().id as string;
+    const other = c.tokens.create({ name: "other", scopeServices: [videoServiceId] });
+    const stolen = await app.inject({ url: `/v1/videos/${id}`, headers: { authorization: `Bearer ${other.secret}` } });
+    expect(stolen.statusCode).toBe(404);
+    expect((await app.inject({ url: `/v1/videos/${id.replace(/e0t/, "e1t")}`, headers: auth() })).statusCode).toBe(404);
+    expect(upstream.requests).toHaveLength(1);
+  });
   it("polling an unsuffixed id is a clean 404", async () => {
     const r = await app.inject({ method: "GET", url: "/v1/videos/video_raw", headers: auth() });
     expect(r.statusCode).toBe(404);

@@ -10,6 +10,10 @@ import type { ActiveRequestRegistry } from "../observability/activeRequests";
 /** Everything the client-facing proxy needs, injected by the composition root. */
 export interface ProxyDeps {
   logMaxChars?: () => number;
+  /** Shared restore admission barrier; release only after upstream/job work ends. */
+  requestGate?: { acquire(): () => void };
+  /** Stable server-held master/session secret used only for signed video capabilities. */
+  videoSigningKey?: string;
   services: ServiceRepo;
   factory: ServiceFactory;
   tokens: TokenRepo;

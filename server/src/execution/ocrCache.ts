@@ -12,6 +12,8 @@ export interface OcrCacheStore {
   /** Whether caching is on right now — the budget is a runtime setting and 0
    * means off, so this is asked per request rather than at construction. */
   enabled(): boolean;
+  /** Serialize overlapping cache fills; the caller must release in finally. */
+  acquire?(hashes: string[], signal?: AbortSignal): Promise<() => void>;
   /** Descriptions already known for these hashes; absent keys are misses. */
   lookup(hashes: string[]): Map<string, string>;
   /** Mark hits as just-used so eviction treats them as fresh. */
@@ -75,6 +77,41 @@ export function imageHash(img: ImagePart): string {
  * that the OCR model itself answered perfectly well.
  */
 export class ImageDescriptionCache implements OcrCacheStore {
+  private readonly fills = new Map<string, Promise<void>>();
+
+  async acquire(hashes: string[], signal?: AbortSignal): Promise<() => void> {
+    if (!this.enabled()) return () => {};
+    signal?.throwIfAborted();
+    const releases: Array<() => void> = [];
+    const waits: Promise<void>[] = [];
+    for (const hash of new Set(hashes)) {
+      const previous = this.fills.get(hash) ?? Promise.resolve();
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const tail = previous.then(() => gate);
+      this.fills.set(hash, tail);
+      waits.push(previous);
+      releases.push(() => {
+        release();
+        void tail.then(() => { if (this.fills.get(hash) === tail) this.fills.delete(hash); });
+      });
+    }
+    let abort: (() => void) | undefined;
+    const cancelled = new Promise<never>((_, reject) => {
+      abort = () => reject(signal?.reason ?? new Error("OCR wait aborted"));
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+    try {
+      await Promise.race([Promise.all(waits), cancelled]);
+      signal?.throwIfAborted();
+      return () => releases.forEach(release => release());
+    } catch (error) {
+      releases.forEach(release => release());
+      throw error;
+    } finally { if (abort) signal?.removeEventListener("abort", abort); }
+  }
+
   constructor(
     private readonly repo: ImageCacheRepo,
     private readonly maxBytes: () => number,

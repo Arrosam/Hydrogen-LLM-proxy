@@ -1,3 +1,4 @@
+import { addUsage, ZERO_USAGE } from "../core/ir/usage";
 import { buildRequest } from "../core/format/registry";
 import type { Family, RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
@@ -20,7 +21,16 @@ function mergeForwardHeaders(
   family: string,
 ): Record<string, string> {
   if (!fwd || fwd.family !== family) return base;
-  return { ...fwd.headers, ...base };
+  // Canonical overrides may also supply this control, so enforce the ingress
+  // allowlist here as well. A case variant must never replace configured auth.
+  const allow = family === "anthropic" ? ["anthropic-beta"] : ["openai-beta", "http-referer", "x-title"];
+  const configured = new Set(Object.keys(base).map(key => key.toLowerCase()));
+  const forwarded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fwd.headers)) {
+    const normalized = key.toLowerCase();
+    if (allow.includes(normalized) && !configured.has(normalized)) forwarded[normalized] = value;
+  }
+  return { ...forwarded, ...base };
 }
 
 /** Resolve a possibly-live token rate (number | getter). Default 2000. */
@@ -139,7 +149,7 @@ export class ModelService {
       const sent = await egress.send(this.deps.transport, target);
       if (!sent.ok) {
         prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
-        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
+        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body, retryable: sent.retryable, usage: sent.usage };
       }
       prog?.record("llm", "llm.receive", `response generated and received from ${t.upstreamModel}`, { status: 200 });
       prog?.record("llm", "llm.result", `result parsed and ready for return`, { model: t.upstreamModel });
@@ -158,7 +168,10 @@ export class ModelService {
         },
       };
     }, { progress: prog, signal: opts.signal });
-    return { result, attemptPath: path, attempts: path.length };
+    const spent = path.reduce((sum, attempt) => addUsage(sum, attempt.usage ?? ZERO_USAGE), ZERO_USAGE);
+    if (result.ok) result.value.response.usage = addUsage(result.value.response.usage, spent);
+    else result.usage = spent;
+    return { result, usage: spent, attemptPath: path, attempts: path.length };
   }
 
   /** Wrap a buffered invocation as a fabricated (paced) client stream. Shared by
@@ -236,7 +249,7 @@ export class ModelService {
       const sent = await egress.relay(this.deps.transport, target);
       if (!sent.ok) {
         prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
-        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
+        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body, retryable: sent.retryable, usage: sent.usage };
       }
       prog?.record("llm", "llm.receive", `stream committed from ${t.upstreamModel} (headers received)`, { status: sent.status });
       prog?.record("llm", "llm.result", `stream events ready for relay`, { model: t.upstreamModel });
@@ -253,6 +266,7 @@ export class ModelService {
         },
       };
     }, { progress: prog, signal: opts.signal });
+    if (!result.ok) result.usage = path.reduce((sum, attempt) => addUsage(sum, attempt.usage ?? ZERO_USAGE), ZERO_USAGE);
     return { result, attemptPath: path, attempts: path.length };
   }
 }

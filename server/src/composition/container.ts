@@ -1,3 +1,4 @@
+import { RequestGate } from "../util/requestGate";
 import type Database from "better-sqlite3";
 import { loadConfig, type AppConfig } from "../config";
 import { setConfig } from "../context";
@@ -72,6 +73,7 @@ export interface Container {
   usageMeter: UsageMeter;
   activeRequests: ActiveRequestRegistry;
   updates: UpdateService;
+  requestGate: RequestGate;
 }
 
 /** Load config, open + migrate the DB, verify the master key, seed the admin, wire everything. */
@@ -131,12 +133,13 @@ export async function boot(): Promise<Container> {
   );
   const requestLogger = new RequestLogger(logs, () => settings.logPayloadMaxChars(), statsCache);
   const usageMeter = new UsageMeter(tokens);
+  const requestGate = new RequestGate();
   const updates = new UpdateService({ repo: config.updateRepo, restartEnabled: config.updateRestartEnabled });
 
   return {
     config, sqlite, db,
     providers, proxies, egressPool, providerModels, models, mappings, services, hostedTools, responses, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
-    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates,
+    catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates, requestGate,
   };
 }
 
@@ -146,7 +149,7 @@ function printInitialAdmin(seed: SeedResult): void {
   const rows = [
     "",
     line,
-    "  Hydrogen - initial admin account created",
+    "  Hydrogen - initial admin credentials provisioned",
     `  URL:      http://localhost:<PORT>`,
     `  username: ${seed.username}`,
   ];

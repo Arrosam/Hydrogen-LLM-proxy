@@ -351,7 +351,7 @@ describe("native DeepSeek thinking disabled", () => {
       }
       const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
       expect(log.httpStatus).toBe(502);
-      expect(log.completionTokens).toBe(9);
+      expect(log.completionTokens).toBe(9 * log.attempts);
     });
   }
 });
@@ -375,10 +375,11 @@ describe("blank response regressions", () => {
         if (stream) expect(r.payload).not.toContain("[DONE]");
         else expect(r.statusCode).toBe(502);
         const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
-        expect(log).toMatchObject({ httpStatus: 502, promptTokens: 5, completionTokens: 9, reasoningTokens: 4 });
+        expect(log).toMatchObject({ httpStatus: 502, promptTokens: 5 * log.attempts, completionTokens: 9 * log.attempts, reasoningTokens: 4 * log.attempts });
         expect(log.error).toContain("no answer or tool call");
         const raw = JSON.parse(log.responseBody);
-        expect(stream ? raw.usage : raw.upstream_response.usage).toMatchObject({ completionTokens: 9, reasoningTokens: 4 });
+        if (stream) expect(raw.usage).toMatchObject({ completionTokens: 9, reasoningTokens: 4 });
+        else expect(log.attemptPath).toHaveLength(log.attempts);
       });
     }
   }
@@ -391,7 +392,7 @@ describe("blank response regressions", () => {
       expect(r.payload).toContain("output token limit");
       const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
       expect(log.httpStatus).toBe(502);
-      expect(log.completionTokens).toBe(9);
+      expect(log.completionTokens).toBe(9 * log.attempts);
     }
   });
 });

@@ -50,6 +50,7 @@ function close(i: Instance): void {
 
 /** Populate an instance with one of everything worth round-tripping. */
 function seed(i: Instance, masterKey: Buffer): void {
+  i.sqlite.prepare("INSERT INTO users (username,password_hash,role,enabled) VALUES (?,?,?,?)").run("admin", "$argon2id$v=19$m=65536,t=3,p=4$test$test", "admin", 1);
   const providers = new ProviderRepo(i.db, masterKey);
   const models = new ModelRepo(i.db);
   const mappings = new MappingRepo(i.db);

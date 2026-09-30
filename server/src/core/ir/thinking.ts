@@ -99,7 +99,11 @@ export const ThinkingPolicy = {
       (version != null && Number(version[1]) === 4 && Number(version[2] ?? 0) < 6);
     if (typeof thinking === "object" || legacy) {
       const budgets: Record<EffortLevel, number> = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 32768, max: 65536 };
-      const budget = typeof thinking === "object" ? thinking.budget : budgets[resolveEffort(thinking)];
+      const requestedBudget = typeof thinking === "object" ? thinking.budget : budgets[resolveEffort(thinking)];
+      // Anthropic requires budget >=1024 and max_tokens strictly above it.
+      // Never enlarge the client ceiling; disable thinking if it cannot fit.
+      if (max_tokens != null && max_tokens <= 1024) return { thinking: { type: "disabled" }, max_tokens };
+      const budget = Math.max(1024, Math.min(requestedBudget, max_tokens != null ? max_tokens - 1 : requestedBudget));
       return { thinking: { type: "enabled", budget_tokens: budget }, max_tokens };
     }
     return { thinking: { type: "adaptive" }, effort: TO_ANTHROPIC_EFFORT[resolveEffort(thinking)], max_tokens };

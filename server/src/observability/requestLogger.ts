@@ -49,11 +49,22 @@ export interface LogParams {
   error?: string | null;
 }
 
-/**
- * Writes one request_logs row per client request, capturing the entire HTTP-level
- * request (method, path, query, headers, body) with credential headers redacted,
- * plus the served model/provider as first-class columns.
- */
+/** Observability must never control delivery or accounting. Do not fall back to
+ * console/request logs containing the thrown error: it may contain credentials
+ * or a payload rejected by the privacy-aware logger. */
+export function bestEffortLogger(logger: RequestLogger): RequestLogger {
+  return {
+    capture(value: unknown): string {
+      try { return logger.capture(value); } catch { return "[log capture unavailable]"; }
+    },
+    record(params: LogParams): void { try { logger.record(params); } catch { /* optional evidence only */ } },
+    amendDeliveryFailure(traceId: string, reason: string): boolean {
+      try { return logger.amendDeliveryFailure(traceId, reason); } catch { return false; }
+    },
+  } as RequestLogger;
+}
+
+/** Writes one credential-redacted HTTP request log per client request. */
 export class RequestLogger {
   constructor(
     private readonly repo: RequestLogRepo,
@@ -78,7 +89,7 @@ export class RequestLogger {
     return serializeForLog(value, this.limit());
   }
 
-  /** Demote a logged 200 to 499 after late evidence that delivery failed. */
+  /** Demote a logged successful 2xx to 499 after late delivery-failure evidence. */
   amendDeliveryFailure(traceId: string, error: string): boolean {
     const changed = this.repo.markDeliveryFailed(traceId, error);
     // The row was folded into the stats as a success when it was written.

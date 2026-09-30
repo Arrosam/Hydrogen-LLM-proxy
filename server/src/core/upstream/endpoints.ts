@@ -72,48 +72,46 @@ const BLOCKED_EXTRA_HEADERS = new Set([
   "upgrade",
 ]);
 
-function trimBase(base: string): string {
-  return base.replace(/\/+$/, "");
+function endpointUrl(base: string, suffix: string): string {
+  const url = new URL(base);
+  url.pathname = url.pathname.replace(/\/+$/, "") + suffix;
+  return url.toString();
 }
 
 /** The chat/messages/responses endpoint URL for a provider. */
 export function chatUrl(p: UpstreamProvider): string {
-  const base = trimBase(p.baseUrl);
   const family = familyForProviderType(p.type);
-  if (family === "anthropic") return `${base}/v1/messages`;
-  if (family === "openai_responses") return `${base}/responses`;
-  return `${base}/chat/completions`;
+  return endpointUrl(p.baseUrl, family === "anthropic" ? "/v1/messages" : family === "openai_responses" ? "/responses" : "/chat/completions");
 }
 
 export function embeddingsUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/embeddings`;
+  return endpointUrl(p.baseUrl, "/embeddings");
 }
 
 /** OpenAI-style media endpoints (non-chat service categories). */
 export function imagesUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/images/generations`;
+  return endpointUrl(p.baseUrl, "/images/generations");
 }
 
 export function speechUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/audio/speech`;
+  return endpointUrl(p.baseUrl, "/audio/speech");
 }
 
 export function transcriptionsUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/audio/transcriptions`;
+  return endpointUrl(p.baseUrl, "/audio/transcriptions");
 }
 
 /** Jina/Cohere-compatible rerank endpoint. */
 export function rerankUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/rerank`;
+  return endpointUrl(p.baseUrl, "/rerank");
 }
 
 export function videosUrl(p: UpstreamProvider, suffix = ""): string {
-  return `${trimBase(p.baseUrl)}/videos${suffix}`;
+  return endpointUrl(p.baseUrl, `/videos${suffix}`);
 }
 
 export function modelsUrl(p: UpstreamProvider): string {
-  const base = trimBase(p.baseUrl);
-  return familyForProviderType(p.type) === "anthropic" ? `${base}/v1/models` : `${base}/models`;
+  return endpointUrl(p.baseUrl, familyForProviderType(p.type) === "anthropic" ? "/v1/models" : "/models");
 }
 
 /**

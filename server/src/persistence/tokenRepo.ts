@@ -1,3 +1,4 @@
+import { quotaLease, type QuotaLease } from "../auth/quotaLease";
 import { eq, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { tokens, type Token } from "../db/schema";
@@ -36,6 +37,23 @@ export interface PublicToken {
 /** Client tokens: SHA-256 hash for lookup, master-key-encrypted secret so an
  * admin can copy an issued key again later. */
 export class TokenRepo {
+  private readonly pending = new Map<number, number>();
+
+  /** Synchronous check-and-reserve before any asynchronous model work. Keys
+   * with a token budget are serialized because actual usage is only known at
+   * completion; parallel admissions cannot all spend the same remaining budget. */
+  reserveQuota(id: number): QuotaLease | "requests" | "tokens" {
+    const token = this.get(id);
+    if (!token) return "requests";
+    const pending = this.pending.get(id) ?? 0;
+    if (token.maxRequests != null && token.usedRequests + pending >= token.maxRequests) return "requests";
+    if (token.maxTokens != null && (token.usedTokens >= token.maxTokens || pending > 0)) return "tokens";
+    this.pending.set(id, pending + 1);
+    return quotaLease(() => {
+      const left = (this.pending.get(id) ?? 1) - 1;
+      if (left > 0) this.pending.set(id, left); else this.pending.delete(id);
+    });
+  }
   constructor(
     private readonly db: DB,
     private readonly masterKey: Buffer,

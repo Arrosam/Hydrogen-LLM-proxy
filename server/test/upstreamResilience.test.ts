@@ -448,7 +448,8 @@ describe("Model Service (passthrough)", () => {
       // never happen is a truncated answer that terminates like a finished one.
       expect(got.text.length).toBeLessThan(ANSWER.length);
       expect(got.sawDone).toBe(false);
-      expect(got.aborted).toBe(true); // the client can see the stream broke
+      if (name === "unparsable body") expect(got.status).toBe(502); // zero frames: real HTTP failure
+      else expect(got.aborted).toBe(true); // already-streamed bytes: transport failure
       expect(await loggedStatus(h)).not.toBe(200);
     }, 60_000);
   }

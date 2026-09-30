@@ -1,5 +1,6 @@
 import type { Response } from "../ir/response";
 import type { StreamEvent } from "../ir/stream";
+import type { Usage } from "../ir/usage";
 
 /** How an upstream attempt failed: an HTTP status, a timeout, a dead connection, or a config fault. */
 export type FailureKind = "http" | "timeout" | "network" | "error";
@@ -10,6 +11,9 @@ export interface SendFailure {
   status: number;
   kind: FailureKind;
   message: string;
+  retryable?: boolean;
+  /** Accounting observed before a semantic/stream failure; still billed. */
+  usage?: Usage;
   /** The upstream error body (parsed JSON when possible), for logging. */
   body?: unknown;
   /** The exact wire body that was sent upstream, for the request log. */

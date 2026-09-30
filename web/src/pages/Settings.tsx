@@ -358,7 +358,7 @@ function BackupCard() {
 
   const [passphrase, setPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
-  const [includeLogs, setIncludeLogs] = useState(true);
+  const [includeLogs, setIncludeLogs] = useState(false);
   // Off by default, like the server: the descriptions are regenerable, and the
   // cache can be the largest thing in the package.
   const [includeImageCache, setIncludeImageCache] = useState(false);

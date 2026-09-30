@@ -42,15 +42,20 @@ export class JsonKeepalive {
     const raw = this.reply.raw;
     if (this.committed || raw.destroyed || raw.headersSent) return;
     this.reply.hijack();
-    raw.writeHead(200, JSON_KEEPALIVE_HEADERS);
+    // Once hijacked, failures must close the raw response, never escape a timer
+    // or be handed back to Fastify's error handler.
     this.committed = true;
-    raw.write("\n");
+    try {
+      raw.writeHead(200, JSON_KEEPALIVE_HEADERS);
+      raw.write("\n");
+    } catch { this.stop(); raw.destroy(); return; }
+    raw.once("close", () => this.stop());
     this.pingTimer = setInterval(() => {
       if (raw.destroyed || raw.writableEnded) {
         this.stop();
         return;
       }
-      raw.write("\n");
+      try { raw.write("\n"); } catch { this.stop(); raw.destroy(); }
     }, this.intervalMs);
     this.pingTimer.unref?.();
   }
@@ -67,6 +72,7 @@ export class JsonKeepalive {
   /** Finish a committed response with the handler's JSON body. Returns true
    * when it wrote (the caller must NOT also return the body to Fastify). */
   finish(body: unknown): boolean {
+    this.stop();
     if (!this.committed) return false;
     const raw = this.reply.raw;
     try {
@@ -95,6 +101,11 @@ export async function withJsonHeartbeat<T>(
   let body: T;
   try {
     body = await run();
+  } catch (error) {
+    if (!keepalive.committed) throw error;
+    // Generic, privacy-safe error: the exception can contain upstream secrets.
+    keepalive.finish({ error: { message: "Request execution failed", type: "server_error" } });
+    return undefined;
   } finally {
     keepalive.stop();
   }

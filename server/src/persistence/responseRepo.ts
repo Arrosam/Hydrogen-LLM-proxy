@@ -1,3 +1,4 @@
+import { publicHistoryItem } from "./conversationHistory";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { conversationItems, responseConversations, storedResponses, responseEvents } from "../db/schema";
@@ -89,7 +90,7 @@ export class ResponseRepo {
       this.assertIdle(id, tokenId);
       const inserted = this.insertItems(id, items);
       this.db.update(responseConversations).set({ revision: sql`${responseConversations.revision} + 1`, touchedAt: this.now() }).where(eq(responseConversations.id, id)).run();
-      return inserted;
+      return inserted.map(publicHistoryItem);
     });
   }
 
@@ -104,7 +105,7 @@ export class ResponseRepo {
       conditions.push(order === "asc" ? gt(conversationItems.sequence, cursor.sequence) : lt(conversationItems.sequence, cursor.sequence));
     }
     const rows = this.db.select().from(conversationItems).where(and(...conditions)).orderBy(order === "asc" ? asc(conversationItems.sequence) : desc(conversationItems.sequence)).limit(limit + 1).all();
-    return { data: rows.slice(0, limit).map(row => row.item), has_more: rows.length > limit };
+    return { data: rows.slice(0, limit).map(row => publicHistoryItem(row.item)), has_more: rows.length > limit };
   }
 
   allItems(id: string, tokenId: number): WireItem[] {
@@ -119,7 +120,8 @@ export class ResponseRepo {
 
   item(id: string, tokenId: number, itemId: string): WireItem | undefined {
     this.requireConversation(id, tokenId);
-    return this.db.select().from(conversationItems).where(and(eq(conversationItems.conversationId, id), eq(conversationItems.id, itemId))).get()?.item;
+    const item = this.db.select().from(conversationItems).where(and(eq(conversationItems.conversationId, id), eq(conversationItems.id, itemId))).get()?.item;
+    return item ? publicHistoryItem(item) : undefined;
   }
 
   deleteItem(id: string, tokenId: number, itemId: string): void {

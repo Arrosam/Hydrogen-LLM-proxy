@@ -162,9 +162,9 @@ Fixed since:
   body is captured to its bounded log string and dropped before the response is
   sent.
 - **Per-service attachment budget** (`execution/fileFetch.ts` plus service
-  definitions): the proxy sets no aggregate limit of its own -- a relay should
-  not decide what a user may attach -- but a Model Service / Micro Agent can set
-  `maxAttachmentBytes` for the URL attachments it inlines.
+  definitions): the proxy now defaults to a 50 MiB aggregate budget, limits
+  each pass to 32 distinct URLs, and shares a wall-clock deadline. A Model
+  Service / Micro Agent can set a positive `maxAttachmentBytes` override.
 
 Still on the table, as a larger change: streaming the upstream request body
 instead of `JSON.stringify`-ing it whole would remove one more full copy per

@@ -122,12 +122,11 @@ describe("inlining", () => {
     expect(JSON.stringify(OpenAIResponsesRequest.construct(ready).render({ upstreamModel: "up" }))).toContain(PDF_URL);
   });
 
-  // The proxy sets no aggregate budget of its own -- a relay should not decide
-  // what a user may attach -- but a service definition may opt into one.
-  it("honours an opt-in aggregate budget, and has none by default", async () => {
+  // A service may tighten the safe default aggregate budget.
+  it("honours an aggregate budget while permitting small files by default", async () => {
     await expect(
       inlineUrlFiles(withUrlDoc(), "openai_completion", fetchTransport(() => ({ status: 200, body: PDF_BYTES })), { timeoutMs: 5_000, maxTotalBytes: 10 }),
-    ).rejects.toThrow(/configured for this service/);
+    ).rejects.toThrow(/remaining download limit/);
 
     // No budget named: the same request inlines exactly as before.
     await expect(
@@ -174,7 +173,9 @@ describe("redirects", () => {
       async postJson() { throw new Error("unused"); },
       async postStream() { throw new Error("unused"); },
       async getStream(url: string): Promise<TransportStreamResult> {
-        await guard.assertAllowed(url); // what UpstreamClient does on every call
+        // Use a public IP rather than external DNS so this security regression
+        // is deterministic even on an offline or heavily loaded CI worker.
+        await guard.assertAllowed(url === PDF_URL ? "https://93.184.216.34/report.pdf" : url);
         return {
           status: url === PDF_URL ? 302 : 200,
           headers: { "content-type": "application/pdf", ...(url === PDF_URL ? { location: metadata } : {}) },
@@ -264,7 +265,7 @@ describe("through a Model Service", () => {
     );
     const inv = await svc.invoke(withUrlDoc().withStream(false));
     expect(inv.result.ok).toBe(false);
-    if (!inv.result.ok) expect(inv.result.message).toMatch(/configured for this service/);
+    if (!inv.result.ok) expect(inv.result.message).toMatch(/remaining download limit/);
   });
 
   it("round-trips maxAttachmentBytes through the service and agent schemas", () => {

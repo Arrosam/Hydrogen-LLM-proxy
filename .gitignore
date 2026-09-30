@@ -145,6 +145,8 @@ hydrogen-secrets.json
 
 # Local scratch / security-review attack scripts
 /.test/
+/.review-*
+/.playwright-mcp/
 
 # Trae debug artifacts
 .dbg/

@@ -31,6 +31,7 @@ export abstract class Response implements ResponseData {
   content: ContentPart[];
   stopReason: ResponseData["stopReason"];
   usage: Usage;
+  logprobs?: Record<string, unknown>;
 
   constructor(data: ResponseData) {
     this.id = data.id;
@@ -39,6 +40,7 @@ export abstract class Response implements ResponseData {
     this.content = data.content;
     this.stopReason = data.stopReason;
     this.usage = data.usage;
+    this.logprobs = data.logprobs;
   }
 
   /** The wire family this subclass's `renderSelf` produces. */
@@ -56,6 +58,7 @@ export abstract class Response implements ResponseData {
       content: this.content,
       stopReason: this.stopReason,
       usage: this.usage,
+      ...(this.logprobs ? { logprobs: this.logprobs } : {}),
     };
   }
 
@@ -114,6 +117,7 @@ export abstract class Response implements ResponseData {
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       stop_reason: this.stopReason,
       usage: this.usage,
+      ...(this.logprobs ? { logprobs: this.logprobs } : {}),
       ...extra,
     };
   }

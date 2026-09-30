@@ -23,6 +23,7 @@ export class HostedToolService extends ModelService {
     }
   }
   override async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
-    return this.fabricated(await this.invoke(request, overrides, opts), Date.now());
+    const startedAt = Date.now();
+    return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
   }
 }

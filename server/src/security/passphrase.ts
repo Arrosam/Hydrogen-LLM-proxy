@@ -107,6 +107,7 @@ export async function openWithPassphrase(sealed: SealedPayload, passphrase: stri
   } catch {
     throw new PassphraseError("malformed backup: unreadable salt");
   }
+  if (salt.length !== SALT_BYTES || salt.toString("base64") !== sealed.salt) throw new PassphraseError("malformed backup: invalid salt");
   let key: Buffer;
   try {
     key = await deriveKey(passphrase, salt, n, r, p);

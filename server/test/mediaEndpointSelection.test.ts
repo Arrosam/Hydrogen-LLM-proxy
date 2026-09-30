@@ -303,7 +303,7 @@ describe("media services on an Anthropic-primary provider", () => {
     const id = created.json().id as string;
     // The alternate is endpoint index 1; the id has to say so, or the poll below
     // would be sent to the provider's Anthropic primary.
-    expect(id).toBe(`vid_1-h${videoServiceId}x${dualProviderId}e1`);
+    expect(id).toMatch(new RegExp(`^vid_1-h${videoServiceId}x${dualProviderId}e1t\\d+s[A-Za-z0-9_-]{43}$`));
     expect(upstream.requests[0].url).toBe("/openai/v1/videos");
 
     upstream.setHandler(json(200, { id: "vid_1", status: "completed" }));
@@ -327,17 +327,17 @@ describe("media services on an Anthropic-primary provider", () => {
       method: "GET", url: `/v1/videos/vid_1-h${videoServiceId}x${dualProviderId}e7`, headers: auth(),
     });
     expect(r.statusCode).toBe(404);
-    expect(r.json().error.message).toContain("endpoint that created this video no longer exists");
+    expect(r.json().error.message).toContain("Unknown video id");
   });
 
-  it("an id from before endpoint routing still resolves to the primary", async () => {
+  it("rejects unsigned legacy routing ids rather than trusting caller-selected providers", async () => {
     // Old ids carried no endpoint group; they can only have come from index 0.
     // Here that is the Anthropic primary, so the request is refused rather than
     // posted at an Anthropic base URL.
     const r = await app.inject({
       method: "GET", url: `/v1/videos/vid_1-h${videoServiceId}x${dualProviderId}`, headers: auth(),
     });
-    expect(r.statusCode).toBe(400);
-    expect(r.json().error.message).toContain("no longer OpenAI-compatible");
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error.message).toContain("Unknown video id");
   });
 });

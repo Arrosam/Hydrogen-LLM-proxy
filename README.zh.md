@@ -18,7 +18,7 @@
   <a href="https://github.com/Arrosam/Hydrogen-LLM-proxy/actions/workflows/docker-publish.yml"><img alt="Build" src="https://github.com/Arrosam/Hydrogen-LLM-proxy/actions/workflows/docker-publish.yml/badge.svg"></a>
   <br>
   <img alt="协议格式" src="https://img.shields.io/badge/%E5%8D%8F%E8%AE%AE%E6%A0%BC%E5%BC%8F-OpenAI%20%2B%20Anthropic-a78bfa?labelColor=0c1219">
-  <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A5%2020-3c873a?logo=nodedotjs&logoColor=white&labelColor=0c1219">
+  <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A5%2022.12-3c873a?logo=nodedotjs&logoColor=white&labelColor=0c1219">
   <img alt="Database" src="https://img.shields.io/badge/%E5%AD%98%E5%82%A8-SQLite-003B57?logo=sqlite&logoColor=white&labelColor=0c1219">
   <a href="https://github.com/Arrosam/Hydrogen-LLM-proxy/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Arrosam/Hydrogen-LLM-proxy?color=eab308&labelColor=0c1219"></a>
 </p>
@@ -147,8 +147,8 @@ Hydrogen 已上架雨云云应用商店，无需自行构建。
 5. **环境变量**都是可选的。如需自定义首次登录凭据可设置 `ADMIN_USERNAME` / `ADMIN_PASSWORD`；
    `PROXY_MASTER_KEY` 和 `SESSION_SECRET` **留空**即可，Hydrogen 会自动生成并持久化。
    不要用雨云的随机字符串生成器填充主密钥——生成的不会是有效的 32 字节 base64 密钥，应用会拒绝启动。
-6. **打开分配的 URL** 并登录。如果 `ADMIN_PASSWORD` 留空，首次登录凭据为 `admin` / `password`，
-   登录后会强制要求设置新密码。
+6. **打开分配的 URL** 并登录。如果 `ADMIN_PASSWORD` 留空，请从服务器启动日志中获取随机临时密码；
+   首次登录会话只能完成密码设置，设置新密码后才能访问控制台。
 
 **绑定自定义域名（HTTPS）。** 在已部署的应用中，**服务 → 新增服务 → 类型「HTTPS网站服务」**，
 容器端口 `8080`，域名类型选「自定义域名」并填入你的域名。雨云会自动签发和续期 Let's Encrypt 证书。
@@ -210,7 +210,7 @@ Caddy 需要端口 **80 和 443** 空闲，且 `A` 记录已指向该机器，**
 
 ### 3. 源码构建
 
-需要 **Node 20+**（Docker 镜像使用 Node 22 构建）。
+需要 **Node 22.12+**（Docker 镜像使用 Node 22 构建）。
 
 ```bash
 git clone https://github.com/Arrosam/Hydrogen-LLM-proxy.git
@@ -315,10 +315,10 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 | `DATA_DIR` | `/data` | SQLite + `hydrogen-secrets.json`。**必须持久化** |
 | `PROXY_MASTER_KEY` | *自动生成* | 32 字节 base64。加密供应商密钥（AES-256-GCM） |
 | `SESSION_SECRET` | *自动生成* | 签名仪表板会话 cookie |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *（空）* | 首个管理员。密码为空 ⇒ 首次登录 `admin`/`password`，强制修改 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *（空）* | 首个管理员。密码为空 ⇒ 随机临时密码写入启动日志；修改前仅可完成密码设置 |
 | `SESSION_TTL` | `12h` | 仪表板会话有效期 |
 | `COOKIE_SECURE` | `auto` | `auto` 根据 `X-Forwarded-Proto` 判断；`false` 用于纯 HTTP；`true` 强制 |
-| `LOG_PAYLOAD_MAX_CHARS` | `2000000` | 每条日志记录的请求/响应体上限。`0` = 不限（数据库无限增长） |
+| `LOG_PAYLOAD_MAX_CHARS` | `100000` | 每条日志记录的请求/响应体上限。`0` = 不限（数据库无限增长） |
 | `ALLOW_PRIVATE_UPSTREAMS` | `false` | 允许供应商 Base URL 指向回环/内网地址（如本地 Ollama）。链路本地元数据地址始终被拒绝 |
 | `SIMULATED_STREAMING_TOKEN_RATE` | `2000` | 缓冲流的重放速率（tokens/秒） |
 | `IMAGE_CACHE_MAX_BYTES` | `67108864` | OCR 图像描述的 LRU 缓存预算。`0` 禁用 |
@@ -336,7 +336,7 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 ## 角色
 
 - **admin** — 全部权限，包括签发 API 密钥、管理用户和访问**设置**。
-- **manager** — 除签发 API 密钥和设置以外的全部权限，且不能创建或修改 admin 账户（防止权限提升）。
+- **manager** — 模型/服务配置及非敏感只读控制台页面。供应商凭据、供应商/代理修改、消耗已保存凭据的 Bench/测试接口、密钥修改、用户管理、请求内容日志、备份和设置均仅限管理员。
 
 ---
 

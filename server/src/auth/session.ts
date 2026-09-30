@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { createHash } from "node:crypto";
 import { getConfig } from "../context";
 
 export const SESSION_COOKIE = "hydrogen_session";
@@ -10,24 +11,37 @@ export interface SessionPayload {
   /** Issued-at, seconds since epoch (set by jwt on sign; present after verify).
    * Used to reject sessions minted before an instance-wide invalidation. */
   iat?: number;
+  /** Opaque password + persisted revocation revision, never the password hash. */
+  version?: string;
+  /** A first-login session is not a dashboard authorization grant. */
+  passwordChangeOnly?: boolean;
 }
 
-export function signSession(payload: SessionPayload): string {
-  const cfg = getConfig();
-  return jwt.sign(payload, cfg.sessionSecret, {
-    expiresIn: Math.floor(cfg.sessionTtlMs / 1000),
+/** Salted argon2 hashes have high entropy. Digesting one together with a persisted
+ * random revision yields an opaque JWT claim without exposing the stored hash. */
+export function passwordSessionVersion(userId: number, passwordHash: string, revision: string): string {
+  return createHash("sha256").update(JSON.stringify([userId, passwordHash, revision])).digest("base64url");
+}
+
+export function signSession(payload: SessionPayload, ttlMs = getConfig().sessionTtlMs): string {
+  return jwt.sign(payload, getConfig().sessionSecret, {
+    expiresIn: Math.max(0, Math.floor(ttlMs / 1000)),
   });
 }
 
 export function verifySession(token: string): SessionPayload | null {
   try {
     const decoded = jwt.verify(token, getConfig().sessionSecret) as jwt.JwtPayload;
-    if (typeof decoded.uid !== "number") return null;
+    if (!Number.isSafeInteger(decoded.uid) || decoded.uid <= 0 ||
+        typeof decoded.username !== "string" || !["admin", "manager"].includes(decoded.role) ||
+        typeof decoded.version !== "string" || !decoded.version) return null;
     return {
       uid: decoded.uid,
       username: String(decoded.username),
       role: decoded.role === "admin" ? "admin" : "manager",
       iat: typeof decoded.iat === "number" ? decoded.iat : undefined,
+      version: decoded.version,
+      passwordChangeOnly: decoded.passwordChangeOnly === true,
     };
   } catch {
     return null;
@@ -46,7 +60,7 @@ export function resolveCookieSecure(isHttps: boolean): boolean {
   }
 }
 
-export function cookieOptions(secure: boolean): {
+export function cookieOptions(secure: boolean, ttlMs = getConfig().sessionTtlMs): {
   httpOnly: true;
   sameSite: "lax";
   secure: boolean;
@@ -58,6 +72,6 @@ export function cookieOptions(secure: boolean): {
     sameSite: "lax",
     secure,
     path: "/",
-    maxAge: Math.floor(getConfig().sessionTtlMs / 1000),
+    maxAge: Math.max(0, Math.floor(ttlMs / 1000)),
   };
 }
