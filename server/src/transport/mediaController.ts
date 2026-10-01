@@ -55,12 +55,14 @@ const ENDPOINT_BY_CATEGORY: Record<MediaCategory, string> = {
   stt: "/v1/audio/transcriptions",
 };
 
-function mediaUrl(category: MediaCategory, p: UpstreamProvider, suffix: "" | "/batch" = ""): string {
+type MediaSuffix = "" | "/batch" | "/edits";
+
+function mediaUrl(category: MediaCategory, p: UpstreamProvider, suffix: MediaSuffix = ""): string {
   switch (category) {
     case "embedding": return embeddingsUrl(p);
     case "rerank": return rerankUrl(p);
-    case "classification": return systemOneUrl(p, suffix);
-    case "image": return imagesUrl(p);
+    case "classification": return systemOneUrl(p, suffix === "/batch" ? "/batch" : "");
+    case "image": return imagesUrl(p, suffix === "/edits" ? "edits" : "generations");
     case "video": return videosUrl(p);
     case "tts": return speechUrl(p);
     case "stt": return transcriptionsUrl(p);
@@ -148,9 +150,15 @@ export class MediaController {
     // Laya's optional batched-state extension; not emulated for Jev providers.
     app.post("/v1/systemone/batch", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "classification", "/batch")));
     app.post("/v1/images/generations", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "image")));
+    // OpenAI SDKs upload image/image[] and optional mask file parts; compatible
+    // providers may also accept JSON URL/data-URL references on the same route.
+    app.post("/v1/images/edits", pre, (req, reply) => this.withWork(req, () =>
+      Buffer.isBuffer(req.body)
+        ? this.handleMultipart(req, reply, "image", "/edits")
+        : this.handleJson(req, reply, "image", "/edits")));
     app.post("/v1/videos", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "video")));
     app.post("/v1/audio/speech", pre, (req, reply) => this.withWork(req, () => this.handleSpeech(req, reply)));
-    app.post("/v1/audio/transcriptions", pre, (req, reply) => this.withWork(req, () => this.handleTranscription(req, reply)));
+    app.post("/v1/audio/transcriptions", pre, (req, reply) => this.withWork(req, () => this.handleMultipart(req, reply, "stt")));
     const videoRead = { preHandler: requireClientToken(this.deps.tokens, "openai_completion", false) };
     app.get("/v1/videos/:id", videoRead, (req, reply) => this.handleVideoGet(req, reply, false));
     app.get("/v1/videos/:id/content", videoRead, (req, reply) => this.handleVideoGet(req, reply, true));
@@ -278,7 +286,7 @@ export class MediaController {
   }
 
   /** JSON-in/JSON-out categories: embedding, rerank, classification, image, video (create). */
-  private async handleJson(req: FastifyRequest, reply: FastifyReply, category: MediaCategory, suffix: "" | "/batch" = ""): Promise<unknown> {
+  private async handleJson(req: FastifyRequest, reply: FastifyReply, category: MediaCategory, suffix: MediaSuffix = ""): Promise<unknown> {
     const token = req.clientToken!;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const serviceName = String(body.model ?? "");
@@ -374,8 +382,13 @@ export class MediaController {
     return reply.code(hit.status).send(stream);
   }
 
-  /** STT: multipart in (forwarded verbatim, model field rewritten), JSON out. */
-  private async handleTranscription(req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
+  /** STT and image edits: multipart in, file parts untouched, JSON/text out. */
+  private async handleMultipart(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    category: "stt" | "image",
+    suffix: "" | "/edits" = "",
+  ): Promise<unknown> {
     const token = req.clientToken!;
     const raw = req.body;
     const contentType = req.headers["content-type"];
@@ -383,17 +396,17 @@ export class MediaController {
       return this.replyError(reply, 400, "Expected a multipart/form-data body.");
     }
     const serviceName = readMultipartField(raw, contentType, "model");
-    const loaded = this.loadService(reply, token, serviceName ?? "", "stt");
+    const loaded = this.loadService(reply, token, serviceName ?? "", category);
     if (!loaded) return reply;
     const { service, def } = loaded;
 
     const ctx = { traceId: genId("trace"), token, service, serviceName: serviceName!, http: httpInfo(req, (v) => this.deps.logger.capture(v)), started: Date.now() };
     const signal = this.abortOnClientClose(reply);
 
-    // Transcribing a long recording is slow and silent; heartbeat like the
-    // other JSON-out categories. (TTS streams binary audio, so it cannot.)
+    // Image edits and long transcriptions can be slow and silent; heartbeat like
+    // the other JSON-out categories. (TTS streams binary audio, so it cannot.)
     const keepalive = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);
-    const outcome = await this.run(def, "stt", signal, async (step, target) => {
+    const outcome = await this.run(def, category, signal, async (step, target) => {
       // Overrides first, then the model rewrite, so `model` always lands on the
       // mapped upstream name — the precedence the JSON passthrough gets from
       // spreading `model` last. Every attempt re-derives the form from `raw`, so
@@ -416,7 +429,7 @@ export class MediaController {
       }
       const headers = buildHeaders(target.upstream);
       headers["content-type"] = String(contentType);
-      const r = await this.deps.transport.postRaw(transcriptionsUrl(target.upstream), headers, rewritten, {
+      const r = await this.deps.transport.postRaw(mediaUrl(category, target.upstream, suffix), headers, rewritten, {
         timeoutMs: def.timeoutMs, signal, proxy: target.upstream.proxy,
       });
       if (r.status >= 200 && r.status < 300) {
@@ -434,9 +447,9 @@ export class MediaController {
       return reply.code(status).send(errBody);
     }
     const hit = outcome.result.value;
-    // A transcript is one short line: the one media category where `{ ok: true }`
-    // hid the only thing the log existed to show.
-    this.recordOnDelivery(reply, ctx, outcome, hit.status, zeroUsage(), hit.sentBody, hit.json ?? hit.text);
+    // Keep the transcript in the log, but not bulky base64 image results.
+    this.recordOnDelivery(reply, ctx, outcome, hit.status, zeroUsage(), hit.sentBody,
+      category === "stt" ? hit.json ?? hit.text : undefined);
     if (hit.json !== undefined) {
       if (keepalive.finish(hit.json)) return;
       return reply.code(hit.status).send(hit.json);

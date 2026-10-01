@@ -77,8 +77,8 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   // way to tell whether a fix is actually running.
   app.get("/healthz", async () => ({ status: "ok", build: process.env.GIT_SHA || "dev" }));
 
-  // Speech-to-text passthrough forwards multipart bodies verbatim; buffer them
-  // raw (Fastify has no default parser for this content type).
+  // Speech-to-text and image-edit passthroughs preserve multipart file parts;
+  // buffer them raw (Fastify has no default parser for this content type).
   app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 
   const proxyDeps = {

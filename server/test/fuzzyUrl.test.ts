@@ -35,6 +35,13 @@ describe("fuzzyRewriteUrl", () => {
     expect(fuzzyRewriteUrl("POST", "/v1/chat/completion", h)).toBe("/v1/chat/completions");
   });
 
+  it("normalizes image edit endpoints without routing them to generations", () => {
+    expect(fuzzyRewriteUrl("POST", "/v1/images/edits", h)).toBe("/v1/images/edits");
+    expect(fuzzyRewriteUrl("POST", "//v1//images//edits/", h)).toBe("/v1/images/edits");
+    expect(fuzzyRewriteUrl("POST", "/images/edits", h)).toBe("/v1/images/edits");
+    expect(fuzzyRewriteUrl("POST", "/api/v1/images/edit?beta=true", h)).toBe("/v1/images/edits?beta=true");
+  });
+
   it("routes a bare base URL by sniffing the wire family", () => {
     expect(fuzzyRewriteUrl("POST", "//v1", anthH)).toBe("/v1/messages");
     expect(fuzzyRewriteUrl("POST", "/v1", h)).toBe("/v1/chat/completions");

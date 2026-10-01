@@ -291,7 +291,8 @@ curl http://localhost:8080/v1/messages \
 | POST | `/v1/rerank` | rerank | |
 | POST | `/v1/systemone` | classification | Jev / Laya 的 Choice、Score 和 Noul 类型化决策 |
 | POST | `/v1/systemone/batch` | classification | Laya 多状态批处理扩展，需上游支持 |
-| POST | `/v1/images/generations` | image | |
+| POST | `/v1/images/generations` | image | 文生图；透传供应商特有的 JSON 参考图字段 |
+| POST | `/v1/images/edits` | image | 参考图生成 / 编辑；multipart 图片与可选蒙版，或上游支持的 JSON 参考图 |
 | POST | `/v1/videos` | video | 返回带路由后缀的任务 ID |
 | GET | `/v1/videos/:id` · `/v1/videos/:id/content` | video | 轮询和下载，无状态路由 |
 | POST | `/v1/audio/speech` | tts | 二进制音频流直通 |
@@ -299,6 +300,23 @@ curl http://localhost:8080/v1/messages \
 
 因为 `/v1/models` 返回的是模型服务，任何有模型选择器的工具都会显示你的服务名
 ——这正是设计意图：`sonnet-any` *就是*模型，对客户端而言。
+
+**参考图生成与图片编辑**使用同一个 `image` 模型服务，无需新建服务类别：
+
+```bash
+curl http://localhost:8080/v1/images/edits \
+  -H "Authorization: Bearer sk-hproxy-..." \
+  -F 'model=image-service' \
+  -F 'prompt=给参考图中的猫加一顶蓝色帽子' \
+  -F 'image=@reference.png' \
+  -F 'mask=@mask.png'
+```
+
+未使用蒙版时省略 `mask`；多张参考图可重复使用 `image[]` 文件字段（需上游模型支持）。
+图片、蒙版和其他供应商字段会被透传，仅改写 `model` 并应用每步参数覆盖。若上游的
+`/images/edits` 支持 JSON URL / data URL 参考图，可直接发送其原生 JSON 请求；
+Hydrogen 不下载参考图，也不转换请求格式。仍使用 `/images/generations` 接收参考图的供应商
+可继续在该路由发送其原生 JSON 字段。上游必须支持所选操作与请求格式。
 
 Jev / Laya 的供应商配置、原生请求示例及批处理限制见[语义分类指南（English）](<docs/semantic-classification.md>)。
 

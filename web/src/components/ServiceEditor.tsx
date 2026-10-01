@@ -47,7 +47,7 @@ const DEFAULT_RETRY_ON: Trigger[] = [429, 499, 502, 503, "timeout", "network"];
 /** The client-facing endpoint each non-chat passthrough category is served on.
  * (chat and ocr both run the chat pipeline on /v1/chat/completions.) */
 const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, string> = {
-  image: "/v1/images/generations",
+  image: "/v1/images/generations · /v1/images/edits",
   video: "/v1/videos",
   tts: "/v1/audio/speech",
   stt: "/v1/audio/transcriptions",

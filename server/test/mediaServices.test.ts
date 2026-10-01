@@ -101,6 +101,22 @@ beforeAll(async () => {
     category: "image", timeoutMs: 10_000,
     steps: [{ model: "m1", provider: "fake", retry: { maxAttempts: 2, on: [503], intervalMs: 0 } }],
   });
+  mk("img-params", {
+    category: "image", timeoutMs: 10_000,
+    steps: [{
+      model: "m1", provider: "fake", retry: { maxAttempts: 2, on: [503], intervalMs: 0 },
+      overrides: { extra: { quality: "high", n: 2, output_format: "webp", model: "hijacked-model" } },
+    }],
+  });
+  const fallbackModel = c.models.create({ name: "m2" });
+  c.mappings.create({ modelId: fallbackModel.id, providerId: provider.id, upstreamModel: "fallback-model" });
+  mk("img-fallback", {
+    category: "image", timeoutMs: 10_000,
+    steps: [
+      { model: "m1", provider: "fake", retry: { maxAttempts: 1 }, overrides: { extra: { quality: "high" } } },
+      { model: "m2", provider: "fake", retry: { maxAttempts: 1 }, overrides: { extra: { size: "1024x1024" } } },
+    ],
+  });
   mk("reranker", { category: "rerank", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
   mk("tts-svc", { category: "tts", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
   mk("stt-svc", { category: "stt", timeoutMs: 10_000, steps: [{ model: "m1", provider: "fake" }] });
@@ -342,6 +358,198 @@ describe("JSON passthrough (embedding / rerank / image / video)", () => {
 });
 
 const CRLF = "\r\n";
+const IMAGE_BOUNDARY = "----hydrogenImageBoundary";
+const IMAGE_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x0d, 0x0a]),
+  // A boundary-like byte sequence inside an image is NOT a form delimiter.
+  Buffer.from(`pixels--${IMAGE_BOUNDARY}\r\nContent-Disposition: form-data; name="model"\r\n\r\nforged-service\r\n`),
+  Buffer.from(`\r\n--${IMAGE_BOUNDARY}--not-a-delimiter\r\n--${IMAGE_BOUNDARY}-not-a-delimiter`),
+]);
+const SECOND_IMAGE_BYTES = Buffer.from([0xff, 0xd8, 0x00, 0xfe, 0x80, 0xff, 0xd9]);
+const MASK_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x80, 0xff]);
+
+/** File parts deliberately precede the routing/override fields. Only the latter
+ * may change; repeated image[] parts and the mask must stay byte-identical. */
+function imageEditRequest(service: string, imageField = "image[]"): {
+  method: "POST"; url: string; headers: Record<string, string>; payload: Buffer;
+} {
+  const filePart = (name: string, filename: string, type: string, bytes: Buffer) => Buffer.concat([
+    Buffer.from(`--${IMAGE_BOUNDARY}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n`),
+    bytes, Buffer.from(CRLF),
+  ]);
+  const textPart = (name: string, value: string) => Buffer.from(
+    `--${IMAGE_BOUNDARY}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+  );
+  return {
+    method: "POST", url: "/v1/images/edits",
+    headers: { ...auth(), "content-type": `multipart/form-data; boundary="${IMAGE_BOUNDARY}"` },
+    payload: Buffer.concat([
+      filePart(imageField, "reference.png", "image/png", IMAGE_BYTES),
+      ...(imageField === "image[]" ? [filePart(imageField, "style.jpg", "image/jpeg", SECOND_IMAGE_BYTES)] : []),
+      filePart("mask", "mask.png", "image/png", MASK_BYTES),
+      textPart("model", service),
+      textPart("prompt", "add a blue hat using the reference style"),
+      textPart("quality", "low"),
+      Buffer.from(`--${IMAGE_BOUNDARY}--\r\n`),
+    ]),
+  };
+}
+
+describe("image edits and reference-image generation", () => {
+  it.each(["image", "image[]"])("forwards %s uploads and masks with only the mapped model changed", async (field) => {
+    upstream.requests.length = 0;
+    const result = { created: 123, data: [{ b64_json: "edited-image", revised_prompt: "a blue hat" }] };
+    upstream.setHandler(jsonHandler(200, result));
+    const request = imageEditRequest("img", field);
+    const original = Buffer.from(request.payload);
+    const r = await app.inject(request);
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual(result);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0].url).toBe("/v1/images/edits");
+    expect(upstream.requests[0].headers.authorization).toBe("Bearer k");
+    expect(upstream.requests[0].headers["content-type"]).toBe(request.headers["content-type"]);
+    const modelField = Buffer.from(`name="model"${CRLF}${CRLF}img${CRLF}`);
+    const at = original.indexOf(modelField);
+    const expected = Buffer.concat([
+      original.subarray(0, at),
+      Buffer.from(`name="model"${CRLF}${CRLF}real-model${CRLF}`),
+      original.subarray(at + modelField.length),
+    ]);
+    expect(upstream.requests[0].body).toEqual(expected);
+    expect(request.payload).toEqual(original); // no in-place changes to the source form
+  });
+
+  it("passes JSON URL/data-URL references and masks through the edits endpoint", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { data: [{ url: "https://img.test/edited.png" }] }));
+    const body = {
+      model: "img-params", prompt: "combine these references", quality: "low",
+      images: [
+        { image_url: "https://images.test/reference.png" },
+        { image_url: "data:image/png;base64,aW1hZ2U=" },
+      ],
+      mask: { image_url: "https://images.test/mask.png" },
+      input_fidelity: "high",
+    };
+    const r = await app.inject({ method: "POST", url: "/v1/images/edits", headers: auth(), payload: body });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().data[0].url).toBe("https://img.test/edited.png");
+    expect(upstream.requests[0].url).toBe("/v1/images/edits");
+    expect(JSON.parse(upstream.requests[0].body.toString())).toEqual({
+      ...body, model: "real-model", quality: "high", n: 2, output_format: "webp",
+    });
+  });
+
+  it("keeps provider-specific reference fields on generations rather than auto-switching endpoints", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { data: [{ url: "https://img.test/generated.png" }] }));
+    const body = { model: "img", prompt: "use this style", image: ["https://images.test/style.png"], strength: 0.6 };
+    const r = await app.inject({ method: "POST", url: "/v1/images/generations", headers: auth(), payload: body });
+    expect(r.statusCode).toBe(200);
+    expect(upstream.requests[0].url).toBe("/v1/images/generations");
+    expect(JSON.parse(upstream.requests[0].body.toString())).toEqual({ ...body, model: "real-model" });
+  });
+
+  it("retries edits and applies multipart overrides without stacking fields or damaging files", async () => {
+    upstream.requests.length = 0;
+    let calls = 0;
+    upstream.setHandler((_req, res) => {
+      const status = ++calls === 1 ? 503 : 200;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(status === 503 ? { error: { message: "busy editing" } } : { data: [{ b64_json: "done" }] }));
+    });
+    const r = await app.inject(imageEditRequest("img-params"));
+    expect(r.statusCode).toBe(200);
+    expect(upstream.requests).toHaveLength(2);
+    expect(upstream.requests[0].body).toEqual(upstream.requests[1].body);
+    for (const sent of upstream.requests) {
+      const text = sent.body.toString();
+      expect(sent.url).toBe("/v1/images/edits");
+      expect(text).toContain(`name="model"${CRLF}${CRLF}real-model`);
+      expect(text).not.toContain("hijacked-model");
+      expect(text).not.toContain(`name="quality"${CRLF}${CRLF}low`);
+      for (const [key, value] of Object.entries({ quality: "high", n: "2", output_format: "webp" })) {
+        expect(text.split(`name="${key}"`)).toHaveLength(2);
+        expect(text).toContain(`name="${key}"${CRLF}${CRLF}${value}`);
+      }
+      for (const bytes of [IMAGE_BYTES, SECOND_IMAGE_BYTES, MASK_BYTES]) expect(sent.body.includes(bytes)).toBe(true);
+      expect(text.endsWith(`--${IMAGE_BOUNDARY}--${CRLF}`)).toBe(true);
+    }
+  });
+
+  it("rebuilds the original form with the next step's model and overrides on fallback", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler((req, res) => {
+      const failed = req.body.includes(Buffer.from("real-model"));
+      res.writeHead(failed ? 503 : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify(failed ? { error: { message: "unavailable" } } : { data: [{ b64_json: "fallback" }] }));
+    });
+    const r = await app.inject(imageEditRequest("img-fallback"));
+    expect(r.statusCode).toBe(200);
+    expect(r.json().data[0].b64_json).toBe("fallback");
+    expect(upstream.requests).toHaveLength(2);
+    const first = upstream.requests[0].body.toString();
+    const second = upstream.requests[1].body.toString();
+    expect(first).toContain(`name="quality"${CRLF}${CRLF}high`);
+    expect(second).toContain(`name="quality"${CRLF}${CRLF}low`);
+    expect(second).toContain(`name="model"${CRLF}${CRLF}fallback-model`);
+    expect(second).not.toContain("real-model");
+    expect(second).toContain(`name="size"${CRLF}${CRLF}1024x1024`);
+    for (const sent of upstream.requests) {
+      expect(sent.url).toBe("/v1/images/edits");
+      for (const bytes of [IMAGE_BYTES, SECOND_IMAGE_BYTES, MASK_BYTES]) expect(sent.body.includes(bytes)).toBe(true);
+    }
+  });
+
+  it("returns the upstream edit error after all retries", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(503, { error: { message: "edit capacity exhausted" } }));
+    const r = await app.inject(imageEditRequest("img"));
+    expect(r.statusCode).toBe(503);
+    expect(r.json().error.message).toContain("edit capacity exhausted");
+    expect(upstream.requests).toHaveLength(2);
+  });
+
+  it("requires authentication and enforces token service scope before sending image bytes", async () => {
+    upstream.requests.length = 0;
+    const request = imageEditRequest("img");
+    const unauth = await app.inject({ ...request, headers: { "content-type": request.headers["content-type"] } });
+    expect(unauth.statusCode).toBe(401);
+    const limited = c.tokens.create({ name: "image-denied", scopeServices: [embServiceId] });
+    const forbidden = await app.inject({ ...request, headers: { ...request.headers, authorization: `Bearer ${limited.secret}` } });
+    expect(forbidden.statusCode).toBe(403);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("rejects non-image services and forms without a text model field", async () => {
+    upstream.requests.length = 0;
+    const mismatch = await app.inject(imageEditRequest("emb"));
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.json().error.message).toContain("/v1/embeddings");
+    const request = imageEditRequest("");
+    const missing = await app.inject(request);
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json().error.message).toContain("Missing 'model'");
+    const noBoundary = await app.inject({ ...request, headers: { ...auth(), "content-type": "multipart/form-data" } });
+    expect(noBoundary.statusCode).toBe(400);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("logs multipart byte counts rather than reference images or masks", async () => {
+    upstream.setHandler(jsonHandler(200, { data: [{ b64_json: "bulk-result" }] }));
+    const r = await app.inject(imageEditRequest("img"));
+    expect(r.statusCode).toBe(200);
+    const row = c.logs.query({ limit: 1 }).rows[0];
+    expect(row.serviceName).toBe("img");
+    const log = c.logs.get(row.id);
+    expect(log.requestPayload).toMatch(/multipart \d+ bytes/);
+    expect(log.upstreamRequestPayload).toMatch(/multipart \d+ bytes/);
+    expect(log.requestPayload).not.toContain("reference.png");
+    expect(log.responsePayload).not.toContain("bulk-result");
+  });
+});
+
 const STT_BOUNDARY = "----hydrogenTestBoundary";
 
 /** One transcription upload: a `model` field, a `language` field the overrides

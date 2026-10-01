@@ -274,6 +274,30 @@ describe("media services on an Anthropic-primary provider", () => {
     expect(upstream.requests[0].url).toBe("/openai/v1/images/generations");
   });
 
+  it("multipart image edits reach the OpenAI alternate with its auth and model", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(json(200, { data: [{ b64_json: "edited" }] }));
+    const boundary = "----hydrogen-image-alt";
+    const body = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nimg-alt\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nadd a hat\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="cat.png"\r\n` +
+        `Content-Type: image/png\r\n\r\nPNGDATA\r\n--${boundary}--\r\n`,
+    );
+    const r = await app.inject({
+      method: "POST", url: "/v1/images/edits",
+      headers: { ...auth(), "content-type": `multipart/form-data; boundary=${boundary}` },
+      payload: body,
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().data[0].b64_json).toBe("edited");
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0].url).toBe("/openai/v1/images/edits");
+    expect(upstream.requests[0].headers.authorization).toBe("Bearer k");
+    expect(upstream.requests[0].headers["x-api-key"]).toBeUndefined();
+    expect(upstream.requests[0].body).toEqual(Buffer.from(body.toString().replace("img-alt", "real-model")));
+  });
+
   it("transcription (STT) reaches the alternate endpoint", async () => {
     upstream.requests.length = 0;
     upstream.setHandler(json(200, { text: "hello there" }));

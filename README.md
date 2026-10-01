@@ -312,7 +312,8 @@ Model Service name.
 | POST | `/v1/rerank` | rerank | |
 | POST | `/v1/systemone` | classification | Jev / Laya typed Choice, Score and Noul decisions |
 | POST | `/v1/systemone/batch` | classification | Laya batched-state extension; requires upstream support |
-| POST | `/v1/images/generations` | image | |
+| POST | `/v1/images/generations` | image | Text-to-image; provider-specific JSON reference fields pass through |
+| POST | `/v1/images/edits` | image | Reference-image generation / editing; multipart images + optional mask, or provider-supported JSON references |
 | POST | `/v1/videos` | video | Returns a job id carrying its own routing suffix |
 | GET | `/v1/videos/:id` · `/v1/videos/:id/content` | video | Poll and download, statelessly routed |
 | POST | `/v1/audio/speech` | tts | Binary audio streamed through |
@@ -320,6 +321,26 @@ Model Service name.
 
 Because `/v1/models` returns Model Services, any tool with a model picker shows your service names —
 which is the intent: `sonnet-any` *is* the model, as far as a client is concerned.
+
+**Reference-image generation and image editing** use the same `image` Model Service — no new
+service category or mapping is needed:
+
+```bash
+curl http://localhost:8080/v1/images/edits \
+  -H "Authorization: Bearer sk-hproxy-..." \
+  -F 'model=image-service' \
+  -F 'prompt=Add a blue hat to the cat in the reference image' \
+  -F 'image=@reference.png' \
+  -F 'mask=@mask.png'
+```
+
+Omit `mask` for an unmasked edit; for multiple references, repeat `image[]` file fields when the
+upstream model supports them. Images, masks, and other provider fields pass through untouched,
+except for the mapped `model` and per-step parameter overrides. Providers whose `/images/edits`
+endpoint accepts JSON URL/data-URL references can receive their native JSON body instead; Hydrogen does not
+fetch references or convert between request formats. Provider-specific reference fields on
+`/images/generations` also remain supported there. The upstream must support the requested
+operation and body format.
 
 For Jev/Laya provider setup, native payload examples and batching limitations, see the
 [semantic classification guide](<docs/semantic-classification.md>).

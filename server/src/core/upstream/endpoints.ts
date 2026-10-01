@@ -46,7 +46,7 @@ export function providerEndpoints(p: {
 }
 
 /**
- * The media/passthrough surface (`/embeddings`, `/images/generations`,
+ * The media/passthrough surface (`/embeddings`, `/images/generations`, `/images/edits`,
  * `/audio/*`, `/rerank`, `/videos`) uses JSON/Bearer endpoints under the
  * provider's base URL. The Jev/Laya `/systemone` surface uses the same routing
  * and authentication convention, but its own typed-decision body, not chat.
@@ -90,8 +90,8 @@ export function embeddingsUrl(p: UpstreamProvider): string {
 }
 
 /** OpenAI-style media endpoints (non-chat service categories). */
-export function imagesUrl(p: UpstreamProvider): string {
-  return endpointUrl(p.baseUrl, "/images/generations");
+export function imagesUrl(p: UpstreamProvider, operation: "generations" | "edits" = "generations"): string {
+  return endpointUrl(p.baseUrl, `/images/${operation}`);
 }
 
 export function speechUrl(p: UpstreamProvider): string {
