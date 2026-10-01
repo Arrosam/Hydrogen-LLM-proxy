@@ -4,6 +4,8 @@ import { readBoundedBody, MAX_ERROR_BODY_BYTES } from "./body";
 import type { Request } from "../ir/request";
 import { buildResponse, parseResponse, parseStream } from "../format/registry";
 import { collectStream } from "../ir/stream";
+import { decodeThinking, decodeThinkingStream } from "../ir/thinkingFormat";
+import { UpstreamStreamError } from "../ir/toolArguments";
 import type { SendTarget, Transport } from "./transport";
 import type { RelayResult, SendResult } from "./outcome";
 
@@ -46,7 +48,9 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
     const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
     if (r.status >= 200 && r.status < 300) {
       // A consumption error throws and is mapped to a retryable failure upstream.
-      const { data, incomplete, failure, error } = await collectStream(parseStream(req.family, r.body));
+      // Decode before collection: collection can merge text and reorder native
+      // reasoning/tool parts, erasing evidence of an interrupted inline block.
+      const { data, incomplete, failure, error } = await collectStream(decodeThinkingStream(parseStream(req.family, r.body), target.thinkingParser));
       if (failure || error) return { ok: false, status: failure?.status ?? 502, kind: "http", message: failure?.message ?? error!, retryable: failure?.retryable, usage: data.usage, sentBody };
       const missing = missingAnswerReason(data.content, data.stopReason);
       if (!incomplete && missing) return { ok: false, status: 502, kind: "http", message: missing, usage: data.usage, sentBody };
@@ -75,7 +79,17 @@ export async function sendBuffered(req: Request, transport: Transport, target: S
       : req.family === "anthropic" ? Array.isArray(body.content)
       : Array.isArray(body.output);
     if (!hasEnvelope) return { ok: false, status: 502, kind: "http", message: `upstream returned invalid ${req.family} response`, body, sentBody };
-    const response = parseResponse(req.family, body);
+    let response = parseResponse(req.family, body);
+    try {
+      const content = decodeThinking(response.content, target.thinkingParser, response.stopReason);
+      const decoding = target.thinkingParser && target.thinkingParser.mode !== "off";
+      if (content !== response.content || decoding && response.logprobs) {
+        response = buildResponse(req.family, { ...response.data(), content, ...(decoding ? { logprobs: undefined } : {}) });
+      }
+    } catch (error) {
+      if (!(error instanceof UpstreamStreamError)) throw error;
+      return { ok: false, status: 502, kind: "http", message: error.message, usage: response.usage, sentBody, retryable: false };
+    }
     const missing = missingAnswerReason(response.content, response.stopReason);
     if (missing) return { ok: false, status: 502, kind: "http", message: missing, usage: response.usage, sentBody };
     return { ok: true, response, sentBody };
@@ -89,7 +103,7 @@ export async function relayStream(req: Request, transport: Transport, target: Se
   const sentBody = req.withStream(true).render(target);
   const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
   if (r.status >= 200 && r.status < 300) {
-    return { ok: true, status: r.status, events: parseStream(req.family, r.body), sentBody };
+    return { ok: true, status: r.status, events: decodeThinkingStream(parseStream(req.family, r.body), target.thinkingParser), sentBody };
   }
   return { ok: false, status: r.status, kind: "http", message: `upstream returned ${r.status}`, body: await drainError(r.body), sentBody };
 }

@@ -47,9 +47,10 @@ export function providerEndpoints(p: {
 
 /**
  * The media/passthrough surface (`/embeddings`, `/images/generations`,
- * `/audio/*`, `/rerank`, `/videos`) is OpenAI-shaped, and both OpenAI families
- * expose it at the same paths under their own base URL. Anthropic has no such
- * surface at all.
+ * `/audio/*`, `/rerank`, `/videos`) uses JSON/Bearer endpoints under the
+ * provider's base URL. The Jev/Laya `/systemone` surface uses the same routing
+ * and authentication convention, but its own typed-decision body, not chat.
+ * Both OpenAI provider types can route these passthroughs; Anthropic cannot.
  */
 export function servesOpenAiMedia(t: ProviderType): boolean {
   return familyForProviderType(t) !== "anthropic";
@@ -104,6 +105,11 @@ export function transcriptionsUrl(p: UpstreamProvider): string {
 /** Jina/Cohere-compatible rerank endpoint. */
 export function rerankUrl(p: UpstreamProvider): string {
   return endpointUrl(p.baseUrl, "/rerank");
+}
+
+/** Jev / Laya typed semantic decisions. `/batch` is a Laya extension. */
+export function systemOneUrl(p: UpstreamProvider, suffix: "" | "/batch" = ""): string {
+  return endpointUrl(p.baseUrl, `/systemone${suffix}`);
 }
 
 export function videosUrl(p: UpstreamProvider, suffix = ""): string {

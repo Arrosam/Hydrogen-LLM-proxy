@@ -20,6 +20,8 @@ const KNOWN = new Set([
   "/v1/models",
   "/v1/embeddings",
   "/v1/rerank",
+  "/v1/systemone",
+  "/v1/systemone/batch",
   "/v1/images/generations",
   "/v1/videos",
   "/v1/audio/speech",
@@ -47,6 +49,8 @@ const SUFFIXES: Array<[string, string]> = [
   ["/embeddings", "/v1/embeddings"],
   ["/embedding", "/v1/embeddings"],
   ["/rerank", "/v1/rerank"],
+  ["/systemone/batch", "/v1/systemone/batch"],
+  ["/systemone", "/v1/systemone"],
   ["/models", "/v1/models"],
 ];
 

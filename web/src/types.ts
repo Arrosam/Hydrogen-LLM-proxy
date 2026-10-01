@@ -139,13 +139,15 @@ export interface ServiceStep {
   advanceOn?: AdvanceTrigger[];
   thinking?: ThinkingLevel;
   overrides?: Overrides;
+  thinkingParser?: ThinkingParser;
 }
 
 /** What kind of API a Model Service serves. Omitted = "chat". "ocr" runs the
  * chat pipeline too (OCR models are vision chat models) and IS usable inside
- * a Micro Agent; the other non-chat categories are OpenAI-style passthrough
- * endpoints and are NOT. Mirrors the server's ServiceCategorySchema. */
-export type ServiceCategory = "chat" | "ocr" | "image" | "video" | "tts" | "stt" | "embedding" | "rerank";
+ * a Micro Agent; the other categories use native passthrough endpoints and
+ * are NOT. "classification" serves Jev / Laya's typed questions, not OpenAI
+ * chat. Mirrors the server's ServiceCategorySchema. */
+export type ServiceCategory = "chat" | "ocr" | "image" | "video" | "tts" | "stt" | "embedding" | "rerank" | "classification";
 
 /** Categories served by the translated chat pipeline (usable in Micro Agents). */
 export function isChatPipelineCategory(c: ServiceCategory): boolean {
@@ -171,6 +173,12 @@ export interface ThinkingDelimiters {
   close: string;
 }
 
+/** Explicit input grammar for one upstream, independent of client presentation. */
+export type ThinkingParser =
+  | { mode: "off" }
+  | { mode: "think_tags"; unterminated?: "error" | "reasoning" }
+  | { mode: "custom"; delimiters: ThinkingDelimiters; unterminated?: "error" | "reasoning" };
+
 export interface ServiceSteps {
   hostedTools?: HostedToolOptions;
   category?: ServiceCategory;
@@ -178,6 +186,7 @@ export interface ServiceSteps {
   steps: ServiceStep[];
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Legacy field retained only for explicit migration in the editor; rejected by the server. */
   thinkingDelimiters?: ThinkingDelimiters;
   /** Aggregate budget (bytes) for URL attachments inlined for this service. 0/absent = unlimited. */
   maxAttachmentBytes?: number;
@@ -250,6 +259,7 @@ export interface AgentDef {
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
   thinkingFormat?: ThinkingFormat;
+  /** Legacy field retained only for explicit migration in the editor; rejected by the server. */
   thinkingDelimiters?: ThinkingDelimiters;
   /** Aggregate budget (bytes) for URL attachments inlined by each call. 0/absent = unlimited. */
   maxAttachmentBytes?: number;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AnthropicRequest, OpenAICompletionRequest, OpenAIResponsesRequest, parseStream } from "../src/core/format";
 import { collectStream, type StreamEvent } from "../src/core/ir/stream";
-import { applyThinkingFormat, withThinkingFormat } from "../src/core/ir/thinkingFormat";
+import { applyThinkingFormat, withThinkingFormat, decodeThinking, decodeThinkingStream } from "../src/core/ir/thinkingFormat";
 import type { Transport } from "../src/core/upstream/transport";
 import { missingAnswerReason, requireAnswer } from "../src/core/ir/answer";
 
@@ -93,8 +93,9 @@ describe("thinking format must not swallow the answer", () => {
       const chunks: StreamEvent[] = [];
       for (let i = 0; i < raw.length; i += size) chunks.push({ type: "text_delta", text: raw.slice(i, i + size) });
       chunks.push({ type: "finish", stopReason: "stop" });
-      const { data } = await collectStream(withThinkingFormat(source(chunks), "none"));
-      expect(data.content).toEqual(applyThinkingFormat([{ type: "text", text: raw }], "none"));
+      const parser = { mode: "custom" as const, delimiters: { open: `<${tag}>`, close: `</${tag} \n >` } };
+      const { data } = await collectStream(withThinkingFormat(decodeThinkingStream(source(chunks), parser), "none"));
+      expect(data.content).toEqual(applyThinkingFormat(decodeThinking([{ type: "text", text: raw }], parser), "none"));
       expect(data.content).toEqual([{ type: "text", text: "answer" }]);
     });
   }
@@ -104,7 +105,7 @@ describe("thinking format must not swallow the answer", () => {
       { type: "text_delta", text: "<think>first" }, { type: "usage", usage },
       { type: "text_delta", text: " second</think>answer" }, { type: "finish", stopReason: "stop", usage },
     ];
-    const { data } = await collectStream(withThinkingFormat(source(events), "none"));
+    const { data } = await collectStream(withThinkingFormat(decodeThinkingStream(source(events), { mode: "think_tags" }), "none"));
     expect(data.content).toEqual([{ type: "text", text: "answer" }]);
     expect(data.usage).toEqual(usage);
   });

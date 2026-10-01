@@ -12,6 +12,7 @@ import {
   rerankUrl,
   servesOpenAiMedia,
   speechUrl,
+  systemOneUrl,
   transcriptionsUrl,
   videosUrl,
   type UpstreamProvider,
@@ -30,8 +31,8 @@ import { JsonKeepalive } from "./jsonKeepalive";
 import type { ProxyDeps } from "./deps";
 
 /**
- * Client-facing endpoints for the non-chat service categories. Each is an
- * OpenAI-style passthrough: the request body goes to the provider's matching
+ * Client-facing endpoints for the non-chat service categories. Each is a
+ * JSON/media passthrough: the request body goes to the provider's matching
  * endpoint with `model` swapped to the mapped upstream name (plus any step
  * override parameters), and the step chain's retry/fallback rules apply.
  *
@@ -47,16 +48,18 @@ type MediaCategory = Exclude<ServiceCategory, "chat" | "ocr">;
 const ENDPOINT_BY_CATEGORY: Record<MediaCategory, string> = {
   embedding: "/v1/embeddings",
   rerank: "/v1/rerank",
+  classification: "/v1/systemone",
   image: "/v1/images/generations",
   video: "/v1/videos",
   tts: "/v1/audio/speech",
   stt: "/v1/audio/transcriptions",
 };
 
-function mediaUrl(category: MediaCategory, p: UpstreamProvider): string {
+function mediaUrl(category: MediaCategory, p: UpstreamProvider, suffix: "" | "/batch" = ""): string {
   switch (category) {
     case "embedding": return embeddingsUrl(p);
     case "rerank": return rerankUrl(p);
+    case "classification": return systemOneUrl(p, suffix);
     case "image": return imagesUrl(p);
     case "video": return videosUrl(p);
     case "tts": return speechUrl(p);
@@ -141,6 +144,9 @@ export class MediaController {
     const pre = { preHandler: requireClientToken(this.deps.tokens, "openai_completion") };
     app.post("/v1/embeddings", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "embedding")));
     app.post("/v1/rerank", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "rerank")));
+    app.post("/v1/systemone", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "classification")));
+    // Laya's optional batched-state extension; not emulated for Jev providers.
+    app.post("/v1/systemone/batch", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "classification", "/batch")));
     app.post("/v1/images/generations", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "image")));
     app.post("/v1/videos", pre, (req, reply) => this.withWork(req, () => this.handleJson(req, reply, "video")));
     app.post("/v1/audio/speech", pre, (req, reply) => this.withWork(req, () => this.handleSpeech(req, reply)));
@@ -203,8 +209,9 @@ export class MediaController {
     send: (step: ServiceStep, target: ResolvedTarget) => Promise<AttemptResult<MediaHit>>,
   ): Promise<RunOutput<MediaHit>> {
     return runSteps<MediaHit>(def, async (step) => {
-      // Constrained to the OpenAI-shaped endpoints: a provider that also
-      // declares one reaches it here even when its primary is Anthropic.
+      // JSON/Bearer passthroughs use the OpenAI endpoint families (including
+      // Jev/Laya's non-chat System One wire). Enabled alternates qualify even
+      // when the provider's primary is Anthropic.
       const res = this.deps.catalog.resolveWithin(step.model, step.provider, MEDIA_FAMILIES);
       if (!res.ok) {
         const message =
@@ -270,8 +277,8 @@ export class MediaController {
     return gone.signal;
   }
 
-  /** JSON-in/JSON-out categories: embedding, rerank, image, video (create). */
-  private async handleJson(req: FastifyRequest, reply: FastifyReply, category: MediaCategory): Promise<unknown> {
+  /** JSON-in/JSON-out categories: embedding, rerank, classification, image, video (create). */
+  private async handleJson(req: FastifyRequest, reply: FastifyReply, category: MediaCategory, suffix: "" | "/batch" = ""): Promise<unknown> {
     const token = req.clientToken!;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const serviceName = String(body.model ?? "");
@@ -289,7 +296,7 @@ export class MediaController {
     const outcome = await this.run(def, category, signal, async (step, target) => {
       const upstreamBody = { ...body, ...stepParams(step), model: target.upstreamModel };
       lastSent = upstreamBody;
-      const r = await this.deps.transport.postJson(mediaUrl(category, target.upstream), buildHeaders(target.upstream), upstreamBody, {
+      const r = await this.deps.transport.postJson(mediaUrl(category, target.upstream, suffix), buildHeaders(target.upstream), upstreamBody, {
         timeoutMs: def.timeoutMs, signal, proxy: target.upstream.proxy,
       });
       if (r.status >= 200 && r.status < 300) {
@@ -312,7 +319,9 @@ export class MediaController {
     if (category === "video" && json && typeof json.id === "string") {
       json = { ...json, id: suffixVideoId(json.id, service.id, hit.target.providerId, hit.target.endpointIndex, token.id, this.videoKey) };
     }
-    this.recordOnDelivery(reply, ctx, outcome, hit.status, usageFrom(category, json), hit.sentBody);
+    // Typed answers are the result, not bulk data like vectors/base64 images.
+    this.recordOnDelivery(reply, ctx, outcome, hit.status, usageFrom(category, json, suffix === "/batch"), hit.sentBody,
+      category === "classification" ? json ?? hit.text : undefined);
     if (keepalive.finish(json ?? hit.text)) return;
     return reply.code(hit.status).send(json ?? hit.text);
   }
@@ -504,8 +513,21 @@ function zeroUsage(): Usage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
-/** Embeddings report prompt-token usage; the other categories have none. */
-function usageFrom(category: MediaCategory, json: Record<string, unknown> | undefined): Usage {
+/** Jev/Laya use input/output counters; Laya batches expose aggregate total_usage.
+ * Missing/invalid upstream counters must never reduce a client's quota. */
+function tokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+/** Embeddings and classification report token usage; other categories have none. */
+function usageFrom(category: MediaCategory, json: Record<string, unknown> | undefined, batch = false): Usage {
+  if (category === "classification") {
+    const raw = batch ? json?.total_usage : json?.usage;
+    const u = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    const promptTokens = tokenCount(u.input_tokens);
+    const completionTokens = tokenCount(u.output_tokens);
+    return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
+  }
   if (category !== "embedding") return zeroUsage();
   const u = (json?.usage ?? {}) as { prompt_tokens?: number; total_tokens?: number };
   return {

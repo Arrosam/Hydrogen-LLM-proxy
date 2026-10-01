@@ -34,8 +34,8 @@ type Transport = "proxy" | "internal";
 type TargetKind = "service" | "agent" | "raw";
 
 const FAMILIES: Family[] = ["openai_completion", "anthropic", "openai_responses"];
-const MEDIA_CATEGORIES: ServiceCategory[] = ["embedding", "rerank", "image", "video", "tts", "stt"];
-const ALL_CATEGORIES: ServiceCategory[] = ["chat", ...MEDIA_CATEGORIES];
+const NON_CHAT_CATEGORIES: ServiceCategory[] = ["embedding", "rerank", "classification", "image", "video", "tts", "stt"];
+const ALL_CATEGORIES: ServiceCategory[] = ["chat", ...NON_CHAT_CATEGORIES];
 
 const isChatCategory = (c: ServiceCategory): boolean => c === "chat" || c === "ocr";
 
@@ -49,6 +49,7 @@ function proxyPath(category: ServiceCategory, ingress: Family): string {
   switch (category) {
     case "embedding": return "/v1/embeddings";
     case "rerank": return "/v1/rerank";
+    case "classification": return "/v1/systemone";
     case "image": return "/v1/images/generations";
     case "video": return "/v1/videos";
     case "tts": return "/v1/audio/speech";
@@ -153,11 +154,32 @@ function buildChatBody(i: ChatInput): Record<string, unknown> {
   };
 }
 
-/** A starting body for each media category, so the panel is never a blank box. */
-function defaultMediaBody(category: ServiceCategory, model: string, text: string): Record<string, unknown> {
+/** A starting native body for each non-chat category, editable in the body panel. */
+function defaultNativeBody(category: ServiceCategory, model: string, text: string): Record<string, unknown> {
   switch (category) {
     case "embedding": return { model, input: text || "hello" };
     case "rerank": return { model, query: text || "hello", documents: ["first document", "second document"] };
+    case "classification": return {
+      model,
+      state: text || "My payouts have been failing for three days. Please help today!",
+      questions: {
+        department: {
+          type: "choice",
+          instructions: "Which team should handle this request?",
+          criteria: { billing: "Payments, invoices, refunds", technical: "Bugs, outages, integrations", sales: "Pricing, upgrades, new accounts" },
+        },
+        frustration: {
+          type: "score",
+          instructions: "How frustrated is the customer?",
+          criteria: ["Calm", "Frustrated", "Very angry"],
+        },
+        is_urgent: {
+          type: "noul",
+          instructions: "Does this request need urgent attention?",
+          criteria: { true: "Explicitly time-sensitive", false: "No urgency expressed" },
+        },
+      },
+    };
     case "image": return { model, prompt: text || "a red circle on a white background", n: 1, size: "1024x1024" };
     case "video": return { model, prompt: text || "a red circle rolling across a white background" };
     case "tts": return { model, input: text || "Hydrogen model bench.", voice: "alloy" };
@@ -325,6 +347,7 @@ export function ModelBench() {
 
   const [system, setSystem] = useState("");
   const [prompt, setPrompt] = useState("Reply with the single word: pong.");
+  const [classificationState, setClassificationState] = useState("My payouts have been failing for three days. Please help today!");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [fillerTokens, setFillerTokens] = useState(10_000);
   const [filler, setFiller] = useState("");
@@ -426,7 +449,8 @@ export function ModelBench() {
     return out;
   }, [params]);
 
-  const composedText = filler ? `${prompt}\n\n${filler}` : prompt;
+  const inputText = category === "classification" ? classificationState : prompt;
+  const composedText = filler ? `${inputText}\n\n${filler}` : inputText;
 
   /**
    * The request body, built ON DEMAND rather than on every render.
@@ -450,7 +474,7 @@ export function ModelBench() {
         params: paramObject,
       });
     }
-    return { ...defaultMediaBody(category, modelName, composedText), ...paramObject };
+    return { ...defaultNativeBody(category, modelName, composedText), ...paramObject };
   }, [isChat, modelName, ingress, system, composedText, attachments, streaming, paramObject, category]);
 
   /**
@@ -777,7 +801,7 @@ export function ModelBench() {
                   {pickable.length === 0 && <option value="">{t("bench.noTargets")}</option>}
                   {pickable.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.name} · {s.category}
+                      {s.name} · {s.category === "classification" ? t("serviceEditor.category.classification") : s.category}
                       {s.enabled ? "" : ` (${t("common.disabled")})`}
                     </option>
                   ))}
@@ -825,7 +849,7 @@ export function ModelBench() {
                   <label className="label">{t("bench.field.category")}</label>
                   <select className="select" value={rawCategory} onChange={(e) => setRawCategory(e.target.value as ServiceCategory)}>
                     {ALL_CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>{cat}</option>
+                      <option key={cat} value={cat}>{cat === "classification" ? t("serviceEditor.category.classification") : cat}</option>
                     ))}
                   </select>
                 </div>
@@ -902,8 +926,9 @@ export function ModelBench() {
             )}
 
             <div>
-              <label className="label">{isChat ? t("bench.field.message") : t("bench.field.input")}</label>
-              <textarea className="input h-28 font-mono text-xs" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+              <label className="label">{isChat ? t("bench.field.message") : t(category === "classification" ? "bench.field.state" : "bench.field.input")}</label>
+              <textarea className="input h-28 font-mono text-xs" value={inputText} onChange={(e) => category === "classification" ? setClassificationState(e.target.value) : setPrompt(e.target.value)} />
+              {category === "classification" && <p className="mt-1 text-xs text-ink-500">{t("bench.classification.hint")}</p>}
             </div>
 
             {/* Context-window probe */}
@@ -941,7 +966,7 @@ export function ModelBench() {
               </p>
             </div>
 
-            <div>
+            {category !== "classification" && <div>
               <label className="label">{category === "stt" ? t("bench.field.audio") : t("bench.field.attachments")}</label>
               <input
                 className="input text-xs"
@@ -967,7 +992,7 @@ export function ModelBench() {
                   ))}
                 </ul>
               )}
-            </div>
+            </div>}
 
             <ParamsEditor rows={params} onChange={setParams} />
           </div>

@@ -36,6 +36,7 @@ let upstream: http.Server;
 let baseUrl: string;
 /** Flipped per test to make the next upstream answer a failure. */
 let failWith: { status: number; body: unknown } | null = null;
+let textOutput = "pong";
 
 /** One server playing every upstream shape; the path says which. */
 function startUpstream(): Promise<void> {
@@ -64,7 +65,7 @@ function startUpstream(): Promise<void> {
             res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "up", ...d })}\n\n`);
           };
           chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-          chunk({ choices: [{ index: 0, delta: { content: "pong" }, finish_reason: null }] });
+          chunk({ choices: [{ index: 0, delta: { content: textOutput }, finish_reason: null }] });
           chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
           chunk({
             choices: [],
@@ -131,6 +132,7 @@ beforeAll(async () => {
     families: ["openai_completion", "anthropic"],
   });
   c.services.create({ name: "svc", definition: { timeoutMs: 10_000, steps: [{ model: "m1", provider: "dual" }] } });
+  c.services.create({ name: "hidden", definition: { timeoutMs: 10_000, thinkingFormat: "none", steps: [{ model: "m1", provider: "dual", thinkingParser: { mode: "think_tags" } }] } });
   c.services.create({
     name: "emb",
     definition: { timeoutMs: 10_000, category: "embedding", steps: [{ model: "m1", provider: "dual" }] },
@@ -347,6 +349,20 @@ describe("a streamed run reports its tokens, like a buffered one", () => {
     expect(meta.usage!.promptTokens).toBe(100);
     expect(meta.usage!.completionTokens).toBe(9);
     expect(meta.usage!.cachedInputTokens).toBe(70);
+  });
+
+  it("reports malformed decoded streams as failures, with usage and no hidden text", async () => {
+    textOutput = "<think>private unfinished thought";
+    try {
+      const service = c.services.getByName("hidden");
+      const response = await post("/admin/api/bench/chat", { target: { kind: "service", serviceId: service.id }, ingress: "openai_completion", body: { ...CHAT_BODY, stream: true } });
+      const frame = response.payload.split("\n\n").find(frame => frame.startsWith("event: bench"))!;
+      const meta = JSON.parse(frame.split("\n").find(line => line.startsWith("data:"))!.slice(5));
+      expect(meta).toMatchObject({ ok: false, status: 502, usage: { completionTokens: 9 } });
+      expect(meta.message).toContain("thinking block is unterminated");
+      expect(response.payload).not.toContain("private unfinished thought");
+      expect(response.payload).not.toContain("[DONE]");
+    } finally { textOutput = "pong"; }
   });
 
   it("a buffered run of the same request reports the same numbers", async () => {

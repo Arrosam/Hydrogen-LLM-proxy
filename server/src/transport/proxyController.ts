@@ -16,8 +16,9 @@ import { missingAnswerReason, requireAnswer } from "../core/ir/answer";
 import { UpstreamStreamError } from "../core/ir/toolArguments";
 import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
-import { isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
-import { withThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
+import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { requireThinkingReplay, thinkingReplayError, ThinkingReplayError } from "../core/ir/thinkingReplay";
 import { requireClientToken } from "../auth/tokenAuth";
 import { genId } from "../util/ids";
 import { asMillis } from "../util/time";
@@ -37,9 +38,6 @@ interface RequestCtx {
   ingress: Family;
   /** How this service presents thinking to its client (ir/thinkingFormat.ts). */
   thinkingFormat: ThinkingFormat;
-  /** Literal thinking boundaries this service declares, when its upstream's
-   * model does not delimit its trace in a shape the scanner recognises. */
-  thinkingDelimiters?: ThinkingDelimiters;
 }
 
 /**
@@ -308,7 +306,6 @@ export class ProxyController {
     // Media passthrough categories (image/tts/embedding/...) have their own
     // endpoints; the chat pipeline serves chat and ocr services.
     let thinkingFormat: ThinkingFormat = "original";
-    let thinkingDelimiters: ThinkingDelimiters | undefined;
     try {
       const def = this.deps.services.def(service);
       const category = serviceCategory(def);
@@ -320,7 +317,6 @@ export class ProxyController {
         return this.replyError(reply, ingress, 400, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
       }
       thinkingFormat = serviceThinkingFormat(def);
-      thinkingDelimiters = serviceThinkingDelimiters(def);
     } catch { /* an unparsable definition falls through to the 500 below */ }
 
     const started = Date.now();
@@ -337,7 +333,7 @@ export class ProxyController {
       return this.replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
     }
 
-    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat, thinkingDelimiters };
+    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
     try {
@@ -404,12 +400,15 @@ export class ProxyController {
       // so the full body has no reason to stay live across the send.
       const upstreamPayload = this.deps.logger.capture(value.upstreamRequest);
       value.upstreamRequest = {};
-      // Shape the client's copy: lift a `<think>` block out of the answer, inline
-      // it into the answer, or drop it. `original` returns the same object.
-      const shapedResponse = value.response.withThinkingFormat(thinkingFormat, thinkingDelimiters);
-      const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
+      // A stateless client must be able to replay the canonical reasoning on
+      // its next turn. Reject incompatible presentation before shaping, rather
+      // than silently falling back to original and leaking hidden thinking.
+      const replayError = thinkingReplayError(value.response.content, thinkingFormat, value.family);
+      const shapedResponse = replayError ? value.response : value.response.withThinkingFormat(thinkingFormat);
+      const responseError = replayError ?? missingAnswerReason(value.response.content, value.response.stopReason) ??
         missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
-      const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
+      const responseStatus = replayError ? 400 : responseError ? 502 : 200;
+      const clientBody = responseError ? buildErrorBody(ingress, responseStatus, responseError)
         : shapedResponse.render(ingress, serviceName, { thinkingFormat });
       // Deliver first, then log what actually happened: writing the 200 row
       // before send() is how a response nobody received was recorded as success.
@@ -424,11 +423,11 @@ export class ProxyController {
           }
         } catch { /* the connection died first; responseFlushed reports it */ }
       } else {
-        reply.code(emptyReason ? 502 : 200).send(clientBody);
+        reply.code(responseStatus).send(clientBody);
       }
       const flushed = await settled;
-      const status = flushed ? (emptyReason ? 502 : 200) : 499;
-      const error = flushed ? emptyReason ?? null : "connection closed before the response was fully sent";
+      const status = flushed ? responseStatus : 499;
+      const error = flushed ? responseError ?? null : "connection closed before the response was fully sent";
       prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
       this.deps.activeRequests.finish(traceId, status, error ?? undefined);
       this.deps.logger.record({
@@ -436,7 +435,7 @@ export class ProxyController {
         servedModel: value.modelName, servedProvider: value.providerName,
         ingress, egress: value.family, streaming: false, httpStatus: status, http,
         upstreamPayload,
-        responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
+        responseBody: responseError && !replayError ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
         usage: value.response.usage, latencyMs: Date.now() - started,
         attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
       });
@@ -582,11 +581,12 @@ export class ProxyController {
    * reflects delivery failure. */
   private async relay(reply: FastifyReply, ctx: RequestCtx, value: StreamValue, o: { attempts: number; attemptPath: unknown; committed?: boolean }): Promise<void> {
     const acc: StreamAccumulator = newAccumulator();
-    const validated = requireAnswer(value.events);
+    const validated = requireAnswer(requireThinkingReplay(value.events, ctx.thinkingFormat, value.family));
     const events = value.dropReasoning ? withoutReasoning(validated) : validated;
     // Shaped BEFORE the tap, so the log records the copy the client actually
-    // received rather than a canonical form it never saw.
-    const shaped = withThinkingFormat(events, ctx.thinkingFormat, ctx.thinkingDelimiters);
+    // received rather than a canonical form it never saw. Replay validation must
+    // precede any filter that could erase the evidence needed to reject safely.
+    const shaped = withThinkingFormat(events, ctx.thinkingFormat);
     const outGen = serializeStream(ctx.ingress, tapStream(requireAnswer(shaped), acc), {
       model: ctx.serviceName,
       thinkingFormat: ctx.thinkingFormat,
@@ -611,6 +611,7 @@ export class ProxyController {
     return (async () => {
       let streamError: string | null = null;
       let protocolError = false;
+      let replayError = false;
       let clientDisconnected = false;
       try {
         for await (const chunk of outGen) {
@@ -644,6 +645,7 @@ export class ProxyController {
       } catch (e) {
         streamError = e instanceof Error ? e.message : String(e);
         protocolError = e instanceof UpstreamStreamError;
+        replayError = e instanceof ThinkingReplayError;
       } finally {
         // Capture the socket now: Node detaches it from the response on finish,
         // and the delivery watch below needs it after that point.
@@ -657,11 +659,12 @@ export class ProxyController {
           // HTTP message it would read as complete. Abort instead: an unfinished
           // chunked body is an error in every HTTP client.
           const answerIsShort = streamError !== null || acc.incomplete;
+          const failureCode = replayError ? 400 : acc.failure?.status ?? 502;
           try {
             if (!committed && answerIsShort) {
-              reply.code(acc.failure?.status ?? 502).send(buildErrorBody(ctx.ingress, acc.failure?.status ?? 502, acc.error ?? streamError ?? "upstream stream ended before completion (truncated)"));
-            } else if (acc.error || protocolError) {
-              raw.write(buildErrorFrame(ctx.ingress, acc.failure?.status ?? 502, acc.error ?? streamError!));
+              reply.code(failureCode).send(buildErrorBody(ctx.ingress, failureCode, acc.error ?? streamError ?? "upstream stream ended before completion (truncated)"));
+            } else if (acc.error || protocolError || replayError) {
+              raw.write(buildErrorFrame(ctx.ingress, failureCode, acc.error ?? streamError!));
               raw.end();
             } else if (answerIsShort) raw.destroy();
             else raw.end();
@@ -678,7 +681,13 @@ export class ProxyController {
         if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
         let error = streamError;
         let status = 200;
-        if (streamError) status = protocolError ? 502 : 499;
+        if (streamError) {
+          status = replayError ? 400 : protocolError ? 502 : 499;
+          if (replayError) {
+            responseBody.incomplete = true;
+            responseBody.error = streamError;
+          }
+        }
         else if (clientDisconnected) {
           status = 499;
           error = "client disconnected before stream completed";

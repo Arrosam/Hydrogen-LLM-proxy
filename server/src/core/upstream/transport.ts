@@ -1,5 +1,6 @@
 import type { Readable } from "node:stream";
 import type { EgressProxy } from "./egress/types";
+import type { ThinkingParser } from "../ir/thinkingFormat";
 
 /**
  * The HTTP transport a Request subclass uses to reach an upstream. The concrete
@@ -74,6 +75,8 @@ export interface TransportStreamResult {
  * the thinking policy fit a budget under the provider's hard cap.
  */
 export interface SendTarget {
+  /** Local wire-to-canonical decoding; never serialized into the upstream body. */
+  thinkingParser?: ThinkingParser;
   upstreamModel: string;
   url: string;
   headers: Record<string, string>;

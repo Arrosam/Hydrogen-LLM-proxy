@@ -1,5 +1,6 @@
 import { addUsage, ZERO_USAGE } from "../core/ir/usage";
 import { buildRequest } from "../core/format/registry";
+import { requireAnswer } from "../core/ir/answer";
 import type { Family, RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
 import { inlineUrlFiles, needsUrlFileInlining } from "./fileFetch";
@@ -136,6 +137,7 @@ export class ModelService {
       });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
+        thinkingParser: step.thinkingParser,
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
@@ -153,8 +155,10 @@ export class ModelService {
       }
       prog?.record("llm", "llm.receive", `response generated and received from ${t.upstreamModel}`, { status: 200 });
       prog?.record("llm", "llm.result", `result parsed and ready for return`, { model: t.upstreamModel });
-      // Honor a "disabled" thinking level end-to-end even if the upstream ignored it.
+      // The wire round-trip decoded this step's grammar before collection and
+      // answer validation, so canonical history never sees ambiguous raw tags.
       let response = sent.response;
+      // Honor a "disabled" thinking level end-to-end even if the upstream ignored it.
       if (merged.params.thinking === "disabled") response = response.withoutReasoning();
       return {
         ok: true,
@@ -236,6 +240,7 @@ export class ModelService {
       });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
+        thinkingParser: step.thinkingParser,
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
@@ -256,7 +261,7 @@ export class ModelService {
       return {
         ok: true,
         value: {
-          events: sent.events,
+          events: requireAnswer(sent.events),
           family: t.family,
           upstreamModel: t.upstreamModel,
           providerName: t.providerName,

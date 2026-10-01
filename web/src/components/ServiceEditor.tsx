@@ -5,6 +5,7 @@ import { Toggle } from "./common";
 import { useToast } from "./Toast";
 import { AsrEditor, OcrEditor, StageEditor } from "./StageEditor";
 import { OverridesEditor } from "./OverridesEditor";
+import { ThinkingParserEditor } from "./ThinkingParserEditor";
 import { useI18n } from "../lib/i18n";
 import { intInput, selectAll } from "../lib/input";
 import { useListKeys } from "../lib/useListKeys";
@@ -33,6 +34,7 @@ import {
   type ThinkingFormat,
   isAgentDef,
   isChatPipelineCategory,
+  serviceCategoryOf,
 } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
@@ -42,7 +44,7 @@ const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
  * the editor when no explicit retry policy is set. */
 const DEFAULT_RETRY_ON: Trigger[] = [429, 499, 502, 503, "timeout", "network"];
 
-/** The client-facing endpoint each media passthrough category is served on.
+/** The client-facing endpoint each non-chat passthrough category is served on.
  * (chat and ocr both run the chat pipeline on /v1/chat/completions.) */
 const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, string> = {
   image: "/v1/images/generations",
@@ -51,6 +53,7 @@ const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, strin
   stt: "/v1/audio/transcriptions",
   embedding: "/v1/embeddings",
   rerank: "/v1/rerank",
+  classification: "/v1/systemone",
 };
 
 /**
@@ -156,8 +159,9 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
   const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
-  const [thinkingOpen, setThinkingOpen] = useState("");
-  const [thinkingClose, setThinkingClose] = useState("");
+  // Keep legacy input visible until the operator explicitly migrates it; never
+  // silently drop a configured grammar while saving unrelated changes.
+  const [legacyDelimiters, setLegacyDelimiters] = useState<ServiceSteps["thinkingDelimiters"]>();
   const [maxAttachmentMiB, setMaxAttachmentMiB] = useState(0);
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
@@ -205,8 +209,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
       setThinkingFormat(service.steps?.thinkingFormat ?? "original");
-      setThinkingOpen(service.steps?.thinkingDelimiters?.open ?? "");
-      setThinkingClose(service.steps?.thinkingDelimiters?.close ?? "");
+      setLegacyDelimiters(service.steps?.thinkingDelimiters);
       setMaxAttachmentMiB(Math.round((service.steps?.maxAttachmentBytes ?? 0) / (1024 * 1024)));
     } else {
       const firstModel = models[0]?.name ?? "";
@@ -223,8 +226,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setCategory("chat");
       setReliableStreaming(false);
       setThinkingFormat("original");
-      setThinkingOpen("");
-      setThinkingClose("");
+      setLegacyDelimiters(undefined);
       setMaxAttachmentMiB(0);
     }
     setRaw(false);
@@ -236,9 +238,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   // persisted -- a definition nobody configured stays as short as it was.
   const thinkingFormatField = () => {
     if (!isChatPipelineCategory(kind === "chain" ? "chat" : category)) return {};
-    // Both halves or neither: half a pair is a declaration the scanner cannot
-    // use, and persisting it would read as configured when it is not.
-    const delimiters = thinkingOpen && thinkingClose ? { thinkingDelimiters: { open: thinkingOpen, close: thinkingClose } } : {};
+    const delimiters = legacyDelimiters ? { thinkingDelimiters: legacyDelimiters } : {};
     if (thinkingFormat === "original") return delimiters;
     return { thinkingFormat, ...delimiters };
   };
@@ -342,8 +342,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
       setThinkingFormat(parsed.thinkingFormat ?? "original");
-      setThinkingOpen(parsed.thinkingDelimiters?.open ?? "");
-      setThinkingClose(parsed.thinkingDelimiters?.close ?? "");
+      setLegacyDelimiters(parsed.thinkingDelimiters);
       setMaxAttachmentMiB(Math.round((parsed.maxAttachmentBytes ?? 0) / (1024 * 1024)));
       setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
       return parsed;
@@ -480,7 +479,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
           <div>
             <label className="label">{t("serviceEditor.categoryLabel")}</label>
             <select className="select w-auto" value={category} onChange={(e) => setCategory(e.target.value as ServiceCategory)}>
-              {(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"] as const).map((c) => (
+              {(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank", "classification"] as const).map((c) => (
                 <option key={c} value={c}>{t(`serviceEditor.category.${c}`)}</option>
               ))}
             </select>
@@ -491,7 +490,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
             )}
             {category !== "chat" && category !== "ocr" && (
               <p className="mt-1 text-[11px] text-ink-600">
-                {t("serviceEditor.categoryHint", { endpoint: CATEGORY_ENDPOINTS[category] })}
+                {t(category === "classification" ? "serviceEditor.categoryHintClassification" : "serviceEditor.categoryHint", { endpoint: CATEGORY_ENDPOINTS[category] })}
               </p>
             )}
           </div>
@@ -522,27 +521,16 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               ))}
             </select>
             <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">{t("serviceEditor.thinkingOpen")}</label>
-                <input
-                  className="input"
-                  value={thinkingOpen}
-                  onChange={(e) => setThinkingOpen(e.target.value)}
-                  placeholder={t("serviceEditor.thinkingOpenPlaceholder")}
-                />
+            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.thinkingParserHint")}</p>
+            {legacyDelimiters && (
+              <div className="mt-3 rounded-lg border border-amber-700 p-3 text-xs text-amber-300">
+                <p>{t("serviceEditor.thinkingLegacyWarning")}</p>
+                <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(legacyDelimiters, null, 2)}</pre>
+                <button type="button" className="btn-ghost btn-xs mt-2" onClick={() => setLegacyDelimiters(undefined)}>
+                  {t("serviceEditor.thinkingLegacyRemove")}
+                </button>
               </div>
-              <div>
-                <label className="label">{t("serviceEditor.thinkingClose")}</label>
-                <input
-                  className="input"
-                  value={thinkingClose}
-                  onChange={(e) => setThinkingClose(e.target.value)}
-                  placeholder={t("serviceEditor.thinkingClosePlaceholder")}
-                />
-              </div>
-            </div>
-            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.thinkingDelimitersHint")}</p>
+            )}
           </div>
         )}
 
@@ -585,7 +573,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                 setStages(s);
                 setOutput(o);
               }}
-              services={services.filter((m) => m.id !== service?.id)}
+              services={services.filter((m) => m.id !== service?.id && isChatPipelineCategory(serviceCategoryOf(m.steps)))}
             />
           </div>
         ) : (
@@ -683,6 +671,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         />
                       </div>
 
+                      {isChatPipelineCategory(category) && <ThinkingParserEditor value={step.thinkingParser} onChange={thinkingParser => patchStep(i, { thinkingParser })} />}
                       <StepAdvanced step={step} onPatch={(p) => patchStep(i, p)} />
 
                       {i < steps.length - 1 && (

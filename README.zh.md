@@ -38,7 +38,7 @@
 > **微代理（Micro Agent）** — 一个阶段式流水线（草稿 → 评审 → 修订、路由器、图像 OCR 预处理），
 > 客户端调用它就像调用一个普通模型名一样。无需任何客户端适配。
 >
-> **不止对话** — 模型服务还覆盖图像生成、视频、语音合成、语音识别、向量嵌入和重排序，
+> **不止对话** — 模型服务还覆盖图像生成、视频、语音合成、语音识别、向量嵌入、重排序和语义分类（Jev / Laya），
 > 每一种都享有相同的重试/回退引擎。
 >
 > **一键部署** — 已上架[雨云应用商店](#1-雨云应用商店一键部署)，
@@ -88,12 +88,13 @@
 
 - **两种协议格式，双向翻译。** OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages
   ——流式/非流式、工具调用、图像和思考块都完整保留而非丢弃。
-- **八种服务类型。** `chat`、`ocr`、`image`、`video`、`tts`、`stt`、`embedding`、`rerank`
-  ——非对话类型使用 OpenAI 风格的直通代理，同样跑你的步骤链。
+- **九种服务类型。** `chat`、`ocr`、`image`、`video`、`tts`、`stt`、`embedding`、`rerank`、`classification`
+  ——非对话类型通过专用端点透传，同样跑你的步骤链；语义分类保留 Jev / Laya 的 System One 类型化决策协议。
 - **微代理。** 只进不退的阶段流水线，支持条件分支和路由器。每个阶段运行一个已保存的模型服务，
   继承该服务的全部韧性配置。支持嵌套，环路会被拒绝。
 - **逐步参数覆写。** Temperature、top-p/top-k、max tokens、停止序列、思考级别、system 覆写，
   以及任意额外 body 参数——都按步骤绑定，不是按客户端。
+- **显式思考解码与输出分离。** 每个上游步骤独立配置内联思考标记，支持增量解析、异常块明确拒绝以及续接回放保护。旧配置需按[配置与迁移指南](<docs/thinking-formats.md>)迁移。
 - **可靠流式。** 缓冲上游流，把中途截断视为可重试错误，重放完整响应——或者返回干净的 502，
   永远不会只给一半。
 - **带缓存的图像 OCR。** 视觉预处理阶段将图像转为文本供下游阶段使用；描述按图像哈希缓存，
@@ -288,6 +289,8 @@ curl http://localhost:8080/v1/messages \
 | GET | `/v1/models` | — | 列出你的模型服务（发送 `anthropic-version` 头则返回 Anthropic 格式） |
 | POST | `/v1/embeddings` | embedding | OpenAI 兼容供应商 |
 | POST | `/v1/rerank` | rerank | |
+| POST | `/v1/systemone` | classification | Jev / Laya 的 Choice、Score 和 Noul 类型化决策 |
+| POST | `/v1/systemone/batch` | classification | Laya 多状态批处理扩展，需上游支持 |
 | POST | `/v1/images/generations` | image | |
 | POST | `/v1/videos` | video | 返回带路由后缀的任务 ID |
 | GET | `/v1/videos/:id` · `/v1/videos/:id/content` | video | 轮询和下载，无状态路由 |
@@ -296,6 +299,8 @@ curl http://localhost:8080/v1/messages \
 
 因为 `/v1/models` 返回的是模型服务，任何有模型选择器的工具都会显示你的服务名
 ——这正是设计意图：`sonnet-any` *就是*模型，对客户端而言。
+
+Jev / Laya 的供应商配置、原生请求示例及批处理限制见[语义分类指南（English）](<docs/semantic-classification.md>)。
 
 Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hydrogen 保存会话并执行工具循环，具体工具逻辑由外部 HTTP 转接服务实现。参见[会话与服务器工具接入指南](docs/server-tools.zh.md)（[English design](docs/server-tools-design.md)）。
 

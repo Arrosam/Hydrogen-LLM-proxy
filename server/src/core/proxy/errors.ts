@@ -24,6 +24,20 @@ export function extractUpstreamMessage(body: unknown): string | null {
     if (typeof m === "string") return m;
   }
   if (typeof b.message === "string") return b.message;
+  // Laya's FastAPI server uses detail for HTTPException and validation errors.
+  // Keep diagnostics bounded and do not echo validation `input`/`ctx` fields.
+  if (typeof b.detail === "string") return b.detail.slice(0, 500);
+  if (Array.isArray(b.detail)) {
+    const messages: string[] = [];
+    for (const item of b.detail.slice(0, 10)) {
+      if (!item || typeof item !== "object" || typeof item.msg !== "string") continue;
+      const loc = Array.isArray(item.loc)
+        ? item.loc.slice(0, 10).filter((v: unknown) => typeof v === "string" || typeof v === "number").join(".").slice(0, 200)
+        : "";
+      messages.push(`${loc ? `${loc}: ` : ""}${item.msg.slice(0, 500)}`);
+    }
+    if (messages.length) return messages.join("; ").slice(0, 500);
+  }
   return null;
 }
 

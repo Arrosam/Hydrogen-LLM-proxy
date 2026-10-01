@@ -73,6 +73,40 @@ describe("Responses and Conversations HTTP API", () => {
     const listed = await app.inject({ url: `/v1/conversations/${conversation.json().id}/items`, headers: headers() });
     expect(listed.payload).not.toContain("__hydrogenCanonicalMessages");
   });
+  it.each([false, true])("rejects ephemeral lossy replay-bearing output (stream=%s)", async stream => {
+    services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], thinkingFormat: "none" } });
+    outputs.push([{ type: "reasoning", origin: "anthropic", text: "secret thought", signature: "sig" }, toolCall]);
+    const response = await create({ store: false, stream });
+    expect(response.payload).toContain("replay-required reasoning");
+    expect(response.payload).not.toContain("secret thought");
+    expect(response.payload).not.toContain('"type":"function_call"');
+    if (!stream) expect(response.statusCode).toBe(400);
+    else expect(response.payload).not.toContain('"type":"response.completed"');
+  });
+  it.each([false, true])("hides presentation but preserves original for stored continuation (stream=%s)", async stream => {
+    services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], thinkingFormat: "none" } });
+    outputs.push([{ type: "reasoning", origin: "anthropic", text: "secret thought", signature: "sig" }, toolCall]);
+    const response = await create({ stream });
+    expect(response.statusCode).toBe(200);
+    expect(response.payload).not.toContain("secret thought");
+    const body = stream ? response.payload.split("\n").filter(line => line.startsWith("data: "))
+      .map(line => JSON.parse(line.slice(6))).find(event => event.type === "response.completed").response : response.json();
+    const next = await create({ previous_response_id: body.id, input: [{ type: "function_call_output", call_id: "call1", output: "found" }] });
+    expect(next.statusCode).toBe(200);
+    expect(requests[1].messages.flatMap(message => message.content)).toContainEqual({ type: "reasoning", origin: "anthropic", text: "secret thought", signature: "sig" });
+  });
+  it("store:false still permits hidden thinking when a durable conversation retains history", async () => {
+    services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], thinkingFormat: "none" } });
+    const conversation = (await app.inject({ method: "POST", url: "/v1/conversations", headers: headers(), payload: {} })).json();
+    outputs.push([{ type: "reasoning", origin: "anthropic", text: "private thought", signature: "sig" }, toolCall]);
+    const first = await create({ store: false, conversation: conversation.id });
+    expect(first.statusCode).toBe(200);
+    expect(first.payload).not.toContain("private thought");
+    expect(repo.response(first.json().id, owner.token.id)).toBeUndefined();
+    const next = await create({ conversation: conversation.id, input: [{ type: "function_call_output", call_id: "call1", output: "found" }] });
+    expect(next.statusCode).toBe(200);
+    expect(requests[1].messages.flatMap(message => message.content)).toContainEqual({ type: "reasoning", origin: "anthropic", text: "private thought", signature: "sig" });
+  });
   it("stores stable response identity and restores messages without inheriting instructions", async () => {
     const first = await create({ instructions: "first-only" }); expect(first.statusCode).toBe(200);
     const body = first.json(); expect(body.status).toBe("completed"); expect(body.id).not.toBe("upstream-id");

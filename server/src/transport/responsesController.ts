@@ -6,9 +6,10 @@ import type { Family } from "../core/format/family";
 import { buildRequest, buildResponse, parseRequest } from "../core/format/registry";
 import type { Message } from "../core/ir/content";
 import { ZERO_USAGE } from "../core/ir/usage";
+import { thinkingReplayError } from "../core/ir/thinkingReplay";
 import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
-import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
+import { parseService, isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
 import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
@@ -261,8 +262,12 @@ export class ResponsesController {
       // turn straight through, which is exactly the turn the round trip has to be
       // synthesized into. Those requests take the buffered path and fabricate
       // their stream, so the client receives the same blocks either way.
-      const live = flags.stream && !bound.length && !serverTools.size && family === "openai_responses"
-        ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition), serviceThinkingDelimiters(definition)) : undefined;
+      // Ephemeral lossy output cannot be continued from retained history. Check
+      // the complete canonical response before delivering its tool calls.
+      const stateless = !flags.store && !conversationId;
+      const lossyEphemeral = stateless && ["none", "think_tags"].includes(serviceThinkingFormat(definition));
+      const live = flags.stream && !lossyEphemeral && !bound.length && !serverTools.size && family === "openai_responses"
+        ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition)) : undefined;
       try {
         abort.signal.throwIfAborted();
         this.repo.transition(id, token.id, "in_progress", { ...initial, status: "in_progress" });
@@ -271,7 +276,7 @@ export class ResponsesController {
         // actually call; every other request is passed through untouched.
         const effective = serverTools.size ? buildRequest(family, { ...request.data(), tools }) : request;
         const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
-          progress, emit: flags.stream ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+          progress, emit: flags.stream && !lossyEphemeral ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
           declaredNames: serverTools.size ? new Map([...declaredServerTools(serverTools)].map(([declared, entry]) => [declared, entry.tool.name])) : undefined });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
@@ -298,7 +303,9 @@ export class ResponsesController {
             if (content.length) final = buildResponse(family, { ...final.data(), content });
           }
         }
-        const response = final.withThinkingFormat(serviceThinkingFormat(definition), serviceThinkingDelimiters(definition));
+        const replayError = stateless ? thinkingReplayError(final.content, serviceThinkingFormat(definition), run.value.family) : undefined;
+        if (replayError) throw new ResponseStateError(replayError, 400);
+        const response = final.withThinkingFormat(serviceThinkingFormat(definition));
         const terminalStatus = ["length", "content_filter", "pause_turn"].includes(response.stopReason ?? "") ? "incomplete" : "completed";
         const extra: WireItem = { ...initial, status: terminalStatus, hydrogen: { response_id: id, session_id: sessionId, tool_calls: run.traces } };
         // Let the renderer supply output, usage and incomplete_details; the envelope supplies state fields.

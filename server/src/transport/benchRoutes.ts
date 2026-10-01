@@ -13,6 +13,7 @@ import {
   imagesUrl,
   rerankUrl,
   speechUrl,
+  systemOneUrl,
   transcriptionsUrl,
   videosUrl,
 } from "../core/upstream/endpoints";
@@ -26,9 +27,8 @@ import {
   ServiceCategorySchema,
   type ServiceCategory,
   type ServiceDef,
-  serviceThinkingDelimiters,
 } from "../execution/definition";
-import { withThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { classifyError, type AttemptRecord, type AttemptResult } from "../execution/steps";
 import type { Request as CanonicalRequest } from "../core/ir/request";
 import { newAccumulator, tapStream } from "../core/ir/stream";
@@ -209,7 +209,6 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
     // the bench shows the real answer rather than a canonical one. A raw tuple
     // belongs to no service and therefore has no format to apply.
     let thinkingFormat: ThinkingFormat = "original";
-    let thinkingDelimiters: ThinkingDelimiters | undefined;
     if (target.kind === "service") {
       const loaded = loadService(c, target.serviceId);
       if (!loaded.ok) return reply.code(loaded.status).send({ error: loaded.message });
@@ -220,12 +219,11 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
       }
       label = loaded.name;
       thinkingFormat = serviceThinkingFormat(loaded.def);
-      thinkingDelimiters = serviceThinkingDelimiters(loaded.def);
     } else {
       label = `${target.model}@${target.provider}`;
     }
 
-    if (streaming) return runChatStream(c, reply, target, ingress, request, label, thinkingFormat, thinkingDelimiters, timeoutMs);
+    if (streaming) return runChatStream(c, reply, target, ingress, request, label, thinkingFormat, timeoutMs);
 
     // A slow chain can outlive an intermediary's idle timeout (Cloudflare 524s
     // a silent origin at ~100s); failures travel in-body, so committing 200
@@ -251,7 +249,7 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
         latencyMs,
         served: v.served,
         upstreamRequest: v.upstreamRequest,
-        response: v.response.withThinkingFormat(thinkingFormat, thinkingDelimiters).render(ingress, label, { thinkingFormat }),
+        response: v.response.withThinkingFormat(thinkingFormat).render(ingress, label, { thinkingFormat }),
         thinkingFormat,
         usage: v.response.usage,
         attemptPath: run.attemptPath,
@@ -291,8 +289,9 @@ export async function benchRoutes(app: FastifyInstance, c: Container): Promise<v
       steps = { model: target.model, provider: target.provider, providerFormat: target.providerFormat };
     }
 
-    // Every media route is OpenAI-shaped; an Anthropic endpoint serves none of
-    // them. A chosen provider format is therefore INTERSECTED with the media
+    // JSON/media passthrough routes use the OpenAI endpoint families, including
+    // Jev/Laya's own System One wire; Anthropic serves none of them.
+    // A chosen provider format is therefore INTERSECTED with the passthrough
     // set rather than used as-is -- picking "anthropic" here would otherwise
     // resolve happily and then POST an embeddings body at an Anthropic base
     // URL, which fails as a 404 from somewhere the operator never aimed at.
@@ -433,7 +432,6 @@ async function runChatStream(
   request: CanonicalRequest,
   label: string,
   thinkingFormat: ThinkingFormat,
-  thinkingDelimiters: ThinkingDelimiters | undefined,
   timeoutMs: number | undefined,
 ): Promise<void> {
   const started = Date.now();
@@ -471,11 +469,13 @@ async function runChatStream(
       // share, no thinking tokens -- while the buffered run beside it shows
       // all three.
       const acc = newAccumulator();
-      const shaped = tapStream(withThinkingFormat(v.events, thinkingFormat, thinkingDelimiters), acc);
+      const shaped = tapStream(withThinkingFormat(v.events, thinkingFormat), acc);
       for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) reply.raw.write(frame);
+      const streamError = acc.error ?? (acc.incomplete ? "upstream stream ended before completion (truncated)" : undefined);
       meta({
-        ok: true,
-        status: 200,
+        ok: !streamError,
+        status: streamError ? acc.failure?.status ?? 502 : 200,
+        ...(streamError ? { message: streamError } : {}),
         latencyMs: Date.now() - started,
         served: { model: v.modelName, provider: v.providerName, family: v.family, upstreamModel: v.upstreamModel, url: "" },
         upstreamRequest: v.upstreamRequest,
@@ -520,18 +520,21 @@ async function runChatStream(
       return;
     }
     const acc = newAccumulator();
-    const shaped = tapStream(withThinkingFormat(relayed.events, thinkingFormat, thinkingDelimiters), acc);
+    const shaped = tapStream(withThinkingFormat(relayed.events, thinkingFormat), acc);
     for await (const frame of serializeStream(ingress, shaped, { model: label, thinkingFormat })) {
       reply.raw.write(frame);
     }
+    const streamError = acc.error ?? (acc.incomplete ? "upstream stream ended before completion (truncated)" : undefined);
+    const status = streamError ? acc.failure?.status ?? 502 : relayed.status;
     meta({
-      ok: true,
-      status: relayed.status,
+      ok: !streamError,
+      status,
+      ...(streamError ? { message: streamError } : {}),
       latencyMs: Date.now() - started,
       served: served(t, t.url),
       upstreamRequest: relayed.sentBody,
       usage: acc.usage,
-      attemptPath: [rawAttempt(target, 200, Date.now() - started, "ok")],
+      attemptPath: [rawAttempt(target, status, Date.now() - started, streamError ? "error" : "ok", streamError)],
     });
     reply.raw.end();
       return;
@@ -574,6 +577,7 @@ function mediaUrl(category: ServiceCategory, t: ResolvedTarget): string {
   switch (category) {
     case "embedding": return embeddingsUrl(t.upstream);
     case "rerank": return rerankUrl(t.upstream);
+    case "classification": return systemOneUrl(t.upstream);
     case "image": return imagesUrl(t.upstream);
     case "video": return videosUrl(t.upstream);
     case "tts": return speechUrl(t.upstream);

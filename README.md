@@ -40,7 +40,8 @@ hashed, and the whole instance — config, keys, users, logs — exports to a si
 > that clients call as if it were one model name. No client support required.
 >
 > **Beyond chat** — Model Services also cover image generation, video, text-to-speech,
-> transcription, embeddings and rerank, with the same retry/fallback engine behind each one.
+> transcription, embeddings, rerank and semantic classification (Jev / Laya), with the same
+> retry/fallback engine behind each one.
 >
 > **Deploy in one click** — published in the [Rainyun app store](#1-rainyun-app-store-one-click),
 > or run the pre-built image anywhere Docker runs.
@@ -91,12 +92,16 @@ agent pipeline is a dashboard edit. Client code keeps asking for `sonnet-any`.
 - **Two wire formats, translated both ways.** OpenAI Chat Completions, OpenAI Responses and
   Anthropic Messages — streaming and non-streaming, tool calls, images, and thinking blocks
   round-tripped rather than dropped.
-- **Eight kinds of service.** `chat`, `ocr`, `image`, `video`, `tts`, `stt`, `embedding`, `rerank` —
-  the non-chat ones are OpenAI-style passthroughs that still run your step chain.
+- **Nine kinds of service.** `chat`, `ocr`, `image`, `video`, `tts`, `stt`, `embedding`, `rerank`,
+  `classification` — non-chat services use dedicated passthrough endpoints that still run your step
+  chain; classification preserves the Jev/Laya typed System One protocol.
 - **Micro Agents.** Forward-only stage pipelines with conditions and routers. Each stage runs a saved
   Model Service, so every stage inherits that service's resilience. Nesting allowed, cycles rejected.
 - **Per-step overrides.** Temperature, top-p/top-k, max tokens, stop sequences, thinking level, a
   system override, plus arbitrary extra body params — pinned per step, not per client.
+- **Explicit thinking decoding, separate from presentation.** Configure each upstream's inline
+  markers independently of the service output format. Incremental parsing, fail-closed malformed
+  blocks, and replay-state protection. See the [configuration and migration guide](docs/thinking-formats.md).
 - **Reliable streaming.** Buffer the upstream stream, treat a truncation as a retryable failure, and
   replay a complete response — or a clean 502, never half of one.
 - **Image OCR with a cache.** A vision pre-pass transcribes images to text for downstream stages;
@@ -305,6 +310,8 @@ Model Service name.
 | GET | `/v1/models` | — | Your Model Services (Anthropic shape if `anthropic-version` is sent) |
 | POST | `/v1/embeddings` | embedding | OpenAI-compatible providers |
 | POST | `/v1/rerank` | rerank | |
+| POST | `/v1/systemone` | classification | Jev / Laya typed Choice, Score and Noul decisions |
+| POST | `/v1/systemone/batch` | classification | Laya batched-state extension; requires upstream support |
 | POST | `/v1/images/generations` | image | |
 | POST | `/v1/videos` | video | Returns a job id carrying its own routing suffix |
 | GET | `/v1/videos/:id` · `/v1/videos/:id/content` | video | Poll and download, statelessly routed |
@@ -313,6 +320,9 @@ Model Service name.
 
 Because `/v1/models` returns Model Services, any tool with a model picker shows your service names —
 which is the intent: `sonnet-any` *is* the model, as far as a client is concerned.
+
+For Jev/Laya provider setup, native payload examples and batching limitations, see the
+[semantic classification guide](<docs/semantic-classification.md>).
 
 Operators can bind hosted HTTP tools to Model Services and Micro Agents for Responses and Anthropic requests.
 See the [design and scope](docs/server-tools-design.md) and [integration guide (中文)](docs/server-tools.zh.md).

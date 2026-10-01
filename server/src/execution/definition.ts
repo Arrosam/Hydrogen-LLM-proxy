@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { GENERATION_PARAM_KEYS, mergeOverrides, type GenerationParams, type RequestOverrides } from "../core/ir/params";
-import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
+import type { ThinkingFormat } from "../core/ir/thinkingFormat";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -109,16 +109,22 @@ export const ThinkingLevelSchema = z.union([
 export const ThinkingFormatSchema = z.enum(["original", "reasoning_content", "reasoning", "think_tags", "none"]);
 
 /**
- * Operator-declared thinking boundaries, for a model whose trace is not
- * tag-shaped at all (harmony channels, corner-bracket markers). The scanner
- * matches these literally instead of guessing from shape, which is the only
- * way to cover such a model -- vLLM ships the same escape hatch as
- * `--reasoning-config`, Open WebUI as a configurable reasoning tag pair.
+ * Operator-declared literal boundaries for one upstream's inline trace.
+ * These belong inside a step's explicit custom thinkingParser, never to the
+ * service-wide output format. No tag-name or Markdown heuristics are inferred.
  */
 export const ThinkingDelimitersSchema = z.object({
   open: z.string().min(1).max(64),
   close: z.string().min(1).max(64),
-});
+}).refine(pair => pair.open.trim().length > 0 && pair.close.trim().length > 0 && pair.open !== pair.close,
+  "Thinking markers must be distinct and contain non-whitespace text");
+
+/** Input grammar belongs to one upstream step, never to the service's display policy. */
+export const ThinkingParserSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("off") }).strict(),
+  z.object({ mode: z.literal("think_tags"), unterminated: z.enum(["error", "reasoning"]).optional() }).strict(),
+  z.object({ mode: z.literal("custom"), delimiters: ThinkingDelimitersSchema, unterminated: z.enum(["error", "reasoning"]).optional() }).strict(),
+]);
 
 export const ResponseFormatSchema = z.union([
   z.object({ type: z.literal("text") }),
@@ -194,6 +200,9 @@ export const StepSchema = z.object({
   thinking: ThinkingLevelSchema.optional(),
   /** Rich per-step parameter overrides. */
   overrides: OverridesSchema.optional(),
+  /** Decode inline reasoning for this upstream before canonical history is stored.
+   * Absent/off trusts native structured fields and never scans answer text. */
+  thinkingParser: ThinkingParserSchema.optional(),
 });
 
 /**
@@ -202,11 +211,12 @@ export const StepSchema = z.object({
  * (DeepSeek-OCR, GLM-OCR, ...) are vision chat models, so an ocr service is
  * served on the chat endpoints and may run inside a Micro Agent — it exists to
  * label the service and mark it as an OCR pre-pass candidate. Every other
- * category is an OpenAI-style passthrough to the provider's matching endpoint,
+ * category is a JSON/media passthrough to the provider's matching endpoint
+ * (classification uses the Jev/Laya System One wire, not chat),
  * still running the step chain's retry/fallback; those are NOT allowed inside
  * a Micro Agent.
  */
-export const ServiceCategorySchema = z.enum(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"]);
+export const ServiceCategorySchema = z.enum(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank", "classification"]);
 export type ServiceCategory = z.infer<typeof ServiceCategorySchema>;
 
 /** Categories served by the translated chat pipeline (vs. media passthrough). */
@@ -248,9 +258,11 @@ export const ServiceStepsSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this service's client. Omitted = "original". */
   thinkingFormat: ThinkingFormatSchema.optional(),
-  /** Literal thinking boundaries for this service's upstream, when its model
-   * does not delimit its trace with a tag shape the scanner can recognise. */
-  thinkingDelimiters: ThinkingDelimitersSchema.optional(),
+  /** Legacy input is rejected with migration guidance, never silently ignored. */
+  thinkingDelimiters: z.unknown().optional().superRefine((value, ctx) => {
+    if (value !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      message: "Move thinkingDelimiters to each upstream step's thinkingParser: { mode: 'custom', delimiters: { open, close } }. Service presentation no longer scans text." });
+  }),
   /**
    * Aggregate budget (bytes) for the URL attachments this service inlines.
    * Absent or 0 = the safe 50 MiB default. See {@link AttachmentBudgetSchema}.
@@ -359,9 +371,11 @@ export const AgentSchema = z.object({
   reliableStreaming: z.boolean().optional(),
   /** How thinking reaches this agent's client (see ServiceStepsSchema). */
   thinkingFormat: ThinkingFormatSchema.optional(),
-  /** Literal thinking boundaries for this agent's upstreams (see
-   * ServiceStepsSchema). */
-  thinkingDelimiters: ThinkingDelimitersSchema.optional(),
+  /** A shared grammar is unsafe for heterogeneous stages/fallbacks. */
+  thinkingDelimiters: z.unknown().optional().superRefine((value, ctx) => {
+    if (value !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      message: "Move thinkingDelimiters to thinkingParser on each upstream step (or referenced Model Service). Agents only control presentation." });
+  }),
   /**
    * Aggregate budget (bytes) for the URL attachments every call this agent
    * makes may inline. Absent or 0 = unlimited; inherited by stages that do not
@@ -399,19 +413,6 @@ export function isAgent(def: ServiceDef): def is AgentDef {
  */
 export function serviceThinkingFormat(def: ServiceDef): ThinkingFormat {
   return def.thinkingFormat ?? "original";
-}
-
-/**
- * The literal thinking boundaries a definition declares, if any.
- *
- * Scanning by tag SHAPE cannot cover a model that does not delimit its trace
- * that way (harmony's channel markers being the standard example), so the
- * operator can state the pair outright and the scanner matches it literally.
- * Read together with {@link serviceThinkingFormat}, which decides how that
- * thinking is presented once it has been found.
- */
-export function serviceThinkingDelimiters(def: ServiceDef): ThinkingDelimiters | undefined {
-  return def.thinkingDelimiters;
 }
 
 /** The effective category of a definition. Agents are always "chat". */

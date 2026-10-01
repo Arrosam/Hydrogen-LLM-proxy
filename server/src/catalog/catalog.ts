@@ -53,8 +53,9 @@ export type ConstrainedResolution =
 
 /**
  * The families whose providers expose the OpenAI media/passthrough surface.
- * Embeddings, rerank, images, video, TTS and STT are all OpenAI-shaped routes;
- * an Anthropic endpoint serves none of them.
+ * Embeddings, rerank, images, video, TTS and STT are OpenAI-shaped routes.
+ * Jev/Laya classification uses its own JSON/Bearer System One route through
+ * these provider types too; an Anthropic endpoint serves none of them.
  */
 export const MEDIA_FAMILIES: readonly Family[] = ["openai_completion", "openai_responses"];
 

@@ -1,662 +1,560 @@
-/**
- * Thinking format override — how a service presents the model's thinking to its
- * own client.
- *
- * Two properties carry the whole feature and each has its own section below.
- *
- * The first is that `original` is a STRICT no-op. It is the default, so every
- * service that existed before this feature is running it, and a scan that fired
- * "helpfully" on those would take `<think>` tags away from clients that parse
- * them themselves. Identity is asserted on the rendered body, not on the
- * canonical content, because the body is what the client actually gets.
- *
- * The second is that every other value has to FIND the thinking before it can
- * re-say it — including the case Hydrogen was blind to: a model served through
- * vLLM / Ollama / llama.cpp that writes `<think>…</think>` at the head of its
- * answer text and fills no structured field at all.
- */
 import { describe, expect, it } from "vitest";
 import {
   applyThinkingFormat,
+  decodeThinking,
+  decodeThinkingStream,
   liftThinkTags,
+  THINKING_FORMATS,
+  THINKING_QUOTE_LOOKAHEAD,
   withThinkingFormat,
   type ThinkingDelimiters,
-  type ThinkingFormat,
+  type ThinkingParser,
 } from "../src/core/ir/thinkingFormat";
-import type { ContentPart } from "../src/core/ir/content";
-import type { StreamEvent } from "../src/core/ir/stream";
-import { AnthropicResponse, OpenAICompletionResponse, OpenAIResponsesResponse } from "../src/core/format";
-import type { ResponseData } from "../src/core/ir/stream";
+import { reasoningOf as contentReasoning, textOf as contentText, type ContentPart } from "../src/core/ir/content";
+import { collectStream, type ResponseData, type StreamEvent } from "../src/core/ir/stream";
+import { UpstreamStreamError } from "../src/core/ir/toolArguments";
 import { requireAnswer } from "../src/core/ir/answer";
+import { AnthropicResponse, OpenAICompletionResponse, OpenAIResponsesResponse } from "../src/core/format";
 
 const THOUGHT = "The user wants the capital. It is Paris.";
 const ANSWER = "Paris.";
-
-const data = (content: ContentPart[]): ResponseData => ({
-  id: "x",
-  model: "m",
-  created: 1,
-  content,
-  stopReason: "stop",
-  usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-});
-
+const TAGS: ThinkingParser = { mode: "think_tags" };
+const PAIR: ThinkingDelimiters = { open: "[reasoning]", close: "[/reasoning]" };
+const USAGE = { promptTokens: 9, completionTokens: 7, totalTokens: 16 };
+const START: StreamEvent = { type: "start", id: "x", model: "m", created: 1 };
+const FINISH: StreamEvent = { type: "finish", stopReason: "stop", usage: USAGE };
+const TOOL: ContentPart = { type: "tool_use", id: "t1", name: "get", input: {} };
+const TOOL_START: StreamEvent = { type: "tool_start", index: 0, id: "t1", name: "get" };
 const textOnly = (text: string): ContentPart[] => [{ type: "text", text }];
-const withReasoning: ContentPart[] = [
-  { type: "reasoning", text: THOUGHT },
-  { type: "text", text: ANSWER },
-];
+const withReasoning: ContentPart[] = [{ type: "reasoning", text: THOUGHT }, { type: "text", text: ANSWER }];
+const data = (content: ContentPart[]): ResponseData => ({ id: "x", model: "m", created: 1, content, stopReason: "stop", usage: USAGE });
 
-/** Collect a canonical event stream into an array. */
+async function* stream(...events: StreamEvent[]): AsyncGenerator<StreamEvent> { yield* events; }
 async function drain(events: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
   const out: StreamEvent[] = [];
   for await (const ev of events) out.push(ev);
   return out;
 }
-
-/** A stream of the given events, one at a time. */
-async function* stream(...events: StreamEvent[]): AsyncGenerator<StreamEvent> {
-  for (const ev of events) yield ev;
-}
-
-/** Text deltas from a string, split into `size`-character pieces — the point
- * being that a tag can land across a chunk boundary, which is where a naive
- * scanner breaks. */
 function deltas(text: string, size: number): StreamEvent[] {
   const out: StreamEvent[] = [];
   for (let i = 0; i < text.length; i += size) out.push({ type: "text_delta", text: text.slice(i, i + size) });
   return out;
 }
+const textOf = (events: StreamEvent[]): string => events.map(e => e.type === "text_delta" ? e.text : "").join("");
+const reasoningOf = (events: StreamEvent[]): string => events.map(e => e.type === "reasoning_delta" ? e.text : "").join("");
+const finishOf = (events: StreamEvent[]) => events.find(e => e.type === "finish");
 
-const textOf = (events: StreamEvent[]): string =>
-  events.filter((e) => e.type === "text_delta").map((e) => (e as { text: string }).text).join("");
-const reasoningOf = (events: StreamEvent[]): string =>
-  events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text).join("");
+/** Compare canonical content, not chunk boundaries: the latter are transport
+ * artifacts and may split delimiters, surrogate pairs, or zero-width literals. */
+async function checkPartitions(raw: string, thought: string, answer: string, parser = TAGS): Promise<void> {
+  const partitions: string[][] = [[raw], ...[1, 2, 3, 7, 19].map(size => deltas(raw, size).map(e => (e as { text: string }).text))];
+  for (let at = 0; at <= raw.length; at++) partitions.push([raw.slice(0, at), raw.slice(at)]);
+  for (const pieces of partitions) {
+    const buffered = decodeThinking(pieces.map(text => ({ type: "text", text })), parser);
+    expect(contentReasoning(buffered)).toBe(thought);
+    expect(contentText(buffered)).toBe(answer);
+    const out = await drain(decodeThinkingStream(stream(START, ...pieces.map(text => ({ type: "text_delta" as const, text })), FINISH), parser));
+    expect(reasoningOf(out)).toBe(thought);
+    expect(textOf(out)).toBe(answer);
+    expect(out[0]).toBe(START);
+    expect(finishOf(out)).toBe(FINISH);
+  }
+}
 
-// --- EP: `original` changes nothing ---------------------------------------
+describe("explicit decoding is independent from presentation", () => {
+  it("absent/off parser is strict identity, even with declared delimiters", () => {
+    for (const parser of [undefined, { mode: "off" as const }, { mode: "off" as const, delimiters: PAIR }]) {
+      const content = textOnly(`<think>${THOUGHT}</think>${ANSWER}`);
+      expect(decodeThinking(content, parser)).toBe(content);
+      const events = stream(START, { type: "text_delta", text: contentText(content) }, FINISH);
+      expect(decodeThinkingStream(events, parser)).toBe(events);
+    }
+  });
 
-describe("EP: `original` is a strict no-op on every wire", () => {
-  const FORMATS: Array<ThinkingFormat | undefined> = ["original", undefined];
-
-  for (const fmt of FORMATS) {
-    it(`content is returned by identity (${fmt ?? "absent"})`, () => {
-      const content = textOnly(`<think>${THOUGHT}</think>\n\n${ANSWER}`);
-      // Same reference, not merely a deep-equal copy: the response object is
-      // reused rather than rebuilt, and callers rely on that.
-      expect(applyThinkingFormat(content, fmt)).toBe(content);
-      expect(applyThinkingFormat(withReasoning, fmt)).toBe(withReasoning);
+  for (const format of [...THINKING_FORMATS, undefined]) {
+    it(`${format ?? "absent"} presentation never scans`, async () => {
+      for (const raw of [`<think>${THOUGHT}</think>${ANSWER}`, `${PAIR.open}${THOUGHT}${PAIR.close}${ANSWER}`, "<think>private truncated body"]) {
+        expect(applyThinkingFormat(textOnly(raw), format)).toEqual(textOnly(raw));
+        const events: StreamEvent[] = [START, { type: "text_delta", text: raw }, FINISH];
+        expect(await drain(withThinkingFormat(stream(...events), format))).toEqual(events);
+      }
     });
   }
 
-  it("a `<think>` block stays in the answer text, exactly as it arrived", () => {
-    const raw = `<think>${THOUGHT}</think>\n\n${ANSWER}`;
-    const body = new OpenAICompletionResponse(data(textOnly(raw))).renderSelf("svc");
-    const message = (body.choices as Array<{ message: Record<string, unknown> }>)[0].message;
-    expect(message.content).toBe(raw);
-    expect(message.reasoning).toBeUndefined();
-    expect(message.reasoning_content).toBeUndefined();
+  it("native-field and original presentation are identity", () => {
+    for (const format of [undefined, "original", "reasoning", "reasoning_content"] as const) {
+      expect(applyThinkingFormat(withReasoning, format)).toBe(withReasoning);
+      const events = stream();
+      expect(withThinkingFormat(events, format)).toBe(events);
+    }
   });
 
-  it("structured reasoning still goes out under BOTH dialect spellings", () => {
+  it("the compatibility helper is an explicit decode request", () => {
+    expect(liftThinkTags(textOnly(`<think>${THOUGHT}</think>${ANSWER}`))).toEqual(withReasoning);
+    expect(liftThinkTags(textOnly(`${PAIR.open}${THOUGHT}${PAIR.close}${ANSWER}`), PAIR)).toEqual(withReasoning);
+  });
+
+  it("custom mode requires nonempty declared delimiters even for direct callers", () => {
+    for (const delimiters of [undefined, { open: "", close: "x" }, { open: "x", close: "" }]) {
+      expect(() => decodeThinking([], { mode: "custom", delimiters })).toThrow(TypeError);
+      expect(() => decodeThinkingStream(stream(), { mode: "custom", delimiters })).toThrow(TypeError);
+    }
+  });
+});
+
+describe("literal, partition-invariant initial block grammar", () => {
+  it("recognizes the exact think pair and normalizes only surrounding separators", async () => {
+    const body = `\n ${THOUGHT}\t\n`;
+    await checkPartitions(`\n\t<think>${body}</think>\r\n\t ${ANSWER}`, body, ANSWER);
+    expect(decodeThinking(textOnly(`<think>${THOUGHT}</think>`), TAGS)).toEqual([{ type: "reasoning", text: THOUGHT }]);
+    expect(decodeThinking(textOnly("<think></think>  answer"), TAGS)).toEqual(textOnly("answer"));
+  });
+
+  const NOT_TAGS = [
+    "<reason>contract reason</reason>", "<reasoning>xml</reasoning>", "<thinking>xml</thinking>",
+    "<thought>xml</thought>", "<chain_of_thought>xml</chain_of_thought>", "<deep_think>xml</deep_think>",
+    "<think >space</think >", "< think>space</ think>", "<THINK>case</THINK>", "<thi\u200bnk>invisible</thi\u200bnk>",
+    "<analysis>xml</analysis>", "<result>xml</result>", "<div class=\"box\">html</div>",
+    "Explain <think>this</think>", "`<think>quoted</think>`", "<thinker>word</thinker>",
+  ];
+  for (const raw of NOT_TAGS) {
+    it(`does not guess at ${JSON.stringify(raw)}`, async () => {
+      const content = textOnly(raw);
+      expect(decodeThinking(content, TAGS)).toBe(content);
+      const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, 1), FINISH), TAGS), "none"));
+      expect(textOf(out)).toBe(raw);
+      expect(reasoningOf(out)).toBe("");
+      expect(finishOf(out)).toBe(FINISH);
+    });
+  }
+
+  const CUSTOM: ThinkingDelimiters[] = [
+    PAIR,
+    { open: "<|channel|>analysis<|message|>", close: "<|channel|>final<|message|>" },
+    { open: "<thinking>", close: "</thinking>" },
+    { open: "\u200b[thi\u200cnk]", close: "[/thi\u200dnk]\u2060" },
+    { open: "🙂a", close: "🔚z" },
+    { open: "  [[ ", close: " ]] " },
+    { open: "x", close: "y" },
+    { open: "<", close: "aaaaab" },
+    { open: "[", close: "ababaca" },
+    { open: "|", close: "|" },
+  ];
+  for (const pair of CUSTOM) {
+    it(`custom literal offsets survive every split: ${JSON.stringify(pair)}`, async () => {
+      const body = pair.close === "y" ? "alpha" : "aaabaaaabaababababb partial delimiter";
+      await checkPartitions(`${pair.open}${body}${pair.close}\n\n${ANSWER}`, body, ANSWER, { mode: "custom", delimiters: pair });
+    });
+  }
+
+  it("overlapping custom closes agree with a literal indexOf oracle", async () => {
+    // Deterministic finite fuzzing: exercise KMP fallback chains without timing
+    // assertions or a probabilistic test. Non-matching suffixes must never vanish.
+    let seed = 0x12345678;
+    const random = (): number => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+    for (let n = 0; n < 200; n++) {
+      const close = Array.from({ length: 1 + random() % 15 }, () => "abc"[random() % 3]).join("");
+      const body = Array.from({ length: 80 }, () => "abc"[random() % 3]).join("");
+      const rest = body + close + "answer";
+      const at = rest.indexOf(close);
+      const parser: ThinkingParser = { mode: "custom", delimiters: { open: "[", close } };
+      const out = await drain(decodeThinkingStream(stream(...deltas("[" + rest, 1), FINISH), parser));
+      expect(reasoningOf(out)).toBe(rest.slice(0, at));
+      expect(textOf(out)).toBe(rest.slice(at + close.length));
+      const buffered = decodeThinking(textOnly("[" + rest), parser);
+      expect(contentReasoning(buffered)).toBe(reasoningOf(out));
+      expect(contentText(buffered)).toBe(textOf(out));
+    }
+  });
+
+  it("custom zero-width characters are not erased from either markers or offsets", async () => {
+    const pair = { open: "[\u200bR]", close: "[/R]" };
+    const parser: ThinkingParser = { mode: "custom", delimiters: pair };
+    await checkPartitions("[\u200bR]first[/R]answer", "first", "answer", parser);
+    const raw = "[R]first[/R]answer";
+    expect(decodeThinking(textOnly(raw), parser)).toEqual(textOnly(raw));
+  });
+
+  it("only decodes the initial block, not later prose", async () => {
+    await checkPartitions("<think>first</think>answer <think>example</think>", "first", "answer <think>example</think>");
+  });
+
+  for (const body of ["a dangling `", "a dangling ```\n", "a dangling ~~~\n", "example: `", 'a quote "']) {
+    it(`literal close remains authoritative after ${JSON.stringify(body)}`, async () => {
+      await checkPartitions(`<think>${body}</think>answer`, body, "answer");
+    });
+  }
+
+  for (const body of [
+    "write `</think>` in prose. Still thinking.",
+    "write ``a ` and </think>`` in prose.",
+    'write "</think>" in prose.',
+    "write '</think>' in prose.",
+    "write “</think>” in prose.",
+    "Example:\n```xml\n</think>\n```\nStill thinking.",
+    "Example:\n~~~xml\n</think>\n~~~\nStill thinking.",
+    "Example:\n````xml\n```\n</think>\n````\nStill thinking.",
+    "Example:\n  ```xml\n</think>\n  ```  \nStill thinking.",
+    "Example:\n```xml\n</think> and </think>\n```\nStill thinking.",
+    "The model's response doesn't stop until `</think>` is emitted.",
+    "write 'don't emit </think> yet' in prose. Still reasoning.",
+    "write ‘don’t emit </think> yet’ in prose. Still reasoning.",
+  ]) {
+    it(`quoted examples stay reasoning across every split: ${JSON.stringify(body)}`, async () => {
+      await checkPartitions(`<think>${body}</think>answer`, body, "answer");
+    });
+  }
+
+  it("does not consume the proof character starting the true terminator", async () => {
+    await checkPartitions("<think>say `</think>`</think>answer", "say `</think>`", "answer");
+  });
+
+  it("does not mistake the answer's bare opening fence for proof of a quoted close", async () => {
+    await checkPartitions("<think>Example:\n```\nreasoning</think>\n```\nanswer\n```", "Example:\n```\nreasoning", "```\nanswer\n```");
+  });
+
+  it("recovers dangling inline quotation at a newline without waiting for EOF", async () => {
+    await checkPartitions("<think>dangling `sample</think>\nanswer", "dangling `sample", "answer");
+  });
+
+  it("escaped backticks do not poison real boundaries", async () => {
+    const body = "a literal \\` character";
+    await checkPartitions(`<think>${body}</think>answer`, body, "answer");
+  });
+
+  it("custom exact protocol pairs stay literal even inside a quotation", async () => {
+    await checkPartitions("<think>write `</think>` in prose</think>answer", "write `", "` in prose</think>answer",
+      { mode: "custom", delimiters: { open: "<think>", close: "</think>" } });
+  });
+
+  it("normalizes separator whitespace spanning parts but not later answer whitespace", async () => {
+    await checkPartitions("<think>x</think>\r\n \t\u00a0answer\n  tail", "x", "answer\n  tail");
+  });
+});
+
+describe("fail-closed malformed blocks and safe terminal metadata", () => {
+  const MALFORMED = ["<think>SECRET", "<think>SECRET</thi", "<think>SECRET</reason>", "<th", "<think"];
+  for (const raw of MALFORMED) {
+    it(`never releases ${JSON.stringify(raw)} into none presentation`, async () => {
+      expect(() => applyThinkingFormat(decodeThinking(textOnly(raw), TAGS), "none")).toThrow(UpstreamStreamError);
+      try { decodeThinking(textOnly(raw), TAGS); } catch (e) { expect(String(e)).not.toContain("SECRET"); }
+      for (const size of [1, 3, 999]) {
+        const out = await drain(requireAnswer(withThinkingFormat(decodeThinkingStream(stream(START, ...deltas(raw, size), { type: "usage", usage: USAGE }, FINISH), TAGS), "none")));
+        expect(textOf(out)).toBe("");
+        expect(reasoningOf(out)).toBe("");
+        expect(out).toContainEqual({ type: "usage", usage: USAGE });
+        expect(finishOf(out)).toMatchObject({ type: "finish", stopReason: "stop", usage: USAGE, error: expect.any(String) });
+        expect(JSON.stringify(out)).not.toContain("SECRET");
+      }
+    });
+  }
+
+  it("synthetic error finish covers EOF without a terminal event", async () => {
+    const out = await drain(decodeThinkingStream(stream({ type: "text_delta", text: "<think>secret</thi" }, { type: "usage", usage: USAGE }), TAGS));
+    expect(textOf(out)).toBe("");
+    expect(reasoningOf(out)).toBe("secret</thi");
+    expect(out.at(-1)).toMatchObject({ type: "finish", stopReason: null, incomplete: true, error: expect.any(String) });
+    expect(out).toContainEqual({ type: "usage", usage: USAGE });
+  });
+
+  it("never recovers an ambiguous tail as answer on an upstream error or truncation", async () => {
+    const raw = "<think>example `</think>PRIVATE_TAIL";
+    for (const finish of [
+      { type: "finish", stopReason: "stop", incomplete: true, usage: USAGE },
+      { type: "finish", stopReason: "stop", error: "upstream failed", usage: USAGE },
+      ...(["length", "content_filter", "pause_turn", "tool_use", null] as const).map(stopReason => ({ type: "finish" as const, stopReason, usage: USAGE })),
+    ] as StreamEvent[]) {
+      const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, 3), finish), TAGS), "none"));
+      expect(textOf(out)).toBe("");
+      expect(JSON.stringify(out)).not.toContain("PRIVATE_TAIL");
+      expect(finishOf(out)).toHaveProperty("error");
+    }
+    async function* broken(): AsyncGenerator<StreamEvent> {
+      yield { type: "text_delta", text: raw };
+      throw Error("private transport content");
+    }
+    const out = await drain(withThinkingFormat(decodeThinkingStream(broken(), TAGS), "none"));
+    expect(textOf(out)).toBe("");
+    expect(finishOf(out)).toHaveProperty("error");
+  });
+
+  it("requires a normal buffered stop to recover an uncertain quoted boundary", () => {
+    const raw = "<think>example `</think>PRIVATE_TAIL";
+    for (const stop of ["length", "content_filter", "pause_turn", "tool_use", null] as const) {
+      expect(() => decodeThinking(textOnly(raw), TAGS, stop)).toThrow("thinking block was interrupted");
+    }
+    expect(contentText(decodeThinking(textOnly(raw), TAGS, "stop"))).toBe("PRIVATE_TAIL");
+    expect(contentText(decodeThinking(textOnly("<think>private</think>partial answer"), TAGS, "length"))).toBe("partial answer");
+  });
+
+  it("does not recover an ambiguous tail at iterator EOF without a finish event", async () => {
+    const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas("<think>example `</think>PRIVATE_TAIL", 3)), TAGS), "none"));
+    expect(textOf(out)).toBe("");
+    expect(JSON.stringify(out)).not.toContain("PRIVATE_TAIL");
+    expect(finishOf(out)).toMatchObject({ incomplete: true, error: "Upstream thinking block was interrupted" });
+  });
+
+  it("retains original terminal fields and an already present upstream error", async () => {
+    const finish: StreamEvent = { type: "finish", stopReason: "length", usage: USAGE, incomplete: true, error: "safe upstream error" };
+    const out = await drain(decodeThinkingStream(stream({ type: "text_delta", text: "<think>secret" }, finish), TAGS));
+    expect(finishOf(out)).toEqual(finish);
+    expect(textOf(out)).toBe("");
+  });
+
+  it("reasoning policy retains the whole unterminated body including partial close", async () => {
+    const parser: ThinkingParser = { ...TAGS, unterminated: "reasoning" };
+    const raw = "<think> secret\n</thi";
+    expect(decodeThinking(textOnly(raw), parser)).toEqual([{ type: "reasoning", text: " secret\n</thi" }]);
+    await checkPartitions(raw, " secret\n</thi", "", parser);
+    const hidden = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, 1), FINISH), parser), "none"));
+    expect(textOf(hidden)).toBe("");
+    expect(reasoningOf(hidden)).toBe("");
+    expect(finishOf(hidden)).toBe(FINISH);
+    expect(() => decodeThinking(textOnly("<thi"), parser)).toThrow(UpstreamStreamError);
+  });
+
+  for (const interrupted of [TOOL_START, { type: "reasoning_start", signature: "OPAQUE" }, { type: "reasoning_delta", text: "NATIVE" }, { type: "reasoning_stop", signature: "OPAQUE" }] as StreamEvent[]) {
+    it(`${interrupted.type} interrupts a candidate without leaking subsequent payload`, async () => {
+      for (const raw of ["<th", "<think>SECRET"]) {
+        for (const unterminated of ["error", "reasoning"] as const) {
+          const out = await drain(decodeThinkingStream(stream({ type: "text_delta", text: raw }, interrupted, { type: "text_delta", text: "DO_NOT_LEAK" }, { type: "usage", usage: USAGE }, FINISH), { ...TAGS, unterminated }));
+          expect(textOf(out)).toBe("");
+          expect(out).not.toContain(interrupted);
+          expect(finishOf(out)).toMatchObject({ error: "Upstream thinking block was interrupted", usage: USAGE });
+          expect(JSON.stringify(out)).not.toContain("DO_NOT_LEAK");
+        }
+      }
+    });
+  }
+
+  it("buffered structural interruptions fail just like streamed ones", () => {
+    for (const interrupt of [TOOL, { type: "reasoning", text: "native", signature: "SIGNED" }] as ContentPart[]) {
+      for (const raw of ["<th", "<think>secret"]) {
+        expect(() => decodeThinking([...textOnly(raw), interrupt, ...textOnly("unsafe")], TAGS)).toThrow("Upstream thinking block was interrupted");
+      }
+    }
+  });
+
+  it("upstream exceptions mid-block become safe errors without exposing exception contents", async () => {
+    async function* broken(): AsyncGenerator<StreamEvent> {
+      yield { type: "text_delta", text: "<think>secret" };
+      yield { type: "usage", usage: USAGE };
+      throw new Error("SECRET_FROM_TRANSPORT");
+    }
+    const out = await drain(withThinkingFormat(decodeThinkingStream(broken(), TAGS), "none"));
+    expect(textOf(out)).toBe("");
+    expect(JSON.stringify(out)).not.toContain("SECRET");
+    expect(finishOf(out)).toHaveProperty("error");
+    expect(out).toContainEqual({ type: "usage", usage: USAGE });
+  });
+});
+
+describe("bounded incremental decoding, not whole-block buffering", () => {
+  it("unresolved quotations stop at the fixed bound, not EOF or an unbounded answer", async () => {
+    for (const quote of ["`", "\"", "\n```xml\n"]) {
+      const prefix = `<think>example ${quote}</think>`;
+      const raw = prefix + "SECRET" + "x".repeat(THINKING_QUOTE_LOOKAHEAD) + "</think>answer";
+      expect(() => decodeThinking(textOnly(raw), TAGS)).toThrow("thinking boundary is ambiguous");
+      for (const size of [1, 7, 99999]) {
+        let ended = false;
+        let closed = false;
+        async function* input(): AsyncGenerator<StreamEvent> {
+          try {
+            yield* deltas(raw, size);
+            ended = true;
+            yield FINISH;
+          } finally { closed = true; }
+        }
+        const out = await drain(withThinkingFormat(decodeThinkingStream(input(), TAGS), "none"));
+        expect(textOf(out)).toBe("");
+        expect(JSON.stringify(out)).not.toContain("SECRET");
+        expect(finishOf(out)).toMatchObject({ error: expect.stringContaining("thinking boundary is ambiguous"), incomplete: true });
+        expect(ended).toBe(false);
+        expect(closed).toBe(true);
+      }
+    }
+  });
+
+  it("additional markers do not reset the ambiguous quotation budget", async () => {
+    const raw = "<think>```xml\n</think>" + "</think>".repeat(600);
+    const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, 3), FINISH), TAGS), "none"));
+    expect(textOf(out)).toBe("");
+    expect(finishOf(out)).toHaveProperty("error", expect.stringContaining("thinking boundary is ambiguous"));
+  });
+
+  it("emits reasoning before pulling the closing chunk", async () => {
+    let pulls = 0;
+    async function* source(): AsyncGenerator<StreamEvent> {
+      pulls++; yield { type: "text_delta", text: "<think>first" };
+      pulls++; yield { type: "text_delta", text: " next" };
+      pulls++; yield { type: "text_delta", text: "</think>answer" };
+      pulls++; yield FINISH;
+    }
+    const out = decodeThinkingStream(source(), TAGS);
+    expect((await out.next()).value).toEqual({ type: "reasoning_start" });
+    expect((await out.next()).value).toEqual({ type: "reasoning_delta", text: "first" });
+    expect(pulls).toBe(1);
+    expect((await out.next()).value).toEqual({ type: "reasoning_delta", text: " next" });
+    expect(pulls).toBe(2);
+    const tail = await drain(out);
+    expect(tail[0]).toEqual({ type: "reasoning_stop" });
+    expect(textOf(tail)).toBe("answer");
+  });
+
+  it("retains only possible closing suffix across a large number of small chunks", async () => {
+    const count = 20_000;
+    const chunk = "a".repeat(31) + "x";
+    const close = "aaaaab";
+    let produced = 0;
+    let consumed = 0;
+    async function* source(): AsyncGenerator<StreamEvent> {
+      yield { type: "text_delta", text: "[" };
+      for (let i = 0; i < count; i++) { produced += chunk.length; yield { type: "text_delta", text: chunk }; }
+      yield { type: "text_delta", text: close + ANSWER };
+      yield FINISH;
+    }
+    for await (const event of decodeThinkingStream(source(), { mode: "custom", delimiters: { open: "[", close } })) {
+      if (event.type === "reasoning_delta") {
+        consumed += event.text.length;
+        expect(produced - consumed).toBeLessThan(close.length);
+      }
+      if (event.type === "text_delta") expect(event.text).toBe(ANSWER);
+    }
+    expect(consumed).toBe(count * chunk.length);
+  });
+
+  it("padding bound is the same for buffered, single-chunk and split input", async () => {
+    await checkPartitions(" ".repeat(512) + "<think>x</think>answer", "x", "answer");
+    for (const raw of [" ".repeat(513), " ".repeat(513) + "<think>secret</think>answer"]) {
+      expect(() => decodeThinking(textOnly(raw), TAGS)).toThrow("512-character padding limit");
+      for (const size of [1, 512, 9999]) {
+        const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, size), FINISH), TAGS), "none"));
+        expect(textOf(out)).toBe("");
+        expect(finishOf(out)).toMatchObject({ error: "Upstream thinking prefix exceeds the 512-character padding limit" });
+      }
+    }
+  });
+
+  it("releases ordinary short answers and whitespace-only prefixes without loss", async () => {
+    for (const raw of ["", "ok", " \n\t", "<other>", " ".repeat(512)]) {
+      await checkPartitions(raw, "", raw);
+    }
+  });
+});
+
+describe("structured authority, content order, signatures and usage", () => {
+  it("native reasoning first disables the textual scan and preserves opaque fields", async () => {
+    const native: ContentPart = { type: "reasoning", text: "", signature: "SIGNED", origin: "anthropic", redacted: true, itemId: "r1" };
+    const content = [native, ...textOnly("<think>literal answer markup</think>"), TOOL];
+    expect(decodeThinking(content, TAGS)).toBe(content);
+    for (const format of ["original", "reasoning", "reasoning_content"] as const) expect(applyThinkingFormat(decodeThinking(content, TAGS), format)).toBe(content);
+    const events: StreamEvent[] = [START, { type: "reasoning_start", id: "r1", signature: "SIGNED", origin: "anthropic", redacted: true }, { type: "reasoning_stop", id: "r1", signature: "SIGNED", origin: "anthropic", redacted: true }, { type: "text_delta", text: "<think>literal answer markup</think>" }, FINISH];
+    expect(await drain(decodeThinkingStream(stream(...events), TAGS))).toEqual(events);
+  });
+
+  it("tool-first responses disable scanning; nothing is hoisted across the tool", async () => {
+    const content = [TOOL, ...textOnly("<think>literal</think>")];
+    expect(decodeThinking(content, TAGS)).toBe(content);
+    const out = await drain(decodeThinkingStream(stream(TOOL_START, { type: "text_delta", text: "<think>literal</think>" }, FINISH), TAGS));
+    expect(out[0]).toBe(TOOL_START);
+    expect(textOf(out)).toBe("<think>literal</think>");
+  });
+
+  it("unrelated buffered content and text metadata survive in order", () => {
+    const image: ContentPart = { type: "image", source: { kind: "url", url: "https://example.com/image.png" } };
+    const native: ContentPart = { type: "reasoning", text: "later", signature: "SIGNED", origin: "openai_responses", itemId: "r" };
+    const tail: ContentPart = { type: "text", text: "\n\nanswer", cacheControl: { type: "ephemeral" } };
+    const content: ContentPart[] = [...textOnly("<thi"), ...textOnly("nk>body</th"), ...textOnly("ink>"), tail, image, TOOL, native, ...textOnly("after")];
+    const out = decodeThinking(content, TAGS);
+    expect(out).toEqual([{ type: "reasoning", text: "body" }, { ...tail, text: "answer" }, image, TOOL, native, { type: "text", text: "after" }]);
+    expect(out[2]).toBe(image);
+    expect(out[3]).toBe(TOOL);
+    expect(out[4]).toBe(native);
+  });
+
+  it("start and usage between delimiter fragments are transparent", async () => {
+    const usage: StreamEvent = { type: "usage", usage: USAGE };
+    const out = await drain(decodeThinkingStream(stream(START, { type: "text_delta", text: "<th" }, usage, { type: "text_delta", text: "ink>body</th" }, usage, { type: "text_delta", text: "ink>answer" }, FINISH), TAGS));
+    expect(out.filter(e => e.type === "usage")).toEqual([usage, usage]);
+    expect(out[0]).toBe(START);
+    expect(finishOf(out)).toBe(FINISH);
+    expect(reasoningOf(out)).toBe("body");
+    expect(textOf(out)).toBe("answer");
+  });
+
+  it("drops raw logprobs before the opener and mid-block without ending the scan", async () => {
+    const privateLogprobs: StreamEvent = { type: "logprobs", value: { content: [{ token: "PRIVATE_TOKEN", logprob: -0.1 }] } };
+    const events: StreamEvent[] = [START, privateLogprobs, { type: "text_delta", text: "<th" }, privateLogprobs,
+      { type: "text_delta", text: "ink>private thought" }, privateLogprobs,
+      { type: "text_delta", text: "</think>answer" }, privateLogprobs, FINISH];
+    const decoded = await drain(decodeThinkingStream(stream(...events), TAGS));
+    expect(reasoningOf(decoded)).toBe("private thought");
+    expect(textOf(decoded)).toBe("answer");
+    expect(decoded.some(e => e.type === "logprobs")).toBe(false);
+    expect(finishOf(decoded)).toBe(FINISH);
+    const hidden = await drain(withThinkingFormat(decodeThinkingStream(stream(...events), TAGS), "none"));
+    expect(JSON.stringify(hidden)).not.toContain("private thought");
+    expect(JSON.stringify(hidden)).not.toContain("PRIVATE_TOKEN");
+    expect(textOf(hidden)).toBe("answer");
+    for (const parser of [undefined, { mode: "off" as const }]) {
+      expect(await drain(decodeThinkingStream(stream(...events), parser))).toEqual(events);
+    }
+  });
+
+  it("a collector retains accounting on malformed none decoding", async () => {
+    const result = await collectStream(withThinkingFormat(decodeThinkingStream(stream(START, { type: "text_delta", text: "<think>private" }, FINISH), TAGS), "none"));
+    expect(result.data.content).toEqual([]);
+    expect(result.data.usage).toMatchObject(USAGE);
+    expect(result.error).toBe("Upstream thinking block is unterminated");
+    expect(result.incomplete).toBe(true);
+  });
+});
+
+describe("pure presentation across client wires", () => {
+  it("none removes only reasoning after an explicit decode", async () => {
+    const raw = `<think>${THOUGHT}</think>${ANSWER}`;
+    expect(applyThinkingFormat(decodeThinking(textOnly(raw), TAGS), "none")).toEqual(textOnly(ANSWER));
+    const out = await drain(withThinkingFormat(decodeThinkingStream(stream(...deltas(raw, 3), FINISH), TAGS), "none"));
+    expect(textOf(out)).toBe(ANSWER);
+    expect(reasoningOf(out)).toBe("");
+  });
+
+  it("think_tags inlines readable reasoning and suppresses redacted blocks", async () => {
+    const raw = `<think>\n${THOUGHT}\n</think>\n\n${ANSWER}`;
+    expect(applyThinkingFormat(withReasoning, "think_tags")).toEqual(textOnly(raw));
+    expect(applyThinkingFormat([{ type: "reasoning", text: "", redacted: true, signature: "OPAQUE" }, ...textOnly(ANSWER)], "think_tags")).toEqual(textOnly(ANSWER));
+    const out = await drain(withThinkingFormat(stream({ type: "reasoning_start" }, { type: "reasoning_delta", text: THOUGHT }, { type: "reasoning_stop" }, { type: "text_delta", text: ANSWER }, FINISH), "think_tags"));
+    expect(textOf(out)).toBe(raw);
+    expect(reasoningOf(out)).toBe("");
+  });
+
+  it("inlining preserves the order of separated reasoning/tool/text blocks", async () => {
+    const content: ContentPart[] = [...textOnly("first"), { type: "reasoning", text: "one" }, TOOL, { type: "reasoning", text: "two" }, ...textOnly("last")];
+    expect(applyThinkingFormat(content, "think_tags")).toEqual([...textOnly("first"), ...textOnly("<think>\none\n</think>\n\n"), TOOL, ...textOnly("<think>\ntwo\n</think>\n\nlast")]);
+    const out = await drain(withThinkingFormat(stream({ type: "reasoning_delta", text: "one" }, TOOL_START, FINISH), "think_tags"));
+    expect(textOf(out)).toBe("<think>\none\n</think>\n\n");
+    expect(out.findIndex(e => e.type === "tool_start")).toBeGreaterThan(out.findIndex(e => e.type === "text_delta" && e.text.includes("</think>")));
+  });
+
+  for (const field of ["reasoning", "reasoning_content"] as const) {
+    it(`${field} controls only the Chat Completions field name`, () => {
+      const shaped = applyThinkingFormat(decodeThinking(textOnly(`<think>${THOUGHT}</think>${ANSWER}`), TAGS), field);
+      const body = new OpenAICompletionResponse(data(shaped)).renderSelf("svc", { thinkingFormat: field });
+      const message = (body.choices as Array<{ message: Record<string, unknown> }>)[0].message;
+      expect(message[field]).toBe(THOUGHT);
+      expect(message[field === "reasoning" ? "reasoning_content" : "reasoning"]).toBeUndefined();
+      expect(message.content).toBe(ANSWER);
+      const anthropic = new AnthropicResponse(data(shaped)).renderSelf("svc", { thinkingFormat: field });
+      expect((anthropic.content as unknown[])[0]).toMatchObject({ type: "thinking", thinking: THOUGHT });
+      const responses = new OpenAIResponsesResponse(data(shaped)).renderSelf("svc", { thinkingFormat: field });
+      expect((responses.output as Array<{ type: string }>).some(p => p.type === "reasoning")).toBe(true);
+    });
+  }
+
+  it("original output keeps both native Chat Completions dialect spellings", () => {
     const body = new OpenAICompletionResponse(data(withReasoning)).renderSelf("svc");
     const message = (body.choices as Array<{ message: Record<string, unknown> }>)[0].message;
     expect(message.reasoning).toBe(THOUGHT);
     expect(message.reasoning_content).toBe(THOUGHT);
-  });
-
-  it("a stream is passed through by identity", async () => {
-    const events = stream({ type: "text_delta", text: "<think>x</think>hi" });
-    expect(withThinkingFormat(events, "original")).toBe(events);
-  });
-});
-
-// --- EP: lifting `<think>` out of the answer text -------------------------
-
-describe("EP: thinking buried in the answer text is found", () => {
-  it("a leading <think> block becomes a reasoning part", () => {
-    const out = liftThinkTags(textOnly(`<think>${THOUGHT}</think>\n\n${ANSWER}`));
-    expect(out).toEqual([
-      { type: "reasoning", text: THOUGHT },
-      { type: "text", text: ANSWER },
-    ]);
-  });
-
-  it("the other spellings templates use are recognised too", () => {
-    for (const tag of ["think", "thinking", "reasoning"]) {
-      const out = liftThinkTags(textOnly(`<${tag}>${THOUGHT}</${tag}>\n${ANSWER}`));
-      expect(out[0]).toEqual({ type: "reasoning", text: THOUGHT });
-    }
-  });
-
-  it("leading whitespace from a chat template does not hide the tag", () => {
-    const out = liftThinkTags(textOnly(`\n\n<think>\n${THOUGHT}\n</think>\n\n${ANSWER}`));
-    expect(out[0]).toEqual({ type: "reasoning", text: THOUGHT });
-    expect(out[1]).toEqual({ type: "text", text: ANSWER });
-  });
-
-  it("a thinking-only answer leaves no empty text part behind", () => {
-    const out = liftThinkTags(textOnly(`<think>${THOUGHT}</think>`));
-    expect(out).toEqual([{ type: "reasoning", text: THOUGHT }]);
-  });
-});
-
-describe("DT: when NOT to treat a tag as thinking", () => {
-  it("an unterminated tag stays text — a truncated answer is not a thought", () => {
-    // Turning the whole remaining answer into reasoning would hand the client
-    // an empty response, which is worse than the tag showing through.
-    const content = textOnly(`<think>${THOUGHT} and then the stream died`);
-    expect(liftThinkTags(content)).toBe(content);
-  });
-
-  it("a tag part-way down the answer is the model writing ABOUT the tag", () => {
-    const content = textOnly(`Wrap your reasoning in <think>like this</think> before answering.`);
-    expect(liftThinkTags(content)).toBe(content);
-  });
-
-  it("a structured field wins: the upstream already said where its thinking is", () => {
-    const content: ContentPart[] = [
-      { type: "reasoning", text: THOUGHT },
-      { type: "text", text: "<think>not thinking</think> answer" },
-    ];
-    expect(liftThinkTags(content)).toBe(content);
-  });
-
-  it("content with no text part at all is left alone", () => {
-    const content: ContentPart[] = [{ type: "tool_use", id: "t1", name: "get", input: {} }];
-    expect(liftThinkTags(content)).toBe(content);
-  });
-});
-
-// --- EP: each output format ------------------------------------------------
-
-describe("EP: the four output formats", () => {
-  const raw = textOnly(`<think>${THOUGHT}</think>\n\n${ANSWER}`);
-
-  it("think_tags: structured reasoning is inlined ahead of the answer", () => {
-    const out = applyThinkingFormat(withReasoning, "think_tags");
-    expect(out).toEqual([{ type: "text", text: `<think>\n${THOUGHT}\n</think>\n\n${ANSWER}` }]);
-  });
-
-  it("think_tags: a block that arrived as tags survives the round trip", () => {
-    const out = applyThinkingFormat(raw, "think_tags");
-    expect(out).toEqual([{ type: "text", text: `<think>\n${THOUGHT}\n</think>\n\n${ANSWER}` }]);
-  });
-
-  it("think_tags: a redacted block is dropped, not rendered as an empty one", () => {
-    // It has no readable text by definition; `<think></think>` would say
-    // something false about what the model did.
-    const out = applyThinkingFormat(
-      [{ type: "reasoning", text: "", redacted: true, signature: "OPAQUE" }, { type: "text", text: ANSWER }],
-      "think_tags",
-    );
-    expect(out).toEqual([{ type: "text", text: ANSWER }]);
-  });
-
-  it("none: thinking is kept from the client, from either source", () => {
-    expect(applyThinkingFormat(withReasoning, "none")).toEqual([{ type: "text", text: ANSWER }]);
-    expect(applyThinkingFormat(raw, "none")).toEqual([{ type: "text", text: ANSWER }]);
-  });
-
-  it("reasoning_content: the Chat Completions client gets that field ONLY", () => {
-    const shaped = applyThinkingFormat(raw, "reasoning_content");
-    const body = new OpenAICompletionResponse(data(shaped)).renderSelf("svc", { thinkingFormat: "reasoning_content" });
-    const message = (body.choices as Array<{ message: Record<string, unknown> }>)[0].message;
-    expect(message.reasoning_content).toBe(THOUGHT);
-    expect(message.reasoning).toBeUndefined();
-    expect(message.content).toBe(ANSWER);
-  });
-
-  it("reasoning: the Chat Completions client gets THAT field only", () => {
-    const shaped = applyThinkingFormat(raw, "reasoning");
-    const body = new OpenAICompletionResponse(data(shaped)).renderSelf("svc", { thinkingFormat: "reasoning" });
-    const message = (body.choices as Array<{ message: Record<string, unknown> }>)[0].message;
-    expect(message.reasoning).toBe(THOUGHT);
-    expect(message.reasoning_content).toBeUndefined();
-  });
-});
-
-describe("DT: the field-name choice belongs to one wire only", () => {
-  const shaped = applyThinkingFormat(textOnly(`<think>${THOUGHT}</think>${ANSWER}`), "reasoning_content");
-
-  it("Anthropic keeps its native thinking block rather than inventing a field", () => {
-    const body = new AnthropicResponse(data(shaped)).renderSelf("svc", { thinkingFormat: "reasoning_content" });
-    const blocks = body.content as Array<Record<string, unknown>>;
-    expect(blocks[0]).toMatchObject({ type: "thinking", thinking: THOUGHT });
-    expect(JSON.stringify(body)).not.toContain("reasoning_content");
-  });
-
-  it("Responses keeps its native reasoning item", () => {
-    const body = new OpenAIResponsesResponse(data(shaped)).renderSelf("svc", { thinkingFormat: "reasoning" });
-    const output = body.output as Array<Record<string, unknown>>;
-    expect(output.some((o) => o.type === "reasoning")).toBe(true);
-  });
-
-  it("...but the content-level formats DO apply to those wires", () => {
-    const inlined = applyThinkingFormat(withReasoning, "think_tags");
-    const body = new AnthropicResponse(data(inlined)).renderSelf("svc", { thinkingFormat: "think_tags" });
-    const blocks = body.content as Array<Record<string, unknown>>;
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("text");
-    expect(String(blocks[0].text)).toContain("<think>");
-  });
-});
-
-// --- ST: the streaming half ------------------------------------------------
-
-describe("ST: a tag split across deltas is still recognised", () => {
-  const RAW = `<think>${THOUGHT}</think>\n\n${ANSWER}`;
-
-  // One character at a time is the worst case: every tag lands across a
-  // boundary. Larger sizes cover the ordinary ones.
-  for (const size of [1, 2, 3, 7, 500]) {
-    it(`chunked ${size} char(s) at a time`, async () => {
-      const out = await drain(withThinkingFormat(stream(...deltas(RAW, size), { type: "finish", stopReason: "stop" }), "reasoning"));
-      expect(reasoningOf(out)).toBe(THOUGHT);
-      expect(textOf(out)).toBe(ANSWER);
-      expect(out.some((e) => e.type === "reasoning_start")).toBe(true);
-      expect(out.some((e) => e.type === "reasoning_stop")).toBe(true);
-    });
-  }
-
-  it("the `start` event every stream opens with does not end the scan", async () => {
-    // It is metadata, and it is always first: treating it as the beginning of
-    // the answer disabled the scanner on every real stream while every unit
-    // case that omitted it kept passing.
-    const out = await drain(
-      withThinkingFormat(
-        stream({ type: "start", id: "x", model: "m", created: 1 }, ...deltas(RAW, 3), { type: "finish", stopReason: "stop" }),
-        "reasoning",
-      ),
-    );
-    expect(reasoningOf(out)).toBe(THOUGHT);
-    expect(textOf(out)).toBe(ANSWER);
-  });
-
-  it("an answer with no tag reaches the client whole and unchanged", async () => {
-    const plain = "There is no thinking here, just an answer.";
-    const out = await drain(withThinkingFormat(stream(...deltas(plain, 3), { type: "finish", stopReason: "stop" }), "reasoning"));
-    expect(textOf(out)).toBe(plain);
-    expect(out.some((e) => e.type === "reasoning_start")).toBe(false);
-  });
-
-  it("a short answer that never fills the scan buffer is still delivered", async () => {
-    // The scan holds text back until it can decide; a two-word answer must not
-    // be swallowed by that hold when the stream simply ends.
-    const out = await drain(withThinkingFormat(stream({ type: "text_delta", text: "ok" }, { type: "finish", stopReason: "stop" }), "reasoning"));
-    expect(textOf(out)).toBe("ok");
-  });
-
-  it("an upstream that used a structured field is passed straight through", async () => {
-    const out = await drain(
-      withThinkingFormat(
-        stream(
-          { type: "reasoning_start" },
-          { type: "reasoning_delta", text: THOUGHT },
-          { type: "reasoning_stop" },
-          { type: "text_delta", text: ANSWER },
-          { type: "finish", stopReason: "stop" },
-        ),
-        "reasoning",
-      ),
-    );
-    expect(reasoningOf(out)).toBe(THOUGHT);
-    expect(textOf(out)).toBe(ANSWER);
-  });
-
-  it("a tool call before any text ends the scan without eating the buffer", async () => {
-    const out = await drain(
-      withThinkingFormat(
-        stream(
-          { type: "text_delta", text: "<th" },
-          { type: "tool_start", index: 0, id: "t1", name: "get" },
-          { type: "finish", stopReason: "tool_use" },
-        ),
-        "reasoning",
-      ),
-    );
-    expect(textOf(out)).toBe("<th");
-    expect(out.some((e) => e.type === "tool_start")).toBe(true);
-  });
-});
-
-describe("EG: a stream that dies inside a candidate thinking block", () => {
-  it("the held run goes out as text, matching the buffered path", async () => {
-    const out = await drain(
-      withThinkingFormat(stream(...deltas(`<think>${THOUGHT}`, 4)), "reasoning"),
-    );
-    // A block that never closed is the answer text, not a thought -- the same
-    // contract `liftThinkTags` documents. Nothing was emitted as reasoning.
-    expect(reasoningOf(out)).toBe("");
-    expect(textOf(out).endsWith(THOUGHT)).toBe(true);
-    expect(out.some((e) => e.type === "reasoning_stop")).toBe(false);
-  });
-
-  it("a finish arriving mid-block releases the held run before the finish", async () => {
-    const out = await drain(
-      withThinkingFormat(stream({ type: "text_delta", text: "<think>half a thought" }, { type: "finish", stopReason: "length" }), "reasoning"),
-    );
-    const textAt = out.findIndex((e) => e.type === "text_delta");
-    const finishAt = out.findIndex((e) => e.type === "finish");
-    expect(textAt).toBeGreaterThanOrEqual(0);
-    expect(textAt).toBeLessThan(finishAt);
-    expect(out.some((e) => e.type === "reasoning_delta")).toBe(false);
-  });
-
-  it("a truncated tag block is not reported as thinking-with-no-answer", async () => {
-    // The exact regression: the relay validates the RAW stream, shapes it, then
-    // validates the SHAPED stream again. When shaping reclassified an
-    // unterminated block as reasoning, the second pass rejected an answer that
-    // was really there, and the client saw a thinking block with no content.
-    const raw = String.fromCharCode(60) + "think" + String.fromCharCode(62) + THOUGHT + " and then the stream died";
-    const shaped = withThinkingFormat(stream(...deltas(raw, 3), { type: "finish", stopReason: "stop" }), "reasoning_content");
-    const out = await drain(requireAnswer(shaped));
-    expect(out.find((e) => e.type === "finish")).not.toHaveProperty("error");
-    expect(textOf(out)).toBe(raw);
-  });
-});
-
-describe("ST: streaming think_tags and none", () => {
-  it("think_tags wraps streamed reasoning back into the answer text", async () => {
-    const out = await drain(
-      withThinkingFormat(
-        stream(
-          { type: "reasoning_start" },
-          { type: "reasoning_delta", text: "half " },
-          { type: "reasoning_delta", text: "a thought" },
-          { type: "reasoning_stop" },
-          { type: "text_delta", text: ANSWER },
-          { type: "finish", stopReason: "stop" },
-        ),
-        "think_tags",
-      ),
-    );
-    expect(textOf(out)).toBe(`<think>\nhalf a thought\n</think>\n\n${ANSWER}`);
-    expect(out.some((e) => e.type === "reasoning_delta")).toBe(false);
-  });
-
-  it("think_tags closes the block before a tool call, never straddling it", async () => {
-    const out = await drain(
-      withThinkingFormat(
-        stream(
-          { type: "reasoning_delta", text: "thinking" },
-          { type: "tool_start", index: 0, id: "t1", name: "get" },
-          { type: "finish", stopReason: "tool_use" },
-        ),
-        "think_tags",
-      ),
-    );
-    const text = textOf(out);
-    expect(text).toBe("<think>\nthinking\n</think>\n\n");
-    const closeAt = out.findIndex((e) => e.type === "text_delta" && (e as { text: string }).text.includes("</think>"));
-    const toolAt = out.findIndex((e) => e.type === "tool_start");
-    expect(closeAt).toBeLessThan(toolAt);
-  });
-
-  it("none removes streamed reasoning from both sources", async () => {
-    const fromField = await drain(
-      withThinkingFormat(
-        stream({ type: "reasoning_delta", text: THOUGHT }, { type: "text_delta", text: ANSWER }, { type: "finish", stopReason: "stop" }),
-        "none",
-      ),
-    );
-    expect(reasoningOf(fromField)).toBe("");
-    expect(textOf(fromField)).toBe(ANSWER);
-
-    const fromTags = await drain(
-      withThinkingFormat(stream(...deltas(`<think>${THOUGHT}</think>${ANSWER}`, 5), { type: "finish", stopReason: "stop" }), "none"),
-    );
-    expect(reasoningOf(fromTags)).toBe("");
-    expect(textOf(fromTags)).toBe(ANSWER);
-  });
-});
-
-// --- EG: the spellings a model actually emits ------------------------------
-
-/** A tag spelled with `name`, so a case can pair any two spellings. */
-const openTag = (name: string): string => `<${name}>`;
-const closeTag = (name: string): string => `</${name}>`;
-
-/**
- * Every one of these must be FOUND, and the buffered and streaming scans must
- * agree on it: the same response has to reach a client the same way whether or
- * not it streamed.
- *
- * The failure they pin was silent and looked like a client bug. When the scan
- * did not recognise a tag, the block was never lifted and the raw tags went out
- * as the ANSWER text -- which the client parses again, opening a thinking block
- * that swallows the answer, so the user saw thinking and no output at all.
- *
- * Each of these is a real spelling: a template pads a tag (`<think >`), a model
- * mixes the synonyms it opens and closes with, and a model occasionally emits a
- * zero-width character inside a token. The close name used to be built from the
- * OPENING tag's name, so a mixed pair matched nothing and nothing was lifted.
- */
-describe("EG: the tag spellings a model actually emits", () => {
-  const SPELLINGS: Array<[string, string]> = [
-    ["a matched pair", `${openTag("think")}${THOUGHT}${closeTag("think")}`],
-    ["a close in another spelling", `${openTag("thinking")}${THOUGHT}${closeTag("reasoning")}`],
-    ["a close in the shortest spelling", `${openTag("thinking")}${THOUGHT}${closeTag("think")}`],
-    ["a space before the closing bracket", `${openTag("think ")}${THOUGHT}${closeTag("think ")}`],
-    ["a newline before the closing bracket", `${openTag("think\n")}${THOUGHT}${closeTag("think\n")}`],
-    ["a non-breaking space inside the tag", `${openTag("think\u00a0")}${THOUGHT}${closeTag("think\u00a0")}`],
-    ["a zero-width space inside the name", `${openTag("thi\u200bnk")}${THOUGHT}${closeTag("thi\u200bnk")}`],
-    ["leading newlines from a template", `${"\n".repeat(30)}${openTag("think")}${THOUGHT}${closeTag("think")}`],
-    ["a wide indent before the tag", `${" ".repeat(40)}${openTag("think")}${THOUGHT}${closeTag("think")}`],
-    // The name is recognised by its stem, so a template that wraps it still
-    // works -- and these are the cases a fixed three-name list missed, which
-    // delivered the whole block to the client as the ANSWER.
-    ["the thought spelling", `${openTag("thought")}${THOUGHT}${closeTag("thought")}`],
-    ["a wrapped name", `${openTag("chain_of_thought")}${THOUGHT}${closeTag("chain_of_thought")}`],
-    ["a prefixed name", `${openTag("thinking_process")}${THOUGHT}${closeTag("thinking_process")}`],
-    ["a stem in the middle of the name", `${openTag("deep_think")}${THOUGHT}${closeTag("deep_think")}`],
-    ["a wrapped name closed with a plain one", `${openTag("chain_of_thought")}${THOUGHT}${closeTag("reasoning")}`],
-  ];
-
-  for (const [name, head] of SPELLINGS) {
-    it(`${name} is found, buffered and streamed alike`, async () => {
-      const raw = `${head}\n\n${ANSWER}`;
-      const buffered = applyThinkingFormat(textOnly(raw), "reasoning_content");
-      expect(buffered).toEqual([
-        { type: "reasoning", text: THOUGHT },
-        { type: "text", text: ANSWER },
-      ]);
-
-      // One character at a time is the worst case: every tag lands across a
-      // chunk boundary, which is where an unsettled prefix has to be held.
-      for (const size of [1, 2, 3, 7, 500]) {
-        const out = await drain(
-          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
-        );
-        expect(reasoningOf(out)).toBe(THOUGHT);
-        expect(textOf(out)).toBe(ANSWER);
-      }
-    });
-  }
-
-  it("an unterminated block is still text, however its tags were spelled", async () => {
-    // The contract this scanner has always had: a block that never closed is
-    // the answer text, not a thought. Recognising more spellings must not turn
-    // a truncated answer into an empty response.
-    const raw = `${openTag("thinking")}${THOUGHT}`;
-    expect(liftThinkTags(textOnly(raw))).toEqual(textOnly(raw));
-    const out = await drain(withThinkingFormat(stream(...deltas(raw, 2)), "reasoning_content"));
-    expect(reasoningOf(out)).toBe("");
-    expect(textOf(out)).toBe(raw);
-  });
-
-  it("padding alone never settles the scan", async () => {
-    // A run of leading newlines is a chat template, not the answer beginning.
-    // Ending the scan on it left the tag in the answer text on the streaming
-    // path while the buffered path lifted it.
-    const out = await drain(
-      withThinkingFormat(
-        stream(...deltas(`${"\n".repeat(200)}${openTag("think")}${THOUGHT}${closeTag("think")}\n${ANSWER}`, 4), { type: "finish", stopReason: "stop" }),
-        "reasoning_content",
-      ),
-    );
-    expect(reasoningOf(out)).toBe(THOUGHT);
-    expect(textOf(out)).toBe(ANSWER);
-  });
-});
-
-/**
- * The reasoning of a model that is thinking ABOUT these tags quotes them, and a
- * quotation is not the end of the thought.
- *
- * This is the failure that reaches a user as "that is still the thinking, but
- * my client showed it as the answer". The scanner took the FIRST close tag --
- * the one the model had just written down inside a code span or a fence -- as
- * the end of the block, so everything after it, the rest of the reasoning and
- * the answer itself, was delivered as ordinary answer text.
- */
-describe("EG: a close tag the model only quoted", () => {
-  const TICK = String.fromCharCode(96);
-  const FENCE = TICK.repeat(3);
-
-  /** The real-world shape: a quotation mid-reasoning, then a real end. */
-  const QUOTED: Array<[string, string]> = [
-    ["quoted in a code span", `The block ends at ${TICK}${closeTag("think")}${TICK}, normally.\nKeep going.`],
-    ["quoted in a code span, other spelling", `The block ends at ${TICK}${closeTag("reasoning")}${TICK}, normally.\nKeep going.`],
-    ["quoted in a fenced example", `Example:\n${FENCE}\n${closeTag("think")}\n${FENCE}\nAfter the example.`],
-  ];
-
-  for (const [name, body] of QUOTED) {
-    it(`${name} does not end the thought`, async () => {
-      const raw = `${openTag("think")}${body}${closeTag("think")}\n\n${ANSWER}`;
-      const buffered = applyThinkingFormat(textOnly(raw), "reasoning_content");
-      expect(buffered).toEqual([
-        { type: "reasoning", text: body },
-        { type: "text", text: ANSWER },
-      ]);
-      for (const size of [1, 2, 3, 7, 500]) {
-        const out = await drain(
-          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
-        );
-        expect(reasoningOf(out)).toBe(body);
-        expect(textOf(out)).toBe(ANSWER);
-      }
-    });
-  }
-
-  it("a block whose only close tags are quotations stays answer text", async () => {
-    // The safe direction, and the same contract as an unterminated block: a
-    // thought that never really ended is not worth losing the answer over.
-    const raw = `${openTag("think")}Only a quotation here: ${TICK}${closeTag("think")}${TICK} and no real end.`;
-    expect(liftThinkTags(textOnly(raw))).toEqual(textOnly(raw));
-    const out = await drain(withThinkingFormat(stream(...deltas(raw, 3)), "reasoning_content"));
-    expect(reasoningOf(out)).toBe("");
-    expect(textOf(out)).toBe(raw);
-  });
-});
-
-describe("DT: a tag at the head that is NOT thinking", () => {
-  // Recognising a name by its stem must not turn a real answer's own markup into
-  // thinking: these are wrappers models are asked to answer in, and `analysis`
-  // in particular is a structured-answer tag, not a trace.
-  const NOT_THINKING = [
-    `${openTag("div")}markup${closeTag("div")}`,
-    `${openTag("analysis")}a structured answer${closeTag("analysis")}`,
-    `${openTag("div class=\"box\"")}attributes${closeTag("div")}`,
-    `${openTag("result")}a structured answer${closeTag("result")}`,
-  ];
-
-  for (const [i, raw] of NOT_THINKING.entries()) {
-    it(`case ${i + 1} stays answer text`, async () => {
-      expect(liftThinkTags(textOnly(`${raw}\n\n${ANSWER}`))).toEqual(textOnly(`${raw}\n\n${ANSWER}`));
-      const out = await drain(withThinkingFormat(stream(...deltas(raw, 2), { type: "finish", stopReason: "stop" }), "reasoning_content"));
-      expect(reasoningOf(out)).toBe("");
-      expect(textOf(out)).toBe(raw);
-    });
-  }
-});
-
-/**
- * The escape hatch every serious implementation of this ships: the operator
- * states the boundaries outright. Scanning by tag SHAPE cannot cover a model
- * that does not delimit its trace that way -- GPT-OSS's harmony channels are
- * the standard example -- so a declared pair is matched literally instead.
- * vLLM exposes the same thing as `--reasoning-config`, Open WebUI as a
- * configurable reasoning tag pair.
- */
-describe("EP: operator-declared boundaries", () => {
-  const CASES: Array<[string, ThinkingDelimiters]> = [
-    ["harmony channels", { open: "<|channel|>analysis<|message|>", close: "<|channel|>final<|message|>" }],
-    ["a bracket pair no name rule could guess", { open: "[reasoning]", close: "[/reasoning]" }],
-    ["a plain tag pair", { open: "<thinking>", close: "</thinking>" }],
-  ];
-
-  for (const [name, pair] of CASES) {
-    it(`${name}: lifted, buffered and streamed alike`, async () => {
-      const raw = `${pair.open}${THOUGHT}${pair.close}${ANSWER}`;
-      expect(applyThinkingFormat(textOnly(raw), "reasoning_content", pair)).toEqual([
-        { type: "reasoning", text: THOUGHT },
-        { type: "text", text: ANSWER },
-      ]);
-      // One character at a time: the declaration has to survive every chunk
-      // boundary, including one that lands inside the marker itself.
-      for (const size of [1, 2, 3, 7, 500]) {
-        const out = await drain(
-          withThinkingFormat(stream(...deltas(raw, size), { type: "finish", stopReason: "stop" }), "reasoning_content", pair),
-        );
-        expect(reasoningOf(out)).toBe(THOUGHT);
-        expect(textOf(out)).toBe(ANSWER);
-      }
-    });
-  }
-
-  it("declaring the boundaries is enough, even while the format is `original`", async () => {
-    // A pair is a statement about the UPSTREAM, so it has to work on its own:
-    // the format only decides how the thinking is presented afterwards.
-    const pair: ThinkingDelimiters = { open: "<|channel|>analysis<|message|>", close: "<|channel|>final<|message|>" };
-    const raw = `${pair.open}${THOUGHT}${pair.close}${ANSWER}`;
-    const out = await drain(withThinkingFormat(stream(...deltas(raw, 4), { type: "finish", stopReason: "stop" }), "original", pair));
-    expect(reasoningOf(out)).toBe(THOUGHT);
-    expect(textOf(out)).toBe(ANSWER);
-  });
-
-  it("an unterminated declared block is still the answer", async () => {
-    const pair: ThinkingDelimiters = { open: "[reasoning]", close: "[/reasoning]" };
-    const raw = `${pair.open}${THOUGHT}`;
-    expect(applyThinkingFormat(textOnly(raw), "reasoning_content", pair)).toEqual(textOnly(raw));
-    const out = await drain(withThinkingFormat(stream(...deltas(raw, 2)), "reasoning_content", pair));
-    expect(reasoningOf(out)).toBe("");
-    expect(textOf(out)).toBe(raw);
-  });
-
-  it("a service with no pair is untouched by the feature", () => {
-    const raw = `[reasoning]${THOUGHT}[/reasoning]${ANSWER}`;
-    expect(applyThinkingFormat(textOnly(raw), "reasoning_content")).toEqual(textOnly(raw));
-  });
-});
-
-describe("EG: a tag quoted in prose, not only in code", () => {
-  // The reasoning of a model that is thinking ABOUT these tags writes them down
-  // in passing: `…` and then keeps thinking. Missing that quotation ends the
-  // block early, and everything after it -- the rest of the reasoning and the
-  // answer -- is delivered as the answer.
-  const QUOTED_INLINE = `${openTag("think")}To close it you write ${"`"}${closeTag("think")}${"`"} like that.\nKeep thinking.${closeTag("think")}\n\n${ANSWER}`;
-
-  it("a backtick-wrapped quotation is not the end", async () => {
-    const want = `To close it you write ${"`"}${closeTag("think")}${"`"} like that.\nKeep thinking.`;
-    expect(applyThinkingFormat(textOnly(QUOTED_INLINE), "reasoning_content")).toEqual([
-      { type: "reasoning", text: want },
-      { type: "text", text: ANSWER },
-    ]);
-    for (const size of [1, 3, 9, 500]) {
-      const out = await drain(
-        withThinkingFormat(stream(...deltas(QUOTED_INLINE, size), { type: "finish", stopReason: "stop" }), "reasoning_content"),
-      );
-      expect(reasoningOf(out)).toBe(want);
-      expect(textOf(out)).toBe(ANSWER);
-    }
-  });
-
-  it("a real end followed by a code fence still ends the block", async () => {
-    // Only ONE side is a backtick here, so it is a terminator rather than a
-    // quotation -- requiring both sides is what keeps this case working.
-    const raw = `${openTag("think")}Reasoning.${closeTag("think")}${"```"}js\ncode\n${"```"}`;
-    const out = await drain(withThinkingFormat(stream(...deltas(raw, 3), { type: "finish", stopReason: "stop" }), "reasoning_content"));
-    expect(reasoningOf(out)).toBe("Reasoning.");
-    expect(textOf(out)).toBe(`${"```"}js\ncode\n${"```"}`);
   });
 });

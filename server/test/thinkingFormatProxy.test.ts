@@ -33,9 +33,13 @@ let baseUrl: string;
 /** "tags" = thinking inline in the content; "field" = a reasoning_content field;
  * "mixed" = inline content whose two tag halves spell the tag differently;
  * "harmony" = a channel-marker trace no name rule can recognise. */
-let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" | "mixed" | "harmony" = "tags";
+let style: "tags" | "field" | "tags-spaced" | "thinking-only" | "empty" | "mixed" | "harmony" | "truncated" | "xml" | "recognition" = "tags";
 let finishReason = "stop";
 let lastUpstreamBody: Record<string, unknown>;
+type RecognitionFixture = { thought: string; answer: string; native?: boolean };
+let recognitionFixture: RecognitionFixture;
+/** A socket test can withhold upstream completion until the client sees output. */
+let streamScript: ((sendContent: (text: string) => void, finish: () => void) => void) | undefined;
 
 /** Tags are assembled from parts so a case can pair any two spellings. */
 const LT = String.fromCharCode(60);
@@ -56,9 +60,12 @@ const HARMONY_CLOSE = "<|channel|>final<|message|>";
 
 /** The content this upstream serves for the current style, inline styles only. */
 const inlineContent = (tagged: string): string =>
-  style === "mixed" ? MIXED_TAGGED
+  style === "recognition" ? `<think>${recognitionFixture.thought}</think>${recognitionFixture.answer}`
+    : style === "mixed" ? MIXED_TAGGED
     : style === "harmony" ? `${HARMONY_OPEN}${THOUGHT}${HARMONY_CLOSE}${ANSWER}`
-      : tagged;
+      : style === "truncated" ? `<think>${THOUGHT}`
+        : style === "xml" ? "<reason>The payment was declined.</reason>"
+          : tagged;
 
 function startUpstream(): Promise<void> {
   return new Promise((resolve) => {
@@ -75,27 +82,41 @@ function startUpstream(): Promise<void> {
           const chunk = (d: Record<string, unknown>): void => {
             res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "up", ...d })}\n\n`);
           };
+          const sendContent = (text: string): void => {
+            chunk({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+          };
+          const finish = (): void => {
+            chunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] });
+            chunk({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14, completion_tokens_details: { reasoning_tokens: 4 } } });
+            res.write("data: [DONE]\n\n");
+            res.end();
+          };
           chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-          if (style === "field" || style === "thinking-only") {
+          if (streamScript) return streamScript(sendContent, finish);
+          if (style === "recognition" && recognitionFixture.native) {
+            for (let i = 0; i < recognitionFixture.thought.length; i += 3) {
+              chunk({ choices: [{ index: 0, delta: { reasoning_content: recognitionFixture.thought.slice(i, i + 3) }, finish_reason: null }] });
+            }
+            for (let i = 0; i < recognitionFixture.answer.length; i += 3) sendContent(recognitionFixture.answer.slice(i, i + 3));
+          } else if (style === "field" || style === "thinking-only") {
             for (const piece of [THOUGHT.slice(0, 12), THOUGHT.slice(12)]) {
               chunk({ choices: [{ index: 0, delta: { reasoning_content: piece }, finish_reason: null }] });
             }
-            if (style === "field") chunk({ choices: [{ index: 0, delta: { content: ANSWER }, finish_reason: null }] });
+            if (style === "field") sendContent(ANSWER);
           } else if (style !== "empty") {
             // Three characters at a time: every tag lands across a boundary,
             // which is the only interesting case for a streamed scanner.
             const served = inlineContent(tagged);
             for (let i = 0; i < served.length; i += 3) {
-              chunk({ choices: [{ index: 0, delta: { content: served.slice(i, i + 3) }, finish_reason: null }] });
+              sendContent(served.slice(i, i + 3));
             }
           }
-          chunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] });
-          chunk({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14, completion_tokens_details: { reasoning_tokens: 4 } } });
-          res.write("data: [DONE]\n\n");
-          return res.end();
+          return finish();
         }
 
-        const message = style === "empty" ? { role: "assistant", content: null }
+        const message = style === "recognition" && recognitionFixture.native
+          ? { role: "assistant", content: recognitionFixture.answer, reasoning_content: recognitionFixture.thought }
+          : style === "empty" ? { role: "assistant", content: null }
           : style === "thinking-only" ? { role: "assistant", content: null, reasoning_content: THOUGHT }
           : style === "field"
           ? { role: "assistant", content: ANSWER, reasoning_content: THOUGHT }
@@ -116,13 +137,19 @@ function startUpstream(): Promise<void> {
 }
 
 /** One service per format, so a case never has to mutate a definition. */
-const SERVICES: Array<{ name: string; format?: string; delimiters?: { open: string; close: string } }> = [
+const SERVICES: Array<{ name: string; format?: string; reliableStreaming?: boolean; delimiters?: { open: string; close: string } }> = [
   { name: "plain" },
   { name: "as-content", format: "reasoning_content" },
   { name: "as-reasoning", format: "reasoning" },
   { name: "as-tags", format: "think_tags" },
   { name: "hidden", format: "none" },
+  { name: "reliable-content", format: "reasoning_content", reliableStreaming: true },
+  { name: "reliable-hidden", format: "none", reliableStreaming: true },
+  { name: "custom-think", format: "reasoning_content", delimiters: { open: "<think>", close: "</think>" } },
   { name: "as-harmony", format: "reasoning_content", delimiters: { open: HARMONY_OPEN, close: HARMONY_CLOSE } },
+  { name: "as-mixed", format: "reasoning_content", delimiters: { open: "<thinking>", close: "</reasoning>" } },
+  { name: "hide-mixed", format: "none", delimiters: { open: "<thinking>", close: "</reasoning>" } },
+  { name: "hide-spaced", format: "none", delimiters: { open: "<think>", close: "</think \n >" } },
 ];
 
 beforeAll(async () => {
@@ -146,9 +173,10 @@ beforeAll(async () => {
       name: s.name,
       definition: {
         timeoutMs: 10_000,
-        steps: [{ model: "m", provider: "p" }],
+        ...(s.reliableStreaming ? { reliableStreaming: true } : {}),
+        steps: [{ model: "m", provider: "p", ...(s.format ? { thinkingParser: s.delimiters
+          ? { mode: "custom", delimiters: s.delimiters } : { mode: "think_tags" } } : {}) }],
         ...(s.format ? { thinkingFormat: s.format } : {}),
-        ...(s.delimiters ? { thinkingDelimiters: s.delimiters } : {}),
       },
     });
   }
@@ -361,8 +389,8 @@ describe("blank response regressions", () => {
 
   it("hidden thinking with a spaced closing tag retains the answer in both modes", async () => {
     style = "tags-spaced";
-    expect(messageOf(await chat("hidden")).content).toBe(ANSWER);
-    expect(streamed((await chat("hidden", true)).payload).content).toBe(ANSWER);
+    expect(messageOf(await chat("hide-spaced")).content).toBe(ANSWER);
+    expect(streamed((await chat("hide-spaced", true)).payload).content).toBe(ANSWER);
   });
 
   for (const responseStyle of ["thinking-only", "empty"] as const) {
@@ -397,37 +425,59 @@ describe("blank response regressions", () => {
   });
 });
 
-describe("EG: a tag pair the model spelled two different ways", () => {
+describe("an upstream with explicitly declared asymmetric markers", () => {
   beforeAll(() => { style = "mixed"; });
   afterAll(() => { style = "tags"; });
 
-  it("lifts like any matched pair, so the client gets the answer", async () => {
-    // Why this is the case worth pinning end to end: the close tag used to be
-    // matched against the name the block OPENED with, so a mixed pair matched
-    // nothing. Nothing was lifted, the raw tags travelled as the answer text,
-    // and a client that parses those tags itself showed a thinking block that
-    // had swallowed the answer -- reported as "only thinking, no output", with
-    // a 200 and no error anywhere to explain it.
-    const message = messageOf(await chat("as-content"));
+  it("uses the step's exact custom grammar", async () => {
+    const message = messageOf(await chat("as-mixed"));
     expect(message.reasoning_content).toBe(THOUGHT);
     expect(message.content).toBe(ANSWER);
   });
 
   it("...and the streamed answer is identical to the buffered one", async () => {
-    const out = streamed((await chat("as-content", true)).payload);
+    const out = streamed((await chat("as-mixed", true)).payload);
     expect(out.reasoningContent).toBe(THOUGHT);
     expect(out.reasoning).toBe("");
     expect(out.content).toBe(ANSWER);
   });
 
   it("a service that hides thinking loses it rather than leaking it into the answer", async () => {
-    // Proves the block was really classified as thinking: `none` can only drop
-    // it if it was found. Left in the text, the tags would arrive here instead.
-    const message = messageOf(await chat("hidden"));
+    // Detection is independent of presentation and specific to this upstream.
+    const message = messageOf(await chat("hide-mixed"));
     expect(message.content).toBe(ANSWER);
     expect(message.reasoning).toBeUndefined();
     expect(message.reasoning_content).toBeUndefined();
   });
+});
+
+describe("explicit decoding safety", () => {
+  afterAll(() => { style = "tags"; finishReason = "stop"; });
+
+  for (const stream of [false, true]) {
+    it(`stream=${stream}: unterminated hidden reasoning is an error, not answer text`, async () => {
+      style = "truncated";
+      finishReason = "length";
+      const response = await chat("hidden", stream);
+      expect(response.payload).not.toContain(THOUGHT);
+      expect(response.payload).not.toContain("<think>");
+      expect(response.payload).toContain("thinking");
+      if (stream) expect(response.payload).not.toContain("[DONE]");
+      else expect(response.statusCode).toBe(502);
+      const log = c.logs.get(c.logs.query({ limit: 1 }).rows[0].id);
+      expect(log.httpStatus).toBe(502);
+      expect(log.completionTokens).toBe(9 * log.attempts);
+    });
+
+    it(`stream=${stream}: legitimate reason XML is preserved`, async () => {
+      style = "xml";
+      finishReason = "stop";
+      const response = await chat("hidden", stream);
+      expect(response.statusCode).toBe(200);
+      const text = stream ? streamed(response.payload).content : messageOf(response).content;
+      expect(text).toBe("<reason>The payment was declined.</reason>");
+    });
+  }
 });
 
 describe("EG: a service that declares its upstream's boundaries", () => {
@@ -455,4 +505,230 @@ describe("EG: a service that declares its upstream's boundaries", () => {
     const out = streamed((await chat("plain", true)).payload);
     expect(out.content).toBe(`${HARMONY_OPEN}${THOUGHT}${HARMONY_CLOSE}${ANSWER}`);
   });
+});
+
+const RECOGNITION_CASES: Array<RecognitionFixture & { name: string }> = [
+  {
+    name: "an inline-code closing tag is thought, not the boundary",
+    thought: "The closing tag is `</think>`. Still reasoning.",
+    answer: "Actual answer",
+  },
+  {
+    name: "a fenced closing tag stays in thought until the real boundary",
+    thought: "Example:\n```xml\n</think>\n```\nStill reasoning.",
+    answer: "Actual answer",
+  },
+  {
+    name: "an unpaired backtick cannot consume the actual answer",
+    thought: "An unfinished `code sample. Still reasoning.",
+    answer: "Actual answer",
+  },
+  {
+    name: "an unclosed fence cannot consume the actual answer",
+    thought: "Example:\n```xml\nAn unfinished sample. Still reasoning.",
+    answer: "Actual answer",
+  },
+  {
+    name: "the answer's opening fence is not the thought's closing fence",
+    thought: "Example:\n```xml\nAn unfinished sample.",
+    answer: "```ts\nconst answer = 42;\n```",
+  },
+  {
+    name: "native structured reasoning is authoritative over tag-shaped text",
+    native: true,
+    thought: "Native thought: `</think>` and <think>literal example</think>.",
+    answer: "<think>This is answer text, not another thought.</think>Actual answer",
+  },
+];
+
+const RECOGNITION_MODES = [
+  { name: "buffered JSON", stream: false, reliable: false },
+  { name: "live SSE", stream: true, reliable: false },
+  { name: "reliable SSE", stream: true, reliable: true },
+] as const;
+
+/** Exercise the saved per-step parser through real HTTP upstream transport,
+ * collection (including reliable streaming), and the downstream formatter. */
+describe("quoted closing tags and malformed quotation recovery", () => {
+  afterAll(() => { style = "tags"; finishReason = "stop"; });
+
+  for (const fixture of RECOGNITION_CASES) {
+    for (const mode of RECOGNITION_MODES) {
+      for (const format of ["reasoning_content", "none"] as const) {
+        it(`${mode.name}, ${format}: ${fixture.name}`, async () => {
+          style = "recognition";
+          recognitionFixture = fixture;
+          finishReason = "stop";
+          const model = format === "none"
+            ? (mode.reliable ? "reliable-hidden" : "hidden")
+            : (mode.reliable ? "reliable-content" : "as-content");
+          const response = await chat(model, mode.stream);
+          expect(response.statusCode).toBe(200);
+          // Pin the upstream path too: reliable mode must collect actual SSE,
+          // rather than accidentally testing the buffered JSON fixture twice.
+          expect(lastUpstreamBody.stream === true).toBe(mode.stream);
+          if (mode.stream) {
+            expect(response.payload).toContain("[DONE]");
+            expect(streamed(response.payload)).toEqual({
+              content: fixture.answer,
+              reasoning: "",
+              reasoningContent: format === "none" ? "" : fixture.thought,
+            });
+          } else {
+            const message = messageOf(response);
+            expect(message.content).toBe(fixture.answer);
+            expect(message.reasoning).toBeUndefined();
+            expect(message.reasoning_content).toBe(format === "none" ? undefined : fixture.thought);
+          }
+        });
+      }
+    }
+  }
+
+  for (const stream of [false, true]) {
+    it(`stream=${stream}: custom protocol delimiters remain literal inside backticks`, async () => {
+      style = "recognition";
+      recognitionFixture = RECOGNITION_CASES[0];
+      const response = await chat("custom-think", stream);
+      expect(response.statusCode).toBe(200);
+      const out = stream ? streamed(response.payload) : {
+        content: messageOf(response).content,
+        reasoningContent: messageOf(response).reasoning_content,
+      };
+      expect(out.reasoningContent).toBe("The closing tag is `");
+      expect(out.content).toBe("`. Still reasoning.</think>Actual answer");
+    });
+  }
+});
+
+/** Injection collects the whole body, so it cannot prove incremental delivery.
+ * These real-socket tests make upstream progress depend on downstream output:
+ * thought must arrive before the closing marker is sent, and an actual answer
+ * must start before finish_reason/[DONE] or EOF. The watchdog detects deadlocks;
+ * it is not a throughput assertion. */
+describe("real-socket thinking recognition does not wait for upstream EOF", () => {
+  let address: string;
+  beforeAll(async () => { address = await app.listen({ port: 0, host: "127.0.0.1" }); });
+  afterAll(() => { streamScript = undefined; style = "tags"; });
+
+  for (const malformed of ["unpaired backtick followed by a newline"] as const) {
+    for (const format of ["reasoning_content", "none"] as const) {
+      it(`${format}, ${malformed}: streams before both close and completion`, async () => {
+        const initial = "Initial reasoning is already available. ";
+        const suffix = "An unfinished `sample.";
+        // A newline ends this dangling inline quotation. The long answer must
+        // stream while upstream remains open, not wait for terminal metadata.
+        const answer = `Actual answer ${"x".repeat(8192)}`;
+        let sendClose: (() => void) | undefined;
+        let finish: (() => void) | undefined;
+        let sentClose = false;
+        let sentFinish = false;
+        let sawThoughtBeforeClose = false;
+        let sawAnswerBeforeFinish = false;
+        streamScript = (sendContent, end) => {
+          finish = () => {
+            if (sentFinish) return;
+            sentFinish = true;
+            end();
+          };
+          sendClose = () => {
+            if (sentClose) return;
+            sentClose = true;
+            const tail = `${suffix}</think>\n${answer}`;
+            for (let i = 0; i < tail.length; i += 257) sendContent(tail.slice(i, i + 257));
+          };
+          sendContent(`<think>${initial}`);
+          // A none client intentionally cannot acknowledge private thought.
+          if (format === "none") sendClose();
+        };
+        const controller = new AbortController();
+        const watchdog = setTimeout(() => controller.abort(new Error("thinking/answer delivery stalled before upstream completion")), 2500);
+        try {
+          const response = await fetch(`${address}/v1/chat/completions`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+            body: JSON.stringify({ model: format === "none" ? "hidden" : "as-content", stream: true, messages: [{ role: "user", content: "test incremental recognition" }] }),
+            signal: controller.signal,
+          });
+          expect(response.status).toBe(200);
+          const reader = response.body!.getReader();
+          const decoder = new TextDecoder();
+          let payload = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            payload += decoder.decode(value, { stream: true });
+            // Network chunks need not align with JSON/SSE frame boundaries.
+            const out = streamed(payload.slice(0, payload.lastIndexOf("\n\n") + 2));
+            if (!sentClose && out.reasoningContent.includes(initial)) {
+              sawThoughtBeforeClose = true;
+              sendClose!();
+            }
+            if (!sentFinish && out.content.startsWith("Actual answer")) {
+              sawAnswerBeforeFinish = true;
+              finish!();
+            }
+          }
+          payload += decoder.decode();
+          if (format === "reasoning_content") expect(sawThoughtBeforeClose).toBe(true);
+          expect(sawAnswerBeforeFinish).toBe(true);
+          expect(streamed(payload)).toEqual({
+            content: answer,
+            reasoning: "",
+            reasoningContent: format === "none" ? "" : `${initial}${suffix}`,
+          });
+          expect(payload).toContain("[DONE]");
+        } finally {
+          clearTimeout(watchdog);
+          controller.abort();
+          finish?.();
+          streamScript = undefined;
+        }
+      });
+    }
+  }
+
+  for (const quotation of ["unclosed fence", "long legitimate quoted example"] as const) {
+    for (const format of ["reasoning_content", "none"] as const) {
+      it(`${format}, ${quotation}: bounded ambiguity errors before EOF without leaking text`, async () => {
+        const privateMarker = "PRIVATE_AMBIGUOUS_REASONING";
+        const longTail = `${privateMarker}${"x".repeat(8192)}`;
+        const wire = `<think>Private example:\n\`\`\`xml\n</think>${longTail}`
+          + (quotation === "long legitimate quoted example" ? "\n```\nStill private.</think>Actual answer" : "");
+        const finishes: Array<() => void> = [];
+        let sentFinish = false;
+        streamScript = (sendContent, end) => {
+          finishes.push(() => { sentFinish = true; end(); });
+          for (let i = 0; i < wire.length; i += 257) sendContent(wire.slice(i, i + 257));
+          // No finish_reason, [DONE], or EOF. The bounded ambiguity guard must
+          // terminate independently, not silently hide or leak an unbounded tail.
+        };
+        const controller = new AbortController();
+        const watchdog = setTimeout(() => controller.abort(new Error("ambiguous thinking waited for upstream EOF")), 2500);
+        try {
+          const response = await fetch(`${address}/v1/chat/completions`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+            body: JSON.stringify({ model: format === "none" ? "hidden" : "as-content", stream: true, messages: [{ role: "user", content: "test bounded recognition" }] }),
+            signal: controller.signal,
+          });
+          const payload = await response.text();
+          expect(sentFinish).toBe(false);
+          expect(payload).toContain("Upstream thinking boundary is ambiguous");
+          expect(payload).not.toContain("[DONE]");
+          expect(streamed(payload).content).toBe("");
+          expect(payload).not.toContain(privateMarker);
+          if (format === "none") {
+            expect(payload).not.toContain("Private example");
+            expect(streamed(payload).reasoningContent).toBe("");
+          }
+        } finally {
+          clearTimeout(watchdog);
+          controller.abort();
+          for (const finish of finishes) finish();
+          streamScript = undefined;
+        }
+      });
+    }
+  }
 });

@@ -62,7 +62,7 @@ export class ServiceValidator {
           const ref = this.services.getByName(stage.service);
           if (!ref) bad(`references unknown Model Service or Micro Agent "${stage.service}"`);
           else {
-            // Media passthrough services (image/video/tts/stt/embedding/rerank)
+            // Non-chat passthrough services (media/embedding/rerank/classification)
             // speak a different request shape; a stage cannot run them. Chat
             // and OCR services both run the chat pipeline, so both are fine.
             const cat = this.categoryOf(stage.service);
@@ -169,7 +169,8 @@ export class ServiceValidator {
           if (!this.catalog.exists(step.model, step.provider)) invalidPairs.push(`${step.model}@${step.provider}`);
           continue;
         }
-        // Media passthrough categories are OpenAI-shaped routes. Validate with
+        // Non-chat passthroughs use JSON/Bearer endpoints (classification has
+        // its own System One body, not a chat wire). Validate with
         // the SAME endpoint selection the runtime uses, so a provider whose
         // primary is Anthropic but which serves an enabled OpenAI alternate
         // passes here exactly as it will succeed there.
