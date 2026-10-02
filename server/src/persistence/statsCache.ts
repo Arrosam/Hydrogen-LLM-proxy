@@ -1,5 +1,6 @@
 import type { SettingsRepo } from "./settingsRepo";
-import type { GroupCount, StatsQueries, StatsSummary, TimePoint } from "./statsQueries";
+import type { GroupCount, StatsAccumulators, StatsQueries, StatsSummary, TimePoint } from "./statsQueries";
+import type { StatsReader, StatsReadTask } from "./statsReader";
 
 /** The settings key the cache persists under. Local-only: it describes this
  * database's request_logs, so backups neither export it nor replace it. */
@@ -104,6 +105,14 @@ function emptyState(): CacheState {
 export class StatsCache {
   private state: CacheState = emptyState();
   private flushTimer: NodeJS.Timeout | null = null;
+  private readiness: "ready" | "initializing" | "failed" = "ready";
+  private range: { sinceId: number; throughId: number } | null = null;
+  private generation = 0;
+  private reader: StatsReadTask | null = null;
+  private initialization: Promise<void> | null = null;
+
+  get status(): "ready" | "initializing" | "failed" { return this.readiness; }
+  get isReady(): boolean { return this.readiness === "ready"; }
 
   constructor(
     private readonly queries: StatsQueries,
@@ -113,13 +122,68 @@ export class StatsCache {
   /** Load the persisted counters (or start from zero when there is no usable
    * cache) and fold in every log row the persisted state has not seen. */
   init(): void {
+    this.cancelInitialization();
     this.state = this.load() ?? emptyState();
     if (this.foldFromDb(this.state.lastId)) this.save();
+  }
+
+  /** Capture an immutable pre-serving boundary without a log aggregation. */
+  prepareDeferred(): void {
+    this.cancelInitialization();
+    this.state = this.load() ?? emptyState();
+    const throughId = this.queries.highestId();
+    this.range = throughId > this.state.lastId ? { sinceId: this.state.lastId, throughId } : null;
+    this.readiness = this.range ? "initializing" : "ready";
+  }
+
+  /** Called after listen. Live inserts have IDs above the captured boundary;
+   * fold them normally, then add the historical interval exactly once. */
+  startDeferred(read: StatsReader): Promise<void> {
+    if (this.initialization) return this.initialization;
+    if (!this.range || this.readiness !== "initializing") return Promise.resolve();
+    const range = this.range;
+    const generation = this.generation;
+    this.initialization = (async () => {
+      try {
+        this.reader = read(range.sinceId, range.throughId);
+        const acc = await this.reader.result;
+        if (generation !== this.generation) return;
+        this.merge(acc);
+        this.readiness = "ready";
+        this.range = null;
+        this.save();
+      } catch {
+        if (generation === this.generation) this.readiness = "failed";
+        // Durable log rows and the last complete cache remain untouched.
+      } finally {
+        if (generation === this.generation) { this.reader = null; this.initialization = null; }
+      }
+    })();
+    return this.initialization;
+  }
+
+  private cancelInitialization(): void {
+    this.generation++;
+    this.reader?.cancel();
+    this.reader = null;
+    this.initialization = null;
+    this.range = null;
+    this.readiness = "ready";
+  }
+
+  /** Cancel background IO without awaiting a possibly blocked native read. */
+  close(): void {
+    this.flush();
+    this.cancelInitialization();
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.readiness = "failed";
   }
 
   /** Rebuild from the table alone, discarding accumulated history. For after a
    * restore replaced request_logs with rows these counters never described. */
   rebuild(): void {
+    this.cancelInitialization();
     this.state = emptyState();
     this.foldFromDb(0);
     this.save();
@@ -127,6 +191,7 @@ export class StatsCache {
 
   /** Zero everything (the request log was cleared). */
   reset(): void {
+    this.cancelInitialization();
     this.state = emptyState();
     this.save();
   }
@@ -177,6 +242,7 @@ export class StatsCache {
   // --- readers (the /stats endpoints; no SQL) --------------------------------
 
   summary(): StatsSummary {
+    this.assertReady();
     const s = this.state;
     return {
       requests: s.requests,
@@ -192,6 +258,7 @@ export class StatsCache {
   }
 
   timeSeries(): TimePoint[] {
+    this.assertReady();
     return Object.entries(this.state.byDay)
       .map(([day, b]) => ({
         day,
@@ -204,10 +271,12 @@ export class StatsCache {
   }
 
   byService(): GroupCount[] {
+    this.assertReady();
     return toGroups(this.state.byService);
   }
 
   byModelProvider(): { models: GroupCount[]; providers: GroupCount[] } {
+    this.assertReady();
     return { models: toGroups(this.state.byModel), providers: toGroups(this.state.byProvider) };
   }
 
@@ -215,16 +284,21 @@ export class StatsCache {
 
   /** Persist now if there are unflushed bumps (for graceful shutdown). */
   flush(): void {
-    if (this.flushTimer) this.save();
+    if (this.isReady && this.flushTimer) this.save();
+  }
+
+  private assertReady(): void {
+    if (!this.isReady) throw new Error("Statistics are not ready");
   }
 
   private scheduleFlush(): void {
-    if (this.flushTimer) return;
+    if (!this.isReady || this.flushTimer) return;
     this.flushTimer = setTimeout(() => this.save(), FLUSH_DELAY_MS);
     this.flushTimer.unref?.();
   }
 
   private save(): void {
+    if (!this.isReady) return;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -259,8 +333,13 @@ export class StatsCache {
   private foldFromDb(sinceId: number): boolean {
     const acc = this.queries.accumulateSince(sinceId);
     if (acc.maxId <= sinceId) return false;
+    this.merge(acc);
+    return true;
+  }
+
+  private merge(acc: StatsAccumulators): void {
     const s = this.state;
-    s.lastId = acc.maxId;
+    s.lastId = Math.max(s.lastId, acc.maxId);
     s.requests += acc.requests;
     s.errors += acc.errors;
     s.promptTokens += acc.promptTokens;
@@ -274,7 +353,6 @@ export class StatsCache {
     for (const g of acc.byService) bump(s.byService, g.key, g.totalTokens, g.requests);
     for (const g of acc.byModel) bump(s.byModel, g.key, g.totalTokens, g.requests);
     for (const g of acc.byProvider) bump(s.byProvider, g.key, g.totalTokens, g.requests);
-    return true;
   }
 }
 

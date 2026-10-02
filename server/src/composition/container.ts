@@ -34,6 +34,7 @@ import { ActiveRequestRegistry } from "../observability/activeRequests";
 import { UpdateService } from "../update/updateService";
 import { ProxyRepo } from "../persistence/proxyRepo";
 import { EgressProxyPool } from "../core/upstream/egress/pool";
+import { startupStage, startupStageAsync, type StartupReporter } from "../util/startup";
 
 /**
  * The composition root: owns every long-lived instance and wires the dependency
@@ -77,14 +78,15 @@ export interface Container {
 }
 
 /** Load config, open + migrate the DB, verify the master key, seed the admin, wire everything. */
-export async function boot(): Promise<Container> {
+export async function boot(options: { deferredStats?: boolean; reportStartup?: StartupReporter } = {}): Promise<Container> {
+  const report = options.reportStartup;
   const config = loadConfig();
   setConfig(config); // kept for auth/session (getConfig).
 
-  const { db, sqlite } = openDatabase(config.dataDir);
-  verifyOrInitMasterKey(db, config.masterKey);
+  const { db, sqlite } = openDatabase(config.dataDir, report);
+  startupStage(report, "db.master_key", () => verifyOrInitMasterKey(db, config.masterKey));
 
-  const seed = await seedAdminIfEmpty(db, config.admin);
+  const seed = await startupStageAsync(report, "db.admin", () => seedAdminIfEmpty(db, config.admin));
   if (seed.created) printInitialAdmin(seed);
 
   // The proxy repo is built before the provider repo because a materialized
@@ -109,12 +111,15 @@ export async function boot(): Promise<Container> {
   const stats = new StatsQueries(db);
   const hostedTools = new HostedToolRepo(db, config.masterKey);
   const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000);
-  responses.failInterrupted();
-  responses.prune();
-  // Seed the incremental stats counters: full aggregation on first boot, then
-  // only the rows the last flush missed. Everything after is in-memory bumps.
+  startupStage(report, "responses.recover", () => responses.failInterrupted());
+  startupStage(report, "responses.prune", () => responses.prune());
+  // Production captures a fixed boundary only. The readonly seed worker starts
+  // after listen; completed requests above the boundary are folded live.
   const statsCache = new StatsCache(stats, settings);
-  statsCache.init();
+  startupStage(report, options.deferredStats ? "stats.prepare" : "stats.sync", () => {
+    if (options.deferredStats) statsCache.prepareDeferred();
+    else statsCache.init();
+  });
   const pruner = new LogPruner(db);
   const imageCache = new ImageCacheRepo(db);
 

@@ -1,0 +1,64 @@
+# Startup DB-read investigation / B002
+
+Status: implemented, locally accepted for the bounded scope, not released or deployed. Owner: Codex; independent reviewer: Sol max `startup_review_sol` agent. Base: v2.2.2 `768244c`, continuing local B001 commit `35bf324` on `codex/fix-sqlite-log-scans-20261002`.
+
+## Evidence and scope
+
+The one authorized production restart at 15:30:54 UTC created a new process still waiting in a hydrogen.db pread after 2m15, with no listener and public 502. Later eight-second samples show ~1.34 MiB/s app reads, small ~4.66 KiB disk IO, ~300 read IOPS, 96% disk busy; only app is in D, without visible kernel errors/limits. This establishes slow advancing IO, not a specific SQL, file progress percentage, ETA, corruption or hardware failure. No production access/data copy is permitted here.
+
+The incident owner subsequently reported natural recovery by 15:47 UTC: healthy with zero health failures, Node in epoll, localhost health 200/6 ms, public 200 and IO PSI below 1%. The new process accumulated 22,621,300,993 logical read bytes, 966,582,272 physical read bytes and 5,524,829 read syscalls during startup. No local fix had been deployed. These facts support investigation of startup read amplification, but do not prove which SQL ran, five complete 6.32 GiB file scans, or a storage hardware fault.
+
+`index.ts` awaits `boot()` before listen, then runs log pruning. B001 cannot prevent this pre-listen blocking. Boot opens/initializes SQLite, runs migrations, master-key verification, admin bootstrap, Responses interrupted recovery/retention cleanup, then StatsCache init. Default stats init issues five synchronous aggregates. All committed migrations already applied means no recurring log index build; pending migrations remain mandatory schema work. Responses recovery avoids replaying externally uncertain operations and remains required. No migration or recovery is bypassed.
+
+| Path before listen in v2.2.2 | Source-grounded cost / disposition |
+| --- | --- |
+| SQLite open, WAL, foreign keys, busy timeout | Native IO can wait; retained with stage markers. |
+| Drizzle migrations | Request-log indexes are created in initial migration 0000. Log-column additions 0001/0006 contain no backfill/table-copy statements. Warm migrated fixtures execute journal bookkeeping, not recurring index rebuilds. Pending migrations remain mandatory. |
+| Master key / admin | Small indexed reads and possible writes; retained. |
+| Responses recovery / prune | Recovery reads all running rows through the status index and updates them. Cleanup includes terminal-row deletion and correlated conversation checks without a conversation/status composite index; data-dependent IO remains. Retained to preserve recovery and retention semantics. |
+| Stats cache seed / catch-up | Five SQL statements. Actual model/provider plans can walk the whole non-null grouping index even for an empty ID tail. Replaced by one primary-key range iterator; warm cache skips aggregation entirely. |
+| Log cap / age prune | Runs after listen. B001 avoids the under-budget OFFSET table walk. Above-budget deletion and age pruning still run synchronously. |
+
+Bounded change: stage diagnostics (no SQL/credentials/payloads); one ordered scalar stats projection over a fixed ID interval; a single readonly worker for production startup stats, after listener opens. Prepare only reads persisted small cache plus max ID. Unready stats return explicit 503/Retry-After, including range queries. Keep logs and accumulated history; do not persist partial totals or prune until ready. Live records above the fixed high-water ID merge once. Log clear/restore invalidates pending results. Worker failure leaves stats unavailable and durable logs/cache intact. No new dependencies, DB migrations/indexes, public credential surfaces, broad DB-worker redesign, production operations or deployment.
+
+Rollback: revert B002 source/build changes; no schema rollback. B001 remains independently reviewable.
+
+Compatibility and data boundaries: existing administrator authentication is unchanged; no upstream/provider invocation or new quota/permission is introduced. Statistics success shapes and cache version 3 remain unchanged, including all-time history after log retention. During initialization/failure the four admin stats endpoints, with or without ranges, return HTTP 503 and `Retry-After: 5`, with `statistics_initializing` / `statistics_unavailable` codes. The existing Overview error display asks for reload; no automatic UI retry was added. The worker reads only the captured `(lastId, highestId]` interval from the local existing database and sends scalar counters/group keys to the parent process. It writes no database, runs no migration and sends nothing externally. Logs, Responses retention/deletion and credentials retain existing policies; partial statistics are not persisted. Explicit clear/restore cancels obsolete initialization.
+
+## AC and risk-based tests
+
+1. Diagnostics distinguish SQLite open/pragmas/migration statements, master-key/admin, Responses recovery/cleanup, stats prepare/scan, app build/listen; only stage/phase/timing/static operation labels are emitted.
+2. Stats seed/catch-up matches original SQL totals/day/service/model/provider semantics, boundaries, empty tails and gaps; exactly one streaming scalar range query, no body/JSON values selected or deserialized, no group-index whole-tail scan. Physical overflow-page reads can still be required to reach scalar columns after large payloads.
+3. Readonly worker opens an existing database without migrations/write pragmas and yields exact results; packaged production and source development entrypoints work. Single worker per initialization; cancellation never requires an unbounded wait.
+4. Production listener/health can respond while stats reader is pending/slow/failed. All stats endpoints return 503 until ready, then exact data; normal authorization remains intact.
+5. Fixed pre-serving upper ID excludes live writes from the seed. Live records and late delivery failures merge exactly once; last ID never moves backwards; no partial flush even after timer/shutdown. Restart uses completed persisted cache; failure does not overwrite durable cache.
+6. Clear/reset and restore/rebuild discard obsolete worker messages/errors/results; no stale persisted stats. Startup/hourly log prune waits for stats readiness.
+7. Existing typecheck, root tests/build and independent review pass; real source/compiled local HTTP verification and bounded payload-heavy comparison are retained.
+
+Techniques: equivalence partitions (empty/valid/invalid cache, warm/cold seed, success/failure), ID boundary values, and lifecycle transitions (pending→ready/failed/cancelled, live writes, reset/restore, shutdown). Synthetic secrets/databases, fixed file-size budget, cleanup and local mocks only. Primary storage IO in schema/key/recovery/request paths remains synchronous and may block; worker isolation cannot cure storage saturation. No production-scale failure or disk fault is assumed reproduced.
+
+## Safe field localization (proposed, not executed)
+
+Only inspect the current confirmed application PID: bounded tails of existing container logs; `/proc/PID/task/PID/syscall`, `wchan`, `stack`, `/proc/PID/io` delta, and already-authorized FD metadata/listener state. Reconfirm PID after restart; do not assume an old PID is still the app. These identify native wait and IO movement, not SQL or percentage. Do not read environ/production tokens, attach a stopping debugger, launch extra SQLite connections/scans, integrity_check/quick_check, COUNT, ANALYZE, VACUUM, file copy or another restart while storage is saturated. v2.2.2 lacks stage logs, so exact SQL cannot currently be proven with those observations alone. New begin/done markers are reviewable local changes and need approved deployment before they can diagnose production.
+
+## Evidence / final state
+
+Environment: macOS arm64, Node v22.22.2, npm 10.9.7, SQLite 3.49.2. This isolated checkout has its own `npm ci` installation from the committed lockfile; reviewed native rebuilds completed. No dependencies or migrations changed. GraphFlow MCP/CLI unavailable; explicit plan and targeted source reads used.
+
+| AC | Evidence | Result |
+| --- | --- | --- |
+| 1 | Warm migration reporter test, source HTTP stage log, real compiled main-entry log | Static stage/phase/operation markers; no SQL, paths, exception text, payloads or credentials in new diagnostics. |
+| 2 | Scalar equality/boundary tests, 4 MiB payload projection/plan assertion, actual old/new query capture | Exact keys/counters; one `INTEGER PRIMARY KEY (rowid>? AND rowid<?)` iterator, no whole-group index scan or body/JSON selection. Equal-count ordering was unspecified by old SQL; seed ties are now deterministic. |
+| 3 | Real source readonly worker, missing-file / single-reader tests, root-cwd and outside-cwd compiled processes | Existing-file readonly range, DB/WAL bytes unchanged in isolated test; no missing-file creation; packaged worker found, including explicit migration/web paths and V8 heap flag. |
+| 4 | Pending HTTP authorization/readiness tests and 80 real loopback health requests | Health/login work; all stats/range calls gate at 503; ready returns exact data. Eleven health requests overlapped the actual worker scan; all 80 were 200, maximum 3.59 ms in this warm local fixture. |
+| 5 | Live insert/delivery-failure, pending flush/close, failure/restart tests and manual restart | Fixed interval merges once; last ID monotonic; incomplete state not saved. Warm restart returns 4,097 requests without launching a reader. Independent failure/restart probe preserves prior waterline and replays the correct tail. |
+| 6 | Reset/rebuild/obsolete-success/obsolete-error tests; readiness guard in startup/hourly prune | Old results cannot restore cleared state; pruning skips incomplete initialization. |
+| 7 | Actual root scripts, Sol max independent review and local main-entry functional checks | Server 1,462 tests / 75 files and web 42 tests / 6 files passed; typecheck/build passed. Latest path-only change passed the 14-case focused suite and external-cwd main-entry check. Independent reviewer found no blocking regression, including the final path change. |
+
+Local evidence is retained one directory above this checkout: `startup-full-test.log`, `startup-typecheck.log`, `startup-build.log`, `startup-focused-test-final.log`, `startup-verification-results.json`, `startup-manual-performance.log`, `startup-production-results.json`, and `startup-production-outside-cwd.log`. Repeatable manual drivers are `verify-startup-stats.mts` and `verify-startup-production.mts`; they use temporary databases, synthetic credentials and loopback only, and remove their fixtures. Backend-only observable HTTP validation applies; no UI layout was changed. Both real compiled runs returned health/home/login/stats 200, 2,048 requests / 30,720 tokens, listener before scan, and SIGTERM exit 0.
+
+The bounded payload-heavy comparison used 4,096 rows with 32 KiB bodies, a 137,175,040-byte database under a 192 MiB budget. Old five-statement aggregation took 232.72 ms; the one-pass projection took 63.29 ms and matched every group/counter. This is one uncontrolled warm-page-cache sample, not a production throughput claim or timing assertion. Structural query-count/plan assertions are the regression gate.
+
+Remaining risks: required open/schema/key/admin/Responses and ordinary request/range-query/prune paths remain synchronous; worker isolation does not solve storage saturation. Scalar projection can still read overflow pages needed to reach later columns. The readonly SELECT holds a snapshot until completion, so concurrent writes can grow WAL; failure also postpones log pruning and can increase retained disk usage. Result transfer, cache merge/serialization and persistence remain proportional to the number of groups and can pause the main thread. Termination cannot guarantee immediate completion of a kernel-blocked native read, so shutdown does not await the worker. Production-scale D-state, controlled cold-cache/slow-disk behavior, Linux/amd64 Docker runtime and live production acceptance were not run here; the exact incident SQL/root cause remains unresolved.
+
+Final state: implemented; full local regression, independent review and applicable functional acceptance completed for these AC; not released or deployed. The user subsequently authorized one patch release, but the current delegation requests candidate preparation and coordination first. The intended candidate is v2.2.3, subject to the final remote-ref check before publication. Production recovery is separate incident evidence, not proof of this patch.

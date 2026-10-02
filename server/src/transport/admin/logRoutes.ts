@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { requireAdmin } from "../../auth/authorization";
 import type { Container } from "../../composition/container";
 import { idParam } from "../../util/validate";
@@ -62,19 +62,32 @@ export async function logRoutes(app: FastifyInstance, c: Container): Promise<voi
     return { from: numParam(q.from), to: numParam(q.to) };
   };
   const bounded = (r: { from?: number; to?: number }): boolean => r.from != null || r.to != null;
-  app.get("/stats/summary", async (req) => {
+  const statsReady = (reply: FastifyReply): boolean => {
+    if (c.statsCache.isReady) return true;
+    const failed = c.statsCache.status === "failed";
+    reply.header("Retry-After", "5").code(503).send({
+      error: failed ? "Statistics are temporarily unavailable." : "Statistics are initializing. Reload shortly.",
+      code: failed ? "statistics_unavailable" : "statistics_initializing",
+    });
+    return false;
+  };
+  app.get("/stats/summary", async (req, reply) => {
+    if (!statsReady(reply)) return reply;
     const r = range(req);
     return bounded(r) ? c.stats.summary(r) : c.statsCache.summary();
   });
-  app.get("/stats/timeseries", async (req) => {
+  app.get("/stats/timeseries", async (req, reply) => {
+    if (!statsReady(reply)) return reply;
     const r = range(req);
     return { points: bounded(r) ? c.stats.timeSeries(r) : c.statsCache.timeSeries() };
   });
-  app.get("/stats/by-service", async (req) => {
+  app.get("/stats/by-service", async (req, reply) => {
+    if (!statsReady(reply)) return reply;
     const r = range(req);
     return { groups: bounded(r) ? c.stats.byService(r) : c.statsCache.byService() };
   });
-  app.get("/stats/by-model-provider", async (req) => {
+  app.get("/stats/by-model-provider", async (req, reply) => {
+    if (!statsReady(reply)) return reply;
     const r = range(req);
     return bounded(r) ? c.stats.byModelProvider(r) : c.statsCache.byModelProvider();
   });

@@ -2,22 +2,29 @@ import { boot } from "./composition/container";
 import { buildApp } from "./app";
 import { closeWithDeadline } from "./util/shutdown";
 import { ensureHeapSized } from "./util/heap";
+import path from "node:path";
+import { startStatsReader } from "./persistence/statsReader";
+import { startupStageAsync, type StartupReporter } from "./util/startup";
 
 const SHUTDOWN_GRACE_MS = 30_000;
 
 async function main(): Promise<void> {
-  const container = await boot();
-  const app = await buildApp(container);
+  const report: StartupReporter = event => console.error(JSON.stringify(event));
+  const container = await boot({ deferredStats: true, reportStartup: report });
+  const app = await startupStageAsync(report, "app.build", () => buildApp(container));
 
-  await app.listen({ port: container.config.port, host: container.config.host });
+  await startupStageAsync(report, "app.listen", () => app.listen({ port: container.config.port, host: container.config.host }));
   app.log.info(`Hydrogen listening on http://${container.config.host}:${container.config.port}`);
 
   // Auto-prune the request log by age. The retention (log_retention_days, 0 =
   // keep forever) is re-read on every tick, so changing it in the dashboard
   // takes effect without a restart.
   const pruneTick = (): void => {
-    const days = Number(container.settings.get("log_retention_days") ?? 0);
+    // The original startup seeded before pruning. Preserve that ordering while
+    // the worker is pending/failed, or its historical rows could disappear.
+    if (!container.statsCache.isReady) return;
     try {
+      const days = Number(container.settings.get("log_retention_days") ?? 0);
       const maxRows = Number(container.settings.get("log_max_rows") ?? 100_000);
       const capped = container.pruner.capRows(Number.isSafeInteger(maxRows) && maxRows > 0 ? maxRows : 100_000);
       if (capped) app.log.info(`log prune: removed ${capped} entries above the row budget`);
@@ -27,7 +34,12 @@ async function main(): Promise<void> {
       app.log.error({ err: e }, "log prune failed");
     }
   };
-  pruneTick();
+  void container.statsCache.startDeferred((sinceId, throughId) =>
+    startStatsReader(path.resolve(container.config.dataDir, "hydrogen.db"), sinceId, throughId, report),
+  ).then(() => {
+    if (container.statsCache.isReady) pruneTick();
+    else app.log.warn("startup statistics unavailable; request logs retained for a future retry");
+  });
   const pruneTimer = setInterval(pruneTick, 60 * 60 * 1000);
   pruneTimer.unref?.();
 
@@ -39,7 +51,7 @@ async function main(): Promise<void> {
     if (pruneTimer) clearInterval(pruneTimer);
     try {
       await closeWithDeadline(app, SHUTDOWN_GRACE_MS);
-      container.statsCache.flush();
+      container.statsCache.close();
     } finally {
       try {
         container.sqlite.close();

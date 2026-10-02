@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/server.cjs --packages=external",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/server.cjs --packages=external && esbuild src/persistence/statsWorker.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/stats-worker.cjs --packages=external",
     "start": "node dist/server.cjs",
     "db:generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",

@@ -48,9 +48,6 @@ export interface GroupCount {
   totalTokens: number;
 }
 
-/** Everything the StatsCache accumulates, aggregated in one pass over the rows
- * above `sinceId`. Latency comes back as a SUM so the cache can keep adding to
- * it and derive the average by division. */
 /** The UTC day bucket every per-day aggregation groups on. One definition, so
  * the SQL path and the cache seed can never disagree about where a day starts. */
 const DAY_KEY = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
@@ -143,45 +140,66 @@ export class StatsQueries {
     return this.groupBy(this.range(q), sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`);
   }
 
-  /**
-   * Seed/catch-up aggregation for the StatsCache: every row with id > sinceId,
-   * in one pass. Runs once at startup (over the whole table on first boot, over
-   * the unflushed tail after that), never per dashboard view.
-   */
-  accumulateSince(sinceId: number): StatsAccumulators {
-    const above = gt(requestLogs.id, sinceId);
-    const totals = this.db
+  /** A primary-key end seek, not an aggregate scan of log payloads. */
+  highestId(): number {
+    return this.db.select({ id: sql<number>`coalesce(max(${requestLogs.id}),0)` }).from(requestLogs).get()?.id ?? 0;
+  }
+
+  /** One scalar projection/iteration over (sinceId, throughId]. No payload
+   * deserialization, whole-table GROUP BY, or five repeated payload-page walks.
+   * Production startup runs this in its dedicated readonly worker. */
+  accumulateSince(sinceId: number, throughId?: number): StatsAccumulators {
+    const acc: StatsAccumulators = {
+      maxId: sinceId, requests: 0, errors: 0, promptTokens: 0, completionTokens: 0,
+      totalTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0,
+      reasoningTokens: 0, latencySumMs: 0, byDay: [], byService: [], byModel: [], byProvider: [],
+    };
+    const days = new Map<string, DayCount>();
+    const services = new Map<string, GroupCount>();
+    const models = new Map<string, GroupCount>();
+    const providers = new Map<string, GroupCount>();
+    const query = this.db
       .select({
-        maxId: sql<number>`coalesce(max(${requestLogs.id}),0)`,
-        requests: sql<number>`count(*)`,
-        errors: sql<number>`coalesce(sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end),0)`,
-        promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
-        completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
-        cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
-        cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
-        reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
-        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
+        id: requestLogs.id, day: DAY_KEY.as("day"), httpStatus: sql<number>`${requestLogs.httpStatus}`.as("httpStatus"),
+        promptTokens: sql<number>`${requestLogs.promptTokens}`.as("promptTokens"),
+        completionTokens: sql<number>`${requestLogs.completionTokens}`.as("completionTokens"),
+        totalTokens: sql<number>`${requestLogs.totalTokens}`.as("totalTokens"),
+        cachedInputTokens: sql<number>`${requestLogs.cachedInputTokens}`.as("cachedInputTokens"),
+        cacheCreationInputTokens: sql<number>`${requestLogs.cacheCreationInputTokens}`.as("cacheCreationInputTokens"),
+        reasoningTokens: sql<number>`${requestLogs.reasoningTokens}`.as("reasoningTokens"),
+        latencyMs: sql<number>`${requestLogs.latencyMs}`.as("latencyMs"),
+        requestedService: sql<string | null>`${requestLogs.requestedService}`.as("requestedService"),
+        servedModel: sql<string | null>`${requestLogs.servedModel}`.as("servedModel"),
+        servedProvider: sql<string | null>`${requestLogs.servedProvider}`.as("servedProvider"),
       })
       .from(requestLogs)
-      .where(above)
-      .get();
-    return {
-      maxId: Math.max(sinceId, totals?.maxId ?? 0),
-      requests: totals?.requests ?? 0,
-      errors: totals?.errors ?? 0,
-      promptTokens: totals?.promptTokens ?? 0,
-      completionTokens: totals?.completionTokens ?? 0,
-      totalTokens: totals?.totalTokens ?? 0,
-      cachedInputTokens: totals?.cachedInputTokens ?? 0,
-      cacheCreationInputTokens: totals?.cacheCreationInputTokens ?? 0,
-      reasoningTokens: totals?.reasoningTokens ?? 0,
-      latencySumMs: totals?.latencySumMs ?? 0,
-      byDay: this.groupByDay(above),
-      byService: this.groupBy(above, sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`),
-      byModel: this.groupBy(and(above, isNotNull(requestLogs.servedModel)), sql<string>`${requestLogs.servedModel}`),
-      byProvider: this.groupBy(and(above, isNotNull(requestLogs.servedProvider)), sql<string>`${requestLogs.servedProvider}`),
-    };
+      .where(and(gt(requestLogs.id, sinceId), throughId == null ? undefined : lte(requestLogs.id, throughId)))
+      .orderBy(requestLogs.id)
+      .toSQL();
+    // The locked Drizzle sync driver has no iteration API; use its owned native
+    // connection for streaming instead of .all() materializing the whole tail.
+    const rows = this.db.$client.prepare(query.sql).iterate(...query.params);
+    for (const raw of rows) {
+      const r = raw as { id: number; day: string; httpStatus: number; promptTokens: number; completionTokens: number;
+        totalTokens: number; cachedInputTokens: number; cacheCreationInputTokens: number; reasoningTokens: number;
+        latencyMs: number; requestedService: string | null; servedModel: string | null; servedProvider: string | null };
+      const error = r.httpStatus >= 400 ? 1 : 0;
+      acc.maxId = r.id; acc.requests++; acc.errors += error;
+      acc.promptTokens += r.promptTokens; acc.completionTokens += r.completionTokens;
+      acc.totalTokens += r.totalTokens; acc.cachedInputTokens += r.cachedInputTokens;
+      acc.cacheCreationInputTokens += r.cacheCreationInputTokens; acc.reasoningTokens += r.reasoningTokens;
+      acc.latencySumMs += r.latencyMs;
+      const day = days.get(r.day) ?? { key: r.day, requests: 0, totalTokens: 0, errors: 0, latencySumMs: 0 };
+      day.requests++; day.totalTokens += r.totalTokens; day.errors += error; day.latencySumMs += r.latencyMs;
+      days.set(r.day, day);
+      addGroup(services, r.requestedService ?? "(unknown)", r.totalTokens);
+      if (r.servedModel != null) addGroup(models, r.servedModel, r.totalTokens);
+      if (r.servedProvider != null) addGroup(providers, r.servedProvider, r.totalTokens);
+    }
+    acc.byDay = [...days.values()].sort((a, b) => compareKey(a.key, b.key));
+    const groups = (map: Map<string, GroupCount>) => [...map.values()].sort((a, b) => b.requests - a.requests || compareKey(a.key, b.key));
+    acc.byService = groups(services); acc.byModel = groups(models); acc.byProvider = groups(providers);
+    return acc;
   }
 
   /** Requests grouped by the model/provider that actually served each request. */
@@ -195,22 +213,6 @@ export class StatsQueries {
     };
   }
 
-  /** byDay for the cache seed: the plain grouping plus the chart's two extra
-   * counters. Separate from `groupBy` so the other breakdowns do not carry two
-   * columns they never read. */
-  private groupByDay(where: SQL | undefined): DayCount[] {
-    const base = this.db
-      .select({
-        key: DAY_KEY,
-        requests: sql<number>`count(*)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
-        errors: ERRORS_SUM,
-        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
-      })
-      .from(requestLogs);
-    return (where ? base.where(where) : base).groupBy(DAY_KEY).orderBy(DAY_KEY).all();
-  }
-
   private groupBy(where: SQL | undefined, key: SQL<string>): GroupCount[] {
     const base = this.db
       .select({
@@ -221,4 +223,15 @@ export class StatsQueries {
       .from(requestLogs);
     return (where ? base.where(where) : base).groupBy(key).orderBy(sql`count(*) desc`).all();
   }
+}
+
+function addGroup(map: Map<string, GroupCount>, key: string, tokens: number): void {
+  const group = map.get(key) ?? { key, requests: 0, totalTokens: 0 };
+  group.requests++; group.totalTokens += tokens; map.set(key, group);
+}
+
+/** Deterministic seed tie order; existing group APIs promise count order only. */
+function compareKey(a: string, b: string): number {
+  if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
+  return Buffer.compare(Buffer.from(a), Buffer.from(b));
 }
