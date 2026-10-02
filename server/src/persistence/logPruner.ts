@@ -1,4 +1,4 @@
-import { desc, lt, lte } from "drizzle-orm";
+import { desc, lt, lte, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { requestLogs } from "../db/schema";
 
@@ -17,6 +17,11 @@ export class LogPruner {
   /** Keep only the most recent `maxRows` rows. Returns the number deleted. */
   capRows(maxRows: number): number {
     if (maxRows <= 0) return 0;
+    // COUNT can use an existing narrow covering index. Walking maxRows entries
+    // in id order scans the payload-bearing table even when nothing needs to
+    // be deleted, which is costly for large request/response logs.
+    const total = this.db.select({ n: sql<number>`count(*)` }).from(requestLogs).get()?.n ?? 0;
+    if (total <= maxRows) return 0;
     const threshold = this.db
       .select({ id: requestLogs.id })
       .from(requestLogs)
