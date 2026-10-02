@@ -256,6 +256,9 @@ export const ServiceStepsSchema = z.object({
    * retried once headers commit).
    */
   reliableStreaming: z.boolean().optional(),
+  /** False bypasses inline thinking decoding and presentation, retaining saved
+   * parser settings. Absent preserves the behavior of existing definitions. */
+  thinkingProcessing: z.boolean().optional(),
   /** How thinking reaches this service's client. Omitted = "original". */
   thinkingFormat: ThinkingFormatSchema.optional(),
   /** Legacy input is rejected with migration guidance, never silently ignored. */
@@ -369,6 +372,8 @@ export const AgentSchema = z.object({
   asr: AgentAsrSchema.optional(),
   /** Reliable streaming for the agent as a whole (see ServiceStepsSchema). */
   reliableStreaming: z.boolean().optional(),
+  /** False also bypasses decoding in this agent's referenced services/agents. */
+  thinkingProcessing: z.boolean().optional(),
   /** How thinking reaches this agent's client (see ServiceStepsSchema). */
   thinkingFormat: ThinkingFormatSchema.optional(),
   /** A shared grammar is unsafe for heterogeneous stages/fallbacks. */
@@ -407,12 +412,12 @@ export function isAgent(def: ServiceDef): def is AgentDef {
 }
 
 /**
- * How a definition presents thinking to its client. Absent means "original",
- * which is a no-op -- the return type is the canonical union, so the persisted
- * enum cannot drift from it without failing to compile.
+ * How a definition presents thinking to its client. Processing off (or an
+ * absent format) means "original", a no-op. The canonical union keeps the
+ * persisted enum and presentation code in sync.
  */
 export function serviceThinkingFormat(def: ServiceDef): ThinkingFormat {
-  return def.thinkingFormat ?? "original";
+  return def.thinkingProcessing === false ? "original" : def.thinkingFormat ?? "original";
 }
 
 /** The effective category of a definition. Agents are always "chat". */

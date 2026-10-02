@@ -65,6 +65,8 @@ export interface InvokeOptions {
   progress?: ProgressRecorder | null;
   /** Aggregate URL-attachment budget (bytes) inherited from an enclosing agent. */
   maxAttachmentBytes?: number;
+  /** An enclosing agent can disable inline thinking decoding for the entire run. */
+  thinkingProcessing?: boolean;
 }
 
 /**
@@ -87,6 +89,11 @@ export class ModelService {
   /** The step chain's timeout, exposed so an agent stage can override it. */
   get timeoutMs(): number {
     return this.def.timeoutMs;
+  }
+
+  /** Exposed to orchestration wrappers so off also bypasses process presentation. */
+  get thinkingProcessing(): boolean {
+    return this.def.thinkingProcessing !== false;
   }
 
   /** Layer the request with the step's config then the caller's override (override wins). */
@@ -137,7 +144,7 @@ export class ModelService {
       });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
-        thinkingParser: step.thinkingParser,
+        thinkingParser: this.def.thinkingProcessing !== false && opts.thinkingProcessing !== false ? step.thinkingParser : undefined,
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
@@ -155,8 +162,8 @@ export class ModelService {
       }
       prog?.record("llm", "llm.receive", `response generated and received from ${t.upstreamModel}`, { status: 200 });
       prog?.record("llm", "llm.result", `result parsed and ready for return`, { model: t.upstreamModel });
-      // The wire round-trip decoded this step's grammar before collection and
-      // answer validation, so canonical history never sees ambiguous raw tags.
+      // When thinking processing is enabled, the wire round-trip decoded this
+      // step's grammar before collection. Otherwise inline text stays untouched.
       let response = sent.response;
       // Honor a "disabled" thinking level end-to-end even if the upstream ignored it.
       if (merged.params.thinking === "disabled") response = response.withoutReasoning();
@@ -240,7 +247,7 @@ export class ModelService {
       });
       const egress = buildRequest(t.family, ready.data());
       const target: SendTarget = {
-        thinkingParser: step.thinkingParser,
+        thinkingParser: this.def.thinkingProcessing !== false && opts.thinkingProcessing !== false ? step.thinkingParser : undefined,
         upstreamModel: t.upstreamModel,
         url: t.url,
         headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),

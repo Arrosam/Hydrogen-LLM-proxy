@@ -1,18 +1,20 @@
+import { useId } from "react";
 import type { ThinkingParser } from "../types";
 import { useI18n } from "../lib/i18n";
 
-/** Decoding is configured beside the upstream, never beside client presentation. */
+/** Each editor updates one upstream step's grammar, independently of presentation. */
 export function ThinkingParserEditor({ value, onChange }: {
   value?: ThinkingParser;
   onChange: (value: ThinkingParser) => void;
 }) {
   const { t } = useI18n();
+  const id = useId();
   const mode = value?.mode ?? "off";
   const policy = value && value.mode !== "off" ? value.unterminated ?? "error" : "error";
   return (
-    <div className="mt-3 space-y-2 rounded-lg border border-ink-700 p-3">
-      <label className="label">{t("serviceEditor.thinkingParser")}</label>
-      <select className="select" value={mode} onChange={e => {
+    <div className="space-y-2 rounded-lg border border-ink-700 p-3">
+      <label className="label" htmlFor={id}>{t("serviceEditor.thinkingParser")}</label>
+      <select id={id} className="select" value={mode} onChange={e => {
         const mode = e.target.value as ThinkingParser["mode"];
         onChange(mode === "off" ? { mode } : mode === "custom"
           ? { mode, delimiters: { open: "", close: "" }, unterminated: policy }

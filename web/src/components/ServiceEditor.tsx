@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { Modal } from "./Modal";
 import { Toggle } from "./common";
@@ -38,6 +38,11 @@ import {
 } from "../types";
 
 const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
+
+type TranslatedThinkingFormat = Exclude<ThinkingFormat, "original">;
+const TRANSLATED_THINKING_FORMATS = THINKING_FORMATS.filter(
+  (format): format is TranslatedThinkingFormat => format !== "original",
+);
 
 /** The server's default retry trigger set, applied when a step omits `retry`
  * (mirrors DEFAULT_RETRY_ON in server/src/execution/definition.ts). Shown in
@@ -126,6 +131,21 @@ const foldStage = (s: AgentStage): AgentStage => foldLegacy(s, ["system", "tempe
 const foldOcr = (o: AgentOcr | undefined): AgentOcr | undefined => (o ? foldLegacy(o, ["temperature", "maxTokens"]) : o);
 const foldStep = (s: ServiceStep): ServiceStep => foldLegacy(s, ["thinking"]);
 
+/** Keep legacy decoder-only definitions active on unrelated saves, including
+ * decoders reached through saved agent references. Explicit off always wins. */
+function hasThinkingDecoder(def: ServiceDef, services: ModelService[], visited = new Set<string>()): boolean {
+  if (def.thinkingProcessing === false) return false;
+  const active = (steps: ServiceStep[] | undefined) => steps?.some(step => step.thinkingParser && step.thinkingParser.mode !== "off") ?? false;
+  if (!isAgentDef(def)) return active(def.steps);
+  const reference = (name: string | undefined): boolean => {
+    if (!name || visited.has(name)) return false;
+    const child = services.find(service => service.name === name);
+    return !!child && hasThinkingDecoder(child.steps, services, new Set([...visited, name]));
+  };
+  return active(def.ocr?.steps) || reference(def.ocr?.service)
+    || def.stages.some(stage => active(stage.steps) || reference(stage.service));
+}
+
 function toggle<T>(arr: T[] | undefined, val: T): T[] {
   const a = arr ?? [];
   return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
@@ -158,7 +178,12 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
   const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
   const [reliableStreaming, setReliableStreaming] = useState(false);
-  const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
+  const [translateThinking, setTranslateThinking] = useState(false);
+  const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("reasoning_content");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedId = useId();
+  const thinkingFormatId = useId();
+  const attachmentId = useId();
   // Keep legacy input visible until the operator explicitly migrates it; never
   // silently drop a configured grammar while saving unrelated changes.
   const [legacyDelimiters, setLegacyDelimiters] = useState<ServiceSteps["thinkingDelimiters"]>();
@@ -208,7 +233,10 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((service.steps as ServiceSteps)?.category ?? "chat");
         setReliableStreaming(Boolean(service.steps?.reliableStreaming));
       }
-      setThinkingFormat(service.steps?.thinkingFormat ?? "original");
+      const format = service.steps?.thinkingFormat ?? "original";
+      const processing = service.steps?.thinkingProcessing ?? (format !== "original" || hasThinkingDecoder(service.steps, services));
+      setTranslateThinking(processing);
+      setThinkingFormat(processing ? format : "reasoning_content");
       setLegacyDelimiters(service.steps?.thinkingDelimiters);
       setMaxAttachmentMiB(Math.round((service.steps?.maxAttachmentBytes ?? 0) / (1024 * 1024)));
     } else {
@@ -225,22 +253,24 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setOcr(undefined);
       setCategory("chat");
       setReliableStreaming(false);
-      setThinkingFormat("original");
+      setTranslateThinking(false);
+      setThinkingFormat("reasoning_content");
       setLegacyDelimiters(undefined);
       setMaxAttachmentMiB(0);
     }
     setRaw(false);
+    setAdvancedOpen(false);
     setSummary("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, service]);
 
-  // "original" is the server's default, so it is left out entirely rather than
-  // persisted -- a definition nobody configured stays as short as it was.
+  // Explicit off bypasses both parsing and presentation (also in child calls),
+  // while retaining saved step grammars so turning processing back on is safe.
   const thinkingFormatField = () => {
     if (!isChatPipelineCategory(kind === "chain" ? "chat" : category)) return {};
     const delimiters = legacyDelimiters ? { thinkingDelimiters: legacyDelimiters } : {};
-    if (thinkingFormat === "original") return delimiters;
-    return { thinkingFormat, ...delimiters };
+    if (!translateThinking) return { thinkingProcessing: false, ...delimiters };
+    return { thinkingProcessing: true, ...(thinkingFormat !== "original" ? { thinkingFormat } : {}), ...delimiters };
   };
 
   const buildDef = (): ServiceDef =>
@@ -341,7 +371,10 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setCategory((parsed as ServiceSteps).category ?? "chat");
         setReliableStreaming(Boolean(parsed.reliableStreaming));
       }
-      setThinkingFormat(parsed.thinkingFormat ?? "original");
+      const format = parsed.thinkingFormat ?? "original";
+      const processing = parsed.thinkingProcessing ?? (format !== "original" || hasThinkingDecoder(parsed, services));
+      setTranslateThinking(processing);
+      setThinkingFormat(processing ? format : "reasoning_content");
       setLegacyDelimiters(parsed.thinkingDelimiters);
       setMaxAttachmentMiB(Math.round((parsed.maxAttachmentBytes ?? 0) / (1024 * 1024)));
       setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
@@ -501,45 +534,10 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
             <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label={t("serviceEditor.reliableStreaming")} />
           )}
         </div>
-        {user?.role === "admin" && !raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && <HostedToolBinding tools={hostedTools} ids={toolIds} config={toolConfig} onIds={setToolIds} onConfig={setToolConfig} />}
         {kind === "resilience" && isChatPipelineCategory(category) && reliableStreaming && (
           <p className="-mt-2 text-xs text-ink-500">
             {t("serviceEditor.reliableStreamingDescription")}
           </p>
-        )}
-
-        {isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
-          <div>
-            <label className="label">{t("serviceEditor.thinkingFormat")}</label>
-            <select
-              className="select w-auto"
-              value={thinkingFormat}
-              onChange={(e) => setThinkingFormat(e.target.value as ThinkingFormat)}
-            >
-              {THINKING_FORMATS.map((f) => (
-                <option key={f} value={f}>{t(`serviceEditor.thinkingFormat.${f}`)}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
-            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.thinkingParserHint")}</p>
-            {legacyDelimiters && (
-              <div className="mt-3 rounded-lg border border-amber-700 p-3 text-xs text-amber-300">
-                <p>{t("serviceEditor.thinkingLegacyWarning")}</p>
-                <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(legacyDelimiters, null, 2)}</pre>
-                <button type="button" className="btn-ghost btn-xs mt-2" onClick={() => setLegacyDelimiters(undefined)}>
-                  {t("serviceEditor.thinkingLegacyRemove")}
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {!raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
-          <div>
-            <label className="label">{t("serviceEditor.maxAttachmentLabel")}</label>
-            <input className="input" type="text" inputMode="numeric" value={maxAttachmentMiB} onFocus={selectAll} onClick={selectAll} onChange={(e) => setMaxAttachmentMiB(intInput(e.target.value, 0))} />
-            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.maxAttachmentHint")}</p>
-          </div>
         )}
 
         {!raw && (
@@ -671,7 +669,6 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         />
                       </div>
 
-                      {isChatPipelineCategory(category) && <ThinkingParserEditor value={step.thinkingParser} onChange={thinkingParser => patchStep(i, { thinkingParser })} />}
                       <StepAdvanced step={step} onPatch={(p) => patchStep(i, p)} />
 
                       {i < steps.length - 1 && (
@@ -704,6 +701,105 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               </div>
             )}
           </div>
+        )}
+
+        {!raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
+          <section className="rounded-xl border border-ink-700 bg-ink-850/40">
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-medium text-ink-300 hover:text-ink-100"
+              aria-expanded={advancedOpen}
+              aria-controls={advancedId}
+              onClick={() => setAdvancedOpen((value) => !value)}
+            >
+              <i className={`bi ${advancedOpen ? "bi-chevron-down" : "bi-chevron-right"} text-xs`} aria-hidden="true" />
+              <i className="bi bi-sliders text-ink-500" aria-hidden="true" />
+              {t("serviceEditor.advanced")}
+              {(toolIds.length > 0 || translateThinking || maxAttachmentMiB > 0) && (
+                <span className="badge-blue ml-auto">{t("serviceEditor.advancedConfigured")}</span>
+              )}
+            </button>
+            {advancedOpen && (
+              <div id={advancedId} className="space-y-5 border-t border-ink-700 p-4">
+                <section aria-labelledby={`${advancedId}-thinking`} className="rounded-lg border border-ink-700">
+                  <div className="flex items-start justify-between gap-4 p-4">
+                    <div className="min-w-0">
+                      <h3 id={`${advancedId}-thinking`} className="flex items-center gap-2 text-sm font-semibold text-ink-200">
+                        <i className="bi bi-lightbulb text-brand-400" aria-hidden="true" />
+                        {t("serviceEditor.thinkingGroup")}
+                      </h3>
+                      <p className="mt-1 text-xs text-ink-400">{t(translateThinking ? "serviceEditor.thinkingGroupHint" : "serviceEditor.thinkingFormatHint.off")}</p>
+                    </div>
+                    <Toggle size="lg" checked={translateThinking} onChange={setTranslateThinking} ariaLabel={t("serviceEditor.thinkingFormat")} label={t(translateThinking ? "serviceEditor.thinkingOn" : "serviceEditor.thinkingOff")} />
+                  </div>
+                  {translateThinking && (
+                    <div className="space-y-4 border-t border-ink-700 p-4">
+                      <div>
+                        <label className="label" htmlFor={thinkingFormatId}>{t("serviceEditor.thinkingFormatTarget")}</label>
+                        <select
+                          id={thinkingFormatId}
+                          className="select sm:w-auto"
+                          value={thinkingFormat}
+                          onChange={(e) => setThinkingFormat(e.target.value as ThinkingFormat)}
+                        >
+                          {thinkingFormat === "original" && <option value="original">{t("serviceEditor.thinkingFormat.original")}</option>}
+                          {TRANSLATED_THINKING_FORMATS.map((format) => (
+                            <option key={format} value={format}>{t(`serviceEditor.thinkingFormat.${format}`)}</option>
+                          ))}
+                        </select>
+                        <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
+                      </div>
+                      {legacyDelimiters && (
+                        <div className="rounded-lg border border-amber-700 p-3 text-xs text-amber-300">
+                          <p>{t("serviceEditor.thinkingLegacyWarning")}</p>
+                          <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(legacyDelimiters, null, 2)}</pre>
+                          <button type="button" className="btn-ghost btn-xs mt-2" onClick={() => setLegacyDelimiters(undefined)}>
+                            {t("serviceEditor.thinkingLegacyRemove")}
+                          </button>
+                        </div>
+                      )}
+                      <div className="border-t border-ink-700 pt-4">
+                        {kind === "resilience" ? (
+                          <div className="space-y-3">
+                            {steps.length === 0 && <p className="text-xs text-ink-500">{t("serviceEditor.thinkingParserNoSteps")}</p>}
+                            {steps.map((step, i) => (
+                              <div key={stepKeys.keys[i]}>
+                                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-400">
+                                  <span className="badge-blue">{t("serviceEditor.stepNumber", { n: i + 1 })}</span>
+                                  <span>{step.model} · {step.provider}</span>
+                                </div>
+                                <ThinkingParserEditor value={step.thinkingParser} onChange={thinkingParser => patchStep(i, { thinkingParser })} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="label">{t("serviceEditor.thinkingParser")}</span>
+                            <p className="text-xs text-ink-500">{t("serviceEditor.thinkingParserAgentHint")}</p>
+                          </div>
+                        )}
+                        <p className="mt-2 text-xs text-ink-500">{t("serviceEditor.thinkingParserHint")}</p>
+                      </div>
+                    </div>
+                  )}
+                </section>
+                {user?.role === "admin" && (
+                  <HostedToolBinding tools={hostedTools} ids={toolIds} config={toolConfig} onIds={setToolIds} onConfig={setToolConfig} />
+                )}
+                <fieldset className="space-y-3 rounded-lg border border-ink-700 p-4">
+                  <legend className="px-2 text-sm font-semibold text-ink-200">
+                    <i className="bi bi-paperclip mr-2 text-ink-400" aria-hidden="true" />
+                    {t("serviceEditor.attachmentsGroup")}
+                  </legend>
+                  <div>
+                    <label className="label" htmlFor={attachmentId}>{t("serviceEditor.maxAttachmentLabel")}</label>
+                    <input id={attachmentId} aria-describedby={`${attachmentId}-hint`} className="input sm:max-w-xs" type="text" inputMode="numeric" value={maxAttachmentMiB} onFocus={selectAll} onClick={selectAll} onChange={(e) => setMaxAttachmentMiB(intInput(e.target.value, 0))} />
+                    <p id={`${attachmentId}-hint`} className="mt-1 text-xs text-ink-500">{t("serviceEditor.maxAttachmentHint")}</p>
+                  </div>
+                </fieldset>
+              </div>
+            )}
+          </section>
         )}
       </div>
     </Modal>
@@ -834,16 +930,17 @@ function TriggerChips({
 function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Partial<ServiceStep>) => void }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const contentId = useId();
   const hasOverrides = !!step.overrides && Object.keys(step.overrides).length > 0;
   return (
     <div className="mt-3">
-      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" onClick={() => setOpen((a) => !a)}>
-        <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
+      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((a) => !a)}>
+        <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} aria-hidden="true" />
         {t("serviceEditor.advancedOverrides")}
         {hasOverrides && <span className="ml-1 text-brand-400">●</span>}
       </button>
       {open && (
-        <div className="mt-2">
+        <div id={contentId} className="mt-2 space-y-3">
           <OverridesEditor
             overrides={step.overrides}
             onChange={(ov) => onPatch({ overrides: ov })}

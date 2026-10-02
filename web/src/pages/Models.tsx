@@ -16,6 +16,10 @@ interface Data {
   providerModels: ProviderModels[];
 }
 
+type MappingForm =
+  | { id?: never; modelId: number; providerId: number; upstreamModel: string; families: string[] }
+  | { id: number; modelId: number; providerId: number; upstreamModel: string; priority: string; enabled: boolean };
+
 export function Models() {
   const { t } = useI18n();
   const { data, loading, error, reload } = useAsync<Data>(async () => {
@@ -31,7 +35,8 @@ export function Models() {
   const { confirm, confirmEl } = useConfirm();
 
   const [modelForm, setModelForm] = useState<{ id?: number; name: string; description: string; enabled: boolean } | null>(null);
-  const [mapForm, setMapForm] = useState<{ modelId: number; providerId: number; upstreamModel: string; families: string[] } | null>(null);
+  const [mapForm, setMapForm] = useState<MappingForm | null>(null);
+  const [mappingError, setMappingError] = useState("");
   const [saving, setSaving] = useState(false);
 
   const providerName = (id: number) => data?.providers.find((p) => p.id === id)?.name ?? `#${id}`;
@@ -67,15 +72,28 @@ export function Models() {
   };
 
   const saveMapping = async () => {
-    if (!mapForm) return;
+    if (!mapForm || saving || !mapForm.upstreamModel.trim()) return;
+    const editing = mapForm.id !== undefined;
+    const priority = editing ? Number(mapForm.priority) : 0;
+    if (editing && (!mapForm.priority.trim() || !Number.isSafeInteger(priority))) {
+      setMappingError(t("models.mappingModal.field.priority.hint"));
+      return;
+    }
     setSaving(true);
+    setMappingError("");
     try {
-      await api.post("/mappings", { ...mapForm, families: mapForm.families.length ? mapForm.families : null });
-      toast.success(t("models.toast.mappingCreated"));
+      if (editing) {
+        // Preserve this mapping's identity and format allowlist. Services keep
+        // their model/provider references while the upstream id changes in place.
+        await api.patch(`/mappings/${mapForm.id}`, { upstreamModel: mapForm.upstreamModel.trim(), priority, enabled: mapForm.enabled });
+      } else {
+        await api.post("/mappings", { ...mapForm, upstreamModel: mapForm.upstreamModel.trim(), families: mapForm.families.length ? mapForm.families : null });
+      }
+      toast.success(t(editing ? "models.toast.mappingUpdated" : "models.toast.mappingCreated"));
       setMapForm(null);
       reload();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("models.toast.mappingFailed"));
+      setMappingError(e instanceof ApiError ? e.message : t("models.toast.mappingFailed"));
     } finally {
       setSaving(false);
     }
@@ -96,7 +114,14 @@ export function Models() {
       toast.error(t("models.toast.createProviderFirst"));
       return;
     }
+    setMappingError("");
     setMapForm({ modelId, providerId: firstProvider, upstreamModel: "", families: [] });
+  };
+
+  const openEditMapping = (mapping: Mapping) => {
+    setMappingError("");
+    setMapForm({ id: mapping.id, modelId: mapping.modelId, providerId: mapping.providerId,
+      upstreamModel: mapping.upstreamModel, priority: String(mapping.priority), enabled: mapping.enabled });
   };
 
   return (
@@ -159,6 +184,10 @@ export function Models() {
                         <span className="text-ink-200">{providerName(mp.providerId)}</span>
                         <i className="bi bi-arrow-right text-ink-600" />
                         <span className="font-mono text-ink-400">{mp.upstreamModel}</span>
+                        {!mp.enabled && <span className="badge-red">{t("common.disabled")}</span>}
+                        <button className="btn-ghost btn-xs" onClick={() => openEditMapping(mp)}>
+                          <i className="bi bi-pencil" />{t("common.edit")}
+                        </button>
                         <button className="text-ink-600 hover:text-red-400" onClick={() => removeMapping(mp)}>
                           <i className="bi bi-x-lg" />
                         </button>
@@ -204,29 +233,45 @@ export function Models() {
       <Modal
         open={mapForm !== null}
         size="lg"
-        title={t("models.mappingModal.title")}
+        title={t(mapForm?.id !== undefined ? "models.mappingModal.editTitle" : "models.mappingModal.title")}
         icon="bi-diagram-2"
-        onClose={() => setMapForm(null)}
+        onClose={() => { if (!saving) setMapForm(null); }}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setMapForm(null)}>{t("common.cancel")}</button>
-            <button className="btn-primary" onClick={saveMapping} disabled={saving || !mapForm?.upstreamModel}>
-              <i className="bi bi-check-lg" />{t("common.add")}
+            <button className="btn-ghost" disabled={saving} onClick={() => setMapForm(null)}>{t("common.cancel")}</button>
+            <button className="btn-primary" onClick={saveMapping} disabled={saving || !mapForm?.upstreamModel.trim()}>
+              <i className="bi bi-check-lg" />{t(mapForm?.id !== undefined ? "common.save" : "common.add")}
             </button>
           </>
         }
       >
         {mapForm && (
           <div className="space-y-4">
-            <div>
-              <label className="label">{t("models.mappingModal.field.provider.label")}</label>
-              <select className="select" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
-                {data?.providers.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
-                ))}
-              </select>
-            </div>
+            {mapForm.id !== undefined ? (
+              <>
+                <p className="text-sm text-ink-400">{t("models.mappingModal.identityHint")}</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="block"><span className="label">{t("models.mappingModal.field.model.label")}</span><input className="input" readOnly value={data?.models.find(model => model.id === mapForm.modelId)?.name ?? `#${mapForm.modelId}`} /></label>
+                  <label className="block"><span className="label">{t("models.mappingModal.field.provider.label")}</span><input className="input" readOnly value={providerName(mapForm.providerId)} /></label>
+                </div>
+                <label className="block">
+                  <span className="label">{t("models.mappingModal.field.priority.label")}</span>
+                  <input className="input" type="text" inputMode="numeric" value={mapForm.priority} onChange={event => setMapForm({ ...mapForm, priority: event.target.value })} />
+                </label>
+                <Toggle checked={mapForm.enabled} onChange={enabled => setMapForm({ ...mapForm, enabled })} label={t("models.mappingModal.field.enabled.label")} />
+              </>
+            ) : (
+              <label className="block">
+                <span className="label">{t("models.mappingModal.field.provider.label")}</span>
+                <select className="select" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
+                  {data?.providers.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
+                  ))}
+                </select>
+              </label>
+            )}
             {(() => {
+              if (mapForm.id !== undefined) return null;
               const prov = data?.providers.find((p) => p.id === mapForm.providerId);
               const fams = prov ? [prov.type, ...(prov.altEndpoints ?? []).map((e) => e.type)] : [];
               const uniq = [...new Set(fams)];
@@ -256,8 +301,10 @@ export function Models() {
               );
             })()}
             <div>
-              <label className="label">{t("models.mappingModal.field.upstreamModel.label")}</label>
-              <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
+              <label className="block">
+                <span className="label">{t("models.mappingModal.field.upstreamModel.label")}</span>
+                <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
+              </label>
               <p className="mt-1 text-xs text-ink-500">{t("models.mappingModal.field.upstreamModel.hint")}</p>
               {/* The field above doubles as the search box: type to narrow the
                   provider's own list, click to fill it in, or ignore the list
@@ -280,6 +327,7 @@ export function Models() {
                 />
               </div>
             </div>
+            {mappingError && <ErrorNote message={mappingError} />}
           </div>
         )}
       </Modal>

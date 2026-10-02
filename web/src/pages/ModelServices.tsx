@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
 import { PageHeader } from "../components/Layout";
@@ -6,6 +6,8 @@ import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common
 import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
+import { Modal } from "../components/Modal";
+import { useAuth } from "../auth";
 import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
 import { isAgentDef, serviceCategoryOf } from "../types";
 
@@ -51,6 +53,12 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
   const { confirm, confirmEl } = useConfirm();
   const [editing, setEditing] = useState<ModelService | null>(null);
   const [creating, setCreating] = useState(false);
+  const { user } = useAuth();
+  const [copying, setCopying] = useState<ModelService | null>(null);
+  const [copyName, setCopyName] = useState("");
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const copyNameId = useId();
 
   const copy = COPY[kind];
   const isKind = (m: ModelService) => (kind === "chain" ? isAgentDef(m.steps) : !isAgentDef(m.steps));
@@ -69,6 +77,38 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
       reload();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : t("services.toast.deleteFailed"));
+    }
+  };
+
+  const startCopy = (source: ModelService) => {
+    const stem = source.name.slice(0, 108);
+    let proposed = `${stem}-copy`;
+    let suffix = 2;
+    while (data?.services.some(service => service.name === proposed)) proposed = `${stem}-copy-${suffix++}`;
+    setCopying(source);
+    setCopyName(proposed);
+    setCopyError("");
+  };
+
+  const duplicate = async () => {
+    if (!copying || copyBusy) return;
+    const name = copyName.trim();
+    if (!name) { setCopyError(t("serviceEditor.toast.nameRequired")); return; }
+    if (data?.services.some(service => service.name === name)) { setCopyError(t("services.copy.nameExists")); return; }
+    setCopyBusy(true);
+    setCopyError("");
+    try {
+      // Copy the saved definition verbatim rather than rebuilding it through the
+      // visual editor: legacy fields, nested references and all settings survive.
+      await api.post("/services", { name, description: copying.description, enabled: copying.enabled,
+        steps: copying.steps, ...(user?.role === "admin" ? { toolIds: copying.toolIds ?? [] } : {}) });
+      toast.success(t("services.copy.saved", { name }));
+      setCopying(null);
+      reload();
+    } catch (error) {
+      setCopyError(error instanceof ApiError ? error.message : t("services.copy.failed"));
+    } finally {
+      setCopyBusy(false);
     }
   };
 
@@ -141,6 +181,10 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
                 <i className="bi bi-pencil" />
                 {t("services.action.edit")}
               </button>
+              <button className="btn-ghost btn-xs" onClick={() => startCopy(m)}>
+                <i className="bi bi-copy" />
+                {t("services.action.copy")}
+              </button>
               <button className="btn-danger btn-xs" onClick={() => remove(m)}>
                 <i className="bi bi-trash3" />
               </button>
@@ -165,6 +209,22 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
           onSaved={reload}
         />
       )}
+      <Modal open={copying !== null} title={t("services.copy.title", { name: copying?.name ?? "" })} icon="bi-copy" onClose={() => { if (!copyBusy) setCopying(null); }} footer={
+        <>
+          <button className="btn-ghost" disabled={copyBusy} onClick={() => setCopying(null)}>{t("common.cancel")}</button>
+          <button className="btn-primary" disabled={copyBusy} onClick={duplicate}><i className="bi bi-copy" />{t("services.action.copy")}</button>
+        </>
+      }>
+        <div className="space-y-4">
+          <p className="text-sm text-ink-400">{t("services.copy.hint")}</p>
+          <div>
+            <label className="label" htmlFor={copyNameId}>{t("serviceEditor.nameLabel")}</label>
+            <input id={copyNameId} className="input" maxLength={120} value={copyName} onChange={event => setCopyName(event.target.value)} autoFocus />
+          </div>
+          {user?.role !== "admin" && !!copying?.toolIds?.length && <p className="text-xs text-amber-400">{t("services.copy.toolsAdminOnly")}</p>}
+          {copyError && <ErrorNote message={copyError} />}
+        </div>
+      </Modal>
       {confirmEl}
     </div>
   );

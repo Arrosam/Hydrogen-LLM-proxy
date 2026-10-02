@@ -12,6 +12,9 @@ export class HostedToolService extends ModelService {
   constructor(private readonly inner: ModelService, deps: ServiceDeps, private readonly tools: HttpTool[], private readonly config?: HostedToolOptions) {
     super({ timeoutMs: inner.timeoutMs, steps: [] }, deps);
   }
+  override get thinkingProcessing(): boolean {
+    return this.inner.thinkingProcessing !== false;
+  }
   override async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     try {
       const run = await runHostedTools(this.inner, request.withOverrides(overrides), this.tools, this.deps.transport,

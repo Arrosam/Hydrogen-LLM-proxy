@@ -6,7 +6,7 @@ import { fabricateStream } from "../src/core/ir/stream";
 import type { ContentPart } from "../src/core/ir/content";
 import type { Request } from "../src/core/ir/request";
 import type { Invocation } from "../src/execution/outcome";
-import { runHostedTools } from "../src/execution/hostedToolLoop";
+import { runHostedTools, type HostedContext } from "../src/execution/hostedToolLoop";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
 import { parseService, type AgentDef } from "../src/execution/definition";
@@ -53,6 +53,21 @@ describe("hosted model/tool loop", () => {
     await runHostedTools(e, request, [tool], transport(), { sessionId: "s", config: HostedToolOptionsSchema.parse({ streamMode: "all" }), thinkingFormat: "none", emit: async e => { events.push(e); } });
     expect(JSON.stringify(events)).not.toContain("private trace");
     expect(JSON.stringify(e.requests[1].messages)).toContain("private trace");
+  });
+  it.each(["own", "inherited"] as const)("passes process thinking through when %s processing is off without mutating shared context", async disabledBy => {
+    const e = { ...executor([[{ type: "reasoning" as const, text: "visible trace", signature: "sig", origin: "anthropic" as const }, call]]), thinkingProcessing: disabledBy !== "own" };
+    const context: HostedContext = { sessionId: "shared", remainingCalls: 16, remainingRounds: 128, traces: [], thinkingFormat: "none" };
+    const events: unknown[] = [];
+    await runHostedTools(e, request, [tool], transport(), { sessionId: "shared", hosted: context, thinkingProcessing: disabledBy === "inherited" ? false : true,
+      config: HostedToolOptionsSchema.parse({ streamMode: "all" }), emit: async event => { events.push(event); } });
+    expect(JSON.stringify(events)).toContain("visible trace");
+    expect(context.thinkingFormat).toBe("none");
+    expect(e.stream).toHaveBeenCalledWith(expect.anything(), undefined, expect.objectContaining({ thinkingProcessing: false }));
+    const enabled = executor([[{ type: "reasoning", text: "hidden sibling trace" }, { type: "text", text: "answer" }]]);
+    const siblingEvents: unknown[] = [];
+    await runHostedTools(enabled, request, [tool], transport(), { sessionId: "shared", hosted: context, config: HostedToolOptionsSchema.parse({ streamMode: "all" }), emit: async event => { siblingEvents.push(event); } });
+    expect(JSON.stringify(siblingEvents)).not.toContain("hidden sibling trace");
+    expect(context.thinkingFormat).toBe("none");
   });
   it("runs bound tools inside a Micro Agent stage and shares the parent's call budget", async () => {
     const e = executor([[call], [{ ...call, id: "c2" }]]), t = transport();

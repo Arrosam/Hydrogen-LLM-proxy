@@ -130,6 +130,10 @@ export class MicroAgent extends ModelService {
     this.ocrCache = deps.ocrCache ?? null;
   }
 
+  override get thinkingProcessing(): boolean {
+    return this.agent.thinkingProcessing !== false;
+  }
+
   /** Resolve the (possibly live) log-payload max-chars to a concrete number. */
   private resolveLogMaxChars(): number {
     const v = this.logMaxChars;
@@ -146,6 +150,9 @@ export class MicroAgent extends ModelService {
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const agent = this.agent;
+    // Off is a run-wide veto: a referenced service or nested agent must not
+    // re-enable a decoder while this agent is passing thinking through.
+    opts = { ...opts, thinkingProcessing: agent.thinkingProcessing !== false && opts.thinkingProcessing !== false };
     const stack = opts.stack ?? [];
     const prog = opts.progress ?? null;
     // A URL-attachment budget set on this agent bounds each call it makes; an
@@ -244,7 +251,7 @@ export class MicroAgent extends ModelService {
               const stored: Array<{ hash: string; description: string }> = [];
               for (const batch of batchImages(pending)) {
                 const ocrReq = buildOcrRequest(request, batch.map((p) => p.image), ocr);
-                const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted, attachmentLimit);
+                const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
                 calls.push(call);
                 if (!result.ok) {
                   prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
@@ -396,7 +403,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -408,7 +415,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -461,8 +468,9 @@ export class MicroAgent extends ModelService {
     prog: ProgressRecorder | null = null,
     hosted?: InvokeOptions["hosted"],
     maxAttachmentBytes?: number,
+    thinkingProcessing?: boolean,
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes }, () => this.resolveLogMaxChars());
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {

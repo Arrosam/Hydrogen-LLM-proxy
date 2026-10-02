@@ -53,11 +53,15 @@ export function Toggle({
   checked,
   onChange,
   label,
+  ariaLabel,
+  size = "sm",
   disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  ariaLabel?: string;
+  size?: "sm" | "lg";
   disabled?: boolean;
 }) {
   return (
@@ -66,12 +70,15 @@ export function Toggle({
     >
       <button
         type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={ariaLabel ?? label}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
-        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${checked ? "bg-brand-600" : "bg-ink-700"} ${disabled ? "cursor-not-allowed" : ""}`}
+        className={`relative inline-flex ${size === "lg" ? "h-7 w-12" : "h-5 w-9"} shrink-0 items-center rounded-full transition-colors ${checked ? "bg-brand-600" : "bg-ink-700"} ${disabled ? "cursor-not-allowed" : ""}`}
       >
         <span
-          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${checked ? "translate-x-[18px]" : "translate-x-[2px]"}`}
+          className={`inline-block ${size === "lg" ? "h-6 w-6" : "h-4 w-4"} transform rounded-full bg-white shadow transition-transform ${checked ? size === "lg" ? "translate-x-[22px]" : "translate-x-[18px]" : "translate-x-[2px]"}`}
         />
       </button>
       {label && <span className="text-sm text-ink-300">{label}</span>}

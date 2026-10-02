@@ -36,7 +36,16 @@ A service can give different fallback models different grammars while presenting
 }
 ```
 
-Configure **Upstream thinking decoder** beside each model/provider in the service editor. Micro Agents use the decoders of their referenced Model Services; legacy inline stage steps can also carry `thinkingParser` in JSON. Parser settings are local controls, never sent as generation parameters to a provider.
+Open **Advanced → Thinking** in the service editor. Turn thinking processing on to choose the client output format and configure **Upstream thinking decoder** for each model/provider below it. The Advanced section also groups hosted server tools and attachment settings; closing the section does not discard configured values. Micro Agents use the decoders of their referenced Model Services; legacy inline stage steps can also carry `thinkingParser` in JSON. Parser settings are local controls, never sent as generation parameters to a provider.
+
+### Thinking processing toggle (v2.2.2)
+
+- **Off** saves `thinkingProcessing: false`: inline text is not parsed, and the saved `thinkingFormat` does not rewrite client output. Native structured reasoning is still handled by the wire adapter and delivered in the client's native protocol. Unterminated inline tags remain ordinary text rather than triggering decoder errors.
+- **On** saves `thinkingProcessing: true`: each upstream can use its own decoder, followed by the selected client output format. Saved parser settings survive switching off and back on.
+- A Micro Agent's explicit off setting is inherited by referenced services, nested agents, inline stages, and OCR calls. A child cannot re-enable processing within that run, and the shared child definition is not modified.
+- Omitting `thinkingProcessing` preserves existing runtime behavior. The editor recognizes active legacy decoder-only definitions, including nested references, so saving unrelated settings does not disable their decoders or change their original presentation.
+
+This is separate from the generation-level `thinking: "disabled"` control, which still asks the upstream not to generate reasoning and retains its existing filtering policy.
 
 | Parser | Meaning |
 |---|---|
@@ -46,7 +55,7 @@ Configure **Upstream thinking decoder** beside each model/provider in the servic
 
 Custom markers must be distinct, nonempty strings containing non-whitespace text, each at most 64 characters. They are case-sensitive and preserve zero-width characters exactly. Up to 512 whitespace code units may precede an opener; exceeding that bound is an error. A custom opener that itself begins with whitespace matches exactly from position zero.
 
-Only the initial text run is decoded. A native reasoning block encountered first is authoritative. A tag later in an answer is never scanned. There is no broad `think`/`reason`/`thought` stem heuristic, so a legitimate `<reason>…</reason>` answer stays an answer.
+Only the initial text run is decoded. A native reasoning block encountered first is authoritative. When native reasoning and answer content arrive in the same Chat Completions stream frame, the adapter emits reasoning first, matching buffered parsing; literal tags in that answer do not open another thinking block. A tag later in an answer is never scanned. There is no broad `think`/`reason`/`thought` stem heuristic, so a legitimate `<reason>…</reason>` answer stays an answer.
 
 **Built-in think tags recognize quoted examples.** A `</think>` inside a paired backtick span, matching code fence, or paired prose quotation is not immediately accepted as the true end. Marker and quotation boundaries may cross any stream chunk. Apostrophes within words do not open a quotation. Fences must have matching marker characters, sufficient run length, no more than three spaces of indentation, and a whitespace-only closing-line suffix; an answer beginning with a language-tagged fence is not mistaken for a closing fence.
 

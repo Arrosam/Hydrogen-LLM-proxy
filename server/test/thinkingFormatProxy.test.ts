@@ -137,8 +137,10 @@ function startUpstream(): Promise<void> {
 }
 
 /** One service per format, so a case never has to mutate a definition. */
-const SERVICES: Array<{ name: string; format?: string; reliableStreaming?: boolean; delimiters?: { open: string; close: string } }> = [
+const SERVICES: Array<{ name: string; format?: string; thinkingProcessing?: boolean; reliableStreaming?: boolean; delimiters?: { open: string; close: string } }> = [
   { name: "plain" },
+  { name: "processing-off", format: "none", thinkingProcessing: false },
+  { name: "processing-off-reliable", format: "think_tags", thinkingProcessing: false, reliableStreaming: true },
   { name: "as-content", format: "reasoning_content" },
   { name: "as-reasoning", format: "reasoning" },
   { name: "as-tags", format: "think_tags" },
@@ -177,6 +179,7 @@ beforeAll(async () => {
         steps: [{ model: "m", provider: "p", ...(s.format ? { thinkingParser: s.delimiters
           ? { mode: "custom", delimiters: s.delimiters } : { mode: "think_tags" } } : {}) }],
         ...(s.format ? { thinkingFormat: s.format } : {}),
+        ...(s.thinkingProcessing !== undefined ? { thinkingProcessing: s.thinkingProcessing } : {}),
       },
     });
   }
@@ -246,6 +249,32 @@ describe("EP: the default leaves an existing service exactly as it was", () => {
     expect(out.content).toBe(`<think>${THOUGHT}</think>\n\n${ANSWER}`);
     expect(out.reasoning).toBe("");
   });
+});
+
+describe("EP: thinking processing off passes through despite retained parser and format settings", () => {
+  for (const model of ["processing-off", "processing-off-reliable"]) for (const stream of [false, true]) {
+    it(`preserves raw inline thinking (${model}, stream=${stream})`, async () => {
+      style = "tags";
+      const result = await chat(model, stream);
+      expect(result.statusCode).toBe(200);
+      const content = stream ? streamed(result.payload).content : messageOf(result).content;
+      expect(content).toBe(`<think>${THOUGHT}</think>\n\n${ANSWER}`);
+    });
+    it(`does not parse or reject unclosed thinking (${model}, stream=${stream})`, async () => {
+      style = "truncated";
+      const result = await chat(model, stream);
+      expect(result.statusCode).toBe(200);
+      const content = stream ? streamed(result.payload).content : messageOf(result).content;
+      expect(content).toBe(`<think>${THOUGHT}`);
+    });
+    it(`preserves native reasoning (${model}, stream=${stream})`, async () => {
+      style = "field";
+      const result = await chat(model, stream);
+      expect(result.statusCode).toBe(200);
+      if (stream) expect(streamed(result.payload)).toMatchObject({ content: ANSWER, reasoningContent: THOUGHT });
+      else expect(messageOf(result)).toMatchObject({ content: ANSWER, reasoning_content: THOUGHT });
+    });
+  }
 });
 
 describe("EP: an override finds thinking the upstream never labelled", () => {

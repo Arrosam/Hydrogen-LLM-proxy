@@ -726,17 +726,9 @@ export class OpenAICompletionResponse extends Response {
       const delta = (choice.delta ?? {}) as Record<string, unknown>;
       if (choice.logprobs && typeof choice.logprobs === "object") yield { type: "logprobs", value: choice.logprobs as Record<string, unknown> };
 
-      // `content` is a string on every mainstream server, but it is typed `any`
-      // in several wire definitions and SOME deltas do carry parts. Reading only
-      // the string form silently dropped those deltas, which reads downstream as
-      // a model that answered with nothing.
-      if (typeof delta.content === "string") {
-        if (delta.content) yield { type: "text_delta", text: delta.content };
-      } else if (Array.isArray(delta.content)) {
-        yield* contentPartEvents(coerceContentToParts(delta.content));
-      }
-      if (typeof delta.refusal === "string" && delta.refusal) yield { type: "text_delta", text: delta.refusal };
-
+      // A frame can contain both native reasoning and answer text. Emit native
+      // fields first, matching buffered parsing, so an inline decoder does not
+      // mistake a literal tag in that answer for a second thinking channel.
       const reasoning = firstReasoningField(delta);
       if (reasoning) {
         reasoningTextSeen = true;
@@ -750,6 +742,15 @@ export class OpenAICompletionResponse extends Response {
         yield { type: "reasoning_stop", origin: p.origin, id: p.itemId, redacted: p.redacted, signature: p.signature };
         reasoningTextSeen = false;
       }
+
+      // `content` is a string on every mainstream server, but SOME deltas carry
+      // parts; preserving both shapes avoids silently dropping the answer.
+      if (typeof delta.content === "string") {
+        if (delta.content) yield { type: "text_delta", text: delta.content };
+      } else if (Array.isArray(delta.content)) {
+        yield* contentPartEvents(coerceContentToParts(delta.content));
+      }
+      if (typeof delta.refusal === "string" && delta.refusal) yield { type: "text_delta", text: delta.refusal };
 
       const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
       for (const tc of toolCalls) {

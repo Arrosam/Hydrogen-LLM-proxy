@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Readable } from "node:stream";
 import { ModelService } from "../src/execution/modelService";
-import { parseService, type ServiceSteps } from "../src/execution/definition";
+import { parseService, serviceThinkingFormat, type AgentDef, type ServiceSteps } from "../src/execution/definition";
+import { MicroAgent } from "../src/execution/microAgent";
+import { HostedToolService } from "../src/execution/hostedToolService";
 import { OpenAICompletionRequest } from "../src/core/format";
 import { collectStream } from "../src/core/ir/stream";
 import type { Catalog } from "../src/catalog/catalog";
@@ -56,6 +58,38 @@ describe("upstream-specific decoding before canonical history", () => {
         expect(result.result.value.response.content).toEqual([{ type: "reasoning", text: "private" }, { type: "text", text: "answer" }]);
         expect(result.result.value.response.withThinkingFormat("none").text()).toBe("answer");
       }
+    });
+  }
+
+  for (const field of ["reasoning_content", "reasoning"] as const) for (const mode of ["json", "buffered-sse", "relay", "reliable"] as const) {
+    it(`trusts native reasoning before content delivered in the same frame (${field}, ${mode})`, async () => {
+      const raw = "<think>literal markup to display</think>answer";
+      const upstream = transport(false, raw);
+      upstream.postJson = async () => ({ status: 200, headers: {}, text: "", json: {
+        id: "c", model: "up", choices: [{ message: { role: "assistant", content: raw, [field]: "native thought" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+      } });
+      upstream.postStream = async () => ({ status: 200, headers: {}, body: Readable.from([
+        `data: ${JSON.stringify({ id: "c", model: "up", choices: [{ delta: { content: "<think>", [field]: "native thought" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "literal markup to display</think>answer" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } })}\n\n`,
+        "data: [DONE]\n\n",
+      ]) });
+      const service = new ModelService({ timeoutMs: 1000, thinkingProcessing: true, reliableStreaming: mode === "reliable",
+        steps: [{ model: "m", provider: "p", thinkingParser: { mode: "think_tags" }, retry: { maxAttempts: 1 } }] } as ServiceSteps, { catalog, transport: upstream });
+      let content;
+      if (mode === "json" || mode === "buffered-sse") {
+        const result = await service.invoke(request().withStream(mode === "buffered-sse"));
+        if (!result.result.ok) throw Error(result.result.message);
+        content = result.result.value.response.content;
+      } else {
+        const result = await service.stream(request().withStream(true));
+        if (!result.result.ok) throw Error(result.result.message);
+        const collected = await collectStream(result.result.value.events);
+        expect(collected.error).toBeUndefined();
+        content = collected.data.content;
+      }
+      expect(content).toEqual([{ type: "reasoning", text: "native thought" }, { type: "text", text: raw }]);
     });
   }
 
@@ -153,6 +187,99 @@ describe("upstream-specific decoding before canonical history", () => {
     if (!result.result.ok) throw Error("unexpected invocation failure");
     expect(result.result.value.response.usage.totalTokens).toBe(10);
     expect(result.result.value.modelName).toBe("r1");
+  });
+});
+
+describe("thinking processing off", () => {
+  for (const mode of ["json", "buffered-sse", "relay", "reliable"] as const) {
+    it(`passes an unterminated thinking block through without parsing (${mode})`, async () => {
+      const definition = def();
+      definition.thinkingProcessing = false;
+      definition.reliableStreaming = mode === "reliable";
+      definition.steps[0].thinkingParser = { mode: "think_tags" };
+      const raw = "<think>unfinished thinking with a quoted `</think> boundary";
+      const service = new ModelService(definition, { catalog, transport: transport(false, raw) });
+      if (mode === "json" || mode === "buffered-sse") {
+        const result = await service.invoke(request().withStream(mode === "buffered-sse"));
+        if (!result.result.ok) throw Error(result.result.message);
+        expect(result.result.value.response.content).toEqual([{ type: "text", text: raw }]);
+        expect(result.result.value.response.usage.totalTokens).toBe(5);
+      } else {
+        const result = await service.stream(request().withStream(true));
+        if (!result.result.ok) throw Error(result.result.message);
+        const collected = await collectStream(result.result.value.events);
+        expect(collected.error).toBeUndefined();
+        expect(collected.data.content).toEqual([{ type: "text", text: raw }]);
+        expect(collected.data.usage.totalTokens).toBe(5);
+      }
+      expect(serviceThinkingFormat(definition)).toBe("original");
+      expect(definition.steps[0].thinkingParser).toEqual({ mode: "think_tags" });
+    });
+  }
+
+  it("keeps native reasoning fields and raw token logprobs when processing is off", async () => {
+    const upstream = transport(false, "answer");
+    const originalPost = upstream.postJson;
+    upstream.postJson = async (...args) => {
+      const reply = await originalPost(...args);
+      const choice = (reply.json as { choices: Array<{ message: Record<string, unknown>; logprobs?: unknown }> }).choices[0];
+      choice.message.reasoning_content = "native thinking";
+      choice.logprobs = { content: [{ token: "answer", logprob: -1 }] };
+      return reply;
+    };
+    const definition = { timeoutMs: 1000, thinkingProcessing: false, thinkingFormat: "none", steps: [{ model: "m", provider: "p", thinkingParser: { mode: "think_tags" } }] } as ServiceSteps;
+    const result = await new ModelService(definition, { catalog, transport: upstream }).invoke(request());
+    if (!result.result.ok) throw Error(result.result.message);
+    const response = result.result.value.response.withThinkingFormat(serviceThinkingFormat(definition));
+    expect(response.content).toContainEqual({ type: "reasoning", text: "native thinking" });
+    expect(response.logprobs).toBeDefined();
+    expect(response.render("openai_completion", "svc")).toMatchObject({ choices: [{ message: { reasoning_content: "native thinking", content: "answer" } }] });
+  });
+
+  it("treats either own off or inherited off as a veto and can re-enable without losing the grammar", async () => {
+    const definition = { timeoutMs: 1000, thinkingProcessing: true, steps: [{ model: "m", provider: "p", thinkingParser: { mode: "think_tags" } }] } as ServiceSteps;
+    const service = new ModelService(definition, { catalog, transport: transport(false, "<think>thought</think>answer") });
+    for (const inherited of [false, true]) {
+      const result = await service.invoke(request(), undefined, { thinkingProcessing: inherited });
+      if (!result.result.ok) throw Error(result.result.message);
+      expect(result.result.value.response.content).toEqual(inherited
+        ? [{ type: "reasoning", text: "thought" }, { type: "text", text: "answer" }]
+        : [{ type: "text", text: "<think>thought</think>answer" }]);
+    }
+    const disabled = new ModelService({ ...definition, thinkingProcessing: false }, { catalog, transport: transport(false, "<think>thought</think>answer") });
+    const result = await disabled.invoke(request(), undefined, { thinkingProcessing: true });
+    if (!result.result.ok) throw Error(result.result.message);
+    expect(result.result.value.response.text()).toBe("<think>thought</think>answer");
+  });
+
+  it.each(["reference", "nested", "hosted", "inline"] as const)("propagates agent off to %s calls without changing the reused child", async kind => {
+    const raw = "<think>thought</think>answer";
+    const deps = { catalog, transport: transport(false, raw) };
+    const childDef = { timeoutMs: 1000, thinkingProcessing: true, steps: [{ model: "m", provider: "p", thinkingParser: { mode: "think_tags" } }] } as ServiceSteps;
+    const child = new ModelService(childDef, deps);
+    const nested = new MicroAgent({ kind: "micro_agent", thinkingProcessing: true, timeoutMs: 1000, stages: [{ name: "main", service: "child", input: [] }] },
+      { ...deps, logMaxChars: 1000, resolver: { resolve: () => ({ ok: true, executor: child, isAgent: false }) } });
+    const hosted = new HostedToolService(child, deps, []);
+    const definition: AgentDef = { kind: "micro_agent", thinkingProcessing: false, timeoutMs: 1000, stages: [{ name: "main", input: [],
+      ...(kind === "inline" ? { steps: childDef.steps } : { service: "child" }) }] };
+    const agent = new MicroAgent(definition, { ...deps, logMaxChars: 1000,
+      resolver: { resolve: () => ({ ok: true, executor: kind === "nested" ? nested : kind === "hosted" ? hosted : child, isAgent: kind === "nested" }) } });
+    const result = await agent.invoke(request());
+    if (!result.result.ok) throw Error(result.result.message);
+    expect(result.result.value.response.content).toEqual([{ type: "text", text: raw }]);
+    const stream = await agent.stream(request().withStream(true));
+    if (!stream.result.ok) throw Error(stream.result.message);
+    expect((await collectStream(stream.result.value.events)).data.content).toEqual([{ type: "text", text: raw }]);
+    const reused = await child.invoke(request());
+    if (!reused.result.ok) throw Error(reused.result.message);
+    expect(reused.result.value.response.content).toEqual([{ type: "reasoning", text: "thought" }, { type: "text", text: "answer" }]);
+    expect(childDef.thinkingProcessing).toBe(true);
+  });
+
+  it.each([false, true])("retains and validates the service/agent processing flag (%s)", thinkingProcessing => {
+    expect(parseService({ thinkingProcessing, steps: [{ model: "m", provider: "p" }] })).toMatchObject({ thinkingProcessing });
+    expect(parseService({ kind: "micro_agent", thinkingProcessing, stages: [{ name: "main", service: "s", input: [] }] })).toMatchObject({ thinkingProcessing });
+    expect(() => parseService({ thinkingProcessing: "false", steps: [{ model: "m", provider: "p" }] })).toThrow();
   });
 });
 

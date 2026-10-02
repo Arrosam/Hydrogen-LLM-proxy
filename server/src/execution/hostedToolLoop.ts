@@ -47,7 +47,7 @@ export class HostedRunError extends Error {
 
 /** One bounded model/tool loop. Tools are forwarded sequentially and never retried here. */
 export async function runHostedTools(
-  executor: Pick<ModelService, "invoke" | "stream">,
+  executor: Pick<ModelService, "invoke" | "stream"> & Partial<Pick<ModelService, "thinkingProcessing">>,
   request: Request,
   tools: HttpTool[],
   transport: Pick<Transport, "postStream">,
@@ -71,7 +71,9 @@ export async function runHostedTools(
   const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
   const localLimit = { remaining: config.maxCalls };
   const logMaxChars = context.logMaxChars ?? (() => 100_000);
-  const invokeOptions = { ...options, hosted: context };
+  const invokeOptions = { ...options, hosted: context,
+    thinkingProcessing: executor.thinkingProcessing !== false && options.thinkingProcessing !== false };
+  const presentationFormat = invokeOptions.thinkingProcessing ? context.thinkingFormat : "original";
   const calls: ServiceCall[] = [], traces: HostedEvent[] = context.traces;
   let usage: Usage = { ...ZERO_USAGE }, attempts = 0;
   const fail = (message: string, status = 502): never => { throw new HostedRunError(message, status, usage, calls); };
@@ -199,7 +201,7 @@ export async function runHostedTools(
         }
       }
       async function* observe(): AsyncGenerator<StreamEvent> {
-        for await (const event of withThinkingFormat(raw(), options.onModelEvent ? "original" : context.thinkingFormat)) {
+        for await (const event of withThinkingFormat(raw(), options.onModelEvent ? "original" : presentationFormat)) {
           if (options.onModelEvent) await options.onModelEvent(event);
           else await emit({ type: "hydrogen.model.delta", round, event }, false);
           // Presentation may hide thinking; the model's continuation still needs its signed original.

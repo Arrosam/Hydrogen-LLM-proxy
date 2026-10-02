@@ -185,6 +185,8 @@ export interface ServiceSteps {
   timeoutMs: number;
   steps: ServiceStep[];
   reliableStreaming?: boolean;
+  /** False bypasses inline thinking parsing and format translation, including nested calls. */
+  thinkingProcessing?: boolean;
   thinkingFormat?: ThinkingFormat;
   /** Legacy field retained only for explicit migration in the editor; rejected by the server. */
   thinkingDelimiters?: ThinkingDelimiters;
@@ -258,6 +260,8 @@ export interface AgentDef {
   ocr?: AgentOcr; // optional image-to-text pre-pass run before the first stage
   asr?: AgentAsr; // optional audio-to-text (ASR) pre-pass run before the first stage
   reliableStreaming?: boolean;
+  /** False bypasses inline thinking parsing and format translation, including nested calls. */
+  thinkingProcessing?: boolean;
   thinkingFormat?: ThinkingFormat;
   /** Legacy field retained only for explicit migration in the editor; rejected by the server. */
   thinkingDelimiters?: ThinkingDelimiters;
