@@ -1,0 +1,182 @@
+{
+  "recordedAt": "2026-10-03T14:05:12.532Z",
+  "branch": "codex/hydrogen-tool-discovery",
+  "dependencyBase": "8c12ff24b72767bcc7b0438a4091c36e7ecddccc",
+  "ticketBeforeCodeCommit": "d35d7c2b6b5e9c09c3b5acad985cd9c35901a433",
+  "runtime": {
+    "node": "v22.22.2",
+    "npm": "10.9.7",
+    "os": "darwin",
+    "arch": "arm64"
+  },
+  "status": {
+    "implemented": true,
+    "tested": true,
+    "accepted": "Pending owner product disposition for conflicting downstream aliases",
+    "released": false
+  },
+  "gates": [
+    {
+      "command": "npm run typecheck",
+      "result": "pass",
+      "exitCode": 0,
+      "scope": [
+        "server",
+        "web"
+      ]
+    },
+    {
+      "command": "npm test",
+      "result": "pass",
+      "exitCode": 0,
+      "serverTests": 1722,
+      "serverFiles": 82,
+      "webTests": 82,
+      "webFiles": 8,
+      "releaseTests": 9,
+      "totalTests": 1813
+    },
+    {
+      "command": "npm run build",
+      "result": "pass",
+      "exitCode": 0,
+      "scope": [
+        "web",
+        "server",
+        "stats-worker"
+      ]
+    },
+    {
+      "command": "npm test --workspace server -- --run test/toolDirectory.test.ts test/toolDiscoveryRoutes.test.ts test/serverToolPolicyConfig.test.ts",
+      "result": "pass",
+      "exitCode": 0,
+      "tests": 103,
+      "note": "Rerun after strengthening one deletion-isolation assertion; no production source change after full gates."
+    },
+    {
+      "command": "./node_modules/.bin/tsx scripts/validate-tool-discovery.ts",
+      "result": "pass",
+      "exitCode": 0,
+      "scenarios": 12,
+      "evidence": "protocol-client.json"
+    },
+    {
+      "command": "git diff --check",
+      "result": "pass",
+      "exitCode": 0
+    }
+  ],
+  "baseline": {
+    "typecheck": "pass",
+    "test": {
+      "server": 1633,
+      "web": 82,
+      "release": 9
+    },
+    "build": "pass",
+    "initialSocketRestrictedTestRun": "Interrupted (exit 130), not a passed gate; approved disposable loopback rerun passed."
+  },
+  "dependencyAudit": {
+    "command": "npm audit --json",
+    "baseExitCode": 1,
+    "featureExitCode": 1,
+    "vulnerabilitiesEqual": true,
+    "base": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 5,
+      "critical": 0,
+      "total": 5
+    },
+    "feature": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 5,
+      "critical": 0,
+      "total": 5
+    },
+    "affectedPackages": [
+      "braces",
+      "chokidar",
+      "fast-glob",
+      "micromatch",
+      "tailwindcss"
+    ],
+    "directAdvisories": [
+      {
+        "package": "braces",
+        "title": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns",
+        "url": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+        "severity": "high",
+        "range": "<=3.0.3"
+      }
+    ],
+    "addedFindings": 0,
+    "limit": "Five existing high findings in the Tailwind dependency chain remain; this audit gate is not green."
+  },
+  "dependencyInspection": {
+    "sdk": "@modelcontextprotocol/sdk@1.32.0",
+    "addedLockEntries": 69,
+    "changedExistingVersions": [],
+    "resolvedHosts": [
+      "registry.npmjs.org"
+    ],
+    "addedLifecycleEntries": [],
+    "baseLockSha256": "3df96a79c6d76560baa49560f2884b7f3b61a6b39cf1be22e4dfab4c3194c2d2",
+    "finalLockSha256": "53f6a62f552bcc1b641716d68b568050203d52c482d155345c4670d5000c99f3"
+  },
+  "independentReviews": [
+    {
+      "id": "/root/discovery_code_audit",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "max",
+      "result": "pass",
+      "report": "code-review.md"
+    },
+    {
+      "id": "/root/discovery_test_audit",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "max",
+      "result": "pass",
+      "independentFocusedTests": 103,
+      "independentProbeGroups": 7,
+      "report": "test-review.md"
+    }
+  ],
+  "contentPins": {
+    "server/src/app.ts": "f1741d32c3edb65133eeceebf1245d29868c8cb50e78d0eb43c1d39f2cd4fbb6",
+    "server/src/discovery/toolDirectory.ts": "7038bf8210fb75c5e35287bad6c9b0ef35873754c6e205c535b9cf577fe9c105",
+    "server/src/transport/toolDiscoveryRoutes.ts": "1315b0c9477329ec99180b96bd3a20959df9f2bb3451b3fcbc655aa0656ba4e4",
+    "server/src/persistence/hostedToolRepo.ts": "e6783e887d66df51c9fb9d5872eaa710a1f8718d0708655dd5bd405e38a0ed9d",
+    "server/test/toolDirectory.test.ts": "1a634e0a8589fe937c15776727fbdfbe29c434b240332f73b6b6669b6cb94c4b",
+    "server/test/toolDiscoveryRoutes.test.ts": "9d06fe5264c05f70ff7edb134ff22aca8d8c37b61eed4b6129cfc87b1beb501f",
+    "server/test/fixtures/discoveryHarness.ts": "0358270ecc78f6c953282bc011afd8b9b5f0ad23f6e7b8d9d6058eb2750cc2f0",
+    "scripts/validate-tool-discovery.ts": "b5dd3f8db4eebbd75cc40dc43c709b2247b5a020e49f1d311d048861bcf25644",
+    "server/package.json": "e4c222166cf901ca6ff9c9500481aae203e59816b7bf99865e9b4f88b790dca8",
+    "package-lock.json": "53f6a62f552bcc1b641716d68b568050203d52c482d155345c4670d5000c99f3"
+  },
+  "localLogPins": {
+    "baseline-typecheck.log": "655fc44776a9229375e3440dab0d938d7031478e5727bd1a67284cd9ee066923",
+    "baseline-tests-local.log": "3b1985cbd52b01517ed86df70c98c88b717935372a35d23ba4ec459699354278",
+    "baseline-build.log": "425e99916bc335f77bc9acaf0c69cb2ed51a363e8457c21fe8d8165f6474ca4f",
+    "baseline-audit.json": "9f8fef7a45283a027dca934ff84857b298362542b590bb70f019f6445d4a8e79",
+    "final-typecheck.log": "655fc44776a9229375e3440dab0d938d7031478e5727bd1a67284cd9ee066923",
+    "final-tests.log": "0da64ec17f76ea3f731db3b3de03f9e9fce99e82d81fccf5bf0fb4a7d444f467",
+    "final-build.log": "770e65a9d53343ad5f850ecbf69e6718ac7ca337f08c45b2d06c308455a7bdad",
+    "dependency-audit.json": "39a77aaf546b27d223802ea2c5f6513d13fb8c031f8376c6e133f51e0456dfce",
+    "final-focused-tests.log": "e2dd4cd6a5104ffc29dfb4154294f227def677a085f72e8d8cb4fc9409a5173f",
+    "protocol-client.log": "ad61549d0c4a8b75cbd10d02569cc7c9dcf0b49ac9919f3bd454833c75715595"
+  },
+  "limits": [
+    "Listing compatibility verified with the official SDK, not every ordinary agent application; custom metadata may be ignored.",
+    "Unknown upstream schemas/availability were never probed; placeholders are not executable/validated contracts.",
+    "Live pagination edits may duplicate or omit entries, per owner acceptance.",
+    "Conflicting-alias product disposition pending owner decision; current behavior is explicit catalog_conflict.",
+    "No production/live provider/browser/CORS/SDK v2 protocol/abrupt-abort leak certification.",
+    "GitHub Projects/public ticket permission not granted; ticket recorded locally.",
+    "GraphFlow unavailable; no episode started.",
+    "Local development only, no push/merge/publication/deployment/version change."
+  ]
+}

@@ -13,6 +13,7 @@ import { adminRoutes } from "./transport/adminRoutes";
 import { ProxyController } from "./transport/proxyController";
 import { ResponsesController } from "./transport/responsesController";
 import { MediaController } from "./transport/mediaController";
+import { toolDiscoveryRoutes } from "./transport/toolDiscoveryRoutes";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB (allow image payloads)
 
@@ -102,6 +103,10 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   responses.register(app);
   new ProxyController(proxyDeps, responses).register(app);
   new MediaController({ ...proxyDeps, providers: c.providers }).register(app);
+
+  await app.register(scoped => toolDiscoveryRoutes(scoped, {
+    services: c.services, tools: c.hostedTools, tokens: c.tokens, cursorKey: cfg.sessionSecret,
+  }));
 
   await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
 
