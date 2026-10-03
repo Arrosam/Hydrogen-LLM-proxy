@@ -303,14 +303,17 @@ describe("policy decision table and exact declared names", () => {
       { model: "m", provider: "fallback", serverToolPolicy: { mode: "whitelist", names: [] } }] })).invoke(seed([{ type: "web_fetch" }]));
     expect(ok.result.ok).toBe(true); expect(unused.requests).toHaveLength(1);
   });
-  it.each([false, true])("policy denial is terminal; prior failure=%s is counted separately", async prior => {
+  it.each([false, true])("policy mismatch skips stage retries; prior failure=%s is counted separately", async prior => {
     const f = fixture({ fail: prior ? ["primary"] : [] });
     const steps = [...(prior ? [{ model: "m", provider: "primary", retry: { maxAttempts: 1 } }] : []),
       { model: "m", provider: "blocked", retry: { maxAttempts: 3, on: ["error"] }, serverToolPolicy: { mode: "whitelist", names: [] } },
       { model: "m", provider: "permissive" }];
     const inv = await f.service(definition({ steps } as Partial<ServiceSteps>)).invoke(seed([{ type: "web_fetch" }]));
-    expect(inv.result).toMatchObject({ ok: false, status: 400, terminal: true, errorBody: { error: { code: "tool_not_found" } } });
-    expect(f.requests.map(request => request.provider)).toEqual(prior ? ["primary"] : []);
+    expect(inv.result.ok).toBe(true);
+    expect(f.requests.map(request => request.provider)).toEqual(prior ? ["primary", "permissive"] : ["permissive"]);
+    expect((inv.attemptPath as Array<{ provider: string; attempt: number }>).map(entry => [entry.provider, entry.attempt])).toEqual([
+      ...(prior ? [["primary", 1]] : []), ["blocked", 1], ["permissive", 1],
+    ]);
   });
 });
 

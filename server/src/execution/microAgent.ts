@@ -139,6 +139,7 @@ export class MicroAgent extends ModelService {
    * routers. Later routes remain governed by their own selected Model Service;
    * they may depend on model output that does not exist yet. */
   override prepareTools(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): PreparedServerTools {
+    opts = { ...opts, callerToolValidation: opts.callerToolValidation ?? { request: request.withOverrides(overrides) } };
     const availability = { tools: opts.serverTools?.tools ?? [], prefix: opts.serverTools?.prefix ?? this.serverToolNamePrefix };
     validateServerToolBindings(availability.tools, request.family);
     const outputs = new Map<string, string>(), responses = new Map<string, Response>();
@@ -169,6 +170,7 @@ export class MicroAgent extends ModelService {
       break;
     }
     // No model stage was selected; no binding is offered to a provider.
+    this.validateCallerTools(request, overrides, opts, availability, request.family);
     return prepareServerTools(buildStageRequest(request, { name: "preflight", input: [], tools: "none" } as AgentDef["stages"][number], outputs, responses, request.stream), availability);
   }
 
@@ -190,7 +192,7 @@ export class MicroAgent extends ModelService {
     const agent = this.agent;
     // Off is a run-wide veto: a referenced service or nested agent must not
     // re-enable a decoder while this agent is passing thinking through.
-    opts = { ...opts, thinkingProcessing: agent.thinkingProcessing !== false && opts.thinkingProcessing !== false };
+    opts = { ...opts, callerToolValidation: opts.callerToolValidation ?? { request: request.withOverrides(overrides) }, thinkingProcessing: agent.thinkingProcessing !== false && opts.thinkingProcessing !== false };
     const stack = opts.stack ?? [];
     const prog = opts.progress ?? null;
     // A URL-attachment budget set on this agent bounds each call it makes; an
@@ -238,7 +240,10 @@ export class MicroAgent extends ModelService {
     };
 
     try {
-      this.prepareTools(request, overrides, opts);
+      const prepared = this.prepareTools(request, overrides, opts);
+      // OCR/ASR are external work before the selected model chain. A deferred tool
+      // mismatch must not let this pre-pass execute a formerly rejected request.
+      if (prepared.preflightMismatch && (agent.ocr && collectImages(request).length || agent.asr && collectAudio(request).length)) throw prepared.preflightMismatch;
 
       // --- OCR pre-pass -----------------------------------------------------
       if (agent.ocr) {
@@ -449,7 +454,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -461,7 +466,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -518,8 +523,10 @@ export class MicroAgent extends ModelService {
     thinkingProcessing?: boolean,
     serverTools?: InvokeOptions["serverTools"],
     serverToolRound?: number,
+    onStepProgress?: InvokeOptions["onStepProgress"],
+    callerToolValidation?: InvokeOptions["callerToolValidation"],
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing, serverTools, serverToolRound }, () => this.resolveLogMaxChars());
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing, serverTools, serverToolRound, onStepProgress, callerToolValidation }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {

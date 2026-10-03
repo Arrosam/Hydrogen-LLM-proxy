@@ -32,7 +32,12 @@ export interface ServerToolRuntime {
   policy: ServerToolPolicy;
   toolChoice?: ToolChoice;
 }
-export interface PreparedServerTools extends ServerToolRuntime { request: Request; }
+export interface PreparedServerTools extends ServerToolRuntime {
+  request: Request;
+  /** Synchronous preflight defers this step's capability failure to runSteps.
+   * Empty maps grant no new execution ownership while the step is unresolved. */
+  preflightMismatch?: ServerToolCapabilityError;
+}
 
 export function combineServerToolAvailability(local: HttpTool[], parent: ServerToolAvailability | undefined, prefix: string): ServerToolAvailability {
   const tools = [...(parent?.tools ?? [])];
@@ -53,8 +58,22 @@ export class ServerToolPreflightError extends Error {
       (this.errorBody.error as Record<string, unknown>).code = code;
     }
   }
-  failure(): AttemptFailure {
+  failure(_beforeExternalRequest = false): AttemptFailure {
     return { ok: false, status: this.statusCode, kind: "error", message: this.message, errorBody: this.errorBody, retryable: false, terminal: true };
+  }
+}
+
+/** A valid declaration that this particular upstream step cannot carry.
+ * Conversion after possible external IO deliberately remains terminal. */
+export class ServerToolCapabilityError extends ServerToolPreflightError {
+  constructor(message: string, family: Family, readonly category: "policy" | "wire", code?: "tool_not_found") {
+    super(message, family, code);
+  }
+  override failure(beforeExternalRequest = false): AttemptFailure {
+    const failure = super.failure();
+    return beforeExternalRequest
+      ? { ...failure, terminal: false, localToolMismatch: { origin: "hydrogen", phase: "before_external_request", category: this.category } }
+      : failure;
   }
 }
 
@@ -63,6 +82,9 @@ function conflict(name: string, family: Family): never {
 }
 function notFound(name: string, family: Family): never {
   throw new ServerToolPreflightError(`Tool '${name}' not found`, family, "tool_not_found");
+}
+function unavailable(name: string, family: Family): ServerToolCapabilityError {
+  return new ServerToolCapabilityError(`Tool '${name}' not found`, family, "policy", "tool_not_found");
 }
 
 /** Validate availability before any model, attachment, or adapter dispatch. */
@@ -127,8 +149,15 @@ export function serverToolDeclaration(tool: Tool): ServerToolDeclaration | undef
  * operator bound `search`).
  */
 export function hostedServerTools(tools: Tool[] | undefined, bound: HttpTool[], prefix = DEFAULT_SERVER_TOOL_NAME_PREFIX, policy: ServerToolPolicy = DEFAULT_SERVER_TOOL_POLICY, family: Family = "openai_responses"): HostedServerTools {
+  const { matched, mismatch } = matchServerTools(tools, bound, prefix, policy, family);
+  if (mismatch) throw mismatch;
+  return matched;
+}
+
+function matchServerTools(tools: Tool[] | undefined, bound: HttpTool[], prefix: string, policy: ServerToolPolicy, family: Family): { matched: HostedServerTools; mismatch?: ServerToolCapabilityError } {
   const byDeclared = validateServerToolBindings(bound, family);
   const matched: HostedServerTools = new Map();
+  let mismatch: ServerToolCapabilityError | undefined;
   for (const tool of tools ?? []) {
     const declaration = serverToolDeclaration(tool);
     if (!declaration) continue;
@@ -139,9 +168,9 @@ export function hostedServerTools(tools: Tool[] | undefined, bound: HttpTool[], 
       const emittedName = prefix + boundTool.name;
       if (matched.has(emittedName)) conflict(emittedName, family);
       matched.set(emittedName, { tool: boundTool, declaration, emittedName });
-    } else if (policy.mode === "whitelist" || policy.names.includes(declaration.name)) notFound(declaration.name, family);
+    } else if (policy.mode === "whitelist" || policy.names.includes(declaration.name)) mismatch ??= unavailable(declaration.name, family);
   }
-  return matched;
+  return { matched, mismatch };
 }
 
 /** The same matches, indexed by the name the client declared. */
@@ -168,15 +197,73 @@ export function rewriteServerTools(tools: Tool[] | undefined, matched: HostedSer
 function wireTools(value: unknown, egressFamily: Family, ingressFamily: Family): Tool[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value)) throw new ServerToolPreflightError("tools must be an array", ingressFamily);
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new ServerToolPreflightError("Invalid tool declaration", ingressFamily);
+    const tool = entry as Record<string, unknown>;
+    const name = egressFamily === "openai_completion" && (tool.type === "function" || tool.type === "custom")
+      ? (tool[tool.type] as Record<string, unknown> | undefined)?.name : tool.name;
+    const schema = egressFamily === "anthropic" ? tool.input_schema : egressFamily === "openai_completion"
+      ? (tool.function as Record<string, unknown> | undefined)?.parameters : tool.type === "function" ? tool.parameters : undefined;
+    if ((tool.type != null && (typeof tool.type !== "string" || !tool.type))
+      || (egressFamily !== "anthropic" && (typeof tool.type !== "string" || !tool.type))
+      || (name != null && (typeof name !== "string" || !name))
+      || (schema != null && (typeof schema !== "object" || Array.isArray(schema)))
+      || ((tool.type === "function" || tool.type === "custom") && (typeof name !== "string" || !name))) {
+      throw new ServerToolPreflightError("Invalid tool declaration", ingressFamily);
+    }
+  }
   const parsed = parseRequest(egressFamily, { model: "preflight", messages: [], input: [], tools: value }).tools;
   if ((parsed?.length ?? 0) !== value.length) throw new ServerToolPreflightError("Invalid tool declaration", ingressFamily);
   return parsed;
 }
 function wireChoice(value: unknown, egressFamily: Family, ingressFamily: Family): ToolChoice | undefined {
   if (value == null) return undefined;
+  if (typeof value === "object") {
+    const choice = value as Record<string, unknown>;
+    const name = egressFamily === "openai_completion" && (choice.type === "function" || choice.type === "custom")
+      ? (choice[choice.type] as Record<string, unknown> | undefined)?.name : choice.name;
+    if (Array.isArray(value) || typeof choice.type !== "string" || !choice.type
+      || (name != null && (typeof name !== "string" || !name))
+      || ((choice.type === "function" || choice.type === "custom" || egressFamily === "anthropic" && choice.type === "tool") && (typeof name !== "string" || !name))) {
+      throw new ServerToolPreflightError("Invalid tool_choice", ingressFamily);
+    }
+  }
   const choice = parseRequest(egressFamily, { model: "preflight", messages: [], input: [], tool_choice: value }).toolChoice;
   if (!choice) throw new ServerToolPreflightError("Invalid tool_choice", ingressFamily);
+  if (choice.type === "raw" && choice.value.type === "allowed_tools") {
+    const allowed = allowedChoiceTools(choice);
+    if (!allowed) throw new ServerToolPreflightError("Invalid tool_choice", ingressFamily);
+    for (const selection of allowed) {
+      if (selection && typeof selection === "object" && (selection as Record<string, unknown>).type === "allowed_tools") throw new ServerToolPreflightError("Invalid tool_choice", ingressFamily);
+      wireChoice(selection, egressFamily, ingressFamily);
+    }
+  }
   return choice;
+}
+
+/** Preserve malformed caller entries that permissive IR parsers would drop.
+ * Ingress controllers run this before any step can replace the caller's tools. */
+export function validateServerToolInput(body: Record<string, unknown>, family: Family): void {
+  wireTools(body.tools, family, family);
+  wireChoice(body.tool_choice, family, family);
+}
+
+/** Caller invariants precede operator step overlays. A later overlay cannot
+ * erase duplicate declarations or an undeclared caller selection. Validate in
+ * the caller choice's vocabulary without imposing this step's wire capability. */
+export function validateServerToolRequest(request: Request, availability: ServerToolAvailability, egressFamily: Family): void {
+  const effective = effectiveTools(request, egressFamily);
+  const matched = hostedServerTools(effective.tools, availability.tools, availability.prefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, request.family);
+  const tools = rewriteServerTools(effective.tools, matched);
+  const names = new Set<string>();
+  for (const tool of effective.tools ?? []) {
+    const declaration = serverToolDeclaration(tool);
+    const identity = declaration ? `server:${declaration.name}` : `client:${tool.name}`;
+    if (names.has(identity)) conflict(declaration?.name ?? tool.name, request.family);
+    names.add(identity);
+  }
+  const family = effective.toolChoice?.type === "raw" ? effective.toolChoice.family : request.family;
+  validateChoice(rewriteChoice(effective.toolChoice, effective.tools, matched, family, request.family), tools, family, request.family);
 }
 
 /** Materialize tool overlays in their egress vocabulary before applying policy.
@@ -228,10 +315,10 @@ function rewriteChoice(choice: ToolChoice | undefined, original: Tool[] | undefi
   }
   if (choice.type !== "raw") return choice;
   if (choice.value.type === "function" || choice.value.type === "custom") {
-    if (choice.family !== family) throw new ServerToolPreflightError(`Native tool_choice from ${choice.family} cannot be sent to ${family}`, ingressFamily);
+    if (choice.family !== family) throw new ServerToolCapabilityError(`Native tool_choice from ${choice.family} cannot be sent to ${family}`, ingressFamily, "wire");
     return choice;
   }
-  if (choice.family !== family && (choice.value.type === "allowed_tools" || !declared.has(nativeChoiceNames(choice)[0]!))) throw new ServerToolPreflightError(`Native tool_choice from ${choice.family} cannot be sent to ${family}`, ingressFamily);
+  if (choice.family !== family && (choice.value.type === "allowed_tools" || !declared.has(nativeChoiceNames(choice)[0]!))) throw new ServerToolCapabilityError(`Native tool_choice from ${choice.family} cannot be sent to ${family}`, ingressFamily, "wire");
   const allowed = allowedChoiceTools(choice);
   if (allowed) {
     const tools = allowed.map(item => {
@@ -266,10 +353,10 @@ function validateEmittedNames(matched: HostedServerTools, egressFamily: Family, 
     }
   }
 }
-function validateChoice(choice: ToolChoice | undefined, tools: Tool[] | undefined, egressFamily: Family, ingressFamily: Family): void {
+function validateChoice(choice: ToolChoice | undefined, tools: Tool[] | undefined, egressFamily: Family, ingressFamily: Family, beforeRewrite = false): void {
   if (!choice || choice.type === "auto" || choice.type === "none" || choice.type === "required") return;
   if (choice.type === "tool") {
-    if (!tools?.some(tool => !tool.raw && tool.name === choice.name || egressFamily === "anthropic" && serverToolDeclaration(tool)?.name === choice.name)) notFound(choice.name, ingressFamily);
+    if (!tools?.some(tool => !tool.raw && tool.name === choice.name || (beforeRewrite || egressFamily === "anthropic") && serverToolDeclaration(tool)?.name === choice.name)) notFound(choice.name, ingressFamily);
     return;
   }
   const selections = allowedChoiceTools(choice) ?? [choice.value];
@@ -291,12 +378,16 @@ function validateChoice(choice: ToolChoice | undefined, tools: Tool[] | undefine
 export function prepareServerTools(request: Request, availability: ServerToolAvailability = { tools: [] }, policy: ServerToolPolicy = DEFAULT_SERVER_TOOL_POLICY, egressFamily: Family = request.family): PreparedServerTools {
   validateServerToolBindings(availability.tools, request.family);
   const effective = effectiveTools(request, egressFamily);
-  const matched = hostedServerTools(effective.tools, availability.tools, availability.prefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX, policy, request.family);
+  const { matched, mismatch } = matchServerTools(effective.tools, availability.tools, availability.prefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX, policy, request.family);
   const tools = rewriteServerTools(effective.tools, matched);
   validateNames(tools, request.family);
   validateEmittedNames(matched, egressFamily, request.family);
+  // A blocked tool must not hide malformed names or missing choice references.
+  // References may use a declared native name or its valid emitted function.
+  validateChoice(effective.toolChoice, [...(effective.tools ?? []), ...(tools ?? [])], egressFamily, request.family, true);
+  if (mismatch) throw mismatch;
   const foreign = tools?.find(tool => tool.raw && tool.raw.family !== egressFamily);
-  if (foreign?.raw) throw new ServerToolPreflightError(`Tool '${foreign.name}' from ${foreign.raw.family} cannot be sent to ${egressFamily}`, request.family);
+  if (foreign?.raw) throw new ServerToolCapabilityError(`Tool '${foreign.name}' from ${foreign.raw.family} cannot be sent to ${egressFamily}`, request.family, "wire");
   const toolChoice = rewriteChoice(effective.toolChoice, effective.tools, matched, egressFamily, request.family);
   validateChoice(toolChoice, tools, egressFamily, request.family);
   return {
@@ -316,7 +407,7 @@ export function validateRenderedServerTools(body: Record<string, unknown>, famil
     const declaration = serverToolDeclaration(tool);
     if (!declaration) continue;
     if (prepared.policy.mode === "whitelist" ? !prepared.policy.names.includes(declaration.name) : prepared.policy.names.includes(declaration.name)) {
-      notFound(declaration.name, prepared.request.family);
+      throw unavailable(declaration.name, prepared.request.family);
     }
   }
   for (const name of prepared.matched.keys()) {

@@ -1,0 +1,399 @@
+{
+  "ticket": "HYD-TOOL-MISMATCH-FASTFAIL",
+  "base": "8c12ff24b72767bcc7b0438a4091c36e7ecddccc",
+  "node": "v22.22.2",
+  "environment": "darwin/arm64",
+  "providers": "synthetic loopback only",
+  "scenarios": [
+    {
+      "id": "first mismatch to immediate compatible stage",
+      "status": 200,
+      "elapsedMs": 42,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 41
+    },
+    {
+      "id": "multiple mismatches preserve strict order",
+      "status": 200,
+      "elapsedMs": 16,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2,
+        3
+      ],
+      "passed": true,
+      "headersMs": 16
+    },
+    {
+      "id": "all policy mismatches keep final native error",
+      "status": 400,
+      "elapsedMs": 9,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 9
+    },
+    {
+      "id": "all mismatch stream stays HTTP 400",
+      "status": 400,
+      "elapsedMs": 8,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 8
+    },
+    {
+      "id": "all mismatch background stays HTTP 400",
+      "status": 400,
+      "elapsedMs": 8,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 7
+    },
+    {
+      "id": "all mismatches report last wire failure",
+      "status": 400,
+      "elapsedMs": 9,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 9
+    },
+    {
+      "id": "wire mismatch to next native stage",
+      "status": 200,
+      "elapsedMs": 11,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 10
+    },
+    {
+      "id": "retry400 tool-error lookalike retains 3 upstream attempts",
+      "status": 200,
+      "elapsedMs": 55,
+      "requests": {
+        "retry400": 3
+      },
+      "requestOrder": [
+        "retry400",
+        "retry400",
+        "retry400"
+      ],
+      "stages": [
+        1,
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 55
+    },
+    {
+      "id": "retry503 tool-error lookalike retains 3 upstream attempts",
+      "status": 200,
+      "elapsedMs": 61,
+      "requests": {
+        "retry503": 3
+      },
+      "requestOrder": [
+        "retry503",
+        "retry503",
+        "retry503"
+      ],
+      "stages": [
+        1,
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 55
+    },
+    {
+      "id": "caller duplicate cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 3,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 3
+    },
+    {
+      "id": "caller missingChoice cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 2
+    },
+    {
+      "id": "caller droppedEntry cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 0,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 0
+    },
+    {
+      "id": "caller badName cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller badSchema cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller badAllowed cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 0,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 0
+    },
+    {
+      "id": "caller conflictingSession cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller privateHistory cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "Completion n>1 cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "openai_completion malformed declaration stays terminal",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 0
+    },
+    {
+      "id": "anthropic malformed declaration stays terminal",
+      "status": 400,
+      "elapsedMs": 3,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 2
+    },
+    {
+      "id": "key scope cannot use fallback",
+      "status": 403,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "no tools uses ordinary first stage",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true,
+      "headersMs": 7
+    },
+    {
+      "id": "compatible streaming fallback",
+      "status": 200,
+      "elapsedMs": 57,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4
+    },
+    {
+      "id": "slow compatible fallback releases stream headers",
+      "status": 200,
+      "elapsedMs": 850,
+      "requests": {
+        "slow": 1
+      },
+      "requestOrder": [
+        "slow"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4,
+      "providerDelayMs": 800
+    },
+    {
+      "id": "slow compatible fallback returns background ID immediately",
+      "status": 200,
+      "elapsedMs": 814,
+      "requests": {
+        "slow": 1
+      },
+      "requestOrder": [
+        "slow"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 3,
+      "providerDelayMs": 800
+    },
+    {
+      "id": "ordinary mapping retry releases existing background lifecycle",
+      "status": 200,
+      "elapsedMs": 819,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "configuredRetryMs": 800
+    },
+    {
+      "id": "model-round failover never replays completed tool side effect",
+      "status": 200,
+      "elapsedMs": 16,
+      "requests": {
+        "compatible": 2,
+        "adapter": 1
+      },
+      "requestOrder": [
+        "compatible",
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 16
+    },
+    {
+      "id": "Anthropic native sequential fallback",
+      "status": 200,
+      "elapsedMs": 5,
+      "requests": {
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "anthropic"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5
+    }
+  ],
+  "passed": 28,
+  "failed": 0,
+  "limitations": [
+    "OCR/ASR preprocessing and retained pending adapter mismatches keep their existing prepass rejection; moving them behind step selection requires separate orchestration scope."
+  ]
+}

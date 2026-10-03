@@ -158,6 +158,9 @@ export async function runHostedTools(
   // the calls it never ran. Run them before asking the model anything: they are
   // the work the pause declined, and the model's next turn depends on them.
   const pendingCalls = pendingHostedCalls(history, named);
+  // Resuming pending adapter work can dispatch before a model step runs. Keep
+  // the existing rejection at that boundary rather than replaying side effects.
+  if (initial.preflightMismatch && pendingCalls.length) throw initial.preflightMismatch;
   (context.callLimits ??= []).push(localLimit);
   try {
   if (pendingCalls.length) {

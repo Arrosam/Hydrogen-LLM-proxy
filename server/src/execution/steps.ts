@@ -26,6 +26,9 @@ export interface AttemptFailure {
   usage?: import("../core/ir/usage").Usage;
   /** A locally invalid request must not be retried or sent to a fallback. */
   terminal?: boolean;
+  /** Issued only by Hydrogen's tool capability preflight, before external IO.
+   * Provider status codes, bodies and text cannot establish this provenance. */
+  localToolMismatch?: { origin: "hydrogen"; phase: "before_external_request"; category: "policy" | "wire" };
 }
 export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
 
@@ -138,6 +141,7 @@ function triggerMatches(set: Trigger[], f: AttemptFailure): boolean {
 }
 
 function shouldAdvance(advanceOn: AdvanceTrigger[] | undefined, f: AttemptFailure): boolean {
+  if (f.localToolMismatch) return true;
   if (!advanceOn) return true;
   if (advanceOn.includes("exhausted")) return true;
   return triggerMatches(advanceOn.filter((t): t is Trigger => t !== "exhausted"), f);
@@ -263,7 +267,7 @@ export async function runSteps<T>(
       }
 
       // Determine whether a retry is permitted for THIS failure.
-      const triggerMatched = !res.terminal && res.retryable !== false && triggerMatches(retryOn, res);
+      const triggerMatched = !res.terminal && !res.localToolMismatch && res.retryable !== false && triggerMatches(retryOn, res);
       const is499 = res.status === 499;
       const four99Allowed = !is499 || is499Retryable(idempotency);
       const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
@@ -284,7 +288,9 @@ export async function runSteps<T>(
         retryIndex: a - 1, // 0-based: how many retries preceded this attempt
         delayMs: preDelayMs,
         suppressed: !canRetryFlag,
-        reason: !triggerMatched
+        reason: res.localToolMismatch
+          ? `local tool mismatch (${res.localToolMismatch.category}); step cannot execute`
+          : !triggerMatched
           ? `trigger not in retry.on [${retryOn.join(", ")}]`
           : is499Suppressed
             ? `499 suppressed: idempotency="${idempotency}" (non-idempotent; pre-check required)`

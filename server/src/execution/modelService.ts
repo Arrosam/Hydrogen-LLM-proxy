@@ -12,7 +12,7 @@ import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
-import { DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, prepareServerTools, ServerToolPreflightError, validateRenderedServerTools, validateServerToolBindings, localToolHistory, type PreparedServerTools, type ServerToolAvailability, type ServerToolRuntime } from "./serverTools";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, prepareServerTools, ServerToolCapabilityError, ServerToolPreflightError, validateRenderedServerTools, validateServerToolBindings, validateServerToolRequest, localToolHistory, type PreparedServerTools, type ServerToolAvailability, type ServerToolRuntime } from "./serverTools";
 
 /** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
  * upstream headers — only for an upstream of the SAME wire family, and never
@@ -75,6 +75,12 @@ export interface InvokeOptions {
   serverTools?: ServerToolAvailability;
   /** Internal loop turn: a forced choice is released after the first round. */
   serverToolRound?: number;
+  /** Release an HTTP precommit wait on a viable step or ordinary failure.
+   * This does not select a step or invoke any external work. */
+  onStepProgress?: () => void;
+  /** Original caller tool input retained before agent stages can drop/replace
+   * it. This private request never establishes tool execution ownership. */
+  callerToolValidation?: { request: Request; validated?: true };
 }
 
 /**
@@ -113,20 +119,36 @@ export class ModelService {
     return { tools: opts.serverTools?.tools ?? [], prefix: opts.serverTools?.prefix ?? this.serverToolNamePrefix };
   }
 
+  protected validateCallerTools(request: Request, overrides: RequestOverrides | undefined, opts: InvokeOptions, availability: ServerToolAvailability, family: Family): void {
+    const caller = opts.callerToolValidation;
+    if (caller?.validated) return;
+    validateServerToolRequest(caller?.request ?? request.withOverrides(overrides), availability, family);
+    if (caller) caller.validated = true;
+  }
+
   /** Synchronous tool preflight for controllers before committing a stream or
    * reserving a background response. The first resolvable upstream step is the
-   * selected step; unused fallback policies do not reject a successful primary. */
+   * selected step; capability failures are deferred to its sequential attempt.
+   * Preflight never searches ahead for a matching step. */
   prepareTools(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): PreparedServerTools {
     const availability = this.toolAvailability(opts);
     validateServerToolBindings(availability.tools, request.family);
     for (const step of this.def.steps) {
       const resolved = this.deps.catalog.resolve(step.model, step.provider, request.family);
       if (!resolved.ok) continue;
-      const prepared = prepareServerTools(this.merge(request, step, overrides, opts), availability,
-        step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, resolved.target.family);
-      this.validateToolBody(prepared, resolved.target.family, resolved.target);
-      return prepared;
+      this.validateCallerTools(request, overrides, opts, availability, resolved.target.family);
+      const merged = this.merge(request, step, overrides, opts);
+      const policy = step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY;
+      try {
+        const prepared = prepareServerTools(merged, availability, policy, resolved.target.family);
+        this.validateToolBody(prepared, resolved.target.family, resolved.target);
+        return prepared;
+      } catch (error) {
+        if (!(error instanceof ServerToolCapabilityError)) throw error;
+        return { request: merged, matched: new Map(), declaredNames: new Map(), policy, toolChoice: merged.toolChoice, preflightMismatch: error };
+      }
     }
+    this.validateCallerTools(request, overrides, opts, availability, request.family);
     return prepareServerTools(request.withOverrides(overrides), availability);
   }
 
@@ -182,10 +204,12 @@ export class ModelService {
       if (!(error instanceof ServerToolPreflightError)) throw error;
       return { result: error.failure(), attempts: 0, attemptPath: [] };
     }
+    const dispatched = new Set<number>();
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
       if (!res.ok) {
+        opts.onStepProgress?.();
         prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
@@ -193,16 +217,19 @@ export class ModelService {
       const merged = this.merge(request, step, overrides, opts);
       let prepared: PreparedServerTools;
       try {
+        this.validateCallerTools(request, overrides, opts, availability, t.family);
         prepared = prepareServerTools(merged, availability, step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, t.family);
         this.validateToolBody(prepared, t.family, t);
       } catch (error) {
-        if (!(error instanceof ServerToolPreflightError)) throw error;
-        return error.failure();
+        if (!(error instanceof ServerToolPreflightError)) { opts.onStepProgress?.(); throw error; }
+        return error.failure(!dispatched.has(stepIndex));
       }
+      opts.onStepProgress?.();
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
       // A URL attachment this family cannot carry is downloaded and inlined
       // first (see fileFetch). Resolved per step, because the very same request
       // needs no pre-pass at all on a family that takes URLs natively.
+      if (needsUrlFileInlining(prepared.request, t.family)) dispatched.add(stepIndex);
       const ready = await this.inlineFiles(prepared.request, t.family, prog, {
         timeoutMs,
         signal: opts.signal,
@@ -226,6 +253,7 @@ export class ModelService {
       }
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
+      dispatched.add(stepIndex);
       const sent = await egress.send(this.deps.transport, target);
       if (!sent.ok) {
         prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
@@ -310,10 +338,12 @@ export class ModelService {
       if (!(error instanceof ServerToolPreflightError)) throw error;
       return { result: error.failure(), attempts: 0, attemptPath: [] };
     }
+    const dispatched = new Set<number>();
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
       if (!res.ok) {
+        opts.onStepProgress?.();
         prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
@@ -321,13 +351,16 @@ export class ModelService {
       const merged = this.merge(request, step, overrides, opts);
       let prepared: PreparedServerTools;
       try {
+        this.validateCallerTools(request, overrides, opts, availability, t.family);
         prepared = prepareServerTools(merged, availability, step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, t.family);
         this.validateToolBody(prepared, t.family, t);
       } catch (error) {
-        if (!(error instanceof ServerToolPreflightError)) throw error;
-        return error.failure();
+        if (!(error instanceof ServerToolPreflightError)) { opts.onStepProgress?.(); throw error; }
+        return error.failure(!dispatched.has(stepIndex));
       }
+      opts.onStepProgress?.();
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
+      if (needsUrlFileInlining(prepared.request, t.family)) dispatched.add(stepIndex);
       const ready = await this.inlineFiles(prepared.request, t.family, prog, {
         timeoutMs,
         signal: opts.signal,
@@ -351,6 +384,7 @@ export class ModelService {
       }
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `stream request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
+      dispatched.add(stepIndex);
       const sent = await egress.relay(this.deps.transport, target);
       if (!sent.ok) {
         prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
