@@ -34,7 +34,11 @@ const synthetic = http.createServer((req, res) => {
     const multipart = String(req.headers["content-type"]).startsWith("multipart/form-data");
     const body = multipart ? { multipart: raw, contentType: String(req.headers["content-type"]) } : JSON.parse(raw) as Record<string, unknown>;
     calls.push({ provider, body });
-    if (provider === "adapter") { res.setHeader("content-type", "application/json"); res.end('{"results":[]}'); return; }
+    if (provider.startsWith("adapter")) {
+      if (provider === "adapterSlow") await sleep(slowMs);
+      if (!res.destroyed) { res.setHeader("content-type", "application/json"); res.end('{"results":[]}'); }
+      return;
+    }
     const count = calls.filter(call => call.provider === provider).length;
     if (provider.startsWith("retry") && count < 3) {
       res.writeHead(provider === "retry400" ? 400 : 503, { "content-type": "application/json" });
@@ -44,10 +48,10 @@ const synthetic = http.createServer((req, res) => {
     if (res.destroyed) return;
     if (multipart) { res.setHeader("content-type", "application/json"); res.end('{"text":"ASR text"}'); return; }
     const family = families[provider] ?? "openai_responses";
-    const local = (body.tools as Array<{ name?: string }> | undefined)?.some(tool => tool.name === "provider_server_side_lookup");
-    const done = JSON.stringify(body).includes('"function_call_output"');
+    const local = (body.tools as Array<{ name?: string }> | undefined)?.find(tool => tool.name?.startsWith("provider_server_side_lookup"));
+    const done = JSON.stringify(body).includes('"function_call_output"') || JSON.stringify(body).includes('"tool_result"') || JSON.stringify(body).includes('"tool_call_id"');
     const wantsLocal = local && !done && (body.tool_choice as { name?: string } | undefined)?.name !== "client";
-    const content: ContentPart[] = wantsLocal ? [{ type: "tool_use", id: "operation_1", name: "provider_server_side_lookup", input: {} }]
+    const content: ContentPart[] = wantsLocal ? [{ type: "tool_use", id: "operation_1", name: local?.name ?? "provider_server_side_lookup", input: {} }]
       : [{ type: "text", text: provider.toLowerCase().includes("ocr") ? '[{"index":1,"image":"OCR text"}]' : "Synthetic answer" }];
     const response = buildResponse(family, { id: "synthetic", model: "up", created: 1, content, stopReason: wantsLocal ? "tool_use" : "stop",
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
@@ -67,7 +71,7 @@ try {
   const { buildApp } = await import("../server/src/app");
   const c = container = await boot();
   const model = c.models.create({ name: "m" });
-  for (const name of ["first", "second", "compatible", "wire", "anthropic", "retry400", "retry503", "slow", "completion", "ocr", "asr", "retryOcr", "retryAsr", "slowOcr", "slowAsr"]) {
+  for (const name of ["first", "second", "compatible", "wire", "anthropic", "retry400", "retry503", "retryPending", "slow", "completion", "ocr", "asr", "retryOcr", "retryAsr", "slowOcr", "slowAsr"]) {
     const provider = c.providers.create({ name, type: families[name] ?? "openai_responses", baseUrl: `${upstream}/${name}/v1`, apiKey: "synthetic-provider-key" });
     c.mappings.create({ modelId: model.id, providerId: provider.id, upstreamModel: "up" });
   }
@@ -200,6 +204,123 @@ try {
   add("anthropic-fallback", [blocked("anthropic"), { ...compatible("anthropic"), serverToolPolicy: { mode: "whitelist", names: ["web_search"] } }]);
   await check("Anthropic native sequential fallback", "anthropic-fallback", 200, ["anthropic"], {}, "anthropic");
 
+  const completed = (payload: string, family: Family) => payload.startsWith("event:")
+    ? payload.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)))
+      .find(event => family === "anthropic" ? event.type === "hydrogen.response.completed" : event.type === "response.completed" || event.type === "response.incomplete").response
+    : JSON.parse(payload);
+  const pendingSeed = async (id: string, steps: unknown[], family: Family = "openai_responses", reliable = false, slowAdapter = false, conversationId?: string) => {
+    const service = c.services.create({ name: `pending-${id}`, definition: parseServiceSteps({ timeoutMs: 3000, reliableStreaming: reliable, hostedTools: { maxRounds: 1 }, steps }) });
+    const bound = c.hostedTools.create(HttpToolSchema.parse({ name: `lookup_pending_${id.replaceAll("-", "_")}`, url: `${upstream}/${slowAdapter ? "adapterSlow" : "adapter"}`, parameters: { type: "object" },
+      bodyTemplate: { session: "{{session.id}}" }, serverTool: { name: "web_search", resultPath: "/results" } }));
+    c.hostedTools.bind(service.id, [bound.id]);
+    const hit = await request(service.name, { store: true, ...(conversationId ? { conversation: conversationId } : {}) }, family);
+    assert.equal(hit.response.status, 200); const source = await hit.response.json() as Record<string, any>;
+    const responseId = family === "anthropic" ? source.hydrogen.response_id as string : source.id as string;
+    assert.equal(family === "anthropic" ? source.stop_reason : source.status, family === "anthropic" ? "pause_turn" : "incomplete");
+    assert.equal(calls.length, 1); assert(!calls.some(call => call.provider.startsWith("adapter")));
+    record(`pending seed ${id} is unexecuted`, 200, Date.now() - hit.start);
+    return { service, bound, responseId };
+  };
+  const firstPending = (provider = "first") => ({ ...blocked(provider), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } });
+  const pendingTools = (family: Family) => family === "anthropic" ? [{ type: "web_search_20250305", name: "web_search" }, { type: "web_fetch_20250910", name: "web_fetch" }]
+    : [{ type: "web_search" }, { type: "web_fetch" }];
+  for (const mode of ["buffered", "stream", "background", "reliable", "anthropic", "anthropic-stream"] as const) {
+    const family: Family = mode.startsWith("anthropic") ? "anthropic" : "openai_responses";
+    const provider = family === "anthropic" ? "anthropic" : "compatible";
+    const seeded = await pendingSeed(mode, [firstPending(family === "anthropic" ? "anthropic" : "first"), compatible(provider)], family, mode === "reliable");
+    const frozen = JSON.stringify(c.responses.responseSnapshot(seeded.responseId, owner.token.id));
+    c.hostedTools.update(seeded.bound.id, { ...c.hostedTools.materialize(c.hostedTools.get(seeded.bound.id)!), url: `${upstream}/adapterChanged` });
+    c.services.delete(seeded.service.id); c.hostedTools.delete(seeded.bound.id);
+    const hit = await request(seeded.service.name, { store: true, tools: pendingTools(family), ...(family === "anthropic" ? { hydrogen: { previous_response_id: seeded.responseId } } : { previous_response_id: seeded.responseId }),
+      ...(mode === "stream" || mode === "reliable" || mode === "anthropic-stream" ? { stream: true } : {}), ...(mode === "background" ? { background: true } : {}) }, family);
+    assert.equal(hit.response.status, 200); let body: Record<string, any>;
+    if (mode === "background") {
+      const queued = await hit.response.json() as { id: string }; body = {};
+      for (let i = 0; i < 100; i++) {
+        const polled = await fetch(`${local}/v1/responses/${queued.id}`, { headers: { authorization: `Bearer ${owner.secret}` } }); body = await polled.json() as Record<string, any>;
+        if (body.status === "completed") break; assert(i < 99); await sleep(20);
+      }
+    } else body = completed(await hit.response.text(), family);
+    assert.equal(family === "anthropic" ? body.stop_reason : body.status, family === "anthropic" ? "end_turn" : "completed");
+    assert.deepEqual(calls.map(call => call.provider), ["adapter", provider]);
+    assert.equal(calls[0].body.session, seeded.responseId);
+    assert.equal(JSON.stringify(c.responses.responseSnapshot(seeded.responseId, owner.token.id)), frozen);
+    const log = c.logs.query({}).rows[0]; assert.equal(log.attempts, 2); assert.equal(log.totalTokens, 2);
+    const source = c.responses.response(seeded.responseId, owner.token.id)!;
+    assert.equal(source.history.flatMap(message => message.content).filter(part => part.type === "tool_result").length, 1);
+    assert(!JSON.stringify(body).includes("claimedBy")); assert(!JSON.stringify(body).includes("hydrogenTool"));
+    record(`retained pending ${mode} uses frozen next stage once`, 200, Date.now() - hit.start, { headersMs: hit.headersMs, totalAttempts: log.attempts, tokenCharges: log.totalTokens, adapterCalls: 1, privateReceipts: 1 });
+  }
+  for (const last of ["many", "all-policy", "all-wire", "retry"] as const) {
+    for (const mode of last.startsWith("all-") ? ["buffered", "stream", "background"] : ["buffered"]) {
+      const steps = last === "many" ? [firstPending(), firstPending("second"), compatible()]
+        : last === "all-policy" ? [firstPending(), firstPending("second")]
+          : last === "all-wire" ? [firstPending(), compatible("wire")]
+            : [firstPending(), { ...compatible("retryPending"), retry: { maxAttempts: 3, on: ["error"], intervalMs: 20 } }];
+      const seeded = await pendingSeed(`${last}-${mode}`, steps);
+      const expectedStatus = last.startsWith("all-") ? 400 : 200;
+      const hit = await request(seeded.service.name, { store: true, previous_response_id: seeded.responseId, tools: pendingTools("openai_responses"),
+        ...(mode === "stream" ? { stream: true } : {}), ...(mode === "background" ? { background: true } : {}) });
+      assert.equal(hit.response.status, expectedStatus); const body = await hit.response.json() as Record<string, any>;
+      const expected = last === "many" ? ["adapter", "compatible"] : last === "retry" ? ["adapter", "retryPending", "retryPending", "retryPending"] : [];
+      assert.deepEqual(calls.map(call => call.provider), expected);
+      const stages = c.activeRequests.listCompleted(1)[0]?.events.filter(event => event.node === "step.start").map(event => Number(event.message.match(/step (\d+)/)?.[1]));
+      assert.deepEqual(stages, last === "many" ? [1, 2, 3] : last === "retry" ? [1, 2, 2, 2] : [1, 2]);
+      const source = c.responses.response(seeded.responseId, owner.token.id)!;
+      const receipts = source.history.flatMap(message => message.content).filter(part => part.type === "tool_result").length;
+      assert.equal(receipts, last.startsWith("all-") ? 0 : 1);
+      if (last.startsWith("all-")) assert.equal(body.error.code, last === "all-policy" ? "tool_not_found" : null);
+      if (last === "retry") for (const call of calls.slice(1)) assert.equal((call.body.input as Array<{ type: string }>).filter(item => item.type === "function_call_output").length, 1);
+      const log = c.logs.query({}).rows[0]; assert.equal(log.attempts, last === "many" ? 3 : last === "retry" ? 4 : 2);
+      if (last.startsWith("all-")) {
+        assert.equal(log.totalTokens, 0);
+        const uses = source.history.flatMap(message => message.content).filter(part => part.type === "tool_use");
+        assert.equal(uses.length, 1); assert.equal(uses[0].hydrogenTool?.execution, undefined); assert.equal(uses[0].hydrogenTool?.claimedBy, undefined);
+      }
+      assert(Date.now() - hit.start < 2500);
+      record(`retained pending ${last} ${mode} keeps sequential order and no replay`, expectedStatus, Date.now() - hit.start,
+        { headersMs: hit.headersMs, totalAttempts: log.attempts, tokenCharges: log.totalTokens, privateReceipts: receipts, configuredMismatchBackoffMs: 600_000 });
+    }
+  }
+  const recovery = await pendingSeed("durable-recovery", [firstPending(), compatible()]);
+  const addEvent = c.responses.addEvent.bind(c.responses); let failedEvent = false;
+  c.responses.addEvent = (id, tokenId, event) => {
+    if (!failedEvent && event.type === "hydrogen.tool.completed") { failedEvent = true; throw new Error("Synthetic completion-event storage failure"); }
+    return addEvent(id, tokenId, event);
+  };
+  const failed = await request(recovery.service.name, { store: true, stream: true, previous_response_id: recovery.responseId, tools: pendingTools("openai_responses") });
+  assert.equal(failed.response.status, 200);
+  assert((await failed.response.text()).includes("response.failed")); assert.deepEqual(calls.map(call => call.provider), ["adapter"]);
+  const recoveryFailure = c.logs.query({ serviceId: recovery.service.id, status: 502 });
+  assert.equal(recoveryFailure.total, 1); assert.equal(recoveryFailure.rows[0].totalTokens, 0);
+  const recoveryReceipts = c.responses.response(recovery.responseId, owner.token.id)!.history.flatMap(message => message.content).filter(part => part.type === "tool_result");
+  assert.equal(recoveryReceipts.length, 1);
+  record("completed pending receipt survives real HTTP event-store failure", failed.response.status, Date.now() - failed.start,
+    { semanticStatus: recoveryFailure.rows[0].httpStatus, privateReceipts: recoveryReceipts.length });
+  c.responses.addEvent = addEvent;
+  const recovered = await request(recovery.service.name, { store: true, previous_response_id: recovery.responseId, tools: pendingTools("openai_responses") });
+  assert.equal(recovered.response.status, 200); assert.equal((await recovered.response.json() as { status: string }).status, "completed");
+  assert.deepEqual(calls.map(call => call.provider), ["compatible"]);
+  record("original saved source recovery reuses receipt without adapter IO", 200, Date.now() - recovered.start, { adapterCalls: 0, totalAttempts: c.logs.query({}).rows[0].attempts });
+
+  const held = await pendingSeed("cancel-unknown", [firstPending(), compatible()], "openai_responses", false, true);
+  const queuedHit = await request(held.service.name, { store: true, background: true, previous_response_id: held.responseId, tools: pendingTools("openai_responses") });
+  assert.equal(queuedHit.response.status, 200);
+  const pendingQueued = await queuedHit.response.json() as { id: string };
+  for (let i = 0; !calls.some(call => call.provider === "adapterSlow"); i++) { assert(i < 100); await sleep(5); }
+  const cancel = await fetch(`${local}/v1/responses/${pendingQueued.id}/cancel`, { method: "POST", headers: { authorization: `Bearer ${owner.secret}` } }); assert.equal(cancel.status, 200); await cancel.text();
+  for (let i = 0; c.activeRequests.listActive().length; i++) { assert(i < 100); await sleep(10); }
+  assert.deepEqual(calls.map(call => call.provider), ["adapterSlow"]);
+  const cancelledLogs = c.logs.query({ serviceId: held.service.id, status: 499 });
+  assert.equal(cancelledLogs.total, 1); const cancelledLog = cancelledLogs.rows[0]; assert.equal(cancelledLog.totalTokens, 0); assert.equal(cancelledLog.attempts, 2);
+  const heldUses = c.responses.response(held.responseId, owner.token.id)!.history.flatMap(message => message.content).filter(part => part.type === "tool_use");
+  assert.equal(heldUses.length, 1); assert.equal(heldUses[0].hydrogenTool?.execution, "started"); assert.equal(heldUses[0].hydrogenTool?.claimedBy, pendingQueued.id);
+  record("cancelled pending adapter retains unknown durable claim", queuedHit.response.status, Date.now() - queuedHit.start,
+    { semanticStatus: cancelledLog.httpStatus, totalAttempts: cancelledLog.attempts, tokenCharges: cancelledLog.totalTokens, adapterCalls: 1, modelCalls: 0 });
+  const unknown = await request(held.service.name, { store: true, previous_response_id: held.responseId, tools: pendingTools("openai_responses") });
+  assert.equal(unknown.response.status, 502); assert((await unknown.response.text()).includes("refusing to replay")); assert.equal(calls.length, 0);
+  record("unknown pending outcome cannot replay from original source", 502, Date.now() - unknown.start);
+
   for (const kind of ["ocr", "asr"] as const) for (const mode of kind === "ocr" ? ["normal", "retry", "stream", "background", "all-stream", "all-background"] : ["normal", "retry", "stream"]) {
     const allMismatch = mode.startsWith("all-");
     const provider = mode === "retry" ? `retry${kind === "ocr" ? "Ocr" : "Asr"}` : mode.endsWith("stream") || mode.endsWith("background") ? `slow${kind === "ocr" ? "Ocr" : "Asr"}` : kind;
@@ -312,7 +433,7 @@ try {
 
   const result = { ticket: "HYD-TOOL-MISMATCH-FASTFAIL", base: "8c12ff24b72767bcc7b0438a4091c36e7ecddccc", node: process.version,
     environment: `${process.platform}/${process.arch}`, providers: "synthetic loopback only", scenarios: evidence, passed: evidence.length, failed: 0,
-    limitations: ["Retained pending adapter mismatches still keep their terminal prepass rejection; this remains a separate unmet core case, not an approved exclusion.", "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.", "Internal ASR forwards only the authorized configured language/prompt fields; wider public STT parameter parity is unchanged and existing zero-token STT accounting is preserved."] };
+    limitations: ["ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.", "Internal ASR forwards only the authorized configured language/prompt fields; wider public STT parameter parity is unchanged and existing zero-token STT accounting is preserved."] };
   if (process.argv[2]) fs.writeFileSync(path.resolve(process.argv[2]), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify({ passed: evidence.length, failed: 0 }));
 } finally {

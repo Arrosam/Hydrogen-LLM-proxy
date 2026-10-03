@@ -434,21 +434,30 @@ export function markLocalToolCall(call: ToolUsePart, entry: HostedServerTool): v
   call.name = entry.emittedName;
   call.serverTool = true;
   call.hydrogenTool = { ...(entry.tool.id != null ? { id: entry.tool.id } : {}), emittedName: entry.emittedName, declaredName: entry.declaration.name, declarationType: entry.declaration.type,
-    instanceId: sameEntry && previous?.instanceId ? previous.instanceId : genId("srvexec") };
+    instanceId: sameEntry && previous?.instanceId ? previous.instanceId : genId("srvexec"),
+    ...(sameEntry && previous?.execution ? { execution: previous.execution } : {}),
+    ...(sameEntry && previous?.claimedBy ? { claimedBy: previous.claimedBy } : {}) };
 }
 
-function sameToolProvenance(left: ToolUsePart["hydrogenTool"], right: ToolUsePart["hydrogenTool"]): boolean {
+export function sameToolProvenance(left: ToolUsePart["hydrogenTool"], right: ToolUsePart["hydrogenTool"]): boolean {
   return !!left && !!right && left.id === right.id && left.emittedName === right.emittedName
     && left.declaredName === right.declaredName && left.declarationType === right.declarationType && left.instanceId === right.instanceId;
 }
 
 function resultMatchesCall(result: ToolResultPart, call: ToolUsePart): boolean {
-  return result.toolUseId === call.id && (!result.hydrogenTool || sameToolProvenance(result.hydrogenTool, call.hydrogenTool));
+  return result.toolUseId === call.id && (call.hydrogenTool ? sameToolProvenance(result.hydrogenTool, call.hydrogenTool) : !result.hydrogenTool);
 }
 
 function callAnswered(history: Message[], call: ToolUsePart): boolean {
   return history.some(message => message.content.some(part => part.type === "tool_result" ? resultMatchesCall(part, call)
-    : part.type === "server_tool_result" && !part.notExecuted && part.id === call.id));
+    : part.type === "server_tool_result" && !call.hydrogenTool && !part.notExecuted && part.id === call.id));
+}
+
+/** Private instances still needing their authoritative result. Parent loops
+ * may defer a child's owner, but cannot finish by silently dropping its work. */
+export function unansweredLocalToolCalls(history: Message[]): ToolUsePart[] {
+  return history.flatMap(message => message.content).filter((part): part is ToolUsePart => part.type === "tool_use"
+    && !!part.hydrogenTool && !callAnswered(history, part));
 }
 
 /** Append only actual receipts for calls the enclosing history already owns.
@@ -464,6 +473,7 @@ export function retainServerToolReceipts(history: Message[], receipts: readonly 
     const call = history.flatMap(message => message.content).find((part): part is ToolUsePart => part.type === "tool_use"
       && part.id === receipt.call.id && sameToolProvenance(part.hydrogenTool, marker) && isDeepStrictEqual(part.input, receipt.call.input));
     if (!call || callAnswered(history, call)) continue;
+    call.hydrogenTool = structuredClone(marker);
     history.push({ role: "user", content: [structuredClone(receipt.result)] });
     retained.push(receipt);
   }
@@ -473,13 +483,26 @@ export function retainServerToolReceipts(history: Message[], receipts: readonly 
 /** Reconstruct an already-authorized pending call from its saved exact identity.
  * A wire-level server_tool_use without private provenance still requires a
  * declaration in the current prepared map. */
-export function pendingServerTools(history: Message[], availability: ServerToolAvailability, prepared: ServerToolRuntime): HostedServerTools {
+export function pendingServerTools(history: Message[], availability: ServerToolAvailability, prepared: ServerToolRuntime, family: Family = "openai_responses", nested = false): HostedServerTools {
   const matched: HostedServerTools = new Map(prepared.matched);
   const declared = declaredServerTools(prepared.matched);
   for (const message of history) for (const part of message.content) {
     if (part.type !== "tool_use" || part.serverTool !== true) continue;
     const saved = part.hydrogenTool;
+    // A legacy/provider-native completed round trip must not become pending
+    // merely because this request also offers a local adapter declaration.
+    if (!saved && callAnswered(history, part)) continue;
     const tool = saved?.id == null ? undefined : availability.tools.find(tool => tool.enabled && tool.id === saved.id && tool.serverTool?.name === saved.declaredName);
+    if (saved?.id != null && !tool) {
+      // An absent child binding may be resolved by its later nested stage. A
+      // known replacement or disabled exact owner is an invalid resume, never
+      // authority to rebind by the current function name or erase lifecycle.
+      if (!callAnswered(history, part) && availability.tools.some(candidate => candidate.id === saved.id
+        || !nested && (availability.prefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX) + candidate.name === saved.emittedName)) {
+        throw new ServerToolPreflightError("The retained tool executor is unavailable; start a new session", family);
+      }
+      continue;
+    }
     const entry = tool && saved ? { tool, declaration: { name: saved.declaredName, type: saved.declarationType }, emittedName: saved.emittedName }
       : saved ? prepared.matched.get(saved.emittedName) : declared.get(part.name);
     if (!entry) continue;

@@ -26,7 +26,7 @@ import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
 import { ServiceFactory } from "../src/execution/serviceFactory";
-import { localToolHistory } from "../src/execution/serverTools";
+import { localToolHistory, retainServerToolReceipts } from "../src/execution/serverTools";
 import type { InvokeOptions, ModelService, ServiceDeps } from "../src/execution/modelService";
 import type { RequestOverrides } from "../src/core/ir/params";
 import type { Catalog } from "../src/catalog/catalog";
@@ -61,7 +61,16 @@ beforeEach(() => {
   const serviceId = services.create({ name: "svc", definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] } }).id;
   outputs = []; seen = [];
   const invoke = async (executor: ModelService, request: Request, overrides?: RequestOverrides, opts?: InvokeOptions): Promise<Invocation> => {
-    const prepared = executor.prepareTools(request, overrides, opts);
+    let prepared = executor.prepareTools(request, overrides, opts);
+    // This fixture replaces the model step executor; honor its internal
+    // post-preflight continuation handoff before producing a model response.
+    if (opts?.resumeToolCalls) {
+      const resumed = await opts.resumeToolCalls(prepared);
+      if (!resumed.ok) return { attempts: 1, attemptPath: [], result: resumed };
+      const history = structuredClone(prepared.request.messages);
+      retainServerToolReceipts(history, resumed.value);
+      prepared = { ...prepared, request: buildRequest(prepared.request.family, { ...prepared.request.data(), messages: history }) };
+    }
     seen.push(buildRequest("openai_responses", { ...prepared.request.data(), messages: localToolHistory(prepared.request.messages) }));
     const { request: _request, ...serverTools } = prepared;
     const content = structuredClone(outputs.shift() ?? [{ type: "text", text: "done" }]);

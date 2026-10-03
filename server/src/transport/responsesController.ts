@@ -252,6 +252,8 @@ export class ResponsesController {
       if (pending.size) throw new ResponseStateError("Supply results for all outstanding client tool calls before continuing", 400);
     }
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
+    const retainedToolInstances = new Set(request.messages.flatMap(message => message.content)
+      .flatMap(part => part.type === "tool_use" && part.hydrogenTool?.instanceId ? [part.hydrogenTool.instanceId] : []));
     if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
     const bound = service.tools;
     const serverToolNamePrefix = snapshot.serverToolNamePrefix;
@@ -316,6 +318,14 @@ export class ResponsesController {
         if (family === "openai_responses") await emit({ type: "response.in_progress", response: { ...initial, status: "in_progress" } });
         const run = await runHostedTools(executor, request, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools, serverToolNamePrefix,
           progress, onStepProgress: toolPreflightPassed, emit: flags.stream && !lossyEphemeral ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+          onPendingToolExecution: async (call, result) => {
+            // A newly marked raw wire call has no prior private saved instance
+            // to claim. It retains the existing per-invocation no-retry guard.
+            if (!call.hydrogenTool?.instanceId || !retainedToolInstances.has(call.hydrogenTool.instanceId)) return { ok: true, value: undefined };
+            try { this.repo.recordPendingTool(id, token.id, call, result); return { ok: true, value: undefined }; }
+            catch (caught) { return { ok: false, kind: "error", status: caught instanceof ResponseStateError ? caught.statusCode : 502,
+              message: caught instanceof ResponseStateError ? caught.message : "Failed to retain tool execution state", terminal: true, retryable: false }; }
+          },
         });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;

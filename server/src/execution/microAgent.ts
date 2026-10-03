@@ -462,7 +462,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation, opts.resumeToolCalls, opts.onPendingToolExecution);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -474,7 +474,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound, opts.onStepProgress, opts.callerToolValidation, opts.resumeToolCalls, opts.onPendingToolExecution);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -533,8 +533,10 @@ export class MicroAgent extends ModelService {
     serverToolRound?: number,
     onStepProgress?: InvokeOptions["onStepProgress"],
     callerToolValidation?: InvokeOptions["callerToolValidation"],
+    resumeToolCalls?: InvokeOptions["resumeToolCalls"],
+    onPendingToolExecution?: InvokeOptions["onPendingToolExecution"],
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing, serverTools, serverToolRound, onStepProgress, callerToolValidation }, () => this.resolveLogMaxChars());
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing, serverTools, serverToolRound, onStepProgress, callerToolValidation, resumeToolCalls, onPendingToolExecution }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {

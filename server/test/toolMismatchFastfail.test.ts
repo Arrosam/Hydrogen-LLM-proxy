@@ -33,6 +33,14 @@ const compatible = { model: "m", provider: "compatible", retry };
 const tool = () => ({ ...HttpToolSchema.parse({ name: "lookup", url: "https://adapter.test/run", parameters: { type: "object" },
   bodyTemplate: {}, serverTool: { name: "web_search", resultPath: "/results" } }), id: 42 });
 
+function retainedRequest(declarations: unknown[] = [declared, { type: "web_fetch" }], count = 1) {
+  const entry = prepareServerTools(seed(), { tools: [tool()] }).matched.get("provider_server_side_lookup")!;
+  const calls: ToolUsePart[] = Array.from({ length: count }, (_, i) => ({ type: "tool_use", id: `pending_${i + 1}`, name: entry.emittedName, input: {} }));
+  for (const call of calls) markLocalToolCall(call, entry);
+  const request = buildRequest(seed().family, { ...seed(declarations).data(), messages: [{ role: "assistant", content: calls }] });
+  return { request, calls, entry };
+}
+
 /** Real formats/executors with separately counted provider, adapter and file IO.
  * Fake timers observe the absence of retry delay rather than replacing sleep. */
 function fixture(steps: unknown[], opts: {
@@ -374,15 +382,248 @@ describe("hosted-loop state transitions do not replay adapters", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("a deferred mismatch cannot dispatch a privately retained pending adapter call", async () => {
-    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible]);
+  it.each(["buffered", "stream", "reliable"])("a retained pending adapter waits for the next viable stage (%s)", async mode => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible], { reliableStreaming: mode === "reliable" });
     const prepared = prepareServerTools(seed(), { tools: [tool()] });
     const call: ToolUsePart = { type: "tool_use", id: "pending", name: "provider_server_side_lookup", input: {} };
     markLocalToolCall(call, prepared.matched.get(call.name)!);
     const request = buildRequest(seed().family, { ...seed([declared, { type: "web_fetch" }]).data(), messages: [{ role: "assistant", content: [call] }] });
-    const before = JSON.stringify(request.data());
-    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 400 });
-    expect(JSON.stringify(request.data())).toBe(before); expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
+    const before = JSON.stringify(request.data()), clock = Date.now();
+    const adapter = f.deps.transport.postStream.bind(f.deps.transport);
+    vi.spyOn(f.deps.transport, "postStream").mockImplementation(async (...args) => {
+      if (args[0].startsWith("https://adapter.test/")) expect(f.visited.slice(-2)).toEqual(["first", "compatible"]);
+      return adapter(...args);
+    });
+    const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", ...(mode !== "buffered" ? { onModelEvent: async () => {} } : {}) });
+    expect(run.value.response.text()).toBe("done"); expect(run.attempts).toBe(2);
+    expect(run.calls[0].attempts).toMatchObject([{ step: 1, attempt: 1, status: 400 }, { step: 2, attempt: 1, kind: "ok" }]);
+    expect(f.requests.map(entry => entry.provider)).toEqual(["compatible"]); expect(f.adapters).toHaveLength(1); expect(f.files).toHaveLength(0);
+    expect(run.receipts).toHaveLength(1); expect(run.receipts[0].call.hydrogenTool?.instanceId).toBe(call.hydrogenTool?.instanceId);
+    expect(f.requests[0].body.input).toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "pending" }));
+    expect(JSON.stringify(request.data())).toBe(before); expect(Date.now()).toBe(clock); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([1, 2, 100])("pending batch follows multiple mismatches exactly once with %s configured attempts", async maxAttempts => {
+    vi.useFakeTimers();
+    const mismatch = (provider: string) => ({ ...blocked(provider), retry: { ...retry, maxAttempts }, serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } });
+    const f = fixture([mismatch("first"), mismatch("middle"), compatible]);
+    const { request } = retainedRequest(undefined, 2);
+    const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    expect(run.calls[0].attempts.map(attempt => [attempt.step, attempt.attempt])).toEqual([[1, 1], [2, 1], [3, 1]]);
+    expect(f.requests.map(entry => entry.provider)).toEqual(["compatible"]); expect(f.adapters).toHaveLength(2);
+    expect(run.receipts.map(receipt => receipt.call.id)).toEqual(["pending_1", "pending_2"]);
+    expect((f.requests[0].body.input as Array<{ type: string }>).filter(part => part.type === "function_call_output")).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["policy", "wire"])("all mismatching stages retain the final %s failure and unexecuted pending work", async last => {
+    vi.useFakeTimers();
+    const first = { ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } };
+    const final = last === "policy" ? { ...first, provider: "last" } : { ...compatible, provider: "last" };
+    const f = fixture([first, final], { families: { last: last === "wire" ? "openai_completion" : "openai_responses" } });
+    const { request } = retainedRequest(); const before = JSON.stringify(request.data());
+    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 400,
+      message: last === "policy" ? "Tool 'web_fetch' not found" : "Tool 'web_fetch' from openai_responses cannot be sent to openai_completion",
+      errorBody: { error: { code: last === "policy" ? "tool_not_found" : null } }, calls: [{ attempts: [{ step: 1, attempt: 1 }, { step: 2, attempt: 1 }] }] });
+    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+    expect(JSON.stringify(request.data())).toBe(before); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["buffered", "stream", "reliable"])("ordinary upstream retries after pending execution reuse the receipt (%s)", async mode => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } },
+      { ...compatible, retry: { maxAttempts: 2, on: [503], intervalMs: 100 } }], {
+      reliableStreaming: mode === "reliable", reply: (_provider, _body, count) => count === 1 ? 503 : [{ type: "text", text: "done" }],
+    });
+    const { request } = retainedRequest();
+    const start = Date.now(), pending = runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", ...(mode !== "buffered" ? { onModelEvent: async () => {} } : {}) });
+    await vi.advanceTimersByTimeAsync(0); expect(f.adapters).toHaveLength(1); expect(f.requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(99); expect(f.requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); const run = await pending;
+    expect(run.attempts).toBe(3); expect(run.receipts).toHaveLength(1); expect(f.adapters).toHaveLength(1);
+    expect(f.requests.map(entry => entry.provider)).toEqual(["compatible", "compatible"]);
+    for (const entry of f.requests) expect((entry.body.input as Array<{ type: string }>).filter(part => part.type === "function_call_output")).toHaveLength(1);
+    expect(Date.now() - start).toBe(100); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("provider exhaustion and sequential fallback never rerun a completed pending batch", async () => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } },
+      { ...compatible, provider: "failure", retry: { maxAttempts: 2, on: [503], intervalMs: 100 } }, compatible], { reply: provider => provider === "failure" ? 503 : [{ type: "text", text: "done" }] });
+    const { request } = retainedRequest();
+    const pending = runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    await vi.advanceTimersByTimeAsync(100); const run = await pending;
+    expect(run.calls[0].attempts.map(attempt => [attempt.step, attempt.attempt])).toEqual([[1, 1], [2, 1], [2, 2], [3, 1]]);
+    expect(f.requests.map(entry => entry.provider)).toEqual(["failure", "failure", "compatible"]); expect(f.adapters).toHaveLength(1);
+    expect(run.history.flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["started", "completed"] as const)("retained %s call without an authoritative result is terminal and never replayed", async execution => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible, { ...compatible, provider: "later" }]);
+    const { request, calls } = retainedRequest(); calls[0].hydrogenTool!.execution = execution;
+    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 502,
+      message: expect.stringContaining("refusing to replay"), calls: [] });
+    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+    expect(f.visited).toEqual(["first"]); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a completed retained result is carried once across mismatch without any adapter call", async () => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible]);
+    const saved = retainedRequest(); saved.calls[0].hydrogenTool!.execution = "completed";
+    const request = buildRequest(saved.request.family, { ...saved.request.data(), messages: [...saved.request.messages, { role: "user", content: [{ type: "tool_result", toolUseId: saved.calls[0].id,
+      content: [{ type: "text", text: "saved result" }], hydrogenTool: structuredClone(saved.calls[0].hydrogenTool) }] }] });
+    const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    expect(f.adapters).toHaveLength(0); expect(f.requests.map(entry => entry.provider)).toEqual(["compatible"]);
+    expect(f.requests[0].body.input).toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "pending_1", output: "saved result" }));
+    expect(run.history.flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(1); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["nested", "agent"])("pending execution remains once through the %s wrapper", async wrapper => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible]);
+    const nested = new HostedToolService(f.service, f.deps, []);
+    const executor = wrapper === "nested" ? nested : new MicroAgent(parseService({ kind: "micro_agent", timeoutMs: 1000, stages: [{ name: "selected", service: "leaf" }] }) as AgentDef,
+      { ...f.deps, resolver: { resolve: () => ({ ok: true, executor: nested, isAgent: false }), sttDef: () => ({ ok: false, message: "unused" }) }, logMaxChars: 1000 });
+    const { request } = retainedRequest();
+    const run = await runHostedTools(executor, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    expect(run.attempts).toBe(2); expect(run.receipts).toHaveLength(1); expect(f.adapters).toHaveLength(1);
+    expect(f.requests.map(entry => entry.provider)).toEqual(["compatible"]);
+    expect((f.requests[0].body.input as Array<{ type: string }>).filter(part => part.type === "function_call_output")).toHaveLength(1); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([0, 1])("pending execution respects shared round boundary %s", async remainingRounds => {
+    vi.useFakeTimers();
+    const f = fixture([compatible]); const { request } = retainedRequest([declared]);
+    const hosted = { sessionId: "synthetic", remainingCalls: 2, remainingRounds, traces: [] };
+    if (!remainingRounds) {
+      await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", hosted })).rejects.toMatchObject({ statusCode: 402 });
+      expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
+    } else {
+      const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", hosted });
+      expect(run.attempts).toBe(1); expect(f.requests).toHaveLength(1); expect(f.adapters).toHaveLength(1); expect(hosted.remainingRounds).toBe(0); expect(hosted.remainingCalls).toBe(1);
+    }
+    expect(hosted).toHaveProperty("callLimits", []); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("saved pending executor cannot be replaced by a newly offered same-name adapter", async () => {
+    vi.useFakeTimers();
+    const replacement = { ...tool(), id: 43, url: "https://adapter.test/replacement", serverTool: { ...tool().serverTool!, name: "web_fetch" } };
+    const f = fixture([compatible]); const { request, calls } = retainedRequest([{ type: "web_fetch" }]);
+    const adapter = f.deps.transport.postStream.bind(f.deps.transport), urls: string[] = [];
+    vi.spyOn(f.deps.transport, "postStream").mockImplementation(async (...args) => { if (args[0].startsWith("https://adapter.test/")) urls.push(args[0]); return adapter(...args); });
+    const run = await runHostedTools(f.service, request, [tool(), replacement], f.deps.transport, { sessionId: "synthetic" });
+    expect(urls).toEqual(["https://adapter.test/run"]); expect(run.receipts[0].entry.tool.id).toBe(42);
+    expect(run.receipts[0].call.hydrogenTool?.instanceId).toBe(calls[0].hydrogenTool?.instanceId); expect(f.requests).toHaveLength(1);
+  });
+
+  it.each([undefined, "started", "completed"] as const)("missing/disabled exact owner never rebinds or erases lifecycle=%s", async execution => {
+    vi.useFakeTimers();
+    for (const mismatch of [false, true]) for (const disabled of [false, true]) {
+      const f = fixture(mismatch ? [{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible] : [compatible]);
+      const { request, calls } = retainedRequest(mismatch ? undefined : [declared]); calls[0].hydrogenTool!.execution = execution;
+      const before = JSON.stringify(request.data());
+      const availability = disabled ? [{ ...tool(), enabled: false }] : [{ ...tool(), id: 77, url: "https://adapter.test/new" }];
+      await expect(runHostedTools(f.service, request, availability, f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 400,
+        message: "The retained tool executor is unavailable; start a new session" });
+      expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+      expect(JSON.stringify(request.data())).toBe(before); expect(vi.getTimerCount()).toBe(0);
+    }
+  });
+
+  it("an absent child owner may be deferred but its pending work cannot disappear from the final run", async () => {
+    vi.useFakeTimers();
+    const f = fixture([compatible]); const { request } = retainedRequest([]);
+    await expect(runHostedTools(f.service, request, [], f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 502,
+      message: expect.stringContaining("refusing to discard pending work") });
+    expect(f.adapters).toHaveLength(0); expect(f.requests).toHaveLength(1); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["duplicates", "binding"])("global %s validation precedes pending adapter execution", async invalid => {
+    vi.useFakeTimers();
+    const f = fixture([blocked("first"), { ...compatible, overrides: { extra: { tools: [] } } }]);
+    const { request } = retainedRequest(invalid === "duplicates" ? [declared, declared] : [declared]);
+    const tools = invalid === "binding" ? [tool(), { ...tool(), id: 43, name: "other" }] : [tool()];
+    await expect(runHostedTools(f.service, request, tools, f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 400,
+      errorBody: { error: { code: "hydrogen_tool_name_conflict" } } });
+    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancellation after a partial pending batch never reaches a model retry or replays the completed call", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController(), f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible, { ...compatible, provider: "later" }]);
+    const { request } = retainedRequest(undefined, 2), before = JSON.stringify(request.data());
+    const adapter = f.deps.transport.postStream.bind(f.deps.transport); let starts = 0;
+    vi.spyOn(f.deps.transport, "postStream").mockImplementation(async (...args) => {
+      if (args[0].startsWith("https://adapter.test/") && ++starts === 2) { controller.abort(); throw new Error("Synthetic cancelled outcome unknown"); }
+      return adapter(...args);
+    });
+    const completed: string[] = [];
+    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", signal: controller.signal,
+      emit: async event => { if (event.type === "hydrogen.tool.completed") completed.push(String(event.model_call_id)); } })).rejects.toMatchObject({ statusCode: 499,
+      calls: [{ attempts: [{ step: 1, attempt: 1 }, { step: 2, attempt: 1 }] }] });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(starts).toBe(2); expect(completed).toEqual(["pending_1"]); expect(f.adapters).toHaveLength(1); expect(f.requests).toHaveLength(0);
+    expect(JSON.stringify(request.data())).toBe(before); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("an adapter's connection-error receipt is never retried with model retries", async () => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...compatible, retry: { maxAttempts: 2, on: [503], intervalMs: 100 } }], { reply: (_provider, _body, count) => count === 1 ? 503 : [{ type: "text", text: "done" }] });
+    let attempts = 0; const adapter = f.deps.transport.postStream.bind(f.deps.transport);
+    vi.spyOn(f.deps.transport, "postStream").mockImplementation(async (...args) => { if (args[0].startsWith("https://adapter.test/")) { attempts++; throw new Error("Synthetic connection outcome unknown"); } return adapter(...args); });
+    const { request } = retainedRequest([declared]);
+    const pending = runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    await vi.advanceTimersByTimeAsync(100); const run = await pending;
+    expect(attempts).toBe(1); expect(f.requests).toHaveLength(2); expect(run.receipts).toHaveLength(1); expect(run.receipts[0].result.isError).toBe(true);
+    expect(run.receipts[0].result.content).toEqual([{ type: "text", text: JSON.stringify({ error: { code: "tool_connection_error", message: "Tool API request failed" } }) }]);
+    expect(run.receipts[0].call.hydrogenTool?.execution).toBe("completed"); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("known unsafe work anywhere in the retained batch prevents every new side effect", async () => {
+    vi.useFakeTimers(); const f = fixture([compatible]); const { request, calls } = retainedRequest([declared], 2);
+    calls[1].hydrogenTool!.execution = "started";
+    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" })).rejects.toMatchObject({ statusCode: 502, calls: [] });
+    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("completed raw/native history stays completed without acquiring private ownership or replay", async () => {
+    vi.useFakeTimers(); const f = fixture([compatible]);
+    const request = buildRequest(seed().family, { ...seed().data(), messages: [{ role: "assistant", content: [{ type: "tool_use", id: "raw", name: "web_search", input: {}, serverTool: true }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "raw", content: [{ type: "text", text: "existing result" }] }] }] });
+    const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic" });
+    expect(f.adapters).toHaveLength(0); expect(f.requests).toHaveLength(1); expect(run.receipts).toHaveLength(0);
+    expect(run.history[0].content[0]).not.toHaveProperty("hydrogenTool"); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a pending receipt crossing the existing context limit stops before model/attachment dispatch", async () => {
+    vi.useFakeTimers(); const f = fixture([compatible]), saved = retainedRequest([declared]);
+    const padding = { type: "text" as const, text: "" };
+    const messages = [...saved.request.messages, { role: "user" as const, content: [padding] }];
+    padding.text = "x".repeat(25 * 1024 * 1024 - 1024 - Buffer.byteLength(JSON.stringify(messages)));
+    const request = buildRequest(saved.request.family, { ...saved.request.data(), messages });
+    const adapter = f.deps.transport.postStream.bind(f.deps.transport); let executed = 0, retained = 0;
+    vi.spyOn(f.deps.transport, "postStream").mockImplementation(async (...args) => {
+      if (args[0].startsWith("https://adapter.test/")) { executed++; return { status: 200, headers: {}, body: Readable.from([JSON.stringify({ results: ["y".repeat(4096)] })]) }; }
+      return adapter(...args);
+    });
+    await expect(runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", onPendingToolExecution: async (_call, result) => {
+      if (result) retained++; return { ok: true, value: undefined };
+    } })).rejects.toMatchObject({ statusCode: 413, calls: [{ attempts: [{ step: 1, attempt: 1, status: 413 }] }] });
+    expect(executed).toBe(1); expect(retained).toBe(1); expect(f.requests).toHaveLength(0); expect(f.files).toHaveLength(0); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("pending call-limit exhaustion becomes one retained result without adapter IO", async () => {
+    vi.useFakeTimers();
+    const f = fixture([compatible]); const { request } = retainedRequest([declared]);
+    const hosted = { sessionId: "synthetic", remainingCalls: 0, remainingRounds: 1, traces: [] };
+    const run = await runHostedTools(f.service, request, [tool()], f.deps.transport, { sessionId: "synthetic", hosted });
+    expect(f.adapters).toHaveLength(0); expect(f.requests).toHaveLength(1); expect(run.receipts).toHaveLength(1);
+    expect(run.receipts[0].result).toMatchObject({ isError: true, hydrogenTool: { execution: "completed" } });
+    expect(JSON.stringify(run.receipts[0].result.content)).toContain("tool_call_limit"); expect(hosted.remainingCalls).toBe(0); expect(hosted.remainingRounds).toBe(0);
   });
 
   it.each(["ocr", "asr"].flatMap(kind => [false, true].map(retryChild => ({ kind, retryChild }))))("tool-free internal $kind uses independent retry=$retryChild before outer mismatch failover", async ({ kind, retryChild }) => {

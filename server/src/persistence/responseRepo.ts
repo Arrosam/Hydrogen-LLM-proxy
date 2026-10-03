@@ -1,8 +1,10 @@
-import { publicHistoryItem } from "./conversationHistory";
+import { historyItems, historyMessages, privateHistoryMessages, publicHistoryItem, withHistoryMessages } from "./conversationHistory";
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { conversationItems, responseConversations, storedResponses, responseEvents } from "../db/schema";
-import type { Message } from "../core/ir/content";
+import type { Message, ToolResultPart, ToolUsePart } from "../core/ir/content";
+import { sameToolProvenance } from "../execution/serverTools";
 import { genId } from "../util/ids";
 import { decryptSecret, encryptSecret } from "../security/crypto";
 import type { ServiceSnapshot } from "../execution/serviceSnapshot";
@@ -197,6 +199,66 @@ export class ResponseRepo {
     this.db.update(storedResponses).set({ touchedAt: this.now() }).where(and(eq(storedResponses.id, id), eq(storedResponses.tokenId, tokenId))).run();
   }
 
+  /** Claim/publish one retained private instance across its saved copies. The
+   * transaction re-reads authoritative state so stale concurrent forks cannot
+   * dispatch the same operation. No public name or caller result is authority. */
+  recordPendingTool(id: string, tokenId: number, call: ToolUsePart, result?: ToolResultPart): void {
+    const marker = call.hydrogenTool;
+    if (!marker?.instanceId || marker.id == null) throw new ResponseStateError("The retained tool call has no exact saved identity", 409);
+    this.db.transaction(() => {
+      const current = this.response(id, tokenId);
+      if (!current || !result && !RUNNING.includes(current.status as "queued")) throw new ResponseStateError("Response is no longer active", 409);
+      const rows = this.db.select().from(storedResponses).where(and(eq(storedResponses.tokenId, tokenId), sql`exists (
+        select 1 from json_each(${storedResponses.history}) m, json_each(m.value, '$.content') p
+        where json_extract(p.value, '$.type') = 'tool_use' and json_extract(p.value, '$.hydrogenTool.instanceId') = ${marker.instanceId}
+      )`)).all();
+      const items = this.db.select({ sequence: conversationItems.sequence, conversationId: conversationItems.conversationId, item: conversationItems.item }).from(conversationItems)
+        .innerJoin(responseConversations, eq(responseConversations.id, conversationItems.conversationId))
+        .where(and(eq(responseConversations.tokenId, tokenId), sql`exists (
+          select 1 from json_each(${conversationItems.item}, '$.__hydrogenCanonicalMessages') m, json_each(m.value, '$.content') p
+          where json_extract(p.value, '$.type') = 'tool_use' and json_extract(p.value, '$.hydrogenTool.instanceId') = ${marker.instanceId}
+        )`)).all();
+      const histories = [...rows.map(row => row.history), ...items.map(item => historyMessages([item.item]))];
+      const matches = histories.flatMap(history => history.flatMap(message => message.content)).filter((part): part is ToolUsePart => part.type === "tool_use"
+        && part.hydrogenTool?.instanceId === marker.instanceId);
+      if (matches.some(part => part.id !== call.id || !sameToolProvenance(part.hydrogenTool, marker) || !isDeepStrictEqual(part.input, call.input))) {
+        throw new ResponseStateError("The retained tool instance does not match its saved owner or arguments", 409);
+      }
+      if (!matches.length || !rows.some(row => row.id === id)) throw new ResponseStateError("The retained tool instance is not owned by this response", 409);
+      if (result) {
+        if (!sameToolProvenance(result.hydrogenTool, marker) || result.toolUseId !== call.id
+          || !matches.some(part => part.hydrogenTool?.execution === "started" && part.hydrogenTool.claimedBy === id)
+          || matches.some(part => part.hydrogenTool?.execution && part.hydrogenTool.claimedBy !== id)) {
+          throw new ResponseStateError("The retained tool claim does not belong to this response", 409);
+        }
+      } else if (matches.some(part => part.hydrogenTool?.execution)) {
+        throw new ResponseStateError("The retained tool instance has already been claimed; its outcome cannot be replayed", 409);
+      }
+      marker.claimedBy = id;
+      const update = (history: Message[], includeResult = true): Message[] => {
+        const next = structuredClone(history);
+        for (const message of next) for (const part of message.content) if (part.type === "tool_use"
+          && sameToolProvenance(part.hydrogenTool, marker) && isDeepStrictEqual(part.input, call.input)) {
+          part.hydrogenTool = { ...part.hydrogenTool!, execution: result ? "completed" : "started", claimedBy: id };
+        }
+        if (result && includeResult && !next.some(message => message.content.some(part => part.type === "tool_result" && sameToolProvenance(part.hydrogenTool, marker)))) {
+          next.push({ role: "user", content: [structuredClone(result)] });
+        }
+        if (Buffer.byteLength(JSON.stringify(next)) > 25 * 1024 * 1024) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
+        return next;
+      };
+      for (const row of rows) this.db.update(storedResponses).set({ history: update(row.history) })
+        .where(and(eq(storedResponses.id, row.id), eq(storedResponses.tokenId, tokenId))).run();
+      for (const item of items) this.db.update(conversationItems).set({ item: withHistoryMessages(item.item, update(historyMessages([item.item]), false)) })
+        .where(eq(conversationItems.sequence, item.sequence)).run();
+      if (result) for (const conversationId of new Set(items.map(item => item.conversationId))) {
+        const presented = this.allItems(conversationId, tokenId).flatMap(privateHistoryMessages).some(message => message.content.some(part => part.type === "tool_result"
+          && sameToolProvenance(part.hydrogenTool, marker)));
+        if (!presented) this.insertItems(conversationId, historyItems([{ role: "user", content: [result] }]));
+      }
+    });
+  }
+
   /** Terminal transitions are conditional: a late completion can never overwrite cancellation. */
   transition(id: string, tokenId: number, status: StoredResponse["status"], response: WireItem, history?: Message[], append?: WireItem[]): StoredResponse | undefined {
     return this.db.transaction(() => {
@@ -206,7 +268,12 @@ export class ResponseRepo {
         eq(storedResponses.id, id), eq(storedResponses.tokenId, tokenId), inArray(storedResponses.status, [...RUNNING]),
       )).returning().get();
       if (row && row.conversationId && append?.length) {
-        this.insertItems(row.conversationId, append);
+        // Pending receipts were published durably before model/events. Avoid
+        // appending their second presentation copy at final completion.
+        const receipts = new Set(this.allItems(row.conversationId, tokenId).flatMap(privateHistoryMessages).flatMap(message => message.content)
+          .filter((part): part is ToolResultPart => part.type === "tool_result" && !!part.hydrogenTool?.instanceId).map(part => part.hydrogenTool!.instanceId));
+        this.insertItems(row.conversationId, append.filter(item => !privateHistoryMessages(item).some(message => message.content.some(part => part.type === "tool_result"
+          && !!part.hydrogenTool?.instanceId && receipts.has(part.hydrogenTool.instanceId)))));
         this.db.update(responseConversations).set({ revision: sql`${responseConversations.revision} + 1`, touchedAt: this.now() }).where(eq(responseConversations.id, row.conversationId)).run();
       }
       return row;

@@ -3,16 +3,17 @@ import { buildRequest } from "../core/format/registry";
 import { requireAnswer } from "../core/ir/answer";
 import type { Family, RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
+import type { ToolResultPart, ToolUsePart } from "../core/ir/content";
 import { inlineUrlFiles, needsUrlFileInlining } from "./fileFetch";
 import { fabricateStream } from "../core/ir/stream";
 import type { SendTarget, Transport } from "../core/upstream/transport";
 import type { Catalog } from "../catalog/catalog";
-import { runSteps } from "./steps";
+import { runSteps, type AttemptResult } from "./steps";
 import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition";
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
-import { DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, prepareServerTools, ServerToolCapabilityError, ServerToolPreflightError, validateRenderedServerTools, validateServerToolBindings, validateServerToolRequest, localToolHistory, type PreparedServerTools, type ServerToolAvailability, type ServerToolRuntime } from "./serverTools";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, prepareServerTools, retainServerToolReceipts, ServerToolCapabilityError, ServerToolPreflightError, validateRenderedServerTools, validateServerToolBindings, validateServerToolRequest, localToolHistory, type HostedToolReceipt, type PreparedServerTools, type ServerToolAvailability, type ServerToolRuntime } from "./serverTools";
 
 /** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
  * upstream headers — only for an upstream of the SAME wire family, and never
@@ -81,6 +82,13 @@ export interface InvokeOptions {
   /** Original caller tool input retained before agent stages can drop/replace
    * it. This private request never establishes tool execution ownership. */
   callerToolValidation?: { request: Request; validated?: true };
+  /** Internal hosted continuation handoff. Called only after this sequential
+   * step's local tool preflight, before attachment/model IO. The enclosing loop
+   * caches the pending batch outcome; model retries reuse receipts, never work. */
+  resumeToolCalls?: (prepared: PreparedServerTools) => Promise<AttemptResult<HostedToolReceipt[]>>;
+  /** Saved continuation durability. Claim an exact pending instance before IO
+   * and publish its result before events; the controller supplies owned storage. */
+  onPendingToolExecution?: (call: ToolUsePart, result?: ToolResultPart) => Promise<AttemptResult<void>>;
 }
 
 /**
@@ -225,6 +233,18 @@ export class ModelService {
         return error.failure(!dispatched.has(stepIndex));
       }
       opts.onStepProgress?.();
+      if (opts.resumeToolCalls) {
+        // The handoff may execute an adapter. Later failures in this step must
+        // not acquire pre-dispatch capability provenance after that possibility.
+        dispatched.add(stepIndex);
+        const resumed = await opts.resumeToolCalls(prepared);
+        if (!resumed.ok) return { ...resumed, terminal: true, retryable: false };
+        const history = structuredClone(prepared.request.messages);
+        retainServerToolReceipts(history, resumed.value);
+        if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) return { ok: false, kind: "error", status: 413,
+          message: "Tool-loop context exceeds 25 MiB", terminal: true, retryable: false };
+        prepared = { ...prepared, request: buildRequest(prepared.request.family, { ...prepared.request.data(), messages: history }) };
+      }
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
       // A URL attachment this family cannot carry is downloaded and inlined
       // first (see fileFetch). Resolved per step, because the very same request
@@ -359,6 +379,16 @@ export class ModelService {
         return error.failure(!dispatched.has(stepIndex));
       }
       opts.onStepProgress?.();
+      if (opts.resumeToolCalls) {
+        dispatched.add(stepIndex);
+        const resumed = await opts.resumeToolCalls(prepared);
+        if (!resumed.ok) return { ...resumed, terminal: true, retryable: false };
+        const history = structuredClone(prepared.request.messages);
+        retainServerToolReceipts(history, resumed.value);
+        if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) return { ok: false, kind: "error", status: 413,
+          message: "Tool-loop context exceeds 25 MiB", terminal: true, retryable: false };
+        prepared = { ...prepared, request: buildRequest(prepared.request.family, { ...prepared.request.data(), messages: history }) };
+      }
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
       if (needsUrlFileInlining(prepared.request, t.family)) dispatched.add(stepIndex);
       const ready = await this.inlineFiles(prepared.request, t.family, prog, {
