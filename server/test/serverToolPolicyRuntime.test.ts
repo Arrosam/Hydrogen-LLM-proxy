@@ -460,7 +460,7 @@ describe("streaming, nested services and protocol boundaries", () => {
     expect(noDeclaration.result.ok).toBe(true); expect(f.requests.at(-1)!.body.tools).toBeUndefined();
     expect(f.adapters).toHaveLength(1);
   });
-  it("preflights the router-selected stage before any OCR or provider side effect", async () => {
+  it("router-selected outer mismatch leaves the independent OCR request tool-free", async () => {
     const f = fixture(), blocked = f.service(definition({ serverToolPolicy: { mode: "whitelist", names: [] } }));
     const agent = new MicroAgent(parseService({ kind: "micro_agent", ocr: { service: "ocr" }, stages: [
       { name: "route", input: [], transitions: [{ when: { type: "input_contains", value: "q" }, goto: "blocked" }] },
@@ -469,7 +469,8 @@ describe("streaming, nested services and protocol boundaries", () => {
     const request = buildRequest(seed().family, { ...seed([{ type: "web_fetch" }]).data(), messages: [{ role: "user", content: [{ type: "text", text: "q" }, { type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }] }] });
     const inv = await agent.invoke(request);
     expect(inv.result).toMatchObject({ ok: false, status: 400, errorBody: { error: { code: "tool_not_found" } } });
-    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
+    expect(f.requests).toHaveLength(1); expect(f.requests[0].body.tools).toBeUndefined();
+    expect(f.requests[0].body.tool_choice).toBeUndefined(); expect(f.adapters).toHaveLength(0);
   });
   it("local rejection keeps the native Anthropic error envelope", () => {
     try { prepareServerTools(seed([{ type: "web_fetch_20250910", name: "web_fetch" }], "anthropic"), { tools: [] }, { mode: "whitelist", names: [] }); throw new Error("expected rejection"); }

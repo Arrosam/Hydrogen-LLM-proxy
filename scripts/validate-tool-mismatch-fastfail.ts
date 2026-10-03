@@ -12,7 +12,7 @@ import { buildResponse, serializeStream } from "../server/src/core/format/regist
 import { fabricateStream } from "../server/src/core/ir/stream";
 import type { Family } from "../server/src/core/ir/params";
 import type { ContentPart } from "../server/src/core/ir/content";
-import { parseServiceSteps } from "../server/src/execution/definition";
+import { parseService, parseServiceSteps } from "../server/src/execution/definition";
 import { HttpToolSchema } from "../server/src/execution/toolHttp";
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-fastfail-http-"));
@@ -21,14 +21,16 @@ Object.assign(process.env, { NODE_ENV: "test", DATA_DIR: dataDir, ALLOW_PRIVATE_
   SIMULATED_STREAMING_TOKEN_RATE: "2000000", STREAM_COMMIT_GRACE_MS: "600000", JSON_COMMIT_GRACE_MS: "50" });
 const calls: Array<{ provider: string; body: Record<string, unknown> }> = [];
 const evidence: Array<Record<string, unknown>> = [];
-const families: Record<string, Family> = { wire: "openai_completion", anthropic: "anthropic" };
+const families: Record<string, Family> = { wire: "openai_completion", anthropic: "anthropic", completion: "openai_completion",
+  asr: "openai_completion", retryAsr: "openai_completion", slowAsr: "openai_completion" };
 const slowMs = 800;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const synthetic = http.createServer((req, res) => {
   let raw = ""; req.setEncoding("utf8"); req.on("data", chunk => { raw += chunk; });
   req.on("end", () => { void (async () => {
     const provider = req.url!.split("/")[1];
-    const body = JSON.parse(raw) as Record<string, unknown>;
+    const multipart = String(req.headers["content-type"]).startsWith("multipart/form-data");
+    const body = multipart ? { multipart: raw } : JSON.parse(raw) as Record<string, unknown>;
     calls.push({ provider, body });
     if (provider === "adapter") { res.setHeader("content-type", "application/json"); res.end('{"results":[]}'); return; }
     const count = calls.filter(call => call.provider === provider).length;
@@ -36,14 +38,16 @@ const synthetic = http.createServer((req, res) => {
       res.writeHead(provider === "retry400" ? 400 : 503, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { code: "tool_not_found", message: "Tool 'web_search' not found" } })); return;
     }
-    if (provider === "slow") await sleep(slowMs);
+    if (provider.startsWith("slow")) await sleep(slowMs);
     if (res.destroyed) return;
+    if (multipart) { res.setHeader("content-type", "application/json"); res.end('{"text":"ASR text"}'); return; }
     const family = families[provider] ?? "openai_responses";
     const local = (body.tools as Array<{ name?: string }> | undefined)?.some(tool => tool.name === "provider_server_side_lookup");
     const done = JSON.stringify(body).includes('"function_call_output"');
-    const content: ContentPart[] = local && !done ? [{ type: "tool_use", id: "operation_1", name: "provider_server_side_lookup", input: {} }]
-      : [{ type: "text", text: "Synthetic answer" }];
-    const response = buildResponse(family, { id: "synthetic", model: "up", created: 1, content, stopReason: local && !done ? "tool_use" : "stop",
+    const wantsLocal = local && !done && (body.tool_choice as { name?: string } | undefined)?.name !== "client";
+    const content: ContentPart[] = wantsLocal ? [{ type: "tool_use", id: "operation_1", name: "provider_server_side_lookup", input: {} }]
+      : [{ type: "text", text: provider.toLowerCase().includes("ocr") ? '[{"index":1,"image":"OCR text"}]' : "Synthetic answer" }];
+    const response = buildResponse(family, { id: "synthetic", model: "up", created: 1, content, stopReason: wantsLocal ? "tool_use" : "stop",
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
     if (!body.stream) { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(response.renderSelf("up"))); return; }
     res.setHeader("content-type", "text/event-stream");
@@ -61,7 +65,7 @@ try {
   const { buildApp } = await import("../server/src/app");
   const c = container = await boot();
   const model = c.models.create({ name: "m" });
-  for (const name of ["first", "second", "compatible", "wire", "anthropic", "retry400", "retry503", "slow"]) {
+  for (const name of ["first", "second", "compatible", "wire", "anthropic", "retry400", "retry503", "slow", "completion", "ocr", "asr", "retryOcr", "retryAsr", "slowOcr", "slowAsr"]) {
     const provider = c.providers.create({ name, type: families[name] ?? "openai_responses", baseUrl: `${upstream}/${name}/v1`, apiKey: "synthetic-provider-key" });
     c.mappings.create({ modelId: model.id, providerId: provider.id, upstreamModel: "up" });
   }
@@ -194,9 +198,69 @@ try {
   add("anthropic-fallback", [blocked("anthropic"), { ...compatible("anthropic"), serverToolPolicy: { mode: "whitelist", names: ["web_search"] } }]);
   await check("Anthropic native sequential fallback", "anthropic-fallback", 200, ["anthropic"], {}, "anthropic");
 
+  for (const kind of ["ocr", "asr"] as const) for (const mode of kind === "ocr" ? ["normal", "retry", "stream", "background", "all-stream", "all-background"] : ["normal", "retry", "stream"]) {
+    const allMismatch = mode.startsWith("all-");
+    const provider = mode === "retry" ? `retry${kind === "ocr" ? "Ocr" : "Asr"}` : mode.endsWith("stream") || mode.endsWith("background") ? `slow${kind === "ocr" ? "Ocr" : "Asr"}` : kind;
+    const child = c.services.create({ name: `child-${kind}-${mode}`, definition: parseServiceSteps({ category: kind === "ocr" ? "ocr" : "stt", timeoutMs: 3000,
+      steps: [{ ...blocked(provider), retry: { maxAttempts: 3, on: ["error"], intervalMs: 20 } }] }) });
+    if (kind === "ocr") c.hostedTools.bind(child.id, [adapter.id]);
+    const leaf = add(`outer-model-${kind}-${mode}`, [{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } },
+      allMismatch ? { ...blocked("second"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } } : compatible(kind === "ocr" ? "compatible" : "completion")]);
+    const root = c.services.create({ name: `internal-${kind}-${mode}`, definition: parseService({ kind: "micro_agent", timeoutMs: 3000,
+      ...(mode === "all-stream" ? { hostedTools: { streamMode: "all" } } : {}),
+      [kind]: { service: child.name }, stages: [{ name: "model", service: leaf.name }] }) });
+    if (kind === "ocr") c.hostedTools.bind(root.id, [adapter.id]);
+    const scoped = c.tokens.create({ name: `synthetic-${kind}-${mode}`, scopeServices: [root.id] });
+    const family = kind === "ocr" ? "openai_responses" : "openai_completion";
+    // Distinct synthetic media prevent the normal content cache from satisfying
+    // later scenarios that must measure their own child dispatch/retry count.
+    const content = kind === "ocr" ? { type: "input_image", image_url: `data:image/png;base64,${Buffer.from(`synthetic-${mode}`).toString("base64")}` }
+      : { type: "input_audio", input_audio: { data: Buffer.from(`RIFFsyntheticWAVE-${mode}`).toString("base64"), format: "wav" } };
+    const message = { role: "user", content: [content] };
+    const patch = { ...(kind === "ocr" ? { input: [message] } : { messages: [message] }),
+      tools: [{ type: "web_search" }, { type: "web_fetch" }, kind === "ocr" ? { type: "function", name: "client", parameters: {} } : { type: "function", function: { name: "client", parameters: {} } }],
+      tool_choice: kind === "ocr" ? { type: "function", name: "client" } : { type: "function", function: { name: "client" } },
+      stream: mode.endsWith("stream"), background: mode.endsWith("background"), store: mode.endsWith("background") };
+    const beforeLogs = c.logs.query({}).total;
+    const hit = await request(root.name, patch, family, scoped.secret); assert.equal(hit.response.status, 200);
+    if (kind === "ocr" && (mode.endsWith("stream") || mode.endsWith("background"))) assert(hit.headersMs < slowMs / 2, "internal child held Responses headers");
+    let wire = await hit.response.text();
+    if (mode.endsWith("background")) {
+      const queued = JSON.parse(wire); assert.equal(queued.status, "queued");
+      for (let i = 0; i < 100; i++) { const response = await fetch(`${local}/v1/responses/${queued.id}`, { headers: { authorization: `Bearer ${scoped.secret}` } });
+        wire = await response.text(); if (JSON.parse(wire).status === (allMismatch ? "failed" : "completed")) break; assert(i < 99); await sleep(20); }
+    }
+    assert(wire.includes(allMismatch ? "web_fetch" : "Synthetic answer"));
+    if (allMismatch) assert(wire.includes(mode.endsWith("stream") ? "response.failed" : '"status":"failed"'));
+    const childCalls = calls.filter(call => call.provider === provider);
+    assert.equal(childCalls.length, mode === "retry" ? 3 : 1);
+    for (const call of childCalls) {
+      assert.equal(call.body.tools, undefined); assert.equal(call.body.tool_choice, undefined);
+      if (kind === "asr") { const form = String(call.body.multipart); assert(form.includes('name="file"')); assert(!form.includes('name="tools"')); assert(!form.includes("client")); }
+    }
+    assert.deepEqual(calls.map(call => call.provider), [...Array(mode === "retry" ? 3 : 1).fill(provider), ...(allMismatch ? [] : [kind === "ocr" ? "compatible" : "completion"])]);
+    if (!allMismatch) { const outerBody = calls.at(-1)!.body;
+      assert(JSON.stringify(outerBody).includes(kind === "ocr" ? "OCR text" : "ASR text"));
+      assert(JSON.stringify(outerBody.tools).includes(kind === "ocr" ? "provider_server_side_lookup" : "web_search"));
+      assert(JSON.stringify(outerBody.tool_choice).includes("client")); }
+    const logs = c.logs.query({}); assert.equal(logs.total - beforeLogs, 1);
+    const row = logs.rows[0]; assert.equal(row.serviceId, root.id); assert.equal(row.tokenId, scoped.token.id);
+    assert.equal(row.httpStatus, allMismatch ? 400 : 200);
+    assert.equal(row.attempts, childCalls.length + 2); // child attempts plus both outer sequential stages
+    const expectedTokens = kind === "ocr" ? allMismatch ? 2 : 4 : 2; assert.equal(row.totalTokens, expectedTokens);
+    const meter = c.tokens.get(scoped.token.id)!; assert.equal(meter.usedRequests, 1); assert.equal(meter.usedTokens, expectedTokens);
+    record(`independent tool-free ${kind} ${mode}; outer sequential mismatch`, 200, Date.now() - hit.start,
+      { headersMs: hit.headersMs, childAttempts: childCalls.length, totalAttempts: row.attempts, childToolCount: 0, topLevelLogRows: 1, requestCharges: meter.usedRequests, tokenCharges: meter.usedTokens, finalJobStatus: row.httpStatus });
+    if (mode === "normal") {
+      const denied = await request(child.name, {}, "openai_responses", scoped.secret); await denied.response.text();
+      assert.equal(denied.response.status, 403); assert.equal(calls.length, 0);
+      record(`${kind} root scope permits internal reference but denies direct child API`, 403, Date.now() - denied.start);
+    }
+  }
+
   const result = { ticket: "HYD-TOOL-MISMATCH-FASTFAIL", base: "8c12ff24b72767bcc7b0438a4091c36e7ecddccc", node: process.version,
     environment: `${process.platform}/${process.arch}`, providers: "synthetic loopback only", scenarios: evidence, passed: evidence.length, failed: 0,
-    limitations: ["OCR/ASR preprocessing and retained pending adapter mismatches keep their existing prepass rejection; moving them behind step selection requires separate orchestration scope."] };
+    limitations: ["Retained pending adapter mismatches still keep their terminal prepass rejection; this remains a separate unmet core case, not an approved exclusion.", "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.", "Existing internal ASR multipart omits operator STT extra.language/prompt and retains existing zero-token STT accounting; full public STT parameter parity has not been established."] };
   if (process.argv[2]) fs.writeFileSync(path.resolve(process.argv[2]), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify({ passed: evidence.length, failed: 0 }));
 } finally {

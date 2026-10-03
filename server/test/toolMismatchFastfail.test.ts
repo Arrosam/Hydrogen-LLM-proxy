@@ -1,4 +1,6 @@
 import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/core/format";
 import { buildRequest, buildResponse, parseRequest, serializeStream } from "../src/core/format/registry";
@@ -12,12 +14,16 @@ import { parseServiceSteps, type ServiceStep } from "../src/execution/definition
 import { ModelService } from "../src/execution/modelService";
 import { HostedToolService } from "../src/execution/hostedToolService";
 import { MicroAgent } from "../src/execution/microAgent";
-import { parseService, type AgentDef } from "../src/execution/definition";
+import { HostedToolOptionsSchema, parseService, type AgentDef } from "../src/execution/definition";
 import { runHostedTools } from "../src/execution/hostedToolLoop";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { markLocalToolCall, prepareServerTools, ServerToolPreflightError, validateServerToolInput } from "../src/execution/serverTools";
 import type { ToolUsePart } from "../src/core/ir/content";
 import { runSteps, type AttemptFailure, type AttemptRecord } from "../src/execution/steps";
+import { ProxyController } from "../src/transport/proxyController";
+import type { ProxyDeps } from "../src/transport/deps";
+import { ActiveRequestRegistry } from "../src/observability/activeRequests";
+import type { LogParams } from "../src/observability/requestLogger";
 
 const declared = { type: "web_search" };
 const seed = (tools: unknown[] = [declared]) => parseRequest("openai_responses", { model: "svc", input: "hello", tools });
@@ -379,15 +385,148 @@ describe("hosted-loop state transitions do not replay adapters", () => {
     expect(JSON.stringify(request.data())).toBe(before); expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
   });
 
-  it.each(["ocr", "asr"])("deferred mismatch preserves the %s prepass rejection boundary", async kind => {
-    const f = fixture([blocked("first"), compatible]);
+  it.each(["ocr", "asr"].flatMap(kind => [false, true].map(retryChild => ({ kind, retryChild }))))("tool-free internal $kind uses independent retry=$retryChild before outer mismatch failover", async ({ kind, retryChild }) => {
+    vi.useFakeTimers();
+    const f = fixture([{ ...blocked("first"), serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } }, compatible], {
+      reply: (provider, _body, count) => retryChild && provider === "prepass" && count === 1 ? 503 : [{ type: "text", text: provider === "prepass" ? '[{"index":1,"image":"OCR text"}]' : "done" }],
+    });
+    const childStep = { ...blocked("prepass"), retry: { maxAttempts: 2, on: ["error"], intervalMs: 100 } };
+    const child = new ModelService(parseServiceSteps({ steps: [childStep] }), f.deps);
+    const childInvoke = vi.spyOn(child, "invoke");
+    const raw: Buffer[] = [];
+    Object.assign(f.deps.catalog, { resolveWithin: () => ({ ok: true, target: { upstreamModel: "speech", upstream: { type: "openai_completion", baseUrl: "https://provider.test/prepass", apiKey: "synthetic" } } }) });
+    Object.assign(f.deps.transport, { postRaw: async (_url: string, _headers: unknown, body: Buffer) => { raw.push(body); return retryChild && raw.length === 1
+      ? { status: 503, headers: {}, json: { error: { code: "tool_not_found", message: "upstream tool error lookalike" } }, text: "" }
+      : { status: 200, headers: {}, json: { text: "ASR text" }, text: "" }; } });
     const agent = new MicroAgent(parseService({ kind: "micro_agent", [kind]: { service: "prepass" }, stages: [{ name: "model", service: "model" }] }) as AgentDef,
-      { ...f.deps, logMaxChars: 1000, resolver: { resolve: () => ({ ok: true, executor: f.service, isAgent: false }), sttDef: () => ({ ok: true, def: parseServiceSteps({ steps: [compatible] }) }) } });
+      { ...f.deps, logMaxChars: 1000, resolver: { resolve: name => ({ ok: true, executor: name === "prepass" ? child : f.service, isAgent: false }), sttDef: () => ({ ok: true, def: parseServiceSteps({ steps: [childStep] }) }) } });
+    const content: ContentPart = kind === "ocr" ? { type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }
+      : { type: "opaque", family: "openai_completion", value: { type: "input_audio", input_audio: { data: "AA==", format: "wav" } } };
+    const outer = seed([declared, { type: "web_fetch" }, { type: "function", name: "client", parameters: {} }]).withOverrides({ extra: { tool_choice: { type: "function", name: "client" } } });
+    const request = buildRequest(outer.family, { ...outer.data(), messages: [{ role: "user", content: [content] }] });
+    const before = Date.now();
+    const pending = agent.invoke(request, undefined, { serverTools: { tools: [tool()] } });
+    await vi.advanceTimersByTimeAsync(retryChild ? 100 : 0); const inv = await pending;
+    expect(inv.result.ok).toBe(true);
+    expect(f.requests.map(entry => entry.provider)).toEqual(kind === "ocr" ? [...Array(retryChild ? 2 : 1).fill("prepass"), "compatible"] : ["compatible"]);
+    if (kind === "ocr") {
+      const [input, , opts] = childInvoke.mock.calls[0];
+      expect(input.tools).toBeUndefined(); expect(input.toolChoice).toBeUndefined();
+      expect(input.params.extra).toBeUndefined(); expect(input.params.passthrough).toBeUndefined();
+      expect(opts?.hosted).toBeUndefined(); expect(opts?.serverTools?.tools ?? []).toEqual([]);
+      expect(f.requests[0].body.tools).toBeUndefined(); expect(f.requests[0].body.tool_choice).toBeUndefined();
+      expect(raw).toHaveLength(0);
+    } else {
+      expect(childInvoke).not.toHaveBeenCalled(); expect(raw).toHaveLength(retryChild ? 2 : 1);
+      for (const value of raw) { const body = value.toString(); expect(body).toContain('name="model"'); expect(body).toContain('name="file"');
+        expect(body).not.toContain("tool"); expect(body).not.toContain("client"); }
+    }
+    const sent = f.requests.at(-1)!.body;
+    expect(JSON.stringify(sent.input)).toContain(kind === "ocr" ? "OCR text" : "ASR text");
+    expect(sent.tools).toContainEqual(expect.objectContaining({ name: "provider_server_side_lookup" }));
+    expect(sent.tool_choice).toEqual({ type: "function", name: "client" });
+    expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0); expect(vi.getTimerCount()).toBe(0);
+    const paths = inv.attemptPath as Array<{ stage: string; attempts: AttemptRecord[] }>;
+    expect(paths[0].attempts.map(entry => entry.attempt)).toEqual(retryChild ? [1, 2] : [1]);
+    expect(paths.at(-1)?.attempts.map(entry => [entry.step, entry.attempt])).toEqual([[1, 1], [2, 1]]);
+    expect(Date.now() - before).toBe(retryChild ? 100 : 0);
+  });
+
+  it("internal OCR hosted context does not spend the outer declared-tool budget", async () => {
+    const f = fixture([compatible], { reply: provider => [{ type: "text", text: provider === "prepass" ? '[{"index":1,"image":"OCR text"}]' : "done" }] });
+    const child = new ModelService(parseServiceSteps({ steps: [{ ...compatible, provider: "prepass" }] }), f.deps);
+    const inner = vi.spyOn(child, "invoke");
+    const hosted = new HostedToolService(child, f.deps, [{ ...tool(), id: 77 }]);
+    const context = { sessionId: "outer", remainingCalls: 7, remainingRounds: 11, traces: [] };
+    const agent = new MicroAgent(parseService({ kind: "micro_agent", ocr: { service: "prepass" }, stages: [{ name: "model", service: "model" }] }) as AgentDef,
+      { ...f.deps, logMaxChars: 1000, resolver: { resolve: name => ({ ok: true, executor: name === "prepass" ? hosted : f.service, isAgent: false }), sttDef: () => ({ ok: false, message: "unused" }) } });
+    const request = buildRequest(seed().family, { ...seed().data(), messages: [{ role: "user", content: [{ type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }] }] });
+    const inv = await agent.invoke(request, undefined, { hosted: context, serverTools: { tools: [tool()] }, callerToolValidation: { request }, serverToolRound: 3 });
+    expect(inv.result.ok).toBe(true); expect(context.remainingRounds).toBe(11); expect(context.remainingCalls).toBe(7); expect(context.traces).toEqual([]);
+    const options = inner.mock.calls[0][2];
+    expect(options?.hosted).not.toBe(context); expect(options?.callerToolValidation?.request).not.toBe(request);
+    expect(options?.serverTools?.tools.map(entry => entry.id)).toEqual([77]);
+    expect(f.requests[0].body.tools).toBeUndefined(); expect(f.requests[0].body.tool_choice).toBeUndefined();
+    expect(f.adapters).toHaveLength(0);
+    if (inv.result.ok) expect(inv.result.value.response.usage).toMatchObject({ totalTokens: 4 });
+  });
+
+  it.each(["ocr", "asr"].flatMap(kind => [false, true].map(cancel => ({ kind, cancel }))))("internal $kind exhaustion/cancellation=$cancel never dispatches outer stages", async ({ kind, cancel }) => {
+    vi.useFakeTimers();
+    const f = fixture([blocked("first"), compatible], { reply: () => 503 });
+    const childDef = parseServiceSteps({ steps: [{ ...compatible, provider: "prepass", retry: { maxAttempts: 2, on: ["error"], intervalMs: 100 } }] });
+    const child = new ModelService(childDef, f.deps);
+    const raw: Buffer[] = [];
+    Object.assign(f.deps.catalog, { resolveWithin: () => ({ ok: true, target: { upstreamModel: "speech", upstream: { type: "openai_completion", baseUrl: "https://provider.test/prepass", apiKey: "synthetic" } } }) });
+    Object.assign(f.deps.transport, { postRaw: async (_url: string, _headers: unknown, body: Buffer) => { raw.push(body); return { status: 503, headers: {}, json: { error: { message: "upstream unavailable" } }, text: "" }; } });
+    const agent = new MicroAgent(parseService({ kind: "micro_agent", [kind]: { service: "prepass" }, stages: [{ name: "model", service: "model" }] }) as AgentDef,
+      { ...f.deps, logMaxChars: 1000, resolver: { resolve: name => ({ ok: true, executor: name === "prepass" ? child : f.service, isAgent: false }), sttDef: () => ({ ok: true, def: childDef }) } });
     const content: ContentPart = kind === "ocr" ? { type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }
       : { type: "opaque", family: "openai_completion", value: { type: "input_audio", input_audio: { data: "AA==", format: "wav" } } };
     const request = buildRequest(seed().family, { ...seed().data(), messages: [{ role: "user", content: [content] }] });
-    const inv = await agent.invoke(request);
-    expect(inv.result).toMatchObject({ ok: false, terminal: true, status: 400 }); expect(inv.result).not.toHaveProperty("localToolMismatch");
-    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+    const before = Date.now(), controller = new AbortController();
+    const context = { sessionId: "outer", remainingCalls: 7, remainingRounds: 11, traces: [] };
+    const pending = agent.invoke(request, undefined, { signal: controller.signal, hosted: context });
+    await vi.advanceTimersByTimeAsync(0);
+    if (cancel) controller.abort(); else await vi.advanceTimersByTimeAsync(100);
+    const inv = await pending;
+    expect(inv.result).toMatchObject({ ok: false, status: 503 }); expect(inv.result).not.toHaveProperty("localToolMismatch");
+    expect(f.requests.map(entry => entry.provider)).toEqual(kind === "ocr" ? Array(cancel ? 1 : 2).fill("prepass") : []);
+    expect(raw).toHaveLength(kind === "asr" ? cancel ? 1 : 2 : 0);
+    expect((inv.attemptPath as Array<{ stage: string; attempts: AttemptRecord[] }>).map(call => call.stage)).toEqual([`(${kind})`]);
+    expect(context).toMatchObject({ remainingCalls: 7, remainingRounds: 11, traces: [] });
+    expect(Date.now() - before).toBe(cancel ? 0 : 100); expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(100); // drain the existing retry sleep after cancellation
+    expect(f.requests.some(entry => entry.provider === "compatible" || entry.provider === "first")).toBe(false);
+  });
+
+  it.each(["buffered", "stream", "hosted", "hosted-buffered", "hosted-stream"])("completed internal OCR usage survives all outer mismatches (%s)", async mode => {
+    const f = fixture([blocked("first"), blocked("last")], { reply: () => [{ type: "text", text: '[{"index":1,"image":"OCR text"}]' }] });
+    const child = new ModelService(parseServiceSteps({ steps: [{ ...compatible, provider: "prepass" }] }), f.deps);
+    const agent = new MicroAgent(parseService({ kind: "micro_agent", ocr: { service: "prepass" }, stages: [{ name: "model", service: "model" }] }) as AgentDef,
+      { ...f.deps, logMaxChars: 1000, resolver: { resolve: name => ({ ok: true, executor: name === "prepass" ? child : f.service, isAgent: false }), sttDef: () => ({ ok: false, message: "unused" }) } });
+    const request = buildRequest(seed().family, { ...seed().data(), messages: [{ role: "user", content: [{ type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }] }] });
+    if (mode === "hosted") {
+      await expect(runHostedTools(agent, request, [], f.deps.transport, { sessionId: "synthetic", emit: async () => {}, config: HostedToolOptionsSchema.parse({ streamMode: "all" }) }))
+        .rejects.toMatchObject({ statusCode: 400, usage: { totalTokens: 2 } });
+    } else {
+      const executor = mode.startsWith("hosted-") ? new HostedToolService(agent, f.deps, []) : agent;
+      const inv = mode.endsWith("stream") ? await executor.stream(request.withStream(true)) : await executor.invoke(request);
+      expect(inv.result).toMatchObject({ ok: false, status: 400, usage: { totalTokens: 2 } });
+      if ("usage" in inv) expect(inv.usage).toMatchObject({ totalTokens: 2 });
+      expect(inv.attempts).toBe(3); // one child send, then two outer local attempts
+    }
+    expect(f.requests.map(entry => entry.provider)).toEqual(["prepass"]); expect(f.adapters).toHaveLength(0);
+  });
+
+  it.each([false, true])("stateless stream=%s cancellation accounts completed OCR once", async stream => {
+    vi.useFakeTimers();
+    const raw = Object.assign(new EventEmitter(), { writableFinished: false, headersSent: false, writableEnded: false, destroy: vi.fn() });
+    const f = fixture([compatible], { reply: provider => {
+      if (provider === "prepass") return [{ type: "text", text: '[{"index":1,"image":"OCR text"}]' }];
+      raw.emit("close"); return 503;
+    } });
+    const child = new ModelService(parseServiceSteps({ steps: [{ ...compatible, provider: "prepass" }] }), f.deps);
+    const definition = parseService({ kind: "micro_agent", ocr: { service: "prepass" }, stages: [{ name: "model", service: "model" }] }) as AgentDef;
+    const agent = new MicroAgent(definition, { ...f.deps, logMaxChars: 1000,
+      resolver: { resolve: name => ({ ok: true, executor: name === "prepass" ? child : f.service, isAgent: false }), sttDef: () => ({ ok: false, message: "unused" }) } });
+    const logs: LogParams[] = [], record = vi.fn(), activeRequests = new ActiveRequestRegistry();
+    const deps = { ...f.deps, services: { getByName: () => ({ id: 7, enabled: true }), def: () => definition }, factory: { forRow: () => ({ executor: agent }) },
+      logger: { capture: (value: unknown) => JSON.stringify(value), record: (value: LogParams) => logs.push(value) }, usage: { record }, activeRequests, streamCommitGraceMs: 600_000 } as unknown as ProxyDeps;
+    const controller = new ProxyController(deps);
+    const req = { url: "/v1/responses", method: "POST", headers: {}, clientToken: { id: 1, scopeServices: [7] }, body: {
+      model: "agent", stream, tools: [declared], input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+    } } as unknown as FastifyRequest;
+    const hijack = vi.fn(), reply = { raw, hijack } as unknown as FastifyReply;
+    // Inject the already-authenticated controller boundary; real scoped HTTP
+    // authorization is covered separately by the disposable validation script.
+    const owned = controller as unknown as { handleChatOwned(req: FastifyRequest, reply: FastifyReply, ingress: Family): Promise<unknown> };
+    await owned.handleChatOwned(req, reply, "openai_responses");
+    expect(logs).toHaveLength(1); expect(logs[0]).toMatchObject({ httpStatus: 499, usage: { totalTokens: 2 } });
+    expect(record.mock.calls).toEqual([[1, 2]]); expect(hijack).toHaveBeenCalledTimes(1); expect(raw.destroy).toHaveBeenCalledTimes(1);
+    expect(activeRequests.listActive()).toHaveLength(0); expect(f.requests.map(entry => entry.provider)).toEqual(["prepass", "compatible"]);
+    expect(f.adapters).toHaveLength(0); expect(f.files).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(f.requests).toHaveLength(2); expect(record).toHaveBeenCalledTimes(1);
   });
 });

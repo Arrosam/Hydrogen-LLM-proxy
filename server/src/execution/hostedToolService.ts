@@ -6,6 +6,7 @@ import type { HostedToolOptions } from "./definition";
 import { HostedRunError, runHostedTools } from "./hostedToolLoop";
 import type { Invocation, StreamInvocation } from "./outcome";
 import { genId } from "../util/ids";
+import { countAttempts } from "./serviceCall";
 import { combineServerToolAvailability, prepareServerTools, ServerToolPreflightError, type PreparedServerTools } from "./serverTools";
 
 /** A named Micro Agent stage executes its own operator-bound tools before returning. */
@@ -31,7 +32,7 @@ export class HostedToolService extends ModelService {
     } catch (error) {
       if (error instanceof ServerToolPreflightError) return { result: error.failure(), attempts: 0, attemptPath: [] };
       if (!(error instanceof HostedRunError)) throw error;
-      return { result: { ok: false, kind: "error", status: error.statusCode, message: error.message, errorBody: error.errorBody }, usage: error.usage, attemptPath: error.calls, attempts: error.calls.reduce((n, call) => n + call.attempts.length, 0) };
+      return { result: { ok: false, kind: "error", status: error.statusCode, message: error.message, errorBody: error.errorBody, usage: error.usage }, usage: error.usage, attemptPath: error.calls, attempts: countAttempts(error.calls) };
     }
   }
   override async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {

@@ -8,7 +8,7 @@
     {
       "id": "first mismatch to immediate compatible stage",
       "status": 200,
-      "elapsedMs": 42,
+      "elapsedMs": 38,
       "requests": {
         "compatible": 1
       },
@@ -20,12 +20,12 @@
         2
       ],
       "passed": true,
-      "headersMs": 41
+      "headersMs": 37
     },
     {
       "id": "multiple mismatches preserve strict order",
       "status": 200,
-      "elapsedMs": 16,
+      "elapsedMs": 18,
       "requests": {
         "compatible": 1
       },
@@ -38,7 +38,7 @@
         3
       ],
       "passed": true,
-      "headersMs": 16
+      "headersMs": 18
     },
     {
       "id": "all policy mismatches keep final native error",
@@ -51,12 +51,12 @@
         2
       ],
       "passed": true,
-      "headersMs": 9
+      "headersMs": 8
     },
     {
       "id": "all mismatch stream stays HTTP 400",
       "status": 400,
-      "elapsedMs": 8,
+      "elapsedMs": 5,
       "requests": {},
       "requestOrder": [],
       "stages": [
@@ -64,12 +64,12 @@
         2
       ],
       "passed": true,
-      "headersMs": 8
+      "headersMs": 5
     },
     {
       "id": "all mismatch background stays HTTP 400",
       "status": 400,
-      "elapsedMs": 8,
+      "elapsedMs": 7,
       "requests": {},
       "requestOrder": [],
       "stages": [
@@ -82,7 +82,7 @@
     {
       "id": "all mismatches report last wire failure",
       "status": 400,
-      "elapsedMs": 9,
+      "elapsedMs": 7,
       "requests": {},
       "requestOrder": [],
       "stages": [
@@ -90,7 +90,7 @@
         2
       ],
       "passed": true,
-      "headersMs": 9
+      "headersMs": 7
     },
     {
       "id": "wire mismatch to next native stage",
@@ -107,12 +107,12 @@
         2
       ],
       "passed": true,
-      "headersMs": 10
+      "headersMs": 11
     },
     {
       "id": "retry400 tool-error lookalike retains 3 upstream attempts",
       "status": 200,
-      "elapsedMs": 55,
+      "elapsedMs": 56,
       "requests": {
         "retry400": 3
       },
@@ -127,12 +127,12 @@
         1
       ],
       "passed": true,
-      "headersMs": 55
+      "headersMs": 56
     },
     {
       "id": "retry503 tool-error lookalike retains 3 upstream attempts",
       "status": 200,
-      "elapsedMs": 61,
+      "elapsedMs": 60,
       "requests": {
         "retry503": 3
       },
@@ -147,7 +147,7 @@
         1
       ],
       "passed": true,
-      "headersMs": 55
+      "headersMs": 59
     },
     {
       "id": "caller duplicate cannot evade global validation",
@@ -172,12 +172,12 @@
     {
       "id": "caller droppedEntry cannot evade global validation",
       "status": 400,
-      "elapsedMs": 0,
+      "elapsedMs": 1,
       "requests": {},
       "requestOrder": [],
       "stages": [],
       "passed": true,
-      "headersMs": 0
+      "headersMs": 1
     },
     {
       "id": "caller badName cannot evade global validation",
@@ -202,12 +202,12 @@
     {
       "id": "caller badAllowed cannot evade global validation",
       "status": 400,
-      "elapsedMs": 0,
+      "elapsedMs": 1,
       "requests": {},
       "requestOrder": [],
       "stages": [],
       "passed": true,
-      "headersMs": 0
+      "headersMs": 1
     },
     {
       "id": "caller conflictingSession cannot evade global validation",
@@ -232,17 +232,17 @@
     {
       "id": "Completion n>1 cannot evade global validation",
       "status": 400,
-      "elapsedMs": 1,
+      "elapsedMs": 2,
       "requests": {},
       "requestOrder": [],
       "stages": [],
       "passed": true,
-      "headersMs": 1
+      "headersMs": 2
     },
     {
       "id": "openai_completion malformed declaration stays terminal",
       "status": 400,
-      "elapsedMs": 1,
+      "elapsedMs": 0,
       "requests": {},
       "requestOrder": [],
       "stages": [],
@@ -252,7 +252,7 @@
     {
       "id": "anthropic malformed declaration stays terminal",
       "status": 400,
-      "elapsedMs": 3,
+      "elapsedMs": 2,
       "requests": {},
       "requestOrder": [],
       "stages": [],
@@ -271,7 +271,7 @@
     {
       "id": "no tools uses ordinary first stage",
       "status": 200,
-      "elapsedMs": 7,
+      "elapsedMs": 9,
       "requests": {
         "first": 1
       },
@@ -282,7 +282,7 @@
         1
       ],
       "passed": true,
-      "headersMs": 7
+      "headersMs": 9
     },
     {
       "id": "compatible streaming fallback",
@@ -299,12 +299,12 @@
         2
       ],
       "passed": true,
-      "headersMs": 4
+      "headersMs": 5
     },
     {
       "id": "slow compatible fallback releases stream headers",
       "status": 200,
-      "elapsedMs": 850,
+      "elapsedMs": 847,
       "requests": {
         "slow": 1
       },
@@ -316,7 +316,7 @@
         2
       ],
       "passed": true,
-      "headersMs": 4,
+      "headersMs": 5,
       "providerDelayMs": 800
     },
     {
@@ -334,7 +334,7 @@
         2
       ],
       "passed": true,
-      "headersMs": 3,
+      "headersMs": 6,
       "providerDelayMs": 800
     },
     {
@@ -354,7 +354,7 @@
     {
       "id": "model-round failover never replays completed tool side effect",
       "status": 200,
-      "elapsedMs": 16,
+      "elapsedMs": 17,
       "requests": {
         "compatible": 2,
         "adapter": 1
@@ -376,7 +376,7 @@
     {
       "id": "Anthropic native sequential fallback",
       "status": 200,
-      "elapsedMs": 5,
+      "elapsedMs": 4,
       "requests": {
         "anthropic": 1
       },
@@ -388,12 +388,274 @@
         2
       ],
       "passed": true,
-      "headersMs": 5
+      "headersMs": 4
+    },
+    {
+      "id": "independent tool-free ocr normal; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 14,
+      "requests": {
+        "ocr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "ocr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 14,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "ocr root scope permits internal reference but denies direct child API",
+      "status": 403,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "independent tool-free ocr retry; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 59,
+      "requests": {
+        "retryOcr": 3,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "retryOcr",
+        "retryOcr",
+        "retryOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 56,
+      "childAttempts": 3,
+      "totalAttempts": 5,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 847,
+      "requests": {
+        "slowOcr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "slowOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 6,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr background; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 818,
+      "requests": {
+        "slowOcr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "slowOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 9,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr all-stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 840,
+      "requests": {
+        "slowOcr": 1
+      },
+      "requestOrder": [
+        "slowOcr"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 6,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 400
+    },
+    {
+      "id": "independent tool-free ocr all-background; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 824,
+      "requests": {
+        "slowOcr": 1
+      },
+      "requestOrder": [
+        "slowOcr"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 400
+    },
+    {
+      "id": "independent tool-free asr normal; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 8,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 8,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "asr root scope permits internal reference but denies direct child API",
+      "status": 403,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "independent tool-free asr retry; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 52,
+      "requests": {
+        "retryAsr": 3,
+        "completion": 1
+      },
+      "requestOrder": [
+        "retryAsr",
+        "retryAsr",
+        "retryAsr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 52,
+      "childAttempts": 3,
+      "totalAttempts": 5,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free asr stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 812,
+      "requests": {
+        "slowAsr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "slowAsr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 810,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
     }
   ],
-  "passed": 28,
+  "passed": 39,
   "failed": 0,
   "limitations": [
-    "OCR/ASR preprocessing and retained pending adapter mismatches keep their existing prepass rejection; moving them behind step selection requires separate orchestration scope."
+    "Retained pending adapter mismatches still keep their terminal prepass rejection; this remains a separate unmet core case, not an approved exclusion.",
+    "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.",
+    "Existing internal ASR multipart omits operator STT extra.language/prompt and retains existing zero-token STT accounting; full public STT parameter parity has not been established."
   ]
 }

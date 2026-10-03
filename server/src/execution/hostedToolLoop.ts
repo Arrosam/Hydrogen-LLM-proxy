@@ -193,7 +193,12 @@ export async function runHostedTools(
       const call: ServiceCall = { stage: `tool round ${round}`, service: request.requestedService, kind: nested ? "agent" : "service", status: inv.result.ok ? 200 : failureStatus(inv.result),
         latencyMs: Date.now() - started, attempts: nested ? [] : path as AttemptRecord[], ...(nested ? { calls: path as ServiceCall[] } : {}), streamed: true };
       calls.push(call);
-      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, call.status, inv.result.errorBody); }
+      if (!inv.result.ok) {
+        call.usage = inv.result.usage ?? ZERO_USAGE;
+        usage = addUsage(usage, call.usage);
+        call.error = failureMessage(inv.result);
+        return fail(call.error, call.status, inv.result.errorBody);
+      }
       const stream = inv.result.value;
       call.request = serializeForLog(stream.upstreamRequest, logMaxChars());
       let roundUsage: Usage = { ...ZERO_USAGE };

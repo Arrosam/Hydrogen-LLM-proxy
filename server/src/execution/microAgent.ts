@@ -218,7 +218,10 @@ export class MicroAgent extends ModelService {
     let source = request;
     const receipts: HostedToolReceipt[] = [];
 
-    const fail = (result: AttemptFailure): Invocation => ({ result, attemptPath: calls, attempts: countAttempts(calls), usage: calls.reduce((sum, call) => addUsage(sum, call.usage ?? ZERO_USAGE), ZERO_USAGE) });
+    const fail = (result: AttemptFailure): Invocation => {
+      const spent = calls.reduce((sum, call) => addUsage(sum, call.usage ?? ZERO_USAGE), ZERO_USAGE);
+      return { result: { ...result, usage: spent }, attemptPath: calls, attempts: countAttempts(calls), usage: spent };
+    };
     const errorInv = (message: string): Invocation => fail({ ok: false, status: 0, kind: "error", message });
     const commit = (name: string, value: InvokeValue): void => {
       const childReceipts = value.hostedToolReceipts ?? [];
@@ -240,10 +243,7 @@ export class MicroAgent extends ModelService {
     };
 
     try {
-      const prepared = this.prepareTools(request, overrides, opts);
-      // OCR/ASR are external work before the selected model chain. A deferred tool
-      // mismatch must not let this pre-pass execute a formerly rejected request.
-      if (prepared.preflightMismatch && (agent.ocr && collectImages(request).length || agent.asr && collectAudio(request).length)) throw prepared.preflightMismatch;
+      this.prepareTools(request, overrides, opts);
 
       // --- OCR pre-pass -----------------------------------------------------
       if (agent.ocr) {
@@ -302,7 +302,15 @@ export class MicroAgent extends ModelService {
               const stored: Array<{ hash: string; description: string }> = [];
               for (const batch of batchImages(pending)) {
                 const ocrReq = buildOcrRequest(request, batch.map((p) => p.image), ocr);
-                const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
+                // An ordinary, tool-free internal request: cancellation and
+                // accounting stay with this run, declared-tool ownership and
+                // hosted-loop budgets belong to this child alone.
+                const { call, result } = await callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, {
+                  signal: opts.signal, timeoutMs: ocr.timeoutMs, progress: prog,
+                  maxAttachmentBytes: attachmentLimit, thinkingProcessing: opts.thinkingProcessing,
+                  onStepProgress: opts.onStepProgress,
+                  callerToolValidation: { request: ocrReq },
+                }, () => this.resolveLogMaxChars());
                 calls.push(call);
                 if (!result.ok) {
                   prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
@@ -369,7 +377,7 @@ export class MicroAgent extends ModelService {
           const byHash = new Map(known);
           for (const job of pending) {
             const started = Date.now();
-            const out = await transcribeAudio(asrDef, audios[job.index], this.deps, { timeoutMs: asr.timeoutMs, signal: opts.signal });
+            const out = await transcribeAudio(asrDef, audios[job.index], this.deps, { timeoutMs: asr.timeoutMs, signal: opts.signal, onStepProgress: opts.onStepProgress });
             calls.push({
               stage: "(asr)", service: asr.service ?? "(inline)", kind: "service",
               status: out.result.ok ? 200 : out.result.status, latencyMs: Date.now() - started,

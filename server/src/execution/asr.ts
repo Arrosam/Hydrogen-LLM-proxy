@@ -63,9 +63,12 @@ export async function transcribeAudio(
   def: ServiceSteps,
   audio: AudioInput,
   deps: { catalog: Catalog; transport: Transport },
-  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  opts: { timeoutMs?: number; signal?: AbortSignal; onStepProgress?: () => void } = {},
 ): Promise<RunOutput<string>> {
   return runSteps<string>(def, async (step) => {
+    // This independent tool-free request has begun ordinary execution. Release
+    // enclosing HTTP lifecycle waits without sharing tool ownership or budgets.
+    opts.onStepProgress?.();
     // /audio/transcriptions is an OpenAI-shaped route, so the endpoint has to be
     // one -- which a provider whose primary is Anthropic can still offer through
     // a declared alternate.

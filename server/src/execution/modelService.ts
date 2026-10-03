@@ -291,7 +291,7 @@ export class ModelService {
    * `startedAt` is when the run began, so the upstream time (retries included)
    * counts against the pacing budget instead of being added to it. */
   protected fabricated(inv: Invocation, startedAt?: number): StreamInvocation {
-    if (!inv.result.ok) return { result: inv.result, attemptPath: inv.attemptPath, attempts: inv.attempts };
+    if (!inv.result.ok) return { result: { ...inv.result, usage: inv.usage ?? inv.result.usage }, attemptPath: inv.attemptPath, attempts: inv.attempts };
     const v = inv.result.value;
     const tokenRate = resolveRate(this.deps.simulatedStreamingTokenRate);
     return {

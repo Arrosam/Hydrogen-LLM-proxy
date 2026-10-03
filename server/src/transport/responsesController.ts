@@ -12,6 +12,7 @@ import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, isAgent, serviceCategory, serviceThinkingFormat, stepOverrides } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
+import { countAttempts } from "../execution/serviceCall";
 import { collectServerToolCalls, serverToolDeclaration, serverToolParts, serverToolResponseContent, ServerToolPreflightError, validateServerToolInput } from "../execution/serverTools";
 import type { ServiceSnapshot } from "../execution/serviceSnapshot";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
@@ -365,7 +366,7 @@ export class ResponsesController {
         const cancelled = abort.signal.aborted;
         status = cancelled ? 499 : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.statusCode : 502;
         error = cancelled ? "Response execution cancelled" : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.message : "Response execution failed";
-        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; }
+        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; attempts = countAttempts(caught.calls); }
         job.errorBody = nativeFailure(family, status, error, caught instanceof HostedRunError || caught instanceof ServerToolPreflightError ? caught.errorBody : undefined);
         const code = (job.errorBody.error as WireItem).code;
         const failed = this.repo.transition(id, token.id, cancelled ? "cancelled" : "failed", { ...initial, error: { code: code ?? (cancelled ? "cancelled" : "execution_failed"), message: error } });

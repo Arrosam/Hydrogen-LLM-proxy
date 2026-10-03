@@ -378,7 +378,7 @@ export class ProxyController {
         const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => keepalive.stop());
         keepalive.stop();
         if (!outcome.result.ok) {
-          if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
+          if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, { ...outcome, usage: outcome.result.usage });
           if (keepalive.committed) {
             // The 200 is already on the wire; the failure travels in-stream.
             return this.replyFailureInStream(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });
