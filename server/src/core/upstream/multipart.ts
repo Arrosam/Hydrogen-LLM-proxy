@@ -14,6 +14,13 @@ export function multipartBoundary(contentType: string | undefined): string | nul
   return m ? (m[1] ?? m[2]).trim() : null;
 }
 
+/** A configured value as a multipart text field: scalars go in plain,
+ * structured values as JSON, matching the media passthrough representation. */
+export function formFieldValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
 interface Part {
   /** Offset of the part's content (just past the blank line). */
   contentStart: number;

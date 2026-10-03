@@ -17,7 +17,7 @@ import {
   videosUrl,
   type UpstreamProvider,
 } from "../core/upstream/endpoints";
-import { readMultipartField, rewriteMultipartField, upsertMultipartField } from "../core/upstream/multipart";
+import { formFieldValue, readMultipartField, rewriteMultipartField, upsertMultipartField } from "../core/upstream/multipart";
 import { classifyError, runSteps, type AttemptResult, type RunOutput } from "../execution/steps";
 import { isAgent, serviceCategory, stepOverrides, type ServiceCategory, type ServiceStep, type ServiceSteps } from "../execution/definition";
 import { MEDIA_FAMILIES, type ResolvedTarget } from "../catalog/catalog";
@@ -78,13 +78,6 @@ function stepParams(step: ServiceStep): Record<string, unknown> {
 
 /** Field names safe to frame into a Content-Disposition header verbatim. */
 const SAFE_FORM_FIELD = /^[A-Za-z0-9_.-]+$/;
-
-/** A step-override value as a multipart text field: scalars go in plain (a
- * quoted "en" would not be a language), structured values as JSON. */
-function formFieldValue(v: unknown): string {
-  if (typeof v === "string") return v;
-  return typeof v === "object" ? JSON.stringify(v) : String(v);
-}
 
 function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpRequestInfo {
   const [path, query = ""] = req.url.split("?");

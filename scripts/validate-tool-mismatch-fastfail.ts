@@ -14,6 +14,8 @@ import type { Family } from "../server/src/core/ir/params";
 import type { ContentPart } from "../server/src/core/ir/content";
 import { parseService, parseServiceSteps } from "../server/src/execution/definition";
 import { HttpToolSchema } from "../server/src/execution/toolHttp";
+import { buildTranscriptionForm } from "../server/src/execution/asr";
+import { readMultipartField, upsertMultipartField } from "../server/src/core/upstream/multipart";
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-fastfail-http-"));
 Object.assign(process.env, { NODE_ENV: "test", DATA_DIR: dataDir, ALLOW_PRIVATE_UPSTREAMS: "1", LOG_PAYLOAD_MAX_CHARS: "0",
@@ -30,7 +32,7 @@ const synthetic = http.createServer((req, res) => {
   req.on("end", () => { void (async () => {
     const provider = req.url!.split("/")[1];
     const multipart = String(req.headers["content-type"]).startsWith("multipart/form-data");
-    const body = multipart ? { multipart: raw } : JSON.parse(raw) as Record<string, unknown>;
+    const body = multipart ? { multipart: raw, contentType: String(req.headers["content-type"]) } : JSON.parse(raw) as Record<string, unknown>;
     calls.push({ provider, body });
     if (provider === "adapter") { res.setHeader("content-type", "application/json"); res.end('{"results":[]}'); return; }
     const count = calls.filter(call => call.provider === provider).length;
@@ -258,9 +260,59 @@ try {
     }
   }
 
+  const fieldCases = [
+    { name: "nested", overrides: { extra: { language: "en", prompt: "Recognize English proper names.\r\nKeep punctuation." } }, expected: { language: "en", prompt: "Recognize English proper names.\r\nKeep punctuation." } },
+    { name: "direct-precedence", overrides: { language: "en", prompt: "Use direct English hint.", extra: { language: "fr", prompt: "Use nested English hint." } }, expected: { language: "en", prompt: "Use direct English hint." } },
+    { name: "direct-null-empty", overrides: { language: null, prompt: "", extra: { language: "en", prompt: "Use nested English hint." } }, expected: { language: null, prompt: "" } },
+    { name: "empty", overrides: { extra: { language: "", prompt: "" } }, expected: { language: "", prompt: "" } },
+    { name: "null", overrides: { extra: { language: null, prompt: null } }, expected: { language: null, prompt: null } },
+  ];
+  for (const sample of fieldCases) {
+    const child = c.services.create({ name: `configured-asr-${sample.name}`, definition: parseServiceSteps({ category: "stt", timeoutMs: 3000,
+      steps: [{ model: "m", provider: "asr", overrides: sample.overrides }] }) });
+    const audio = { data: Buffer.from(`RIFFconfigured-asr-${sample.name}`).toString("base64"), format: "wav" };
+    const control = buildTranscriptionForm(child.name, audio);
+    let publicForm = control.body;
+    for (const field of ["language", "prompt"] as const) if (sample.expected[field] !== null) publicForm = upsertMultipartField(publicForm, control.contentType, field, "Caller English hint.")!;
+    const publicResponse = await fetch(`${local}/v1/audio/transcriptions`, { method: "POST", headers: {
+      authorization: `Bearer ${owner.secret}`, "content-type": control.contentType,
+    }, body: new Uint8Array(publicForm), signal: AbortSignal.timeout(5000) });
+    assert.equal(publicResponse.status, 200); assert.equal((await publicResponse.json() as { text: string }).text, "ASR text");
+    assert.deepEqual(calls.map(call => call.provider), ["asr"]);
+    const fields = (call: typeof calls[number]) => {
+      const form = Buffer.from(String(call.body.multipart)); const contentType = String(call.body.contentType);
+      assert.equal(readMultipartField(form, contentType, "model"), "up");
+      assert(form.includes(Buffer.from(audio.data, "base64")));
+      for (const field of ["tools", "tool_choice"]) assert.equal(readMultipartField(form, contentType, field), null);
+      return { language: readMultipartField(form, contentType, "language"), prompt: readMultipartField(form, contentType, "prompt") };
+    };
+    const publicFields = fields(calls[0]); assert.deepEqual(publicFields, sample.expected);
+    calls.length = 0; c.activeRequests.clear();
+    const leaf = add(`configured-asr-model-${sample.name}`, [blocked("first"), compatible("completion")]);
+    const root = c.services.create({ name: `configured-asr-root-${sample.name}`, definition: parseService({ kind: "micro_agent", asr: { service: child.name }, stages: [{ name: "model", service: leaf.name }] }) });
+    const scoped = c.tokens.create({ name: `synthetic-configured-${sample.name}`, scopeServices: [root.id] });
+    const beforeLogs = c.logs.query({}).total;
+    const hit = await request(root.name, { language: "caller-only", prompt: "Outer English hint.",
+      messages: [{ role: "user", content: [{ type: "input_audio", input_audio: audio }] }],
+      tools: [{ type: "web_search" }, { type: "function", function: { name: "client", parameters: {} } }],
+      tool_choice: { type: "function", function: { name: "client" } },
+    }, "openai_completion", scoped.secret);
+    assert.equal(hit.response.status, 200); assert((await hit.response.text()).includes("Synthetic answer"));
+    assert.deepEqual(calls.map(call => call.provider), ["asr", "completion"]);
+    const internalFields = fields(calls[0]);
+    console.log(JSON.stringify({ probe: "ASR configured-field parity", case: sample.name, publicFields, internalFields }));
+    assert.deepEqual(internalFields, publicFields, `internal/public configured ${sample.name} fields differ`);
+    assert(JSON.stringify(calls[1].body).includes("ASR text")); assert(JSON.stringify(calls[1].body.tool_choice).includes("client"));
+    const logs = c.logs.query({}); assert.equal(logs.total - beforeLogs, 1); assert.equal(logs.rows[0].serviceId, root.id);
+    assert.equal(logs.rows[0].attempts, 3); assert.equal(logs.rows[0].totalTokens, 2);
+    const meter = c.tokens.get(scoped.token.id)!; assert.equal(meter.usedRequests, 1); assert.equal(meter.usedTokens, 2);
+    record(`public STT/internal ASR configured fields ${sample.name}`, 200, Date.now() - hit.start,
+      { publicFields, internalFields, publicProviderCalls: 1, childToolCount: 0, topLevelLogRows: 1, requestCharges: 1, tokenCharges: 2, totalAttempts: 3 });
+  }
+
   const result = { ticket: "HYD-TOOL-MISMATCH-FASTFAIL", base: "8c12ff24b72767bcc7b0438a4091c36e7ecddccc", node: process.version,
     environment: `${process.platform}/${process.arch}`, providers: "synthetic loopback only", scenarios: evidence, passed: evidence.length, failed: 0,
-    limitations: ["Retained pending adapter mismatches still keep their terminal prepass rejection; this remains a separate unmet core case, not an approved exclusion.", "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.", "Existing internal ASR multipart omits operator STT extra.language/prompt and retains existing zero-token STT accounting; full public STT parameter parity has not been established."] };
+    limitations: ["Retained pending adapter mismatches still keep their terminal prepass rejection; this remains a separate unmet core case, not an approved exclusion.", "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.", "Internal ASR forwards only the authorized configured language/prompt fields; wider public STT parameter parity is unchanged and existing zero-token STT accounting is preserved."] };
   if (process.argv[2]) fs.writeFileSync(path.resolve(process.argv[2]), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify({ passed: evidence.length, failed: 0 }));
 } finally {
