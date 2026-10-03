@@ -53,6 +53,29 @@ async function save(onSaved: ReturnType<typeof vi.fn>) {
 }
 
 describe("Model Service policy editor", () => {
+  it("keeps parameter editing and Fields/JSON transitions independent of the adjacent policy", async () => {
+    const onSaved = editor(service, false);
+    expandStep();
+    const overrides = within(screen.getByRole("group", { name: "Parameter overrides", exact: true }));
+    fireEvent.click(overrides.getByRole("button", { name: "Add parameter" }));
+    fireEvent.change(overrides.getByPlaceholderText("parameter"), { target: { value: "temperature" } });
+    fireEvent.change(overrides.getByPlaceholderText("content — JSON or text"), { target: { value: "0.25" } });
+    fireEvent.click(overrides.getByRole("button", { name: "JSON", exact: true }));
+    const json = overrides.getByRole("textbox") as HTMLTextAreaElement;
+    expect(JSON.parse(json.value)).toEqual({ temperature: 0.25 });
+    fireEvent.change(json, { target: { value: '{"temperature":0.5,"extra":{"fixture":"kept"}}' } });
+    fireEvent.click(overrides.getByRole("button", { name: "Fields", exact: true }));
+    expect((overrides.getAllByPlaceholderText("parameter") as HTMLInputElement[]).map(input => input.value)).toEqual(["temperature", "extra"]);
+    expect((overrides.getAllByPlaceholderText("content — JSON or text") as HTMLInputElement[]).map(input => input.value)).toEqual(["0.5", '{"fixture":"kept"}']);
+    fireEvent.click(overrides.getAllByTitle("Remove override")[1]);
+    expect((upstream().getByRole("combobox", { name: "Policy mode" }) as HTMLSelectElement).value).toBe("inherit");
+    expandStep();
+    const payload = await save(onSaved);
+    expect(payload.steps.steps[0].overrides).toEqual({ temperature: 0.5 });
+    expect(payload.steps.steps[0]).not.toHaveProperty("serverToolPolicy");
+    expect(payload.steps).not.toHaveProperty("serverToolPolicy");
+  });
+
   it("keeps each step policy collapsed and discoverable independently of service Advanced", async () => {
     const onSaved = editor(service, false);
     const serviceAdvanced = screen.getByRole("button", { name: "Advanced", exact: true });
