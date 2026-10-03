@@ -1,8 +1,8 @@
-# F002 — Searchable hosted tool selection
+# HYD-TOOL-SELECTOR — Searchable hosted tool selection
 
-Status: triaged; implementation and acceptance pending. Local tracked ticket only; no remote issue exists (Project OAuth approval is pending).
+Status: implemented and tested; independent final reviews passed; owner visual acceptance pending. Local tracked ticket only; no remote issue exists (Project OAuth approval is pending). This descriptive temporary ID does not replace historical roadmap F002/F003; a GitHub issue number will be assigned later.
 
-Owner: repository owner. Developer: Codex UI task. Reviewer: independent review requested by owner, to be recorded after implementation.
+Owner: repository owner. Developer: Codex UI task. Reviewers: `/root/final_code_audit` (gpt-6.1-sol, max) and `/root/independent_browser_audit` (gpt-6.1-sol, xhigh), each in a separate agent session.
 
 ## Inspiration and scope
 
@@ -20,7 +20,7 @@ Bulk-action decision communicated by the owner: **Select all search results** un
 2. Click/Enter toggles a stable numeric ID without duplicates. Additions create removable chips inside the bordered control, clear query immediately and keep input focused/dropdown usable for consecutive additions.
 3. Select all search results unions current selection and filtered IDs; empty query selects all. Clear removes everything, including missing IDs. Empty/no-result and disabled-control actions are safe.
 4. Boundary checks at 63/64/65: at most 64 unique bindings; reject individual/bulk additions over 64 atomically with visible/announced feedback; removals work at the cap.
-5. Deduplicate catalog IDs and incoming selected IDs; show disabled tool status and preserve disabled/missing bindings across searching and additions. Missing IDs remain removable.
+5. Deduplicate catalog IDs and incoming selected IDs; show disabled tool status and preserve disabled/missing bindings across searching, additions and catalog refresh while open. Missing IDs remain removable; stale virtual options cannot add absent catalog IDs.
 6. Headless UI provides arrows, Enter, Escape, Tab and active/selected accessibility states. Label/help/error associations, chip remove-button names and focus return after removal are verified. Disabled component cannot mutate selection/configuration.
 7. Dropdown escapes the actual scrolling Modal's clipping and positions within viewport. Long names/descriptions, many chips/options, narrow viewport and Hydrogen's supported theme/focus/error/disabled states remain usable.
 8. Existing `ServiceEditor` callback/server ID-array contract and streaming/round/call options remain intact. No unrelated tool-policy change.
@@ -35,4 +35,20 @@ Equivalence partitions: name/description/mixed-case search, empty query/catalog/
 
 ## Evidence and final state
 
-Pending: baseline screenshot, implementation, automated gates, independent review, real-browser functional/visual observations, before/after screenshots, overlapping-file report. GraphFlow MCP/CLI unavailable in this environment; targeted reads and an explicit task plan are used. `.agents/skills` availability is checked separately. Implemented: no. Tested: no. Accepted: pending. Released: no.
+Implementation uses exact official `@headlessui/react@2.2.10` with React18-supported peer range, library keyboard/virtual/anchoring primitives, Hydrogen's existing ink/teal theme, removable chips, filtered bulk union, atomic cap rejection and stable numeric IDs. API/config callbacks remain unchanged.
+
+| AC | Automated evidence | Real browser evidence |
+| --- | --- | --- |
+| 1–2 | Name/description/case, consecutive selection, no-results/stale-active Enter, exact IDs | Search, pointer/Enter, query reset/focus, chips, click/focus reopen |
+| 3 | Filtered/empty-query union, duplicate catalog/IDs, pointer/keyboard blur, Clear | Native filtered pointer/keyboard bulk, Clear, interrupted edit/reopen |
+| 4 | Individual/batch boundary63/64/65, atomic rejection, legacy65/removals | 63→64, rejected65, whole-catalog65 batch, visible error/invalid association |
+| 5 | Disabled/missing IDs preserved, open catalog refresh→remaining/empty, removals | Disabled/missing chips and exact synthetic save payload |
+| 6 | Field/label/help/error associations, disabled state, focus return | Arrows/Enter/Escape/Tab, keyboard chip removal, input/click reopen |
+| 7 | Scoped jsdom geometry only; actual library virtualizer | Before/after desktop, narrow390px long names, scrolling Modal positioning,300-option virtualization, disabled/error states |
+| 8 | ServiceEditor IDs/config save assertion after Advanced collapse/reopen | Real ServiceEditor with synthetic fetch and exact saved ID/config JSON |
+
+See `../evidence/HYD-TOOL-SELECTOR/validation.md`, `gates.txt`, independent code/browser reports and before/after screenshots for exact commands, observations, findings and limitations. Final-source full prescribed `npm test` passes 1,462 server plus 57 web tests. Post-fix full typecheck/build pass. Audit retains five existing high findings; no new package is affected. No tests were removed or weakened.
+
+GraphFlow MCP/CLI unavailable in this environment; targeted reads and an explicit plan were used. No repo `.agents/skills` was present. Only the existing dark theme exists; narrow ServiceEditor footer overflow is adjacent unchanged layout. Safari/Firefox, screen-reader session and real backend persistence were not exercised. All browser data/network responses are synthetic; no paid or production operation occurred.
+
+Implemented: yes. Tested: automated gates and actual Chrome functional/visual checks; independent code and browser reviews passed. Accepted: owner personal visual acceptance pending. Released: no. Remote ticket: no. Push/deploy/merge: none.
