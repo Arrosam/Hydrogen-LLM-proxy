@@ -220,6 +220,8 @@ export const responseConversations = sqliteTable("response_conversations", {
   metadata: text("metadata_json", { mode: "json" }).$type<Record<string, string>>().notNull(),
   /** Incremented by item mutations; used to reject overlapping conversation turns. */
   revision: integer("revision").notNull().default(0),
+  /** Private session configuration; tool credentials must never be plaintext. */
+  serviceSnapshotSecret: text("service_snapshot_secret", { mode: "json" }).$type<EncryptedBlob>(),
   createdAt: createdAt(),
   touchedAt: integer("touched_at").notNull(),
 }, t => ({ ownerIdx: index("response_conversations_token_idx").on(t.tokenId), ageIdx: index("response_conversations_touch_idx").on(t.touchedAt) }));
@@ -243,6 +245,8 @@ export const storedResponses = sqliteTable("stored_responses", {
   inputItems: text("input_items_json", { mode: "json" }).$type<Record<string, unknown>[]>().notNull(),
   /** Full independent snapshot: deleting an ancestor never corrupts a completed child. */
   history: text("history_json", { mode: "json" }).$type<Message[]>().notNull(),
+  /** Independent encrypted configuration snapshot, retained after ancestor deletion. */
+  serviceSnapshotSecret: text("service_snapshot_secret", { mode: "json" }).$type<EncryptedBlob>(),
   createdAt: createdAt(),
   touchedAt: integer("touched_at").notNull(),
 }, t => ({ ownerIdx: index("stored_responses_token_idx").on(t.tokenId), ageIdx: index("stored_responses_touch_idx").on(t.touchedAt), statusIdx: index("stored_responses_status_idx").on(t.status) }));

@@ -4,6 +4,8 @@ import type { DB } from "../db";
 import { conversationItems, responseConversations, storedResponses, responseEvents } from "../db/schema";
 import type { Message } from "../core/ir/content";
 import { genId } from "../util/ids";
+import { decryptSecret, encryptSecret } from "../security/crypto";
+import type { ServiceSnapshot } from "../execution/serviceSnapshot";
 
 export type StoredResponse = typeof storedResponses.$inferSelect;
 export type Conversation = typeof responseConversations.$inferSelect;
@@ -18,7 +20,38 @@ export class ResponseStateError extends Error {
 /** Durable state owned by a single client API Key. All public operations take that owner. */
 export class ResponseRepo {
   private maintenance = false;
-  constructor(private readonly db: DB, private readonly retentionMs: () => number, private readonly now: () => number = Date.now) {}
+  constructor(private readonly db: DB, private readonly retentionMs: () => number, private readonly now: () => number = Date.now,
+    private readonly snapshotKey: Buffer | null = null) {}
+
+  private encodeSnapshot(snapshot: ServiceSnapshot) {
+    if (!this.snapshotKey) throw new Error("Session snapshot encryption key is unavailable");
+    const encoded = JSON.stringify(snapshot);
+    if (Buffer.byteLength(encoded) > 25 * 1024 * 1024) throw new ResponseStateError("Session configuration exceeds 25 MiB", 413);
+    return encryptSecret(encoded, this.snapshotKey);
+  }
+
+  private decodeSnapshot(secret: StoredResponse["serviceSnapshotSecret"]): ServiceSnapshot | undefined {
+    if (!secret) return undefined;
+    if (!this.snapshotKey) throw new Error("Session snapshot encryption key is unavailable");
+    return JSON.parse(decryptSecret(secret, this.snapshotKey)) as ServiceSnapshot;
+  }
+
+  responseSnapshot(id: string, tokenId: number): ServiceSnapshot | undefined {
+    const row = this.response(id, tokenId);
+    if (!row) throw new ResponseStateError("Response not found");
+    return this.decodeSnapshot(row.serviceSnapshotSecret);
+  }
+
+  conversationSnapshot(id: string, tokenId: number): ServiceSnapshot | undefined {
+    return this.decodeSnapshot(this.requireConversation(id, tokenId).serviceSnapshotSecret);
+  }
+
+  hasConversationResponses(id: string, tokenId: number): boolean {
+    this.requireConversation(id, tokenId);
+    return !!this.db.select({ id: storedResponses.id }).from(storedResponses).where(and(
+      eq(storedResponses.conversationId, id), eq(storedResponses.tokenId, tokenId),
+    )).get();
+  }
 
   private expired(touchedAt: number): boolean {
     const ttl = this.retentionMs();
@@ -135,16 +168,21 @@ export class ResponseRepo {
   }
 
   /** Reserve a conversation BEFORE model/tool execution so competing turns cannot both cause effects. */
-  createResponse(input: Omit<ResponseInsert, "touchedAt">, conversationRevision?: number): StoredResponse {
+  createResponse(input: Omit<ResponseInsert, "touchedAt" | "serviceSnapshotSecret">, conversationRevision?: number, snapshot?: ServiceSnapshot): StoredResponse {
     if (this.maintenance) throw new ResponseStateError("Response state is being restored", 503);
+    const snapshotSecret = snapshot ? this.encodeSnapshot(snapshot) : undefined;
     return this.db.transaction(() => {
+      let retainedSnapshot = snapshotSecret;
       if (input.conversationId) {
         const conversation = this.requireConversation(input.conversationId, input.tokenId);
         if (conversationRevision !== undefined && conversation.revision !== conversationRevision) throw new ResponseStateError("Conversation changed while preparing this response", 409);
         this.assertIdle(input.conversationId, input.tokenId);
-        this.db.update(responseConversations).set({ touchedAt: this.now() }).where(eq(responseConversations.id, input.conversationId)).run();
+        // A conversation's first accepted turn fixes its configuration even
+        // when that individual response uses store:false or is later deleted.
+        retainedSnapshot = conversation.serviceSnapshotSecret ?? snapshotSecret;
+        this.db.update(responseConversations).set({ touchedAt: this.now(), ...(retainedSnapshot ? { serviceSnapshotSecret: retainedSnapshot } : {}) }).where(eq(responseConversations.id, input.conversationId)).run();
       }
-      return this.db.insert(storedResponses).values({ ...input, touchedAt: this.now() }).returning().get();
+      return this.db.insert(storedResponses).values({ ...input, serviceSnapshotSecret: retainedSnapshot, touchedAt: this.now() }).returning().get();
     });
   }
 

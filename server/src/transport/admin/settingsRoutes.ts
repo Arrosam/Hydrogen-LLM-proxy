@@ -24,6 +24,9 @@ function isValidAllowlistEntry(raw: string): boolean {
 const AllowlistPut = z.object({ entries: z.array(z.string()).max(200) });
 const RetentionPut = z.object({ days: z.number().int().min(0).max(3650) });
 const UiLanguagePut = z.object({ language: z.enum(["en", "zh"]) });
+const ServerToolNamePrefixPut = z.object({
+  prefix: z.string().max(64).regex(/^[A-Za-z0-9_-]*$/, "Use at most 64 letters, digits, underscores or hyphens, or leave the prefix empty"),
+}).strict();
 const EnvSettingsPut = z.object({
   allowPrivateUpstreams: z.boolean().optional(),
   logPayloadMaxChars: z.number().int().min(0).max(10_000_000).optional(),
@@ -131,6 +134,19 @@ export async function settingsRoutes(app: FastifyInstance, c: Container): Promis
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     c.settings.setUiLanguage(parsed.data.language);
     return { language: parsed.data.language };
+  });
+
+  app.get("/server-tool-name-prefix", async (req, reply) => {
+    if (!requireAdmin(req, reply, "view settings")) return reply;
+    return { prefix: c.settings.serverToolNamePrefix() };
+  });
+
+  app.put("/server-tool-name-prefix", async (req, reply) => {
+    if (!requireAdmin(req, reply, "change the server tool name prefix")) return reply;
+    const parsed = parse(ServerToolNamePrefixPut, req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    c.settings.setServerToolNamePrefix(parsed.data.prefix);
+    return { prefix: c.settings.serverToolNamePrefix() };
   });
 
   // The running server's release — the Settings page footer. Reported by the

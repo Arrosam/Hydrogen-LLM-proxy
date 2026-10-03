@@ -26,8 +26,8 @@ export const HttpToolSchema = z.object({
   enabled: z.boolean().default(true),
   /**
    * Opt this tool into provider-executed ("server-side") round trips on the
-   * client protocols. Absent, the tool behaves exactly as before: it reaches the
-   * model, and only the model's final turn comes back.
+   * client protocols. Bindings are availability only; absent this contract no
+   * client server-tool declaration can offer or execute this adapter.
    *
    * Present, a client that DECLARES `name` as a server tool (Anthropic
    * `tools:[{type:"web_search_20250305", name}]}`, or the Responses equivalent)
@@ -46,7 +46,10 @@ export const HttpToolSchema = z.object({
   }).optional(),
 });
 
-export type HttpTool = z.infer<typeof HttpToolSchema>;
+export type HttpTool = z.infer<typeof HttpToolSchema> & {
+  /** Persisted executor identity, added by the repository; never client configurable. */
+  readonly id?: number;
+};
 export type ServerTool = NonNullable<HttpTool["serverTool"]>;
 
 /**

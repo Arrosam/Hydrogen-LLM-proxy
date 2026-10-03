@@ -1,0 +1,11 @@
+{
+  "ticket": "HYD-TOOL-POLICY",
+  "branch": "codex/hydrogen-tool-policy-preview",
+  "baseline": "47397d97c209af695b7fc01ed376f2ddeaeda06b",
+  "runtimeDiffSha256": "fac766d373b56dc86e9a1a879a3bf383734ec93f33aeadb3bbe0c528916d9423",
+  "startedAt": "2026-10-03T11:18:14.640908+00:00",
+  "node": "v22.22.2",
+  "fixture": "final disposable loopback instance after independent receipt fixes",
+  "externalRequests": 0,
+  "runtimeTreeSha256": "32e4e872c372d32f1025e6fe0ab546ff6e803f18c49b1e1ea6b99db0d441c0a3"
+}

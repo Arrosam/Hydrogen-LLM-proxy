@@ -11,6 +11,7 @@ import { intInput, selectAll } from "../lib/input";
 import { useListKeys } from "../lib/useListKeys";
 import { useAuth } from "../auth";
 import { HostedToolBinding } from "./HostedToolBinding";
+import { isServerToolPolicy, ServerToolPolicyEditor } from "./ServerToolPolicyEditor";
 import type { HostedTool, HostedToolOptions } from "../types";
 import type {
   AdvanceTrigger,
@@ -26,6 +27,7 @@ import type {
   ServiceDef,
   ServiceStep,
   ServiceSteps,
+  ServerToolPolicy,
   Provider,
   Trigger,
 } from "../types";
@@ -169,6 +171,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const [enabled, setEnabled] = useState(true);
   const [timeoutMs, setTimeoutMs] = useState(60000);
   const [steps, setSteps] = useState<ServiceStep[]>([]);
+  const [serverToolPolicy, setServerToolPolicy] = useState<ServerToolPolicy>();
   const stepKeys = useListKeys(steps.length);
   const [category, setCategory] = useState<ServiceCategory>("chat");
   const [kind, setKind] = useState<"resilience" | "chain">("resilience");
@@ -217,6 +220,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setTimeoutMs(service.steps?.timeoutMs ?? 60000);
       if (isAgentDef(service.steps)) {
         setKind("chain");
+        setServerToolPolicy(undefined);
         setStages((service.steps.stages ?? []).map(foldStage));
         setOutput(service.steps.output ?? "");
         setOcr(foldOcr(service.steps.ocr));
@@ -226,6 +230,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(false);
       } else {
         setKind("resilience");
+        setServerToolPolicy((service.steps as ServiceSteps)?.serverToolPolicy);
         setSteps((service.steps as ServiceSteps)?.steps.map(foldStep) ?? []);
         setStages([]);
         setOutput("");
@@ -247,6 +252,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       setEnabled(true);
       setTimeoutMs(60000);
       setKind(defaultKind);
+      setServerToolPolicy(undefined);
       setSteps(defaultKind === "resilience" && firstModel && firstProvider ? [blankStep(firstModel, firstProvider)] : []);
       setStages([]);
       setOutput("");
@@ -289,6 +295,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
       : ({
           timeoutMs,
           steps,
+          ...(serverToolPolicy ? { serverToolPolicy } : {}),
           ...(category !== "chat" ? { category } : {}),
           ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
           ...(maxAttachmentMiB > 0 ? { maxAttachmentBytes: maxAttachmentMiB * 1024 * 1024 } : {}),
@@ -354,11 +361,25 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
   const syncFromRaw = (): ServiceDef | null => {
     try {
       const parsed = JSON.parse(rawText) as ServiceDef;
+      if (isAgentDef(parsed) && (
+        "serverToolPolicy" in parsed || (parsed.stages ?? []).some(stage => "serverToolPolicy" in stage)
+      )) {
+        toast.error(t("serverToolPolicy.agentMigration"));
+        return null;
+      }
+      if (!isAgentDef(parsed) && (
+        (parsed.serverToolPolicy !== undefined && !isServerToolPolicy(parsed.serverToolPolicy))
+        || parsed.steps?.some(step => step.serverToolPolicy !== undefined && !isServerToolPolicy(step.serverToolPolicy))
+      )) {
+        toast.error(t("serverToolPolicy.invalidRaw"));
+        return null;
+      }
       stepKeys.reset();
       setListRevision(v => v + 1);
       setTimeoutMs(parsed.timeoutMs ?? 60000);
       if (isAgentDef(parsed)) {
         setKind("chain");
+        setServerToolPolicy(undefined);
         setStages((parsed.stages ?? []).map(foldStage));
         setOutput(parsed.output ?? "");
         setOcr(foldOcr(parsed.ocr));
@@ -367,6 +388,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
         setReliableStreaming(false);
       } else {
         setKind("resilience");
+        setServerToolPolicy((parsed as ServiceSteps).serverToolPolicy);
         setSteps(((parsed as ServiceSteps).steps ?? []).map(foldStep));
         setCategory((parsed as ServiceSteps).category ?? "chat");
         setReliableStreaming(Boolean(parsed.reliableStreaming));
@@ -459,7 +481,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
 
   const toggleRaw = () => {
     if (!raw) setRawText(JSON.stringify(buildDef(), null, 2));
-    else syncFromRaw();
+    else if (!syncFromRaw()) return;
     setRaw(!raw);
   };
 
@@ -669,7 +691,9 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                         />
                       </div>
 
-                      <StepAdvanced step={step} onPatch={(p) => patchStep(i, p)} />
+                      <StepAdvanced step={step} index={i} onPatch={(p) => patchStep(i, p)}
+                        inheritedPolicy={isChatPipelineCategory(category) ? serverToolPolicy ?? { mode: "blacklist", names: [] } : undefined}
+                        knownNames={hostedTools.flatMap(tool => tool.serverTool ? [tool.serverTool.name] : [])} />
 
                       {i < steps.length - 1 && (
                         <div className="mt-3">
@@ -715,7 +739,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
               <i className={`bi ${advancedOpen ? "bi-chevron-down" : "bi-chevron-right"} text-xs`} aria-hidden="true" />
               <i className="bi bi-sliders text-ink-500" aria-hidden="true" />
               {t("serviceEditor.advanced")}
-              {(toolIds.length > 0 || translateThinking || maxAttachmentMiB > 0) && (
+              {(toolIds.length > 0 || translateThinking || maxAttachmentMiB > 0 || (kind === "resilience" && serverToolPolicy)) && (
                 <span className="badge-blue ml-auto">{t("serviceEditor.advancedConfigured")}</span>
               )}
             </button>
@@ -786,6 +810,12 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
                 {user?.role === "admin" && (
                   <HostedToolBinding tools={hostedTools} ids={toolIds} config={toolConfig} onIds={setToolIds} onConfig={setToolConfig} />
                 )}
+                {kind === "resilience" && <section className="space-y-3" aria-labelledby={`${advancedId}-server-tools`}>
+                  <h3 id={`${advancedId}-server-tools`} className="text-sm font-semibold text-ink-200">{t("serverToolPolicy.title")}</h3>
+                  <p className="text-xs text-ink-400">{t("serverToolPolicy.hint")}</p>
+                  <ServerToolPolicyEditor value={serverToolPolicy} onChange={setServerToolPolicy} title={t("serverToolPolicy.service")}
+                    knownNames={hostedTools.flatMap(tool => tool.serverTool ? [tool.serverTool.name] : [])} />
+                </section>}
                 <fieldset className="space-y-3 rounded-lg border border-ink-700 p-4">
                   <legend className="px-2 text-sm font-semibold text-ink-200">
                     <i className="bi bi-paperclip mr-2 text-ink-400" aria-hidden="true" />
@@ -927,17 +957,25 @@ function TriggerChips({
   );
 }
 
-function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Partial<ServiceStep>) => void }) {
+function StepAdvanced({ step, index, onPatch, inheritedPolicy, knownNames }: {
+  step: ServiceStep;
+  index: number;
+  onPatch: (p: Partial<ServiceStep>) => void;
+  inheritedPolicy?: ServerToolPolicy;
+  knownNames: string[];
+}) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const contentId = useId();
-  const hasOverrides = !!step.overrides && Object.keys(step.overrides).length > 0;
+  const configured = (!!step.overrides && Object.keys(step.overrides).length > 0) || step.serverToolPolicy !== undefined;
   return (
     <div className="mt-3">
-      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((a) => !a)}>
+      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" aria-expanded={open} aria-controls={contentId}
+        aria-label={inheritedPolicy ? `${t("serviceEditor.stepAdvancedPolicyLabel", { n: index + 1 })}${configured ? ` ${t("serviceEditor.advancedConfigured")}` : ""}` : undefined}
+        onClick={() => setOpen((a) => !a)}>
         <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} aria-hidden="true" />
-        {t("serviceEditor.advancedOverrides")}
-        {hasOverrides && <span className="ml-1 text-brand-400">●</span>}
+        {t(inheritedPolicy ? "serviceEditor.stepAdvancedPolicy" : "serviceEditor.advancedOverrides")}
+        {configured && <span className="ml-2 text-brand-400">{t("serviceEditor.advancedConfigured")}</span>}
       </button>
       {open && (
         <div id={contentId} className="mt-2 space-y-3">
@@ -945,6 +983,9 @@ function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Parti
             overrides={step.overrides}
             onChange={(ov) => onPatch({ overrides: ov })}
           />
+          {inheritedPolicy && <ServerToolPolicyEditor title={t("serverToolPolicy.step", { n: index + 1 })}
+            value={step.serverToolPolicy} inherited={inheritedPolicy} knownNames={knownNames}
+            onChange={policy => onPatch({ serverToolPolicy: policy })} />}
         </div>
       )}
     </div>

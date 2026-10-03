@@ -14,14 +14,14 @@ import { HostedToolService } from "../src/execution/hostedToolService";
 import { MicroAgent } from "../src/execution/microAgent";
 import type { ModelService, ServiceDeps } from "../src/execution/modelService";
 
-const tool = HttpToolSchema.parse({ name: "lookup", parameters: { type: "object", properties: { count: { type: "integer" } }, required: ["count"], additionalProperties: false }, url: "https://adapter.test/run", bodyTemplate: { count: "{{arguments.count}}" }, resultPath: "/result" });
-const request = buildRequest("openai_responses", { requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "lookup" }] }], params: {}, stream: false });
-const call: ContentPart = { type: "tool_use", id: "c1", name: "lookup", input: { count: 3 } };
+const tool = HttpToolSchema.parse({ name: "lookup", parameters: { type: "object", properties: { count: { type: "integer" } }, required: ["count"], additionalProperties: false }, url: "https://adapter.test/run", bodyTemplate: { count: "{{arguments.count}}" }, resultPath: "/result", serverTool: { name: "web_search" } });
+const request = buildRequest("openai_responses", { requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "lookup" }] }], tools: [{ name: "web_search", parameters: {}, raw: { family: "openai_responses", value: { type: "web_search" } } }], params: {}, stream: false });
+const call: ContentPart = { type: "tool_use", id: "c1", name: "provider_server_side_lookup", input: { count: 3 } };
 function executor(outputs: ContentPart[][]) {
   const requests: Request[] = [];
   const invoke = vi.fn(async (req: Request): Promise<Invocation> => {
     requests.push(req);
-    const content = outputs.shift() ?? [{ type: "text", text: "done" }];
+    const content = structuredClone(outputs.shift() ?? [{ type: "text", text: "done" }]);
     return { attempts: 1, attemptPath: [], result: { ok: true, value: { family: "openai_responses", modelName: "m", providerName: "p", upstreamModel: "up", upstreamRequest: {},
       response: buildResponse("openai_responses", { id: "up", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
   });
@@ -34,6 +34,23 @@ function executor(outputs: ContentPart[][]) {
 const transport = () => ({ postStream: vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from(['{"result":{"answer":3}}']) })) });
 
 describe("hosted model/tool loop", () => {
+  it("exposes and executes nothing from bindings without declarations", async () => {
+    const seed = buildRequest(request.family, { ...request.data(), tools: undefined });
+    const e = executor([[{ type: "text", text: "plain" }]]), t = transport();
+    const run = await runHostedTools(e, seed, [tool], t, { sessionId: "s" });
+    expect(e.requests[0].tools).toBeUndefined();
+    expect(run.serverTools.size).toBe(0);
+    expect(t.postStream).not.toHaveBeenCalled();
+  });
+  it.each(["lookup", "web_search", "provider_server_side_lookup"])("keeps ordinary function %s client-owned", async name => {
+    const seed = buildRequest(request.family, { ...request.data(), tools: [{ name, parameters: { type: "object" } }] });
+    const e = executor([[{ type: "tool_use", id: "client", name, input: { count: 3 } }]]), t = transport();
+    const run = await runHostedTools(e, seed, [tool], t, { sessionId: "s" });
+    expect(e.requests[0].tools?.map(tool => tool.name)).toEqual([name]);
+    expect(run.value.response.toolCalls()).toEqual([{ id: "client", name, args: '{"count":3}' }]);
+    expect(run.serverTools.size).toBe(0);
+    expect(t.postStream).not.toHaveBeenCalled();
+  });
   it("enforces a nested service's smaller local maxCalls", async () => {
     const e = executor([[call], [{ ...call, id: "c2" }]]), t = transport();
     await runHostedTools(e, request, [tool], t, { sessionId: "shared", config: HostedToolOptionsSchema.parse({ maxCalls: 1 }),
@@ -44,8 +61,8 @@ describe("hosted model/tool loop", () => {
   it("remaps a forced declared server-tool choice to its bound tool", async () => {
     const e = executor([]);
     const forced = buildRequest(request.family, { ...request.data(), toolChoice: { type: "tool", name: "web_search" } });
-    await runHostedTools(e, forced, [tool], transport(), { sessionId: "s", declaredNames: new Map([["web_search", "lookup"]]) });
-    expect(e.requests[0].toolChoice).toEqual({ type: "tool", name: "lookup" });
+    await runHostedTools(e, forced, [tool], transport(), { sessionId: "s" });
+    expect(e.requests[0].toolChoice).toEqual({ type: "tool", name: "provider_server_side_lookup" });
   });
   it("hides thinking in process events while keeping the original for tool continuation", async () => {
     const e = executor([[{ type: "reasoning", text: "private trace", signature: "sig", origin: "anthropic" }, call]]);
@@ -89,11 +106,11 @@ describe("hosted model/tool loop", () => {
     try { await runHostedTools(e, request, [tool], t, { sessionId: "s", signal: abort.signal }); throw new Error("expected cancellation"); }
     catch (error) { expect(error).toMatchObject({ statusCode: 499, usage: { totalTokens: 5 } }); }
   });
-  it("injects definitions, executes POST, replays results and sums model usage", async () => {
+  it("rewrites a declared tool, executes POST, replays results and sums model usage", async () => {
     const e = executor([[call]]), t = transport();
     const run = await runHostedTools(e, request, [tool], t, { sessionId: "session" });
     expect(t.postStream).toHaveBeenCalledTimes(1);
-    expect(e.requests[0].tools?.[0].name).toBe("lookup");
+    expect(e.requests[0].tools?.[0].name).toBe("provider_server_side_lookup");
     expect(e.requests[1].messages.at(-1)?.content[0]).toMatchObject({ type: "tool_result", toolUseId: "c1", isError: false });
     expect(run.value.response.usage.totalTokens).toBe(10);
     expect(run.value.response.toolCalls()).toEqual([]);
@@ -131,7 +148,7 @@ describe("hosted model/tool loop", () => {
     expect(paused.value.response.toolCalls()).toHaveLength(1);
     expect(paused.declined).toEqual(["c1"]);
     const e = executor([]);
-    await expect(runHostedTools(e, buildRequest(request.family, { ...request.data(), tools: [{ name: "lookup", parameters: {} }] }), [tool], t, { sessionId: "s" })).rejects.toThrow("conflicts");
+    await expect(runHostedTools(e, buildRequest(request.family, { ...request.data(), tools: [...request.tools!, { name: "provider_server_side_lookup", parameters: {} }] }), [tool], t, { sessionId: "s" })).rejects.toThrow("conflicts");
     expect(e.invoke).not.toHaveBeenCalled();
   });
 });

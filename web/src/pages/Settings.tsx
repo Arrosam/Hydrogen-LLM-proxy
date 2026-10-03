@@ -6,6 +6,7 @@ import { PageHeader } from "../components/Layout";
 import { HydrogenLogo } from "../components/Logo";
 import { ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
 import { useToast } from "../components/Toast";
+import { ServerToolPrefixCard } from "../components/ServerToolPrefixCard";
 
 interface EnvSettings {
   allowPrivateUpstreams: boolean;
@@ -33,6 +34,7 @@ export function Settings() {
       <PageHeader title={t("settings.title")} subtitle={t("settings.subtitle")} icon="bi-gear" />
       <UpdateCard />
       <LanguageCard />
+      <ServerToolPrefixCard />
       <BackupCard />
       <RetentionCard />
       <ResponseRetentionCard />

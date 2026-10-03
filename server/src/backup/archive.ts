@@ -13,7 +13,8 @@ import { openWithPassphrase, sealWithPassphrase, type SealedPayload } from "../s
  *
  * Two things make this more than a table dump:
  *
- * 1. Provider API keys are encrypted under PROXY_MASTER_KEY, which lives outside
+ * 1. Provider API keys and private session snapshots are encrypted under
+ *    PROXY_MASTER_KEY, which lives outside
  *    the database. Copying the ciphertext would produce a package that only
  *    restores onto the machine that wrote it -- precisely the machine you no
  *    longer have. So keys are decrypted on export, sealed under the admin's
@@ -144,6 +145,8 @@ const TOKEN_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
 const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check", "session_epoch", STATS_CACHE_SETTINGS_KEY]);
 
 type Row = Record<string, unknown>;
+type SnapshotTable = "stored_responses" | "response_conversations";
+const SNAPSHOT_TABLES: readonly SnapshotTable[] = ["stored_responses", "response_conversations"];
 
 export interface BackupPackage {
   format: typeof BACKUP_FORMAT;
@@ -157,7 +160,7 @@ export interface BackupPackage {
   includesImageCache: boolean;
   /** Row counts, so the UI can describe a package before restoring it. */
   counts: Record<string, number>;
-  /** Provider API keys, sealed under the admin's passphrase. */
+  /** Instance secrets and private session snapshots, sealed under the passphrase. */
   secrets: SealedPayload;
   tables: Record<string, Row[]>;
 }
@@ -171,6 +174,9 @@ interface SecretPayload {
   tokenKeys?: { id: number; secret: string }[];
   /** Absent in packages written before egress proxies existed. */
   proxyPasswords?: { id: number; password: string }[];
+  /** One entry per exported session row, including null snapshots. Absent in
+   * packages written before snapshots were made portable. */
+  sessionSnapshots?: { table: SnapshotTable; id: string; snapshot: string | null }[];
 }
 
 export class BackupError extends Error {
@@ -182,6 +188,64 @@ export class BackupError extends Error {
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
+}
+
+function checkSnapshotJson(snapshot: string): void {
+  try {
+    const parsed: unknown = JSON.parse(snapshot);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+  } catch { throw new BackupError("Malformed sealed session snapshot"); }
+}
+
+function decryptSnapshot(value: unknown, masterKey: Buffer, legacy = false): string {
+  let snapshot: string;
+  try {
+    if (typeof value !== "string") throw new Error();
+    snapshot = decryptSecret(JSON.parse(value), masterKey);
+  } catch {
+    throw new BackupError(legacy
+      ? "Legacy session snapshot cannot be decrypted with this instance's master key; export a new backup from the source instance"
+      : "Could not decrypt the saved session snapshot for export");
+  }
+  checkSnapshotJson(snapshot);
+  return snapshot;
+}
+
+/** Authenticate/validate every session secret before deleting target rows.
+ * New packages bind each sealed record to its table and ID, including explicit
+ * nulls. Old non-null ciphertext is usable only with the original master key. */
+function restoredSessionSecrets(pkg: BackupPackage, secrets: SecretPayload, masterKey: Buffer): Map<SnapshotTable, Map<string, string | null>> {
+  const plaintext = new Map<SnapshotTable, Map<string, string | null>>(SNAPSHOT_TABLES.map(table => [table, new Map()]));
+  if (secrets.sessionSnapshots !== undefined) {
+    if (!Array.isArray(secrets.sessionSnapshots)) throw new BackupError("Malformed sealed session snapshots");
+    for (const value of secrets.sessionSnapshots) {
+      if (!value || !SNAPSHOT_TABLES.includes(value.table) || typeof value.id !== "string" || !value.id ||
+          !(value.snapshot === null || typeof value.snapshot === "string")) throw new BackupError("Malformed sealed session snapshot");
+      const entries = plaintext.get(value.table)!;
+      if (entries.has(value.id)) throw new BackupError("Duplicate sealed session snapshot");
+      if (value.snapshot !== null) checkSnapshotJson(value.snapshot);
+      entries.set(value.id, value.snapshot);
+    }
+  }
+  const encrypted = new Map<SnapshotTable, Map<string, string | null>>();
+  for (const table of SNAPSHOT_TABLES) {
+    const entries = plaintext.get(table)!;
+    const restored = new Map<string, string | null>();
+    for (const row of pkg.tables[table] ?? []) {
+      if (!row || typeof row.id !== "string" || !row.id || restored.has(row.id)) throw new BackupError("Invalid session snapshot row identifier");
+      let snapshot: string | null;
+      if (secrets.sessionSnapshots !== undefined) {
+        if (!entries.has(row.id)) throw new BackupError("Missing sealed session snapshot");
+        if (row.service_snapshot_secret != null) throw new BackupError("Session snapshot ciphertext must not accompany sealed snapshots");
+        snapshot = entries.get(row.id)!;
+        entries.delete(row.id);
+      } else snapshot = row.service_snapshot_secret == null ? null : decryptSnapshot(row.service_snapshot_secret, masterKey, true);
+      restored.set(row.id, snapshot === null ? null : JSON.stringify(encryptSecret(snapshot, masterKey)));
+    }
+    if (entries.size) throw new BackupError("Sealed session snapshot does not match an exported row");
+    encrypted.set(table, restored);
+  }
+  return encrypted;
 }
 
 /** Export every table to a package whose secrets only `passphrase` can open. */
@@ -198,6 +262,7 @@ export async function exportBackup(
   const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
   const proxyPasswords: NonNullable<SecretPayload["proxyPasswords"]> = [];
   const toolHeaders: NonNullable<SecretPayload["toolHeaders"]> = [];
+  const sessionSnapshots: NonNullable<SecretPayload["sessionSnapshots"]> = [];
 
   for (const table of TABLES) {
     if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
@@ -262,6 +327,14 @@ export async function exportBackup(
       }
     }
 
+    if (table === "stored_responses" || table === "response_conversations") {
+      for (const row of rows) {
+        sessionSnapshots.push({ table, id: row.id as string,
+          snapshot: row.service_snapshot_secret == null ? null : decryptSnapshot(row.service_snapshot_secret, masterKey) });
+        delete row.service_snapshot_secret;
+      }
+    }
+
     if (table === "settings") {
       const kept = rows.filter((r) => !LOCAL_ONLY_SETTINGS.has(String(r.key)));
       tables[table] = kept;
@@ -276,7 +349,7 @@ export async function exportBackup(
   const metadata = { format: BACKUP_FORMAT as typeof BACKUP_FORMAT, version: BACKUP_VERSION, createdAt, appVersion: opts.appVersion,
     includesLogs: opts.includeLogs, includesImageCache: opts.includeImageCache, counts };
   const integrity = backupDigest({ ...metadata, tables });
-  const secrets = await sealWithPassphrase(JSON.stringify({ integrity, providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ integrity, providerKeys, tokenKeys, proxyPasswords, toolHeaders, sessionSnapshots } satisfies SecretPayload), opts.passphrase);
   const pkg = { ...metadata, secrets, tables };
   if (Buffer.byteLength(JSON.stringify(pkg)) > MAX_BACKUP_BYTES) throw new BackupError("Backup exceeds the safe export budget");
   return pkg;
@@ -360,6 +433,7 @@ export async function restoreBackup(
   const proxyPasswordById = new Map<number, string>();
   for (const { id, password } of secrets.proxyPasswords ?? []) proxyPasswordById.set(id, password);
   const toolHeadersById = new Map((secrets.toolHeaders ?? []).map(value => [value.id, value.headers]));
+  const sessionSecrets = restoredSessionSecrets(pkg, secrets, masterKey);
 
   const restored: Record<string, number> = {};
 
@@ -387,6 +461,9 @@ export async function restoreBackup(
       let written = 0;
       for (const row of rows) {
         const values: Row = { ...row };
+        if (table === "stored_responses" || table === "response_conversations") {
+          values.service_snapshot_secret = sessionSecrets.get(table)!.get(values.id as string)!;
+        }
         if (table === "hosted_tools") {
           const headers = toolHeadersById.get(values.id as number);
           if (headers === undefined) throw new BackupError("Missing sealed tool headers");

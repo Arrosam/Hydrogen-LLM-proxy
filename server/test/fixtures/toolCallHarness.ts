@@ -30,12 +30,15 @@ export function fileArguments(bytes: number): string {
 }
 export function toolRequest(family: Family, stream = true, hosted = false) {
   return buildRequest(family, { requestedService: "svc", stream, params: {}, messages: [{ role: "user", content: [{ type: "text", text: "Write the file" }] }],
-    ...(!hosted ? { tools: [{ name: "write_file", parameters }] } : {}) });
+    tools: hosted ? [{ name: "write_file", parameters: {}, raw: { family: "anthropic", value: { type: "file_writer_tool", name: "write_file" } } }]
+      : [{ name: "write_file", parameters }] });
 }
 
 export interface ToolScenario {
   family: Family;
   args: string;
+  /** Exact function name offered in declaration-only hosted scenarios. */
+  callName?: string;
   deltaChars?: number;
   packetBytes?: number;
   delayMs?: number;
@@ -50,13 +53,14 @@ export interface ToolScenario {
 }
 
 export function* toolFrames(s: ToolScenario): Generator<string> {
+  const name = s.callName ?? "write_file";
   const frame = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
   const chat = (delta: object, finish_reason: string | null = null) => `data: ${JSON.stringify({ id: "c", model: "up", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-  const item = { id: "fc_1", type: "function_call", call_id: "call_1", name: "write_file", arguments: s.args, status: "completed" };
-  if (s.family === "openai_completion") yield chat({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "write_file", arguments: "" } }] });
+  const item = { id: "fc_1", type: "function_call", call_id: "call_1", name, arguments: s.args, status: "completed" };
+  if (s.family === "openai_completion") yield chat({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name, arguments: "" } }] });
   else if (s.family === "anthropic") {
     yield frame("message_start", { message: { id: "msg_1", model: "up", usage: { input_tokens: 1, output_tokens: 0 } } });
-    yield frame("content_block_start", { index: 0, content_block: { type: "tool_use", id: "call_1", name: "write_file", input: {} } });
+    yield frame("content_block_start", { index: 0, content_block: { type: "tool_use", id: "call_1", name, input: {} } });
   } else {
     yield frame("response.created", { response: { id: "resp_1", model: "up", created_at: 1 } });
     if (!s.snapshotOnly) yield frame("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress", arguments: "" } });
@@ -87,9 +91,10 @@ export function* toolFrames(s: ToolScenario): Generator<string> {
 }
 
 export function toolJson(s: ToolScenario): object {
-  if (s.family === "openai_completion") return { id: "c", model: "up", choices: [{ message: { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "write_file", arguments: s.args } }] }, finish_reason: "tool_calls" }] };
-  if (s.family === "anthropic") return { id: "msg_1", model: "up", content: [{ type: "tool_use", id: "call_1", name: "write_file", input: JSON.parse(s.args) }], stop_reason: "tool_use" };
-  return { id: "resp_1", model: "up", status: "completed", output: [{ id: "fc_1", type: "function_call", call_id: "call_1", name: "write_file", arguments: s.args }] };
+  const name = s.callName ?? "write_file";
+  if (s.family === "openai_completion") return { id: "c", model: "up", choices: [{ message: { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name, arguments: s.args } }] }, finish_reason: "tool_calls" }] };
+  if (s.family === "anthropic") return { id: "msg_1", model: "up", content: [{ type: "tool_use", id: "call_1", name, input: JSON.parse(s.args) }], stop_reason: "tool_use" };
+  return { id: "resp_1", model: "up", status: "completed", output: [{ id: "fc_1", type: "function_call", call_id: "call_1", name, arguments: s.args }] };
 }
 
 async function write(res: http.ServerResponse, chunk: Buffer): Promise<void> {

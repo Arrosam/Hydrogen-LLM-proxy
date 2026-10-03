@@ -19,7 +19,7 @@ import type { GenerationParams, ThinkingLevel } from "../ir/params";
 import { ThinkingPolicy } from "../ir/thinking";
 import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
 import { genId, nowSeconds } from "../../util/ids";
-import { applyNonCanonical, collectPassthrough, num, numOrUndef, safeJsonParse } from "./wire";
+import { applyNonCanonical, assertToolFamily, collectPassthrough, num, numOrUndef, safeJsonParse } from "./wire";
 import { FormatConversionError } from "./errors";
 import { foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage";
 import { registerFormat } from "./registry";
@@ -178,6 +178,7 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
           blockType: String(b.type),
           content,
           ...(typeof error === "string" ? { errorCode: error } : {}),
+          ...(callIndex < 0 ? { resultOnly: true } : {}),
         });
         break;
       }
@@ -239,7 +240,7 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
         break;
       case "server_tool_result":
         if (p.family === "anthropic") {
-          blocks.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input });
+          if (!p.resultOnly) blocks.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input });
           if (!p.notExecuted) blocks.push({ type: p.blockType, tool_use_id: p.id, content: p.errorCode !== undefined ? { type: `${p.blockType.includes("_tool_") ? p.blockType : p.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: p.errorCode } : p.content });
         }
         break;
@@ -303,7 +304,7 @@ function parseToolChoice(raw: unknown): ToolChoice | undefined {
     case "tool":
       return c.name ? { type: "tool", name: String(c.name) } : { type: "required" };
     default:
-      return undefined;
+      return { type: "raw", family: "anthropic", value: c };
   }
 }
 
@@ -317,6 +318,8 @@ function toolChoiceToAnthropic(choice: ToolChoice): unknown {
       return { type: "any" };
     case "tool":
       return { type: "tool", name: choice.name };
+    case "raw":
+      return choice.value;
   }
 }
 
@@ -413,6 +416,7 @@ export class AnthropicRequest extends Request {
   }
 
   render(target: RenderTarget): Record<string, unknown> {
+    assertToolFamily(this.tools, this.toolChoice, this.family);
     // Thinking blocks are kept, not stripped: this family REQUIRES the history's
     // thinking back when thinking mode is on — DeepSeek's Anthropic-compatible
     // endpoint answers a request whose assistant turns have none with
@@ -452,8 +456,8 @@ export class AnthropicRequest extends Request {
     if (replayable) out.system = this.systemBlocks;
     else if (this.system) out.system = this.system;
     if (this.tools) {
-      // Same-family server tools replay verbatim; another family's are dropped
-      // (they cannot be expressed here) rather than sent as empty client tools.
+      // Same-family native tools replay verbatim. Foreign raw declarations
+      // were explicitly rejected before reaching this renderer.
       const rendered = this.tools
         .filter((t) => !t.raw || t.raw.family === "anthropic")
         .map((t) => (t.raw ? t.raw.value : { name: t.name, description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
@@ -595,7 +599,7 @@ export class AnthropicResponse extends Response {
         // then its result in the SAME assistant turn, paired by tool_use_id.
         // `blockType` comes from the tool's own contract, so this renderer
         // carries any result shape an adapter and operator agree on.
-        content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } });
+        if (!p.resultOnly) content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } });
         // A call a pause declined to run stays pending: the call block with no
         // result after it is the shape a client continues from, and inventing an
         // outcome would name a failure that never happened.
@@ -696,7 +700,7 @@ export class AnthropicResponse extends Response {
           } else if (typeof block.type === "string" && (block.type.endsWith("_tool_result") || block.type === "web_search_result" || block.type === "server_tool_result")) {
             const id = String(block.tool_use_id ?? "");
             const errorCode = (block.content as { error_code?: unknown } | null)?.error_code;
-            yield { type: "server_tool_result", family: "anthropic", id, name: serverNames.get(id) ?? "server_tool", blockType: String(block.type), content: Array.isArray(block.content) ? block.content : [], ...(typeof errorCode === "string" ? { errorCode } : {}) };
+            yield { type: "server_tool_result", family: "anthropic", id, name: serverNames.get(id) ?? "server_tool", blockType: String(block.type), content: Array.isArray(block.content) ? block.content : [], ...(typeof errorCode === "string" ? { errorCode } : {}), ...(!serverNames.has(id) ? { resultOnly: true } : {}) };
           } else if (block.type === "tool_use") {
             toolBlocks.add(index);
             initialToolInput.set(index, block.input ?? {});
@@ -922,14 +926,17 @@ export class AnthropicResponse extends Response {
         case "server_tool_start": {
           yield* closeReasoning();
           yield* closeText();
+          if (ev.resultOnly) break;
           const idx = nextIndex++;
           serverToolIndexes.set(ev.id, idx);
           yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {}, caller: { type: "direct" } } });
           break;
         }
         case "server_tool_result": {
-          const idx = serverToolIndexes.get(ev.id) ?? nextIndex++;
-          if (serverToolIndexes.has(ev.id)) yield frame("content_block_stop", { index: idx });
+          yield* closeReasoning();
+          yield* closeText();
+          const idx = serverToolIndexes.get(ev.id);
+          if (idx != null) yield frame("content_block_stop", { index: idx });
           serverToolIndexes.delete(ev.id);
           if (ev.notExecuted) break;
           const resultIndex = nextIndex++;

@@ -63,6 +63,9 @@ export interface ToolUsePart {
    * `pause_turn` hands back for the proxy to run.
    */
   serverTool?: boolean;
+  /** Private execution provenance. Wire parsers never accept this from clients.
+   * It preserves the exact executor and emitted name through saved history. */
+  hydrogenTool?: { id?: number; emittedName: string; declaredName: string; declarationType: string; instanceId?: string };
 }
 
 export interface ToolResultPart {
@@ -71,6 +74,9 @@ export interface ToolResultPart {
   content: Array<TextPart | ImagePart>;
   isError?: boolean;
   cacheControl?: unknown;
+  /** Private ownership of an executed result, retained with the matching call
+   * so provider-local IDs reused by another child cannot resolve it. */
+  hydrogenTool?: ToolUsePart["hydrogenTool"];
 }
 
 /** A reasoning/thinking block produced by the model (extended thinking). */
@@ -129,6 +135,10 @@ export interface ServerToolResultPart {
    * exactly the shape a client continues from.
    */
   notExecuted?: boolean;
+  /** A saved pending call was delivered on a previous turn. This turn carries
+   * only its newly executed result; protocols with separate call/result blocks
+   * must not emit the same call again. */
+  resultOnly?: boolean;
 }
 
 export type ContentPart = TextPart | ImagePart | FilePart | OpaquePart | ToolUsePart | ToolResultPart | ReasoningPart | ServerToolResultPart;
@@ -151,8 +161,8 @@ export interface Tool {
   strict?: boolean;
   cacheControl?: unknown;
   /** A provider-executed (server-side) or otherwise family-specific tool
-   * declaration, kept verbatim: replayed untouched to the SAME family, dropped
-   * when crossing families (never mangled into an empty client tool). */
+   * declaration, kept verbatim: replayed untouched to the SAME family. An
+   * unsupported cross-family declaration rejects explicitly. */
   raw?: { family: "openai_completion" | "anthropic" | "openai_responses"; value: unknown };
 }
 
@@ -160,7 +170,10 @@ export type ToolChoice =
   | { type: "auto" }
   | { type: "none" }
   | { type: "required" }
-  | { type: "tool"; name: string };
+  | { type: "tool"; name: string }
+  /** Provider-native selection (e.g. Responses web_search/allowed_tools).
+   * A raw choice is replayable only on the family that supplied it. */
+  | { type: "raw"; family: "openai_completion" | "anthropic" | "openai_responses"; value: Record<string, unknown> };
 
 /**
  * `pause_turn` is the server-side loop asking to be continued: the provider

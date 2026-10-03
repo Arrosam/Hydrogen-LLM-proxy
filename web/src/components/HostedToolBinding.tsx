@@ -5,7 +5,7 @@ export function HostedToolBinding({ tools, ids, config, onIds, onConfig }: { too
   const { language } = useI18n(), zh = language === "zh";
   return <fieldset className="space-y-3 rounded-lg border border-ink-700 p-4">
     <legend className="px-2 text-sm font-semibold">{zh ? "服务器托管工具" : "Hosted server tools"}</legend>
-    <p className="text-xs text-ink-400">{zh ? "绑定后自动向模型提供工具。Hydrogen 将参数转发至工具 API，并保存续接上下文。" : "Bound tools are supplied automatically. Hydrogen forwards arguments to the tool API and saves continuation context."}</p>
+    <p className="text-xs text-ink-400">{zh ? "绑定仅表示工具可用。客户端必须声明每个服务器工具，Hydrogen 才会将其提供给模型或执行。Hydrogen 将已声明工具的参数转发到工具 API，并保存续接上下文。" : "Bindings describe tool availability. Clients must declare each server tool before Hydrogen can offer or execute it. Hydrogen forwards declared tool arguments to the tool API and saves continuation context."}</p>
     {tools.length ? <div className="flex flex-wrap gap-3">{tools.map(tool => <label key={tool.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={ids.includes(tool.id)} onChange={e => onIds(e.target.checked ? [...ids, tool.id] : ids.filter(id => id !== tool.id))} />{tool.name}{!tool.enabled && <span className="text-ink-500">({zh ? "停用" : "disabled"})</span>}</label>)}</div> : <a className="text-sm text-brand-400" href="/tools">{zh ? "前往工具页面注册工具" : "Register a tool on the Tools page"}</a>}
     <label className="block"><span className="label">{zh ? "流式呈现" : "Streaming delivery"}</span><select className="select" value={config.streamMode} onChange={e => onConfig({ ...config, streamMode: e.target.value as HostedToolOptions["streamMode"] })}>
       <option value="all">{zh ? "完整过程：各轮模型内容与工具事件" : "Full process: model rounds and tool events"}</option>

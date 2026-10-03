@@ -4,6 +4,8 @@ import { settings } from "../db/schema";
 
 const ALLOWLIST_KEY = "upstream_allowlist";
 const UI_LANGUAGE_KEY = "ui_language";
+const SERVER_TOOL_NAME_PREFIX_KEY = "server_tool_name_prefix";
+export const DEFAULT_SERVER_TOOL_NAME_PREFIX = "provider_server_side_";
 const LOG_PAYLOAD_MAX_CHARS_KEY = "log_payload_max_chars";
 const SIMULATED_STREAMING_TOKEN_RATE_KEY = "simulated_streaming_token_rate";
 const PROMPT_CACHE_TTL_KEY = "prompt_cache_ttl_minutes";
@@ -130,6 +132,16 @@ export class SettingsRepo {
 
   setUiLanguage(lang: string): void {
     this.set(UI_LANGUAGE_KEY, lang);
+  }
+
+  /** Prefix for emitted Hydrogen tool functions. Empty is an explicit choice;
+   * only an absent setting uses the default. Never normalize stored names. */
+  serverToolNamePrefix(): string {
+    return this.get(SERVER_TOOL_NAME_PREFIX_KEY) ?? DEFAULT_SERVER_TOOL_NAME_PREFIX;
+  }
+
+  setServerToolNamePrefix(prefix: string): void {
+    this.set(SERVER_TOOL_NAME_PREFIX_KEY, prefix);
   }
 
   logPayloadMaxChars(): number {

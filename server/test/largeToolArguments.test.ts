@@ -95,9 +95,9 @@ describe("large tool arguments over real sockets", () => {
 
   it("hosted execution starts only after complete arguments, and the 1 MiB adapter limit fails explicitly", async () => {
     for (const bytes of [1024, 256 * 1024, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1]) {
-      harness = await startToolHarness({ family: "openai_completion", args: fileArguments(bytes), deltaChars: 1024 });
-      const tool = HttpToolSchema.parse({ name: "write_file", parameters, url: harness.upstreamUrl + "/tool", bodyTemplate: { path: "{{arguments.path}}", content: "{{arguments.content}}" } });
-      const run = await runHostedTools(harness.executor, toolRequest("openai_completion", true, true), [tool], harness.transport,
+      harness = await startToolHarness({ family: "openai_completion", args: fileArguments(bytes), deltaChars: 1024, callName: "provider_server_side_write_file" });
+      const tool = HttpToolSchema.parse({ name: "write_file", parameters, url: harness.upstreamUrl + "/tool", bodyTemplate: { path: "{{arguments.path}}", content: "{{arguments.content}}" }, serverTool: { name: "write_file", resultType: "file_writer_result" } });
+      const run = await runHostedTools(harness.executor, toolRequest("anthropic", true, true), [tool], harness.transport,
         { sessionId: "large-args-test", config: HostedToolOptionsSchema.parse({ streamMode: "all" }), emit: async () => {}, logMaxChars: () => 0 });
       expect(run.value.response.text()).toBe("written");
       if (bytes <= 1024 * 1024) {
@@ -112,9 +112,9 @@ describe("large tool arguments over real sockets", () => {
   }, 15000);
 
   it.each([true, false])("malformed arguments never enter a permissive hosted adapter (stream=%s)", async stream => {
-    harness = await startToolHarness({ family: "openai_completion", args: '{"content":"PRIVATE_CONTENT' });
-    const tool = HttpToolSchema.parse({ name: "write_file", parameters: { type: "object" }, url: harness.upstreamUrl + "/tool", bodyTemplate: {} });
-    await expect(runHostedTools(harness.executor, toolRequest("openai_completion", stream, true), [tool], harness.transport,
+    harness = await startToolHarness({ family: "openai_completion", args: '{"content":"PRIVATE_CONTENT', callName: "provider_server_side_write_file" });
+    const tool = HttpToolSchema.parse({ name: "write_file", parameters: { type: "object" }, url: harness.upstreamUrl + "/tool", bodyTemplate: {}, serverTool: { name: "write_file", resultType: "file_writer_result" } });
+    await expect(runHostedTools(harness.executor, toolRequest("anthropic", stream, true), [tool], harness.transport,
       { sessionId: "invalid", config: HostedToolOptionsSchema.parse({ streamMode: stream ? "all" : "final" }), emit: async () => {} })).rejects.toThrow("tool arguments");
     expect(harness.dispatches).toHaveLength(0);
   });

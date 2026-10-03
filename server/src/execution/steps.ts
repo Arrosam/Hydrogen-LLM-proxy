@@ -24,6 +24,8 @@ export interface AttemptFailure {
   errorBody?: unknown;
   retryable?: boolean;
   usage?: import("../core/ir/usage").Usage;
+  /** A locally invalid request must not be retried or sent to a fallback. */
+  terminal?: boolean;
 }
 export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
 
@@ -261,7 +263,7 @@ export async function runSteps<T>(
       }
 
       // Determine whether a retry is permitted for THIS failure.
-      const triggerMatched = res.retryable !== false && triggerMatches(retryOn, res);
+      const triggerMatched = !res.terminal && res.retryable !== false && triggerMatches(retryOn, res);
       const is499 = res.status === 499;
       const four99Allowed = !is499 || is499Retryable(idempotency);
       const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
@@ -310,6 +312,8 @@ export async function runSteps<T>(
       });
       stepFailure = res;
       lastFailure = res;
+
+      if (res.terminal) return { result: res, path };
 
       if (canRetryFlag) {
         continue;

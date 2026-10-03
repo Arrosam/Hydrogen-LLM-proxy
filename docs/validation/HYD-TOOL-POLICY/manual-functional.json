@@ -1,0 +1,200 @@
+[
+  {
+    "scenario": "review regression: allowed_tools selects client alias without local execution",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.446Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 0,
+    "downstreamName": "web_search"
+  },
+  {
+    "scenario": "review regression: mixed client/server alias output and client continuation, stream=false",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.485Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 1,
+    "clientCallId": "fixture-call-3",
+    "completionEvents": null
+  },
+  {
+    "scenario": "review regression: mixed client/server alias output and client continuation, stream=true",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.557Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 1,
+    "clientCallId": "fixture-call-5",
+    "completionEvents": 1
+  },
+  {
+    "scenario": "review regression: fallback tool overlay buffers local call and emits one completion",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.617Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 4,
+    "adapterRequests": 1,
+    "completionEvents": 1
+  },
+  {
+    "scenario": "saved Responses pause/resume delivers completed original call ID",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.640Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 1,
+    "originalCallId": "fixture-call-7"
+  },
+  {
+    "scenario": "saved Anthropic pause/resume delivers new result with original tool_use_id",
+    "result": "pass",
+    "phase": "review-regressions",
+    "verifiedAt": "2026-10-03T11:18:42.662Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 1,
+    "originalCallId": "fixture-call-8"
+  },
+  {
+    "scenario": "review regression: nested three-turn saved receipt, stream=false",
+    "result": "pass",
+    "phase": "nested-resume",
+    "verifiedAt": "2026-10-03T11:18:56.608Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 6,
+    "adapterRequests": 1,
+    "originalCallId": "nested-pending-B",
+    "completedAtSecond": true,
+    "thirdReplays": 0
+  },
+  {
+    "scenario": "review regression: nested three-turn saved receipt, stream=true",
+    "result": "pass",
+    "phase": "nested-resume",
+    "verifiedAt": "2026-10-03T11:18:56.786Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 6,
+    "adapterRequests": 1,
+    "originalCallId": "nested-pending-B",
+    "completedAtSecond": true,
+    "thirdReplays": 0
+  },
+  {
+    "scenario": "no declaration, bound service zero tool exposure",
+    "result": "pass",
+    "phase": "bypass",
+    "verifiedAt": "2026-10-03T11:21:04.262Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 0
+  },
+  {
+    "scenario": "UI-saved whitelist bypasses same-named local Hydrogen tool",
+    "result": "pass",
+    "phase": "bypass",
+    "verifiedAt": "2026-10-03T11:21:04.277Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 0,
+    "rawTool": {
+      "type": "web_search"
+    }
+  },
+  {
+    "scenario": "UI-saved whitelist rejects unmatched server declaration locally",
+    "result": "pass",
+    "phase": "bypass",
+    "verifiedAt": "2026-10-03T11:21:04.283Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 0,
+    "adapterRequests": 0,
+    "status": 400,
+    "error": {
+      "message": "Tool 'file_search' not found",
+      "type": "invalid_request_error",
+      "code": "tool_not_found",
+      "param": null
+    }
+  },
+  {
+    "scenario": "ordinary client function alias retains client ownership",
+    "result": "pass",
+    "phase": "bypass",
+    "verifiedAt": "2026-10-03T11:21:04.293Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 0,
+    "downstreamName": "web_search"
+  },
+  {
+    "scenario": "UI-saved empty step override replaces service bypass and executes local tool",
+    "result": "pass",
+    "phase": "override",
+    "verifiedAt": "2026-10-03T11:22:03.228Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 2,
+    "adapterRequests": 1,
+    "upstreamName": "provider_server_side_fixture_search"
+  },
+  {
+    "scenario": "old response keeps original whitelist after UI stage edit",
+    "result": "pass",
+    "phase": "override",
+    "verifiedAt": "2026-10-03T11:22:03.242Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 1,
+    "adapterRequests": 0,
+    "rawTool": {
+      "type": "web_search"
+    }
+  },
+  {
+    "scenario": "emitted-name conflict fails before either dispatch",
+    "result": "pass",
+    "phase": "override",
+    "verifiedAt": "2026-10-03T11:22:03.247Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 0,
+    "adapterRequests": 0,
+    "status": 400,
+    "error": {
+      "message": "Tool name 'provider_server_side_fixture_search' conflicts with another declared or Hydrogen tool",
+      "type": "invalid_request_error",
+      "code": "hydrogen_tool_name_conflict",
+      "param": null
+    }
+  },
+  {
+    "scenario": "UI-saved empty prefix emits stored name and preserves adapter contract",
+    "result": "pass",
+    "phase": "empty-prefix",
+    "verifiedAt": "2026-10-03T11:25:16.163Z",
+    "baseUrl": "http://127.0.0.1:58255",
+    "sourceContext": "manual-run-context.json",
+    "modelRequests": 2,
+    "adapterRequests": 1,
+    "upstreamName": "fixture_search",
+    "adapterName": "fixture_search"
+  }
+]

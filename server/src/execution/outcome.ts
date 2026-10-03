@@ -2,6 +2,7 @@ import type { Family } from "../core/format/family";
 import type { Response } from "../core/ir/response";
 import type { StreamEvent } from "../core/ir/stream";
 import type { AttemptResult } from "./steps";
+import type { HostedToolReceipt, ServerToolRuntime } from "./serverTools";
 
 /** A successful buffered run: the response plus which target actually served it. */
 export interface InvokeValue {
@@ -12,6 +13,11 @@ export interface InvokeValue {
   modelName: string;
   /** The exact body sent upstream (overrides + translation applied), for logging. */
   upstreamRequest: Record<string, unknown>;
+  /** Exact local ownership selected by the winning upstream step. */
+  serverTools?: ServerToolRuntime;
+  /** Private completed child work; only an already-retained owned call can
+   * acquire its result in an enclosing loop. Never rendered on the wire. */
+  hostedToolReceipts?: HostedToolReceipt[];
 }
 
 /** A successful streaming run: a committed live event stream from the winning target. */
@@ -22,6 +28,8 @@ export interface StreamValue {
   providerName: string;
   modelName: string;
   upstreamRequest: Record<string, unknown>;
+  serverTools?: ServerToolRuntime;
+  hostedToolReceipts?: HostedToolReceipt[];
   /** True when the effective thinking level is "disabled": drop reasoning on relay. */
   dropReasoning: boolean;
 }
