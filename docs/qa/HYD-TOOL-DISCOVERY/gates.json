@@ -12,7 +12,7 @@
   "status": {
     "implemented": true,
     "tested": true,
-    "accepted": "Pending owner product disposition for conflicting downstream aliases",
+    "accepted": true,
     "released": false
   },
   "gates": [
@@ -173,10 +173,18 @@
     "Listing compatibility verified with the official SDK, not every ordinary agent application; custom metadata may be ignored.",
     "Unknown upstream schemas/availability were never probed; placeholders are not executable/validated contracts.",
     "Live pagination edits may duplicate or omit entries, per owner acceptance.",
-    "Conflicting-alias product disposition pending owner decision; current behavior is explicit catalog_conflict.",
+    "Conflicting aliases return owner-approved catalog_conflict; administrator must resolve ambiguity.",
     "No production/live provider/browser/CORS/SDK v2 protocol/abrupt-abort leak certification.",
     "GitHub Projects/public ticket permission not granted; ticket recorded locally.",
     "GraphFlow unavailable; no episode started.",
     "Local development only, no push/merge/publication/deployment/version change."
-  ]
+  ],
+  "ownerDecision": {
+    "implementationCommit": "1c3d5e8bcee09970aadb96a2b8d2ee9d4d212259",
+    "decision": "Cross-stage identical names with different definitions/schema return sanitized catalog_conflict; no arbitrary override, automatic renaming or lossy schema replacement. Administrator resolves ambiguity.",
+    "sourceThreadId": "01a0fa97-234d-744a-b992-afc652f53017",
+    "directUserReplyId": "Sentinel_eebeca0907008191997c4947d7532f2b",
+    "result": "Owner explicitly accepted; remaining product decision closed.",
+    "followupScope": "Documentation only; existing implementation and previously recorded test/audit evidence preserved."
+  }
 }
