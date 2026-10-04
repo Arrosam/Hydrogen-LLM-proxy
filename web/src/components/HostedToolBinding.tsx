@@ -40,6 +40,10 @@ export function HostedToolBinding({ tools, ids, config, onIds, onConfig, disable
     // An existing invalid/legacy selection may still be reduced one chip at a time.
     if (unique.length > MAX_BINDINGS && unique.some(id => !selected.includes(id))) {
       setRejected(true);
+      // A flipped popup can obscure the inline error above the input. Close it
+      // through the library's button while retaining the query and selection.
+      if (button.current?.getAttribute("aria-expanded") === "true") button.current.click();
+      return;
     } else {
       onIds(unique);
       setRejected(false);

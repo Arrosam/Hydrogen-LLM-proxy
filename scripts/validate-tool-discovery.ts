@@ -78,7 +78,7 @@ try {
   assert.equal(f.tokens.get(f.owner.id)!.usedRequests, 0); assert.equal(f.tokens.get(f.owner.id)!.usedTokens, 0);
   record("Zero receiver/model/transport/quota/usage/log/decrypting reads and zero inference counters; no private fields in response");
 
-  const output = path.resolve("docs/qa/HYD-TOOL-DISCOVERY/protocol-client.json");
+  const output = path.resolve(process.argv[2] ?? "docs/qa/HYD-TOOL-DISCOVERY/protocol-client.json");
   const evidence = { runAt: new Date().toISOString(), runtime: { node: process.version, platform: process.platform, arch: process.arch },
     library: "@modelcontextprotocol/sdk@1.32.0", client: "Client + StreamableHTTPClientTransport", application: "real buildApp with disposable SQLite and loopback HTTP receiver",
     credentials: "pre-existing synthetic fixture Keys; no production or generated real credentials", cases,

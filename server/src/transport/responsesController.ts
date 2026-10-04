@@ -244,7 +244,9 @@ export class ResponsesController {
       const pending = new Set<string>();
       for (const message of prefix) for (const part of message.content) {
         if (part.type === "tool_use" && !part.serverTool) pending.add(part.id);
-        if (part.type === "tool_result") pending.delete(part.toolUseId);
+        // A private local receipt can share its provider ID with a client call;
+        // only a client-owned result resolves an outstanding client call.
+        if (part.type === "tool_result" && !part.hydrogenTool) pending.delete(part.toolUseId);
       }
       for (const message of request.messages) for (const part of message.content) if (part.type === "tool_result") {
         if (!pending.delete(part.toolUseId)) throw new ResponseStateError("Tool result does not match an outstanding client call", 400);

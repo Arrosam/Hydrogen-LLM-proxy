@@ -77,14 +77,17 @@ describe("hosted tool Combobox", () => {
     fireEvent.click(bulk);
     expect(onIds).toHaveBeenLastCalledWith([2]);
   });
-  it("rejects a two-tool batch at 63 atomically rather than partially filling the cap", () => {
+  it("rejects a two-tool batch at 63 atomically and closes the popup to reveal the error", async () => {
     const catalog = Array.from({ length: 65 }, (_, i) => tool(i + 1, i >= 63 ? `batch_${i + 1}` : `tool_${i + 1}`));
     const { input, onIds } = setup(catalog, Array.from({ length: 63 }, (_, i) => i + 1));
+    await open(input);
     fireEvent.change(input, { target: { value: "batch" } });
     fireEvent.click(screen.getByRole("button", { name: "Select all search results" }));
     expect(onIds).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: /^Remove / })).toHaveLength(63);
+    await waitFor(() => expect(input.getAttribute("aria-expanded")).toBe("false"));
+    expect(input.value).toBe("batch");
   });
   it("reports no results for a nonempty catalog and Escape closes without inventing an ID", async () => {
     const { input, onIds } = setup();
@@ -127,13 +130,21 @@ describe("hosted tool Combobox", () => {
     expect(document.activeElement).toBe(input);
     expect(screen.queryByRole("alert")).toBeNull();
   });
-  it("rejects an individual 65th binding and allows toggling an existing option off at the cap", async () => {
+  it.each(["pointer", "keyboard"])("rejects an individual 65th binding with %s and allows removing an option after reopening", async mode => {
     const { input, onIds } = setup(Array.from({ length: 65 }, (_, i) => tool(i + 1)), Array.from({ length: 64 }, (_, i) => i + 1));
     await open(input);
     fireEvent.change(input, { target: { value: "tool_65" } });
-    await select(/tool_65/);
+    if (mode === "keyboard") {
+      await screen.findByRole("option", { name: /tool_65/ });
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      fireEvent.keyDown(input, { key: "Enter" });
+    } else await select(/tool_65/);
     expect(onIds).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toBeTruthy();
+    await waitFor(() => expect(input.getAttribute("aria-expanded")).toBe("false"));
+    expect(input.value).toBe("tool_65");
+    fireEvent.click(input);
+    await waitFor(() => expect(input.getAttribute("aria-expanded")).toBe("true"));
     fireEvent.change(input, { target: { value: "tool_64" } });
     await select(/tool_64/);
     expect(onIds.mock.lastCall?.[0]).toHaveLength(63);

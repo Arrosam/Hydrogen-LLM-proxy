@@ -73,7 +73,7 @@ beforeEach(() => {
     }
     seen.push(buildRequest("openai_responses", { ...prepared.request.data(), messages: localToolHistory(prepared.request.messages) }));
     const { request: _request, ...serverTools } = prepared;
-    const content = structuredClone(outputs.shift() ?? [{ type: "text", text: "done" }]);
+    const content: ContentPart[] = structuredClone(outputs.shift() ?? [{ type: "text", text: "done" }]);
     return { attempts: 1, attemptPath: [], result: { ok: true, value: { family: "openai_responses", providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {},
       serverTools,
       response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
@@ -121,15 +121,17 @@ const searchCall: ContentPart = { type: "tool_use", id: "toolu_1", name: "provid
 
 describe("server-side tool round trip over HTTP", () => {
   for (const family of ["openai_responses", "anthropic"] as const) for (const stream of [false, true]) {
-    it(`keeps a client call reusing a completed local ID and accepts its saved continuation (${family}, stream=${stream})`, async () => {
-      outputs.push([searchCall], [{ type: "tool_use", id: "toolu_1", name: "client_function", input: { queries: ["client"] } }]);
+    it.each([false, true])(`keeps a client call sharing a local ID and accepts its saved continuation (${family}, stream=${stream}, sameBatch=%s)`, async sameBatch => {
+      const clientCall: ContentPart = { type: "tool_use", id: "toolu_1", name: "client_function", input: { queries: ["client"] } };
+      if (sameBatch) outputs.push([searchCall, clientCall]);
+      else outputs.push([searchCall], [clientCall]);
       const native = family === "anthropic" ? { type: "web_search_20250305", name: "web_search" } : { type: "web_search" };
       const ordinary = family === "anthropic" ? { name: "client_function", input_schema: { type: "object" } } : { type: "function", name: "client_function", parameters: { type: "object" } };
       const url = family === "anthropic" ? "/v1/messages" : "/v1/responses";
       const payload = family === "anthropic" ? { ...declare([native, ordinary]), stream }
         : { model: "svc", input: "q", tools: [native, ordinary], stream };
       const first = await app.inject({ method: "POST", url, headers: headers(), payload });
-      expect(first.statusCode).toBe(200); expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(2);
+      expect(first.statusCode).toBe(200); expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(sameBatch ? 1 : 2);
       const events = stream ? first.payload.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))) : [];
       const body = stream ? events.find(event => event.type === (family === "anthropic" ? "hydrogen.response.completed" : "response.completed"))?.response : first.json();
       expect(body).toBeTruthy();
@@ -142,8 +144,8 @@ describe("server-side tool round trip over HTTP", () => {
         : { model: "svc", previous_response_id: body.id, tools: [native, ordinary], input: [{ type: "function_call_output", call_id: "toolu_1", output: "legitimate client result" }] };
       const next = await app.inject({ method: "POST", url, headers: headers(), payload: nextPayload });
       expect(next.statusCode).toBe(200); expect(next.payload).toContain("Client continuation accepted");
-      expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(3);
-      expect(seen[2]!.messages.flatMap(message => message.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "legitimate client result" }] }));
+      expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(sameBatch ? 2 : 3);
+      expect(seen.at(-1)!.messages.flatMap(message => message.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "legitimate client result" }] }));
     });
   }
 
