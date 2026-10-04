@@ -2,6 +2,8 @@
 
 Local branch: `codex/hydrogen-tool-policy-preview`. Worktree: `/Users/samuel/Documents/Codex/2026-10-03/task-11/hydrogen-tool-policy`. Release baseline: `47397d97c209af695b7fc01ed376f2ddeaeda06b`. No push, publication, deployment, paid inference or production request is authorized or performed. The [feature card](feature-declared-tools-policy.md) was written before source edits.
 
+The execution ledger below records the original policy branch's local validation. The later aggregate preview.2 has separately authorized dependency remediation/publication and must supply its own final-commit gates; these historical counts are not substituted for that verification. The AC7 wording below incorporates the owner's explicit historical-session acceptance on 2026-10-04.
+
 ## Implementation and migration
 
 Bindings are availability, and each effective upstream step prepares declared tools after applying overrides. Preparation resolves exact ownership, applies the effective Model Service policy, rewrites local declarations and tool selections, and validates the final rendered request. The loop executes only entries in that prepared map, which contain the bound executor and its internal ID. Ordinary functions never gain authority from a prefix or alias. Local name conflicts use `hydrogen_tool_name_conflict`; blocked tools use native provider errors and perform no blocked-request dispatch.
@@ -14,7 +16,7 @@ Successful nested execution carries private receipts for an already-owned pendin
 
 Backup export seals session snapshots under the backup passphrase, removes source-key ciphertext from exported table rows, and validates correspondence and authentication before restore writes. Restore encrypts snapshots under the destination master key. Empty and pre-feature snapshots remain distinguishable. Legacy non-null source-key ciphertext can restore under its original key only; a cross-key legacy restore fails atomically instead of installing unusable sessions.
 
-Clients that formerly relied on automatic binding injection must declare server tools. Existing saved identities without a retained snapshot return a native 409 asking for a new session; the original configuration cannot be reconstructed safely. A continued session must use its original model-service name. The owner will communicate client migration; no general legacy layer is added.
+Clients that formerly relied on automatic binding injection must declare server tools. Previous saved responses and used conversations without a retained snapshot return a native 409 asking for a new session; the original configuration cannot be reconstructed safely. An unused conversation can capture its first configuration on first inference. No stored history is deleted by this refusal. The owner explicitly accepted this historical-session exception on 2026-10-04 at 04:40 UTC, message `Sentinel_3fd3a9393d988191a5cc8f0d09b5f741` in source thread `01a0fa97-234d-744a-b992-afc652f53017`. A continued snapshot-bearing session must use its original model-service name. The owner will communicate client migration; no general legacy layer is added.
 
 ## Entrypoints and capability limits
 
@@ -40,7 +42,7 @@ Final checks ran after all receipt and reused-ID corrections, without subsequent
 | `npm test` | 1,633 server tests in 80 files; 82 web tests in 8 files; 9 release-plan tests. All passed, exit 0. |
 | `npm run build` | Web and server passed, exit 0. Vite retains its existing large-chunk advisory. |
 | `git diff --check` | Passed. |
-| `npm audit --json` | Five existing high advisories; no critical, moderate or low advisories. Dependencies unchanged. |
+| `npm audit --json` | Five existing high package records from one inherited advisory; no critical, moderate or low advisories. Original policy dependencies unchanged. |
 
 The untouched baseline passed both typechecks, 1,462 server tests in 75 files, 42 web tests in 6 files and build. No lint script exists. Final logs are in the sibling local `../evidence/acceptance-{typecheck,tests,build}.log`; independent review does not claim to have executed root's full gates. The final runtime fingerprint is retained in [manual run context](validation/HYD-TOOL-POLICY/manual-run-context.json) and independently matched to the current 183 runtime/workflow/script files. Documentation and screenshot updates do not change that fingerprint.
 
@@ -52,7 +54,7 @@ The untouched baseline passed both typechecks, 1,462 server tests in 75 files, 4
 | 4: Model Service UI | **Pass.** Config/UI tests cover placement, exact names, raw/visual preservation and boundaries. Actual browser verifies search, controls without bindings, no Micro Agent policy editor and separate step Advanced placement. |
 | 5: whole override | **Pass.** Runtime and UI/config tests preserve absent versus explicit empty. Final UI save/reload and HTTP empty-step override replace service bypass and execute locally. Inherit restoration clears the explicit indicator. |
 | 6: decision order | **Pass.** All eight mode × listed × local-match combinations, native cross-family errors and effective overlays. Final HTTP whitelist bypass and unmatched local block pass. |
-| 7: old/new sessions | **Pass.** Snapshot/repository/backup tests cover edits, deletion, reconstruction, conversation/store:false, child deletion, prefixes, recursive graph, live authorization, legacy rejection and cross-key restore. Final HTTP old-session bypass survives the UI edit. |
+| 7: old/new sessions | **Pass for the accepted scope.** Snapshot/repository/backup tests cover edits, deletion, reconstruction, conversation/store:false, child deletion, prefixes, recursive graph, live authorization and cross-key restore. Final HTTP snapshot-bearing old-session bypass survives the UI edit. Historical used identities without snapshots require 409/new session under the owner's explicitly accepted exception; rejection tests assert zero model/adapter calls. This does not claim universal preservation of pre-feature sessions. |
 | 8: wire coherence | **Pass.** Runtime, round-trip, large-argument, reasoning/controller/session tests cover choices, IDs, history, JSON/SSE and native resume results. Exact private-instance receipt tests and four persisted nested partitions prevent operation replay. Final HTTP mixed aliases, fallback streaming, saved Responses/Anthropic resumes and nested three-turn JSON/SSE pass. |
 | 9: endpoint limits | **Pass within existing capabilities.** Runtime tests exercise nested HostedToolService and router/OCR preflight; the entrypoint inventory states stateless/buffered limits. Internal stage projection is preserved while pending-call receipts survive. |
 | 10: preview isolation | `release-plan.test.mjs` covers automatic main/tag preview, explicit stable, historical/invalid tags, CLI output, exact 100/101 length limits and workflow guards. Independent release review passed; no GitHub Release/registry action was run. |

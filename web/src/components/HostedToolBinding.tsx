@@ -75,13 +75,13 @@ export function HostedToolBinding({ tools, ids, config, onIds, onConfig, disable
                 const name = tool?.name ?? `${zh ? "未找到工具" : "Missing tool"} #${id}`;
                 return <span key={id} className="inline-flex max-w-full items-center gap-1 rounded-md border border-ink-700 bg-ink-800 py-0.5 pl-2 pr-1 text-xs text-ink-200">
                   <span className="min-w-0 break-all">{name}{tool && !tool.enabled && <span className="text-ink-400"> ({zh ? "停用" : "disabled"})</span>}</span>
-                  <button type="button" disabled={disabled} aria-label={zh ? `移除 ${name}` : `Remove ${name}`} className="shrink-0 rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100 focus:outline-none focus:ring-2 focus:ring-brand-500/50 disabled:cursor-not-allowed"
+                  <button type="button" disabled={disabled} aria-label={zh ? `移除 ${name}` : `Remove ${name}`} className="shrink-0 rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-ink-100 focus:outline-hidden focus:ring-2 focus:ring-brand-500/50 disabled:cursor-not-allowed"
                     onClick={() => changeSelection(selected.filter(value => value !== id))}><i className="bi bi-x" aria-hidden="true" /></button>
                 </span>;
               })}
             </div>}
             <div className="relative">
-              <ComboboxInput id={controlId} ref={input} className="w-full border-0 bg-transparent py-1 pl-1 pr-8 text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none disabled:cursor-not-allowed"
+              <ComboboxInput id={controlId} ref={input} className="w-full border-0 bg-transparent py-1 pl-1 pr-8 text-sm text-ink-100 placeholder:text-ink-500 focus:outline-hidden disabled:cursor-not-allowed"
                 autoComplete="off" placeholder={zh ? "搜索工具名称或描述…" : "Search tools by name or description…"} value={query}
                 aria-invalid={rejected}
                 onChange={event => setQuery(event.target.value)} onClick={() => { if (!open) button.current?.click(); }} />
@@ -89,7 +89,7 @@ export function HostedToolBinding({ tools, ids, config, onIds, onConfig, disable
             </div>
           </div>
           <ComboboxOptions as={ToolOptions} empty={!filtered.length} emptyLabel={zh ? "没有匹配的工具" : "No matching tools"} anchor={{ to: "bottom start", gap: 6, padding: 12 }} modal={false}
-            className="z-50 w-[var(--input-width)] overflow-y-auto overscroll-contain rounded-lg border border-ink-700 bg-ink-850 py-1 shadow-xl shadow-black/40 [--anchor-max-height:15rem] focus:outline-none">
+            className="z-50 w-[var(--input-width)] overflow-y-auto overscroll-contain rounded-lg border border-ink-700 bg-ink-850 py-1 shadow-xl shadow-black/40 [--anchor-max-height:15rem] focus:outline-hidden">
             {({ option: id }: { option: number }) => {
               const tool = catalog.get(id);
               const name = tool?.name ?? `${zh ? "未找到工具" : "Missing tool"} #${id}`;

@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "2.3.0-preview.1",
+  "version": "2.3.0-preview.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,14 +19,14 @@
     "recharts": "^2.13.3"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
     "@testing-library/react": "^16.1.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^6.1.1",
-    "autoprefixer": "^10.4.20",
     "jsdom": "^25.0.1",
     "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.15",
+    "tailwindcss": "4.3.3",
     "typescript": "^5.6.3",
     "vite": "^8.3.1",
     "vitest": "^5.0.2"

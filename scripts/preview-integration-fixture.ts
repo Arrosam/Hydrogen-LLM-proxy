@@ -61,7 +61,8 @@ const upstream = `http://127.0.0.1:${(fake.address() as AddressInfo).port}`;
 const { boot } = await import("../server/src/composition/container");
 const { buildApp } = await import("../server/src/app");
 const c = await boot();
-c.updates.check = async () => ({ current: "2.3.0-preview.1", latest: null, updateAvailable: false, releaseUrl: null, releaseNotes: null,
+const packageVersion = (JSON.parse(fs.readFileSync(new URL("../server/package.json", import.meta.url), "utf8")) as { version: string }).version;
+c.updates.check = async () => ({ current: packageVersion, latest: null, updateAvailable: false, releaseUrl: null, releaseNotes: null,
   publishedAt: null, prerelease: true, checkedAt: Date.now(), runtime: "node", restartSupported: false });
 const provider = c.providers.create({ name: "Synthetic preview provider", type: "openai_responses", baseUrl: `${upstream}/v1`, apiKey: "synthetic-provider-key" });
 const model = c.models.create({ name: "preview-model" });
@@ -116,7 +117,7 @@ const sha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).tri
 fs.writeFileSync(path.join(evidenceDir, "private-fixture.json"), JSON.stringify({ baseUrl, token: token.secret, scopedToken: scoped.secret,
   serviceId: service.id, emptyServiceId: emptyService.id, snapshotId: snapshot.id, fallbackId: fallback.id, toolId: tool.id, agentId: agent.id,
   pagedAgentId: pagedAgent.id, pagedSecondId: pagedSecond.id, admin: "admin", password: "synthetic-preview-admin-2026", dataDir, sha }, null, 2), { mode: 0o600 });
-fs.writeFileSync(path.join(evidenceDir, "fixture-context.json"), JSON.stringify({ sha, version: "2.3.0-preview.1", node: process.version, baseUrl, synthetic: true, startedAt: new Date().toISOString() }, null, 2));
+fs.writeFileSync(path.join(evidenceDir, "fixture-context.json"), JSON.stringify({ sha, version: packageVersion, node: process.version, baseUrl, synthetic: true, startedAt: new Date().toISOString() }, null, 2));
 console.log(JSON.stringify({ ready: true, baseUrl, sha }));
 let stopping = false;
 async function stop() {

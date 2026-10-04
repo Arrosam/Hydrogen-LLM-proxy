@@ -1,7 +1,22 @@
-@import "bootstrap-icons/font/bootstrap-icons.css";
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@config "../tailwind.config.js";
+@source "../index.html";
+@source "./";
+
+/* Preserve the dashboard's Tailwind 3 base behavior during the build migration. */
+@layer base {
+  *,
+  ::before,
+  ::after,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: #e5e7eb;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
 
 :root {
   color-scheme: dark;
@@ -38,27 +53,31 @@ body {
     @apply p-5;
   }
 
-  .btn {
+  .btn,
+  .btn-primary,
+  .btn-ghost,
+  .btn-danger {
     @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
-      transition-colors focus:outline-none focus:ring-2 focus:ring-brand-500/50 disabled:opacity-50
+      transition-colors focus:outline-hidden focus:ring-2 focus:ring-brand-500/50 disabled:opacity-50
       disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply btn bg-brand-600 text-white hover:bg-brand-500;
+    @apply bg-brand-600 text-white hover:bg-brand-500;
   }
   .btn-ghost {
-    @apply btn border border-ink-700 bg-ink-850 text-ink-200 hover:bg-ink-800;
+    @apply border border-ink-700 bg-ink-850 text-ink-200 hover:bg-ink-800;
   }
   .btn-danger {
-    @apply btn border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40;
+    @apply border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40;
   }
   .btn-xs {
     @apply px-2 py-1 text-xs;
   }
 
-  .input {
+  .input,
+  .select {
     @apply w-full rounded-lg border border-ink-700 bg-ink-950/60 px-3 py-2 text-sm text-ink-100
-      placeholder:text-ink-500 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600;
+      placeholder:text-ink-500 focus:border-brand-600 focus:outline-hidden focus:ring-1 focus:ring-brand-600;
   }
   /* A <select> styled as one of ours. `.input` alone leaves the native control:
      the OS draws its own arrow, nothing reserves room for it, and the popup is
@@ -67,7 +86,7 @@ body {
      spacing, and explicit option colours for the engines that honour them
      (Chrome/Edge/Firefox; Safari ignores them and falls back to color-scheme). */
   .select {
-    @apply input cursor-pointer appearance-none bg-no-repeat pr-9;
+    @apply cursor-pointer appearance-none bg-no-repeat pr-9;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238595a8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5l4 4 4-4'/%3E%3C/svg%3E");
     background-position: right 0.6rem center;
     background-size: 1rem 1rem;
@@ -87,26 +106,32 @@ body {
     @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-ink-400;
   }
 
-  .badge {
+  .badge,
+  .badge-green,
+  .badge-red,
+  .badge-gray,
+  .badge-blue,
+  .badge-purple,
+  .badge-yellow {
     @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium;
   }
   .badge-green {
-    @apply badge bg-emerald-950/60 text-emerald-300 ring-1 ring-emerald-800/50;
+    @apply bg-emerald-950/60 text-emerald-300 ring-1 ring-emerald-800/50;
   }
   .badge-red {
-    @apply badge bg-red-950/60 text-red-300 ring-1 ring-red-800/50;
+    @apply bg-red-950/60 text-red-300 ring-1 ring-red-800/50;
   }
   .badge-gray {
-    @apply badge bg-ink-800 text-ink-300 ring-1 ring-ink-700;
+    @apply bg-ink-800 text-ink-300 ring-1 ring-ink-700;
   }
   .badge-blue {
-    @apply badge bg-brand-700/30 text-brand-400 ring-1 ring-brand-700/50;
+    @apply bg-brand-700/30 text-brand-400 ring-1 ring-brand-700/50;
   }
   .badge-purple {
-    @apply badge bg-purple-950/60 text-purple-300 ring-1 ring-purple-800/50;
+    @apply bg-purple-950/60 text-purple-300 ring-1 ring-purple-800/50;
   }
   .badge-yellow {
-    @apply badge bg-yellow-950/60 text-yellow-300 ring-1 ring-yellow-800/50;
+    @apply bg-yellow-950/60 text-yellow-300 ring-1 ring-yellow-800/50;
   }
 
   .table {
