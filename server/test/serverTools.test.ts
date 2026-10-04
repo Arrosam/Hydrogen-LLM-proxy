@@ -158,6 +158,45 @@ describe("round trip collection", () => {
     delete clientCall.hydrogenTool;
     expect(serverToolResponseContent(completed, parts, 1)).toEqual([{ type: "text", text: "answer" }]);
   });
+
+  it.each(["anthropic", "openai_responses"] as const)("preserves a later client call reusing a local provider ID (%s)", family => {
+    const messages = history();
+    const client = { type: "tool_use" as const, id: "toolu_1", name: "client_function", input: { queries: ["client"] } };
+    messages[2]!.content = [client];
+    const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search" }]).tools, [bound()]);
+    const parts = serverToolParts(collectServerToolCalls(messages, matched), family);
+    const content = serverToolResponseContent(messages, parts, 0);
+    expect(content).toEqual([parts[0], client]);
+    const wire = buildResponse(family, { id: "synthetic", model: "svc", created: 0, content, stopReason: "tool_use", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }).renderSelf("svc");
+    expect(JSON.stringify(wire)).toContain("client_function");
+    expect(JSON.stringify(wire)).not.toContain("hydrogenTool");
+  });
+
+  it("keeps separate local instances sharing a provider ID and matches only the resumed instance", () => {
+    const messages = history();
+    const first = messages[0]!.content[0]!;
+    const firstResult = messages[1]!.content[0]!;
+    if (first.type !== "tool_use" || firstResult.type !== "tool_result") throw new Error("missing fixture");
+    first.hydrogenTool!.instanceId = "private-first";
+    firstResult.hydrogenTool!.instanceId = "private-first";
+    const next = structuredClone(first), nextResult = structuredClone(firstResult);
+    next.hydrogenTool!.instanceId = "private-second"; next.input = { queries: ["second"] };
+    nextResult.hydrogenTool!.instanceId = "private-second"; nextResult.content = [{ type: "text", text: '[{"url":"https://second.invalid"}]' }];
+    messages.splice(2, 0, { role: "assistant", content: [next] }, { role: "user", content: [nextResult] });
+    const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search" }]).tools, [bound()]);
+    const parts = serverToolParts(collectServerToolCalls(messages, matched), "anthropic");
+    expect(serverToolResponseContent(messages, parts, 0)).toEqual([parts[0], parts[1], { type: "text", text: "answer" }]);
+    expect(serverToolResponseContent(messages, parts, 3)).toEqual([{ ...parts[1], resultOnly: true }, { type: "text", text: "answer" }]);
+  });
+
+  it("preserves provider-native result content sharing a local provider ID", () => {
+    const messages = history();
+    const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search" }]).tools, [bound()]);
+    const parts = serverToolParts(collectServerToolCalls(messages, matched), "anthropic");
+    const native = { ...parts[0]!, hydrogenTool: undefined, name: "native_search", content: [{ url: "https://native.invalid" }] };
+    messages[2]!.content = [native];
+    expect(serverToolResponseContent(messages, parts, 0)).toEqual([parts[0], native]);
+  });
 });
 
 describe("Anthropic server tool rendering", () => {

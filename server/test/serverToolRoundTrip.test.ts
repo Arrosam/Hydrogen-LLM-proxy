@@ -120,6 +120,33 @@ afterEach(async () => { await app.close(); db.sqlite.close(); fs.rmSync(dir, { r
 const searchCall: ContentPart = { type: "tool_use", id: "toolu_1", name: "provider_server_side_search", input: { queries: ["tokyo"] } };
 
 describe("server-side tool round trip over HTTP", () => {
+  for (const family of ["openai_responses", "anthropic"] as const) for (const stream of [false, true]) {
+    it(`keeps a client call reusing a completed local ID and accepts its saved continuation (${family}, stream=${stream})`, async () => {
+      outputs.push([searchCall], [{ type: "tool_use", id: "toolu_1", name: "client_function", input: { queries: ["client"] } }]);
+      const native = family === "anthropic" ? { type: "web_search_20250305", name: "web_search" } : { type: "web_search" };
+      const ordinary = family === "anthropic" ? { name: "client_function", input_schema: { type: "object" } } : { type: "function", name: "client_function", parameters: { type: "object" } };
+      const url = family === "anthropic" ? "/v1/messages" : "/v1/responses";
+      const payload = family === "anthropic" ? { ...declare([native, ordinary]), stream }
+        : { model: "svc", input: "q", tools: [native, ordinary], stream };
+      const first = await app.inject({ method: "POST", url, headers: headers(), payload });
+      expect(first.statusCode).toBe(200); expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(2);
+      const events = stream ? first.payload.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))) : [];
+      const body = stream ? events.find(event => event.type === (family === "anthropic" ? "hydrogen.response.completed" : "response.completed"))?.response : first.json();
+      expect(body).toBeTruthy();
+      if (family === "anthropic") expect(body.content).toContainEqual(expect.objectContaining({ type: "tool_use", id: "toolu_1", name: "client_function" }));
+      else expect(body.output).toContainEqual(expect.objectContaining({ type: "function_call", call_id: "toolu_1", name: "client_function" }));
+      expect(first.payload).not.toMatch(/hydrogenTool|instanceId|claimedBy/);
+      outputs.push([{ type: "text", text: "Client continuation accepted" }]);
+      const nextPayload = family === "anthropic"
+        ? { ...declare([native, ordinary]), hydrogen: { previous_response_id: body.hydrogen.response_id }, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "legitimate client result" }] }] }
+        : { model: "svc", previous_response_id: body.id, tools: [native, ordinary], input: [{ type: "function_call_output", call_id: "toolu_1", output: "legitimate client result" }] };
+      const next = await app.inject({ method: "POST", url, headers: headers(), payload: nextPayload });
+      expect(next.statusCode).toBe(200); expect(next.payload).toContain("Client continuation accepted");
+      expect(adapter).toHaveBeenCalledTimes(1); expect(seen).toHaveLength(3);
+      expect(seen[2]!.messages.flatMap(message => message.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "legitimate client result" }] }));
+    });
+  }
+
   it("returns the provider call and its adapter-sourced result to a declaring client", async () => {
     outputs.push([searchCall], [{ type: "text", text: "answer" }]);
     const response = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]) });

@@ -506,7 +506,7 @@ export function ServiceEditor({ open, service, services, models, providers, mapp
             <i className="bi bi-play-circle" />
             {t("serviceEditor.dryRun")}
           </button>
-          <div className="flex-1" />
+          <div className="hidden sm:block sm:flex-1" />
           <button className="btn-ghost" onClick={onClose}>{t("common.cancel")}</button>
           <button className="btn-primary" onClick={save} disabled={busy}>
             <i className="bi bi-check-lg" />

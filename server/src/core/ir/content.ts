@@ -124,6 +124,9 @@ export interface ServerToolResultPart {
   blockType: string;
   /** The adapter's selected result entries, verbatim. */
   content: unknown[];
+  /** Private identity of the local operation represented by this presentation.
+   * Public renderers emit only protocol fields and never this provenance. */
+  hydrogenTool?: ToolUsePart["hydrogenTool"];
   /**
    * Wire error code when the call failed, e.g. `unavailable`. The protocol
    * renders its own error object from this rather than an array of entries, so

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import pkg from "../package.json";
 import { eq } from "drizzle-orm";
 import { DISCOVERY_META } from "../src/discovery/toolDirectory";
 import { hostedTools, modelServices, tokens as tokenTable } from "../src/db/schema";
@@ -18,7 +19,7 @@ describe("real SDK initialization/list/call compatibility (AC1, AC2, AC4, AC8)",
     const tool = f.addTool(); f.tools.bind(f.root.id, [tool.id]); const before = f.fingerprint(), changes = f.changes();
     const client = await f.connect();
     expect(client.getServerCapabilities()).toEqual({ tools: { listChanged: false } });
-    expect(client.getServerVersion()).toEqual({ name: "hydrogen-tool-discovery", version: "2.2.3" });
+    expect(client.getServerVersion()).toEqual({ name: "hydrogen-tool-discovery", version: pkg.version });
     const result = await client.listTools(); expect(names(result)).toEqual(["web_search"]); expect(result.tools[0].inputSchema).toEqual(tool.parameters);
     expect(result.tools[0]._meta?.[DISCOVERY_META]).toMatchObject({ discoveryOnly: true, executable: false });
     await expect(client.callTool({ name: "web_search", arguments: { query: "test" } })).rejects.toMatchObject({ code: ErrorCode.MethodNotFound });

@@ -4,6 +4,9 @@ import { ServiceEditor } from "../src/components/ServiceEditor";
 import { HostedToolBinding } from "../src/components/HostedToolBinding";
 import { I18nProvider } from "../src/lib/i18n";
 import type { HostedTool, Mapping, Model, ModelService, Provider, ServiceSteps } from "../src/types";
+import { comboboxLayout } from "./comboboxLayout";
+
+comboboxLayout();
 
 vi.mock("../src/auth", () => ({ useAuth: () => ({ user: { id: 1, role: "admin" } }) }));
 const toastError = vi.fn();
@@ -221,7 +224,11 @@ describe("Model Service policy editor", () => {
   it("uses custom known declaration names from the catalog without requiring a binding", async () => {
     tools = [tool];
     const onSaved = editor();
-    await screen.findByRole("checkbox", { name: "local_lookup" });
+    const selector = await screen.findByRole("combobox", { name: "Bound tools" });
+    fireEvent.focus(selector);
+    fireEvent.mouseDown(await screen.findByRole("option", { name: /local_lookup/ }), { button: 0 });
+    expect(screen.getByRole("button", { name: "Remove local_lookup" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove local_lookup" }));
     fireEvent.change(base().getByRole("searchbox"), { target: { value: "private" } });
     fireEvent.click(base().getByRole("button", { name: "Add private_search" }));
     const payload = await save(onSaved);

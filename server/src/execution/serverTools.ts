@@ -518,6 +518,7 @@ export interface ServerToolCall {
   name: string;
   id: string;
   input: unknown;
+  hydrogenTool?: ToolUsePart["hydrogenTool"];
   tool: HttpTool;
   /** Selected adapter output, parsed. */
   payload: unknown;
@@ -578,21 +579,27 @@ export function serverToolResponseContent(
   prefix: number,
   notExecuted: ReadonlySet<string> = new Set(),
 ): ContentPart[] {
-  const byId = new Map(parts.map(part => [part.id, part]));
+  const byId = new Map<string, ServerToolResultPart[]>();
+  for (const part of parts) byId.set(part.id, [...(byId.get(part.id) ?? []), part]);
+  const presentation = (call: ToolUsePart) => byId.get(call.id)?.find(part => sameToolProvenance(part.hydrogenTool, call.hydrogenTool));
   const content: ContentPart[] = [];
   // A saved pause can leave its owned call before this turn's prefix. Its
   // result is new content even when a new user message intervenes on resume.
-  const pendingPrefixCalls = new Set<string>();
+  const pendingPrefixCalls = new Set<ToolUsePart>();
   for (const message of history.slice(0, prefix)) for (const part of message.content) {
-    if (message.role === "assistant" && part.type === "tool_use" && part.hydrogenTool && byId.has(part.id)) pendingPrefixCalls.add(part.id);
-    if (part.type === "tool_result") pendingPrefixCalls.delete(part.toolUseId);
-    if (part.type === "server_tool_result" && !part.notExecuted) pendingPrefixCalls.delete(part.id);
+    if (message.role === "assistant" && part.type === "tool_use" && presentation(part)) pendingPrefixCalls.add(part);
+    for (const call of pendingPrefixCalls) {
+      if (part.type === "tool_result" && resultMatchesCall(part, call)
+        || part.type === "server_tool_result" && !part.notExecuted && part.id === call.id && sameToolProvenance(part.hydrogenTool, call.hydrogenTool)) pendingPrefixCalls.delete(call);
+    }
   }
   for (const message of history.slice(prefix)) {
     for (const part of message.content) {
-      if (part.type !== "tool_result" || !pendingPrefixCalls.delete(part.toolUseId)) continue;
-      const call = byId.get(part.toolUseId)!;
-      content.push({ ...call, resultOnly: true });
+      if (part.type !== "tool_result") continue;
+      const pending = [...pendingPrefixCalls].find(call => resultMatchesCall(part, call));
+      if (!pending) continue;
+      pendingPrefixCalls.delete(pending);
+      content.push({ ...presentation(pending)!, resultOnly: true });
     }
     if (message.role !== "assistant") continue;
     for (const part of message.content) {
@@ -600,15 +607,15 @@ export function serverToolResponseContent(
       if (part.type === "tool_use") {
         // A call this run executed becomes the round trip that replaced it; a
         // client tool call, and a call a pause declined, keep their own shape.
-        // "Does a round trip exist for this id" is the only honest test: a name
-        // that matches a bound tool does not by itself mean the proxy ran it.
-        const call = byId.get(part.id);
+        // Provider IDs can be reused in later rounds. Only the exact private
+        // operation may be replaced; an ordinary client/native call stays intact.
+        const call = presentation(part);
         if (!call) content.push(part);
-        else if (!content.includes(call)) content.push(notExecuted.has(part.id) ? { ...call, notExecuted: true } : call);
+        else if (!content.includes(call)) content.push(notExecuted.has(part.id) && !callAnswered(history, part) ? { ...call, notExecuted: true } : call);
         continue;
       }
       // The result half of a pair whose call was already emitted travels with it.
-      if (part.type === "server_tool_result" && content.some(c => c.type === "server_tool_result" && c.id === part.id)) continue;
+      if (part.type === "server_tool_result" && content.some(c => c === part || c.type === "server_tool_result" && c.id === part.id && sameToolProvenance(c.hydrogenTool, part.hydrogenTool))) continue;
       content.push(part);
     }
   }
@@ -640,7 +647,7 @@ export function collectServerToolCalls(history: Message[], matched: HostedServer
       catch { payload = text; }
       const notExecuted = (payload as { error?: { code?: unknown } } | null)?.error?.code === PAUSED_TOOL_MARKER;
       // The client sees the name it declared, not the operator's bound name.
-      calls.push({ name: hit.declaration.name, id: part.id, input: part.input, tool: hit.tool, payload, isError, notExecuted });
+      calls.push({ name: hit.declaration.name, id: part.id, input: part.input, hydrogenTool: part.hydrogenTool, tool: hit.tool, payload, isError, notExecuted });
     }
   }
   return calls;
@@ -665,6 +672,7 @@ export function serverToolParts(calls: ServerToolCall[], family: "anthropic" | "
       id: call.id || genId("srvtoolu"),
       name: call.name,
       input: call.input ?? {},
+      ...(call.hydrogenTool ? { hydrogenTool: call.hydrogenTool } : {}),
       blockType: contract.resultType,
       content: outcome.content,
       ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),

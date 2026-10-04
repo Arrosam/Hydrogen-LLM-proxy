@@ -30,4 +30,6 @@ Existing service/API-key scope, quota, SSRF, backup integrity, cancellation and 
 
 ## Evidence and final state
 
+Integration review reproduced two stale assertions (checkbox-era policy test and hardcoded discovery version), plus a client-call suppression bug when provider call IDs are reused across local/client rounds. The assertion updates preserve their original expectations. Response synthesis now matches exact private local instances, keeps ordinary client/native calls, and covers JSON/SSE saved continuation and provenance privacy in both protocols. Real narrow browser inspection also found the existing modal footer placed Raw JSON fully outside375px; footer wrapping and a responsive spacer restore access without altering editing behavior. Final independent rechecks and aggregate gates must verify these corrections.
+
 Aggregate evidence is recorded in `docs/qa/HYD-INTEGRATION-PREVIEW/` and the sibling task `evidence/` directory. Update this section only from actual final executions. Implemented: local integration/version prepared. Tested/accepted: pending final aggregate evidence. Released: no.

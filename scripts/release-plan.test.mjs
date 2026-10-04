@@ -8,6 +8,23 @@ import { spawnSync } from "node:child_process";
 import { releasePlan } from "./release-plan.mjs";
 
 const sha = "47397d97c209af695b7fc01ed376f2ddeaeda06b";
+test("package and lock versions produce an isolated preview plan", () => {
+  const read = name => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), "utf8"));
+  const version = read("package.json").version;
+  assert.match(version, /^\d+\.\d+\.\d+-preview\.\d+$/);
+  const lock = read("package-lock.json");
+  assert.equal(lock.version, version);
+  for (const workspace of ["", "server", "web"]) {
+    assert.equal(read(`${workspace ? `${workspace}/` : ""}package.json`).version, version);
+    assert.equal(lock.packages[workspace].version, version);
+  }
+  const plan = releasePlan({ ref: `refs/tags/v${version}`, sha });
+  assert.equal(plan.channel, "preview");
+  assert.equal(plan.prerelease, true);
+  assert.equal(plan.latest, false);
+  assert.deepEqual(plan.imageTags, ["preview", `preview-v${version}`, `preview-sha-${sha.slice(0, 12)}`]);
+  assert.deepEqual(plan.githubReleaseArgs, ["release", "create", `v${version}`, "--verify-tag", "--prerelease", "--latest=false"]);
+});
 for (const ref of ["refs/heads/main", "refs/tags/v2.2.4", "refs/tags/v2.2.4-preview.1"]) {
   test(`default preview isolates ${ref}`, () => {
     const plan = releasePlan({ ref, sha });
