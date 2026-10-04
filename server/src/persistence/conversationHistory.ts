@@ -42,3 +42,14 @@ export function historyMessages(items: HistoryItem[]): Message[] {
 export function hasPrivateHistoryField(item: HistoryItem): boolean {
   return Object.prototype.hasOwnProperty.call(item, CANONICAL);
 }
+
+/** Change only an existing trusted canonical snapshot. Public wire data never
+ * establishes local tool execution state. */
+export function withHistoryMessages(item: HistoryItem, messages: Message[]): HistoryItem {
+  if (!hasPrivateHistoryField(item)) throw new Error("Conversation item has no private history");
+  return { ...item, [CANONICAL]: structuredClone(messages) };
+}
+
+export function privateHistoryMessages(item: HistoryItem): Message[] {
+  return Array.isArray(item[CANONICAL]) ? structuredClone(item[CANONICAL] as Message[]) : [];
+}

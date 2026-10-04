@@ -15,6 +15,7 @@ import { ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { missingAnswerReason, requireAnswer } from "../core/ir/answer";
 import { UpstreamStreamError } from "../core/ir/toolArguments";
 import type { AttemptFailure } from "../execution/steps";
+import { validateServerToolInput } from "../execution/serverTools";
 import type { StreamValue } from "../execution/outcome";
 import { isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
@@ -28,11 +29,11 @@ import { ProgressRecorder } from "../observability/progressRecorder";
 import { JsonKeepalive } from "./jsonKeepalive";
 import type { ProxyDeps } from "./deps";
 
-/** Preserve the defined codes of terminal local tool preflight failures. All
+/** Preserve the defined codes of typed local tool preflight failures. All
  * other failures keep the existing ingress envelope and privacy boundary. */
 function proxyFailureBody(family: Family, status: number, message: string, failure: AttemptFailure): Record<string, unknown> {
   const body = buildErrorBody(family, status, message);
-  if (!failure.terminal || !failure.errorBody || typeof failure.errorBody !== "object") return body;
+  if ((!failure.terminal && !failure.localToolMismatch) || !failure.errorBody || typeof failure.errorBody !== "object") return body;
   const source = (failure.errorBody as Record<string, unknown>).error;
   const code = source && typeof source === "object" ? (source as Record<string, unknown>).code : undefined;
   if (code === "hydrogen_tool_name_conflict" || code === "tool_not_found") (body.error as Record<string, unknown>).code = code;
@@ -273,6 +274,7 @@ export class ProxyController {
 
     let request;
     try {
+      validateServerToolInput(body, ingress);
       request = parseRequest(ingress, body);
     } catch {
       return this.replyError(reply, ingress, 400, "Invalid request body.");
@@ -376,7 +378,7 @@ export class ProxyController {
         const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => keepalive.stop());
         keepalive.stop();
         if (!outcome.result.ok) {
-          if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, outcome);
+          if (clientGone.signal.aborted) return this.replyClientGone(reply, ctx, true, { ...outcome, usage: outcome.result.usage });
           if (keepalive.committed) {
             // The 200 is already on the wire; the failure travels in-stream.
             return this.replyFailureInStream(reply, ctx, outcome.result, { attemptPath: outcome.attemptPath, attempts: outcome.attempts });

@@ -11,12 +11,12 @@ import type { ModelService, InvokeOptions } from "./modelService";
 import type { InvokeValue } from "./outcome";
 import { HostedToolOptionsSchema, type HostedToolOptions } from "./definition";
 import { callHttpTool, type HttpTool } from "./toolHttp";
-import { DEFAULT_SERVER_TOOL_NAME_PREFIX, localToolHistory, markLocalToolCall, pendingHostedCalls, pendingServerTools, prepareServerTools, retainServerToolReceipts, ServerToolPreflightError, validateServerToolBindings, type HostedServerTools, type HostedToolReceipt, type PreparedServerTools, type ServerToolRuntime } from "./serverTools";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, localToolHistory, markLocalToolCall, pendingHostedCalls, pendingServerTools, prepareServerTools, retainServerToolReceipts, unansweredLocalToolCalls, ServerToolPreflightError, validateServerToolBindings, type HostedServerTools, type HostedToolReceipt, type PreparedServerTools, type ServerToolRuntime } from "./serverTools";
 import { toolValidator } from "./toolSchema";
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { genId } from "../util/ids";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptRecord } from "./steps";
+import type { AttemptRecord, AttemptResult } from "./steps";
 import type { RequestOverrides } from "../core/ir/params";
 
 export type HostedEvent = { type: string; round: number; [key: string]: unknown };
@@ -73,6 +73,7 @@ export async function runHostedTools(
   const availability = { tools, prefix: options.serverToolNamePrefix ?? options.serverTools?.prefix ?? executor.serverToolNamePrefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX };
   validateServerToolBindings(tools, request.family);
   const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
+  const outermost = !(context.callLimits?.length);
   const localLimit = { remaining: config.maxCalls };
   const logMaxChars = context.logMaxChars ?? (() => 100_000);
   const invokeOptions: InvokeOptions = { ...options, hosted: context, serverTools: availability,
@@ -89,7 +90,7 @@ export async function runHostedTools(
   // caller's Request or another invocation sharing that history.
   const history: Message[] = structuredClone(request.messages);
   let runtime: ServerToolRuntime = initial;
-  let matched = pendingServerTools(history, availability, runtime);
+  let matched = pendingServerTools(history, availability, runtime, request.family, !outermost);
   const owned: HostedServerTools = new Map(matched);
   const receipts: HostedToolReceipt[] = [];
   let named = new Map([...matched].map(([name, entry]) => [name, entry.tool]));
@@ -111,10 +112,11 @@ export async function runHostedTools(
     value: { ...value, hostedToolReceipts: receipts, response: buildResponse(value.family, { ...value.response.data(), stopReason: "pause_turn", usage }) },
     history, calls, attempts, traces, paused: true, declined, serverTools: owned, receipts,
   });
-  const done = (value: InvokeValue, content: ContentPart[]): HostedRun => ({
-    value: { ...value, hostedToolReceipts: receipts, response: buildResponse(value.family, { ...value.response.data(), content, usage }) },
-    history, calls, attempts, traces, paused: false, declined: [], serverTools: owned, receipts,
-  });
+  const done = (value: InvokeValue, content: ContentPart[]): HostedRun => {
+    if (outermost && unansweredLocalToolCalls(history).length) fail("The retained tool call has no available executor or result; refusing to discard pending work");
+    return { value: { ...value, hostedToolReceipts: receipts, response: buildResponse(value.family, { ...value.response.data(), content, usage }) },
+      history, calls, attempts, traces, paused: false, declined: [], serverTools: owned, receipts };
+  };
 
   /**
    * Execute one batch of provider-executed calls.
@@ -123,15 +125,28 @@ export async function runHostedTools(
    * call unexecuted, which is what lets a resumed request replay it. Returns
    * `null` when the batch must wait, having pushed whatever it completed.
    */
-  const runBatch = async (batch: ToolUsePart[], round: number): Promise<ContentPart[] | null> => {
-    if (context.remainingRounds <= 0) return null;
+  const runBatch = async (batch: ToolUsePart[], round: number, reservedRound = false): Promise<ContentPart[] | null> => {
+    if (context.remainingRounds < 0 || context.remainingRounds === 0 && !reservedRound) return null;
+    const batchIds = new Set<string>();
+    for (const call of batch) {
+      if (call.hydrogenTool?.execution) fail("A retained tool call has already started without its result; refusing to replay the operation");
+      if (seen.has(call.id) || batchIds.has(call.id)) fail("Model repeated a tool call ID; refusing to replay the operation");
+      batchIds.add(call.id);
+    }
     const results: ContentPart[] = [];
+    let resultTurn: Message | undefined;
     for (const call of batch) {
       options.signal?.throwIfAborted();
+      if (call.hydrogenTool?.execution) fail("A retained tool call has already started without its result; refusing to replay the operation");
       if (seen.has(call.id)) fail("Model repeated a tool call ID; refusing to replay the operation");
       seen.add(call.id);
       const tool = named.get(call.name)!;
       const callId = genId("toolcall");
+      if (call.hydrogenTool) call.hydrogenTool.execution = "started";
+      if (round === 0 && options.onPendingToolExecution) {
+        const claimed = await options.onPendingToolExecution(call);
+        if (!claimed.ok) fail(claimed.message, claimed.status, claimed.errorBody);
+      }
       await emit({ type: "hydrogen.tool.started", round, call_id: callId, model_call_id: call.id, name: call.name, arguments: call.input });
       options.progress?.record("llm", "tool.start", `hosted tool ${call.name} started`);
       const validate = toolValidator(tool.parameters);
@@ -144,13 +159,20 @@ export async function runHostedTools(
           : await callHttpTool(tool, { arguments: call.input as Record<string, unknown>, tool: { name: tool.name }, call: { id: callId }, session: { id: options.sessionId } }, transport, options.signal);
       context.remainingCalls = Math.max(0, context.remainingCalls - 1);
       for (const limit of context.callLimits ?? []) limit.remaining = Math.max(0, limit.remaining - 1);
+      if (call.hydrogenTool) call.hydrogenTool.execution = "completed";
       const canonicalResult: ToolResultPart = { type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError, hydrogenTool: structuredClone(call.hydrogenTool) };
       results.push(canonicalResult);
+      // Keep each completed receipt before the next call/event can fail. A
+      // partial batch must never become unanswered work on another attempt.
+      if (!resultTurn) { resultTurn = { role: "user", content: results }; history.push(resultTurn); }
       receipts.push({ call: structuredClone(call), result: canonicalResult, entry: matched.get(call.name)! });
+      if (round === 0 && options.onPendingToolExecution) {
+        const recorded = await options.onPendingToolExecution(call, canonicalResult);
+        if (!recorded.ok) fail(recorded.message, recorded.status, recorded.errorBody);
+      }
       await emit({ type: "hydrogen.tool.completed", round, call_id: callId, model_call_id: call.id, name: call.name, ...result });
       options.progress?.record("llm", "tool.complete", `hosted tool ${call.name} ${result.isError ? "returned an error" : "completed"}`);
     }
-    history.push({ role: "user", content: results });
     return results;
   };
 
@@ -158,9 +180,35 @@ export async function runHostedTools(
   // the calls it never ran. Run them before asking the model anything: they are
   // the work the pause declined, and the model's next turn depends on them.
   const pendingCalls = pendingHostedCalls(history, named);
+  if (executor.prepareTools && (pendingCalls.length || options.resumeToolCalls)) {
+    let resumed: Promise<AttemptResult<HostedToolReceipt[]>> | undefined;
+    invokeOptions.resumeToolCalls = prepared => resumed ??= (async (): Promise<AttemptResult<HostedToolReceipt[]>> => {
+      const inherited = options.resumeToolCalls ? await options.resumeToolCalls(prepared) : { ok: true as const, value: [] };
+      if (!inherited.ok) return inherited;
+      for (const receipt of retainServerToolReceipts(history, inherited.value)) owned.set(receipt.entry.emittedName, receipt.entry);
+      // The executing step supplies its preparation boundary. Saved provenance
+      // still chooses the exact pending executor, even if this step's overlay
+      // offers another declaration or drops tools altogether.
+      matched = pendingServerTools(history, availability, prepared, request.family, !outermost);
+      named = new Map([...matched].map(([name, entry]) => [name, entry.tool]));
+      const batch = pendingHostedCalls(history, named);
+      if (batch.length && await runBatch(batch, 0, true) === null) fail("Hosted tool call budget is exhausted; raise it before resuming", 402);
+      if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) fail("Tool-loop context exceeds 25 MiB", 413);
+      return { ok: true, value: [...inherited.value, ...receipts] };
+    })().catch((error: unknown): AttemptResult<HostedToolReceipt[]> => {
+      if (error instanceof ServerToolPreflightError) return error.failure();
+      return { ok: false, kind: "error", status: options.signal?.aborted ? 499 : error instanceof HostedRunError ? error.statusCode : 502,
+        message: options.signal?.aborted ? "Response execution cancelled" : error instanceof HostedRunError ? error.message : "Hosted tool execution failed",
+        ...(error instanceof HostedRunError && error.errorBody ? { errorBody: error.errorBody } : {}), terminal: true, retryable: false };
+    });
+  }
   (context.callLimits ??= []).push(localLimit);
   try {
-  if (pendingCalls.length) {
+  if (outermost && unansweredLocalToolCalls(history).some(call => call.hydrogenTool?.execution)) {
+    fail("A retained tool call has already started without its result; refusing to replay the operation");
+  }
+  if (pendingCalls.length && context.remainingRounds <= 0) fail("Hosted tool call budget is exhausted; raise it before resuming", 402);
+  if (pendingCalls.length && !executor.prepareTools) {
     // Still spent: stay paused rather than half-running a batch.
     if (await runBatch(pendingCalls, 0) === null) fail("Hosted tool call budget is exhausted; raise it before resuming", 402);
   }
@@ -190,7 +238,12 @@ export async function runHostedTools(
       const call: ServiceCall = { stage: `tool round ${round}`, service: request.requestedService, kind: nested ? "agent" : "service", status: inv.result.ok ? 200 : failureStatus(inv.result),
         latencyMs: Date.now() - started, attempts: nested ? [] : path as AttemptRecord[], ...(nested ? { calls: path as ServiceCall[] } : {}), streamed: true };
       calls.push(call);
-      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, call.status, inv.result.errorBody); }
+      if (!inv.result.ok) {
+        call.usage = inv.result.usage ?? ZERO_USAGE;
+        usage = addUsage(usage, call.usage);
+        call.error = failureMessage(inv.result);
+        return fail(call.error, call.status, inv.result.errorBody);
+      }
       const stream = inv.result.value;
       call.request = serializeForLog(stream.upstreamRequest, logMaxChars());
       let roundUsage: Usage = { ...ZERO_USAGE };

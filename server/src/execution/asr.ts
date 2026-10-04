@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import { buildHeaders, transcriptionsUrl } from "../core/upstream/endpoints";
 import { extractUpstreamMessage } from "../core/proxy/errors";
 import { runSteps, type RunOutput } from "./steps";
-import type { ServiceSteps } from "./definition";
+import { stepOverrides, type ServiceSteps } from "./definition";
+import { formFieldValue, upsertMultipartField } from "../core/upstream/multipart";
 import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
 import type { Transport } from "../core/upstream/transport";
 
@@ -63,9 +64,12 @@ export async function transcribeAudio(
   def: ServiceSteps,
   audio: AudioInput,
   deps: { catalog: Catalog; transport: Transport },
-  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  opts: { timeoutMs?: number; signal?: AbortSignal; onStepProgress?: () => void } = {},
 ): Promise<RunOutput<string>> {
   return runSteps<string>(def, async (step) => {
+    // This independent tool-free request has begun ordinary execution. Release
+    // enclosing HTTP lifecycle waits without sharing tool ownership or budgets.
+    opts.onStepProgress?.();
     // /audio/transcriptions is an OpenAI-shaped route, so the endpoint has to be
     // one -- which a provider whose primary is Anthropic can still offer through
     // a declared alternate.
@@ -81,9 +85,18 @@ export async function transcribeAudio(
       return { ok: false, status: 0, kind: "error", message: "transport does not support multipart uploads (ASR)" };
     }
     const { body, contentType } = buildTranscriptionForm(res.target.upstreamModel, audio);
+    let form = body;
+    const params = stepOverrides(step)?.extra;
+    for (const field of ["language", "prompt"] as const) {
+      const value = params?.[field];
+      if (value == null) continue;
+      const set = upsertMultipartField(form, contentType, field, formFieldValue(value));
+      if (!set) return { ok: false, status: 0, kind: "error", message: `multipart body is not framed well enough to set '${field}'` };
+      form = set;
+    }
     const headers = buildHeaders(res.target.upstream);
     headers["content-type"] = contentType;
-    const r = await deps.transport.postRaw(transcriptionsUrl(res.target.upstream), headers, body, {
+    const r = await deps.transport.postRaw(transcriptionsUrl(res.target.upstream), headers, form, {
       timeoutMs: opts.timeoutMs ?? def.timeoutMs,
       signal: opts.signal,
       proxy: res.target.upstream.proxy,

@@ -75,8 +75,8 @@ function fixture(opts: {
   return { requests, adapters, deps, service: (def = definition()) => new ModelService(def, deps) };
 }
 
-function nestedReceiptGraph(opts: { siblingReusesId?: boolean; output?: string } = {}) {
-  const callId = "shared_provider_id", nameA = "provider_server_side_lookup_A", nameB = "provider_server_side_lookup_B";
+function nestedReceiptGraph(opts: { siblingReusesId?: boolean; output?: string; sameName?: boolean } = {}) {
+  const callId = "shared_provider_id", nameA = opts.sameName ? emitted : "provider_server_side_lookup_A", nameB = opts.sameName ? emitted : "provider_server_side_lookup_B";
   const f = fixture({ answer: (body, provider) => {
     const input = (body.input ?? []) as Array<Record<string, unknown>>;
     const completed = input.some(item => item.type === "function_call_output" && item.call_id === callId);
@@ -85,8 +85,8 @@ function nestedReceiptGraph(opts: { siblingReusesId?: boolean; output?: string }
     if (provider === "A" && opts.siblingReusesId && pendingB && !completed) return [{ type: "tool_use", id: callId, name: nameA, input: { q: "A" } }];
     return [{ type: "text", text: "answer " + provider }];
   } });
-  const a = tool({ id: 43, name: "lookup_A", url: "https://adapter.test/A" });
-  const b = tool({ id: 44, name: "lookup_B", url: "https://adapter.test/B" });
+  const a = tool({ id: 43, name: opts.sameName ? "lookup" : "lookup_A", url: "https://adapter.test/A" });
+  const b = tool({ id: 44, name: opts.sameName ? "lookup" : "lookup_B", url: "https://adapter.test/B" });
   const childA = new HostedToolService(f.service(definition({ steps: [{ model: "m", provider: "A",
     ...(opts.siblingReusesId ? { overrides: { extra: { tools: [raw] } } } : {}) }] })), f.deps, [a], HostedToolOptionsSchema.parse({ maxRounds: 2 }));
   const childB = new HostedToolService(f.service(definition({ steps: [{ model: "m", provider: "B" }] })), f.deps, [b], HostedToolOptionsSchema.parse({ maxRounds: 1 }));
@@ -98,6 +98,29 @@ function nestedReceiptGraph(opts: { siblingReusesId?: boolean; output?: string }
 }
 
 describe("nested completed execution receipts", () => {
+  it.each([false, true])("same-name sibling stages preserve the exact retained child owner (stream=%s)", async stream => {
+    const f = nestedReceiptGraph({ sameName: true });
+    const entry = prepareServerTools(seed(), { tools: [f.b] }).matched.get(f.nameB)!;
+    const call: ToolUsePart = { type: "tool_use", id: f.callId, name: f.nameB, input: { q: "B" } }; markLocalToolCall(call, entry);
+    const request = buildRequest("openai_responses", { ...seed([]).data(), stream, messages: [{ role: "assistant", content: [call] }] });
+    const run = await runHostedTools(f.agent, request, [], f.deps.transport, { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1, streamMode: stream ? "all" : "final" }),
+      ...(stream ? { emit: async () => {} } : {}) });
+    expect(f.requests.map(request => request.provider)).toEqual(["A", "B"]); expect(f.adapters.map(adapter => adapter.url)).toEqual(["https://adapter.test/B"]);
+    expect(run.receipts).toHaveLength(1); expect(run.receipts[0].entry.tool.id).toBe(f.b.id); expect(run.receipts[0].call.hydrogenTool!.instanceId).toBe(call.hydrogenTool!.instanceId);
+  });
+
+  it("a known unsafe child instance blocks the entire retained batch before sibling effects", async () => {
+    const f = nestedReceiptGraph({ sameName: true });
+    const calls = [f.a, f.b].map((bound, i): ToolUsePart => {
+      const entry = prepareServerTools(seed(), { tools: [bound] }).matched.get(emitted)!;
+      const call: ToolUsePart = { type: "tool_use", id: `pending_${i}`, name: emitted, input: { q: "B" } }; markLocalToolCall(call, entry); return call;
+    });
+    calls[1].hydrogenTool!.execution = "started";
+    const request = buildRequest("openai_responses", { ...seed([]).data(), messages: [{ role: "assistant", content: calls }] });
+    await expect(runHostedTools(f.agent, request, [], f.deps.transport, { sessionId: "s" })).rejects.toMatchObject({ statusCode: 502, calls: [] });
+    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
+  });
+
   it.each([false, true])("retains only an exposed pending child call across three turns (stream=%s)", async stream => {
     const f = nestedReceiptGraph({ siblingReusesId: true });
     const options = { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1, streamMode: stream ? "all" : "final" }),
@@ -118,7 +141,7 @@ describe("nested completed execution receipts", () => {
     expect(new Set(receipts.map(receipt => receipt.call.hydrogenTool!.instanceId)).size).toBe(2);
     expect(second.history.flatMap(message => message.content).filter(part => part.type === "tool_use")).toHaveLength(1);
     const retained = second.history.flatMap(message => message.content).filter((part): part is ToolResultPart => part.type === "tool_result");
-    expect(retained).toHaveLength(1); expect(retained[0].hydrogenTool).toEqual(pendingB!.hydrogenTool);
+    expect(retained).toHaveLength(1); expect(retained[0].hydrogenTool).toEqual({ ...pendingB!.hydrogenTool, execution: "completed" });
     const content = serverToolResponseContent(second.history, serverToolParts(collectServerToolCalls(second.history, second.serverTools), "openai_responses"), secondRequest.messages.length);
     const projected = buildResponse("openai_responses", { ...second.value.response.data(), content }).renderSelf("svc");
     expect((projected.output as Array<Record<string, unknown>>).map(item => item.type)).toEqual(["web_search_call", "message"]);
@@ -138,7 +161,7 @@ describe("nested completed execution receipts", () => {
     const request = buildRequest("openai_responses", { ...seed([]).data(), messages: [{ role: "assistant", content: [call] }, { role: "user", content: [{ type: "text", text: "continue" }] }] });
     const run = await runHostedTools(f.agent, request, [], f.deps.transport, { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1 }) });
     expect(run.value.response.text()).toBe("answer A"); expect(f.adapters.map(adapter => adapter.url)).toEqual(["https://adapter.test/B"]);
-    expect(run.history.flatMap(message => message.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: f.callId, hydrogenTool: call.hydrogenTool }));
+    expect(run.history.flatMap(message => message.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: f.callId, hydrogenTool: { ...call.hydrogenTool, execution: "completed" } }));
     expect(run.serverTools.get(f.nameB)?.tool.id).toBe(f.b.id); expect(run.receipts).toHaveLength(1);
   });
 
@@ -303,14 +326,17 @@ describe("policy decision table and exact declared names", () => {
       { model: "m", provider: "fallback", serverToolPolicy: { mode: "whitelist", names: [] } }] })).invoke(seed([{ type: "web_fetch" }]));
     expect(ok.result.ok).toBe(true); expect(unused.requests).toHaveLength(1);
   });
-  it.each([false, true])("policy denial is terminal; prior failure=%s is counted separately", async prior => {
+  it.each([false, true])("policy mismatch skips stage retries; prior failure=%s is counted separately", async prior => {
     const f = fixture({ fail: prior ? ["primary"] : [] });
     const steps = [...(prior ? [{ model: "m", provider: "primary", retry: { maxAttempts: 1 } }] : []),
       { model: "m", provider: "blocked", retry: { maxAttempts: 3, on: ["error"] }, serverToolPolicy: { mode: "whitelist", names: [] } },
       { model: "m", provider: "permissive" }];
     const inv = await f.service(definition({ steps } as Partial<ServiceSteps>)).invoke(seed([{ type: "web_fetch" }]));
-    expect(inv.result).toMatchObject({ ok: false, status: 400, terminal: true, errorBody: { error: { code: "tool_not_found" } } });
-    expect(f.requests.map(request => request.provider)).toEqual(prior ? ["primary"] : []);
+    expect(inv.result.ok).toBe(true);
+    expect(f.requests.map(request => request.provider)).toEqual(prior ? ["primary", "permissive"] : ["permissive"]);
+    expect((inv.attemptPath as Array<{ provider: string; attempt: number }>).map(entry => [entry.provider, entry.attempt])).toEqual([
+      ...(prior ? [["primary", 1]] : []), ["blocked", 1], ["permissive", 1],
+    ]);
   });
 });
 
@@ -457,7 +483,7 @@ describe("streaming, nested services and protocol boundaries", () => {
     expect(noDeclaration.result.ok).toBe(true); expect(f.requests.at(-1)!.body.tools).toBeUndefined();
     expect(f.adapters).toHaveLength(1);
   });
-  it("preflights the router-selected stage before any OCR or provider side effect", async () => {
+  it("router-selected outer mismatch leaves the independent OCR request tool-free", async () => {
     const f = fixture(), blocked = f.service(definition({ serverToolPolicy: { mode: "whitelist", names: [] } }));
     const agent = new MicroAgent(parseService({ kind: "micro_agent", ocr: { service: "ocr" }, stages: [
       { name: "route", input: [], transitions: [{ when: { type: "input_contains", value: "q" }, goto: "blocked" }] },
@@ -466,7 +492,8 @@ describe("streaming, nested services and protocol boundaries", () => {
     const request = buildRequest(seed().family, { ...seed([{ type: "web_fetch" }]).data(), messages: [{ role: "user", content: [{ type: "text", text: "q" }, { type: "image", source: { kind: "base64", mediaType: "image/png", data: "AA==" } }] }] });
     const inv = await agent.invoke(request);
     expect(inv.result).toMatchObject({ ok: false, status: 400, errorBody: { error: { code: "tool_not_found" } } });
-    expect(f.requests).toHaveLength(0); expect(f.adapters).toHaveLength(0);
+    expect(f.requests).toHaveLength(1); expect(f.requests[0].body.tools).toBeUndefined();
+    expect(f.requests[0].body.tool_choice).toBeUndefined(); expect(f.adapters).toHaveLength(0);
   });
   it("local rejection keeps the native Anthropic error envelope", () => {
     try { prepareServerTools(seed([{ type: "web_fetch_20250910", name: "web_fetch" }], "anthropic"), { tools: [] }, { mode: "whitelist", names: [] }); throw new Error("expected rejection"); }

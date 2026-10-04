@@ -12,7 +12,8 @@ import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, isAgent, serviceCategory, serviceThinkingFormat, stepOverrides } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
-import { collectServerToolCalls, serverToolDeclaration, serverToolParts, serverToolResponseContent, ServerToolPreflightError } from "../execution/serverTools";
+import { countAttempts } from "../execution/serviceCall";
+import { collectServerToolCalls, serverToolDeclaration, serverToolParts, serverToolResponseContent, ServerToolPreflightError, validateServerToolInput } from "../execution/serverTools";
 import type { ServiceSnapshot } from "../execution/serviceSnapshot";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
@@ -193,6 +194,7 @@ export class ResponsesController {
     if (family === "openai_responses" && body.input !== undefined && typeof body.input !== "string" && !Array.isArray(body.input)) throw new ResponseStateError("input must be a string or an item array", 400);
     if (body.prompt !== undefined) throw new ResponseStateError("Provider-stored prompt templates are not supported", 400);
     if (Array.isArray(body.input)) this.validateItems(z.array(z.record(z.unknown())).parse(body.input));
+    validateServerToolInput(clean, family);
     let request = parseRequest(family, clean);
     const allow = family === "anthropic" ? ["anthropic-beta"] : ["openai-beta", "http-referer", "x-title"];
     const forwarded: Record<string, string> = {};
@@ -250,6 +252,8 @@ export class ResponsesController {
       if (pending.size) throw new ResponseStateError("Supply results for all outstanding client tool calls before continuing", 400);
     }
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
+    const retainedToolInstances = new Set(request.messages.flatMap(message => message.content)
+      .flatMap(part => part.type === "tool_use" && part.hydrogenTool?.instanceId ? [part.hydrogenTool.instanceId] : []));
     if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
     const bound = service.tools;
     const serverToolNamePrefix = snapshot.serverToolNamePrefix;
@@ -278,6 +282,8 @@ export class ResponsesController {
     req.body = undefined;
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName: service.name, ingress: family, streaming: flags.stream });
     const progress = new ProgressRecorder(this.deps.activeRequests, traceId);
+    let toolPreflightPassed: (() => void) | undefined;
+    const viableStep = prepared.preflightMismatch ? new Promise<void>(resolve => { toolPreflightPassed = resolve; }) : undefined;
     const job: Job = { abort, done: Promise.resolve(initial), bytes: 0 };
     this.jobs.set(id, job);
     const emit = async (event: WireItem): Promise<void> => {
@@ -311,7 +317,15 @@ export class ResponsesController {
         this.repo.transition(id, token.id, "in_progress", { ...initial, status: "in_progress" });
         if (family === "openai_responses") await emit({ type: "response.in_progress", response: { ...initial, status: "in_progress" } });
         const run = await runHostedTools(executor, request, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools, serverToolNamePrefix,
-          progress, emit: flags.stream && !lossyEphemeral ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+          progress, onStepProgress: toolPreflightPassed, emit: flags.stream && !lossyEphemeral ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
+          onPendingToolExecution: async (call, result) => {
+            // A newly marked raw wire call has no prior private saved instance
+            // to claim. It retains the existing per-invocation no-retry guard.
+            if (!call.hydrogenTool?.instanceId || !retainedToolInstances.has(call.hydrogenTool.instanceId)) return { ok: true, value: undefined };
+            try { this.repo.recordPendingTool(id, token.id, call, result); return { ok: true, value: undefined }; }
+            catch (caught) { return { ok: false, kind: "error", status: caught instanceof ResponseStateError ? caught.statusCode : 502,
+              message: caught instanceof ResponseStateError ? caught.message : "Failed to retain tool execution state", terminal: true, retryable: false }; }
+          },
         });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
@@ -362,7 +376,7 @@ export class ResponsesController {
         const cancelled = abort.signal.aborted;
         status = cancelled ? 499 : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.statusCode : 502;
         error = cancelled ? "Response execution cancelled" : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.message : "Response execution failed";
-        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; }
+        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; attempts = countAttempts(caught.calls); }
         job.errorBody = nativeFailure(family, status, error, caught instanceof HostedRunError || caught instanceof ServerToolPreflightError ? caught.errorBody : undefined);
         const code = (job.errorBody.error as WireItem).code;
         const failed = this.repo.transition(id, token.id, cancelled ? "cancelled" : "failed", { ...initial, error: { code: code ?? (cancelled ? "cancelled" : "execution_failed"), message: error } });
@@ -389,6 +403,14 @@ export class ResponsesController {
     job.done.catch(() => undefined);
     if (!flags.background) reply.raw.once("close", () => { if (!reply.raw.writableFinished) abort.abort(); });
     try {
+      // A synchronous capability mismatch has not dispatched anything. Let the
+      // actual sequential chain reach a viable step or final local failure before
+      // committing. A viable step releases normal SSE/background/keepalive handling
+      // before external work, so a slow compatible fallback cannot hold headers.
+      if (viableStep) {
+        await Promise.race([viableStep, job.done]);
+        if ((job.status ?? 200) >= 400) return reply.code(job.status!).send(job.errorBody);
+      }
       if (flags.stream) return await this.follow(reply, row);
       if (flags.background) return initial;
       const heartbeat = new JsonKeepalive(reply, this.deps.jsonCommitGraceMs ?? 30_000, this.deps.streamPingIntervalMs ?? 10_000);

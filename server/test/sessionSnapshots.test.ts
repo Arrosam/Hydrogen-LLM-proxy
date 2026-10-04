@@ -8,7 +8,7 @@ import "../src/core/format";
 import { openDatabase, type OpenedDatabase } from "../src/db";
 import { buildResponse, serializeStream } from "../src/core/format/registry";
 import { fabricateStream } from "../src/core/ir/stream";
-import type { ContentPart } from "../src/core/ir/content";
+import type { ContentPart, ToolUsePart } from "../src/core/ir/content";
 import type { Family } from "../src/core/format/family";
 import type { Catalog } from "../src/catalog/catalog";
 import type { Transport } from "../src/core/upstream/transport";
@@ -24,6 +24,8 @@ import { ProxyController } from "../src/transport/proxyController";
 import type { ProxyDeps } from "../src/transport/deps";
 import { ActiveRequestRegistry } from "../src/observability/activeRequests";
 import { UsageMeter } from "../src/observability/usageMeter";
+import { markLocalToolCall, prepareServerTools } from "../src/execution/serverTools";
+import { parseRequest } from "../src/core/format/registry";
 
 type Call = { url: string; headers: Record<string, string>; body: Record<string, unknown> };
 const KEY = Buffer.alloc(32, 18);
@@ -149,6 +151,124 @@ function completedBody(payload: string) {
 }
 
 describe("saved session feature configuration", () => {
+  it.each([undefined, "started", "completed"] as const)("a legitimate client result sharing a private call ID cannot answer lifecycle=%s", async execution => {
+    const entry = prepareServerTools(parseRequest("openai_responses", { model: "svc", input: "hello", tools: declaration }), { tools: tools.forService(rootId) }).matched.get("provider_server_side_lookup")!;
+    const call: ToolUsePart = { type: "tool_use", id: "shared", name: entry.emittedName, input: {} }; markLocalToolCall(call, entry); call.hydrogenTool!.execution = execution;
+    const id = `private-client-${execution ?? "unexecuted"}`;
+    repo.createResponse({ id, tokenId: owner.token.id, serviceId: rootId, status: "incomplete", response: { store: true, model: "svc" }, inputItems: [],
+      history: [{ role: "assistant", content: [call, { type: "tool_use", id: "shared", name: "client", input: {} }] }] }, undefined, factory.snapshot(services.get(rootId)!));
+    const continued = await create({ previous_response_id: id, tools: [], input: [{ type: "function_call_output", call_id: "shared", output: "legitimate client result" }] });
+    if (execution) {
+      expect(continued.statusCode).toBe(502); expect(continued.json().error.message).toContain("refusing to replay"); expect(adapterCalls).toHaveLength(0); expect(modelCalls).toHaveLength(0);
+    } else {
+      expect(continued.statusCode).toBe(200); expect(adapterCalls).toHaveLength(1); expect(modelCalls).toHaveLength(1);
+      const history = repo.response(continued.json().id, owner.token.id)!.history.flatMap(message => message.content);
+      expect(history.filter(part => part.type === "tool_result" && part.hydrogenTool?.instanceId === call.hydrogenTool!.instanceId)).toHaveLength(1);
+      expect(history.filter(part => part.type === "tool_result" && !part.hydrogenTool)).toHaveLength(1);
+    }
+  });
+
+  it.each([false, true])("retained pending work waits for actual sequential preflight and frozen fallback (stream=%s)", async stream => {
+    const retry = { maxAttempts: 100, on: ["error"], intervalMs: 600_000, backoff: { initialMs: 600_000, maxMs: 600_000 } };
+    services.update(rootId, { definition: serviceDef({ hostedTools: { maxRounds: 1 }, steps: [
+      { model: "first", provider: "p", retry, advanceOn: [], serverToolPolicy: { mode: "blacklist", names: ["web_fetch"] } },
+      { model: "next", provider: "p", retry },
+    ] }) });
+    const first = await create({ stream }); expect(first.statusCode).toBe(200);
+    const source = stream ? completedBody(first.payload) : first.json(); expect(source.status).toBe("incomplete"); expect(adapterCalls).toHaveLength(0);
+    changeTool(); prefix = "changed_"; services.delete(rootId); tools.delete(toolId);
+    const continued = await create({ stream, previous_response_id: source.id, tools: [...declaration, { type: "web_fetch" }] });
+    expect(continued.statusCode).toBe(200); const body = stream ? completedBody(continued.payload) : continued.json(); expect(body.status).toBe("completed");
+    expect(modelCalls.map(call => call.body.model)).toEqual(["first", "next"]); expect(adapterCalls).toHaveLength(1); expect(adapterCalls[0].url).toBe("https://adapter.test/original");
+    const log = (proxyDeps.logger.record as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0];
+    expect(log.attempts).toBe(2); expect(log.usage.totalTokens).toBe(2);
+    const saved = repo.response(source.id, owner.token.id)!.history.flatMap(message => message.content);
+    expect(saved.filter(part => part.type === "tool_result")).toHaveLength(1);
+    expect(saved.find(part => part.type === "tool_use")).toMatchObject({ hydrogenTool: { id: toolId, execution: "completed", claimedBy: body.id } });
+    expect(continued.payload).not.toContain("claimedBy");
+  });
+
+  it.each(["previous", "conversation", "deleted-conversation-source"])("partial pending receipts survive completion-event failure on %s", async identity => {
+    services.update(rootId, { definition: serviceDef({ hostedTools: { maxRounds: 1 } }) });
+    const transport = proxyDeps.transport as Transport;
+    vi.spyOn(transport, "postJson").mockImplementationOnce(async (url, suppliedHeaders, raw) => {
+      modelCalls.push({ url, headers: suppliedHeaders, body: raw as Record<string, unknown> });
+      const content: ContentPart[] = [1, 2].map(i => ({ type: "tool_use", id: `pending_${i}`, name: "provider_server_side_lookup", input: { i } }));
+      const json = buildResponse("openai_responses", { id: "upstream", model: "m", created: 1, content, stopReason: "tool_use", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }).renderSelf("m");
+      return { status: 200, headers: {}, json, text: JSON.stringify(json) };
+    });
+    const conversationId = identity !== "previous" ? repo.createConversation(owner.token.id, {}).id : undefined;
+    const first = await create(conversationId ? { conversation: conversationId } : {}); expect(first.statusCode).toBe(200);
+    const source = first.json(); expect(source.status).toBe("incomplete"); expect(adapterCalls).toHaveLength(0);
+    if (identity === "deleted-conversation-source") repo.deleteResponse(source.id, owner.token.id);
+    const saved = conversationId ? { conversation: conversationId } : { previous_response_id: source.id };
+    const addEvent = repo.addEvent.bind(repo); let injected = false;
+    vi.spyOn(repo, "addEvent").mockImplementation((id, tokenId, event) => {
+      if (!injected && event.type === "hydrogen.tool.completed") { injected = true; throw new Error("Synthetic event-store failure"); }
+      return addEvent(id, tokenId, event);
+    });
+    const failed = await create({ ...saved, stream: true }); expect(failed.payload).toContain("response.failed");
+    expect(adapterCalls).toHaveLength(1); expect(modelCalls).toHaveLength(1);
+    const failedEvent = failed.payload.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6))).find(event => event.type === "response.failed");
+    expect(repo.response(failedEvent.response.id, owner.token.id)!.history.flatMap(message => message.content)
+      .filter(part => part.type === "tool_result")).toHaveLength(1);
+    const resumed = await create(saved); expect(resumed.statusCode).toBe(200); expect(resumed.json().status).toBe("completed");
+    expect(adapterCalls.map(call => (call.body.args as { i: number }).i)).toEqual([1, 2]); expect(modelCalls).toHaveLength(2);
+    expect(repo.response(resumed.json().id, owner.token.id)!.history.flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(2);
+    if (conversationId) {
+      const { historyMessages } = await import("../src/persistence/conversationHistory");
+      expect(historyMessages(repo.allItems(conversationId, owner.token.id)).flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(2);
+      const publicItems = await app.inject({ url: `/v1/conversations/${conversationId}/items?order=asc&limit=100`, headers: headers() });
+      expect(publicItems.json().data.filter((item: { type: string }) => item.type === "function_call_output")).toHaveLength(2);
+      expect(publicItems.payload).not.toContain("claimedBy"); expect(publicItems.payload).not.toContain("hydrogenTool");
+    }
+    expect(resumed.payload).not.toContain("claimedBy");
+  });
+
+  it("a concurrent stale previous-response fork cannot claim an executing pending instance", async () => {
+    services.update(rootId, { definition: serviceDef({ hostedTools: { maxRounds: 1 } }) });
+    const first = await create(); const source = first.json(); expect(source.status).toBe("incomplete");
+    const transport = proxyDeps.transport as Transport, postStream = transport.postStream.bind(transport);
+    const fromSnapshot = factory.fromSnapshot.bind(factory); let ready = 0, prepared!: () => void;
+    const bothPrepared = new Promise<void>(resolve => { prepared = resolve; });
+    vi.spyOn(factory, "fromSnapshot").mockImplementation(snapshot => {
+      const built = fromSnapshot(snapshot), invoke = built.executor.invoke.bind(built.executor);
+      built.executor.invoke = async (...args) => { if (++ready === 2) prepared(); await bothPrepared; return invoke(...args); };
+      return built;
+    });
+    let release!: () => void, started!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; }), entered = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(transport, "postStream").mockImplementation(async (...args) => {
+      if (args[0].startsWith("https://adapter.test/")) { started(); await barrier; }
+      return postStream(...args);
+    });
+    // Reserve both continuations before either asynchronous job claims work.
+    const winner = create({ previous_response_id: source.id }), loser = create({ previous_response_id: source.id });
+    await entered;
+    try { const conflict = await loser; expect(conflict.statusCode).toBe(409); expect(conflict.json().error.message).toContain("already been claimed"); }
+    finally { release(); }
+    const done = await winner; expect(done.statusCode).toBe(200); expect(adapterCalls).toHaveLength(1); expect(modelCalls).toHaveLength(2);
+    vi.restoreAllMocks();
+    const again = await create({ previous_response_id: source.id, tools: [] }); expect(again.statusCode).toBe(200); expect(adapterCalls).toHaveLength(1);
+  });
+
+  it("an unknown pending outcome remains claimed after failure and restart without replay", async () => {
+    services.update(rootId, { definition: serviceDef({ hostedTools: { maxRounds: 1 } }) });
+    const first = await create(); const source = first.json();
+    const addEvent = repo.addEvent.bind(repo);
+    vi.spyOn(repo, "addEvent").mockImplementation((id, tokenId, event) => {
+      if (event.type === "hydrogen.tool.started") throw new Error("Synthetic failure after durable claim");
+      return addEvent(id, tokenId, event);
+    });
+    const failure = await create({ previous_response_id: source.id, stream: true }); expect(failure.payload).toContain("response.failed");
+    expect(adapterCalls).toHaveLength(0); expect(modelCalls).toHaveLength(1);
+    repo.failInterrupted();
+    const retry = await create({ previous_response_id: source.id }); expect(retry.statusCode).toBe(502); expect(retry.json().error.message).toContain("refusing to replay");
+    expect(adapterCalls).toHaveLength(0); expect(modelCalls).toHaveLength(1);
+    const call = repo.response(source.id, owner.token.id)!.history.flatMap(message => message.content).find((part): part is ToolUsePart => part.type === "tool_use")!;
+    expect(call.hydrogenTool).toMatchObject({ execution: "started", claimedBy: expect.any(String) });
+  });
+
   it.each([false, true])("retains definitions, policy, prefix and executor after edits (stream=%s)", async stream => {
     const originalTools = [...declaration, { type: "external_extra" }];
     services.update(rootId, { definition: serviceDef({ serverToolPolicy: { mode: "whitelist", names: [] },

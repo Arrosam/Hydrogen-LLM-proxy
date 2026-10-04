@@ -9,6 +9,9 @@ import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { ServiceRepo } from "../src/persistence/serviceRepo";
 import { hostedTools } from "../src/db/schema";
+import "../src/core/format";
+import type { Message, ToolResultPart, ToolUsePart } from "../src/core/ir/content";
+import { historyItems, historyMessages } from "../src/persistence/conversationHistory";
 
 let opened: OpenedDatabase;
 let dir: string;
@@ -34,6 +37,77 @@ afterAll(() => {
 const newResponse = (id: string, conversationId?: string) => repo.createResponse({ id, tokenId: owner, status: "queued", background: true, response: { id, status: "queued", object: "response" }, inputItems: [], history: [], conversationId });
 
 describe("owned response state", () => {
+  const pending = (instanceId: string): ToolUsePart => ({ type: "tool_use", id: "operation", name: "provider_server_side_lookup", serverTool: true, input: { query: "synthetic" },
+    hydrogenTool: { id: 42, emittedName: "provider_server_side_lookup", declaredName: "web_search", declarationType: "web_search", instanceId } });
+  const ownedResponse = (id: string, call: ToolUsePart, status: "queued" | "incomplete" = "queued", tokenId = owner, conversationId?: string) => repo.createResponse({
+    id, tokenId, conversationId, status, response: { store: true }, inputItems: [], history: [{ role: "assistant", content: [structuredClone(call)] }],
+  });
+  const result = (call: ToolUsePart): ToolResultPart => ({ type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: "synthetic completed result" }],
+    hydrogenTool: { ...call.hydrogenTool!, execution: "completed" } });
+
+  it("late stale copies cannot claim or prevent the winning receipt from being published", () => {
+    const saved = pending("late-copy-instance"), call = structuredClone(saved);
+    ownedResponse("late-source", saved, "incomplete"); ownedResponse("late-winner", saved);
+    call.hydrogenTool!.execution = "started"; repo.recordPendingTool("late-winner", owner, call);
+    ownedResponse("late-loser", saved);
+    expect(() => repo.recordPendingTool("late-loser", owner, structuredClone(saved))).toThrow("already been claimed");
+    call.hydrogenTool!.execution = "completed"; repo.recordPendingTool("late-winner", owner, call, result(call));
+    for (const id of ["late-source", "late-winner", "late-loser"]) {
+      const parts = repo.response(id, owner)!.history.flatMap(message => message.content);
+      expect(parts.find(part => part.type === "tool_use")).toMatchObject({ hydrogenTool: { execution: "completed", claimedBy: "late-winner" } });
+      expect(parts.filter(part => part.type === "tool_result")).toHaveLength(1);
+    }
+  });
+
+  it("claim updates are scoped by conversation sequence even when public item IDs collide across keys", () => {
+    const call = pending("item-isolation-instance");
+    const first = repo.createConversation(owner, {}, historyItems([{ role: "assistant", content: [call] }]).map(item => ({ ...item, id: "same-item" })));
+    const other = repo.createConversation(stranger, {}, [{ id: "same-item", type: "message", role: "user", content: "other owner's text" }]);
+    const before = repo.allItems(other.id, stranger);
+    ownedResponse("item-isolation-runner", call, "queued", owner, first.id);
+    call.hydrogenTool!.execution = "started"; repo.recordPendingTool("item-isolation-runner", owner, call);
+    expect(repo.allItems(other.id, stranger)).toEqual(before);
+    call.hydrogenTool!.execution = "completed"; repo.recordPendingTool("item-isolation-runner", owner, call, result(call));
+    expect(repo.allItems(other.id, stranger)).toEqual(before);
+    expect(repo.items(first.id, owner, { order: "asc", limit: 100 }).data.filter(item => item.type === "function_call_output")).toHaveLength(1);
+    expect(historyMessages(repo.allItems(first.id, owner)).flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(1);
+    expect(JSON.stringify(repo.items(first.id, owner).data)).not.toContain("claimedBy");
+  });
+
+  it("claims survive original response deletion through an authoritative conversation item", () => {
+    const call = pending("deleted-source-instance"), conversation = repo.createConversation(owner, {}, historyItems([{ role: "assistant", content: [call] }]));
+    ownedResponse("deleted-claim-source", call, "incomplete"); repo.deleteResponse("deleted-claim-source", owner);
+    ownedResponse("deleted-claim-winner", call, "queued", owner, conversation.id);
+    call.hydrogenTool!.execution = "started"; repo.recordPendingTool("deleted-claim-winner", owner, call);
+    repo.transition("deleted-claim-winner", owner, "cancelled", {});
+    // A known completed receipt can still be retained without reversing cancellation.
+    call.hydrogenTool!.execution = "completed"; repo.recordPendingTool("deleted-claim-winner", owner, call, result(call));
+    expect(repo.response("deleted-claim-winner", owner)!.status).toBe("cancelled");
+    repo.deleteResponse("deleted-claim-winner", owner);
+    const restored = historyMessages(repo.allItems(conversation.id, owner));
+    expect(restored.flatMap(message => message.content).filter(part => part.type === "tool_result")).toHaveLength(1);
+    expect(repo.items(conversation.id, owner).data.filter(item => item.type === "function_call_output")).toHaveLength(1);
+  });
+
+  it.each(["owner", "arguments", "call-id", "instance"])("claim rejects mismatched %s before any private state mutation", invalid => {
+    const saved = pending(`invalid-${invalid}`), call = structuredClone(saved);
+    ownedResponse(`invalid-${invalid}-source`, saved, "incomplete"); ownedResponse(`invalid-${invalid}-runner`, saved);
+    if (invalid === "arguments") call.input = { query: "changed" };
+    if (invalid === "call-id") call.id = "other";
+    if (invalid === "instance") call.hydrogenTool!.instanceId = "unknown-instance";
+    expect(() => repo.recordPendingTool(`invalid-${invalid}-runner`, invalid === "owner" ? stranger : owner, call)).toThrow();
+    expect(repo.response(`invalid-${invalid}-source`, owner)!.history[0].content).toEqual([saved]);
+  });
+
+  it("restart keeps the authoritative source claim even after the interrupted runner is failed", () => {
+    const call = pending("restart-claim-instance");
+    ownedResponse("restart-claim-source", call, "incomplete"); ownedResponse("restart-claim-runner", call);
+    call.hydrogenTool!.execution = "started"; repo.recordPendingTool("restart-claim-runner", owner, call);
+    repo.failInterrupted(); expect(repo.response("restart-claim-runner", owner)!.status).toBe("failed");
+    const history: Message[] = repo.response("restart-claim-source", owner)!.history;
+    expect(history[0].content[0]).toMatchObject({ hydrogenTool: { execution: "started", claimedBy: "restart-claim-runner" } });
+  });
+
   it("isolates read, continuation touch, delete and conversation mutations by API Key", () => {
     const conversation = repo.createConversation(owner, {}, [{ type: "message", role: "user", content: "hi" }]);
     newResponse("resp-private", conversation.id);

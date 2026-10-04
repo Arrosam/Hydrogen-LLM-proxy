@@ -95,7 +95,7 @@ describe("adapter result selection", () => {
 describe("round trip collection", () => {
   const history = (): Message[] => [
     { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["a"] } }] },
-    { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E" }]) }] }] },
+    { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E" }]) }] }] },
     { role: "assistant", content: [{ type: "text", text: "answer" }] },
   ];
 
@@ -111,9 +111,9 @@ describe("round trip collection", () => {
   it("keeps every round of a multi-round run, not just the last", () => {
     const multi: Message[] = [
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["a"] } }] },
-      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "u1" }]) }] }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: JSON.stringify([{ url: "u1" }]) }] }] },
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_2", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["b"] } }] },
-      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_2", content: [{ type: "text", text: JSON.stringify([{ url: "u2" }]) }] }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_2", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: JSON.stringify([{ url: "u2" }]) }] }] },
       { role: "assistant", content: [{ type: "text", text: "answer" }] },
     ];
     const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()]);
@@ -123,7 +123,7 @@ describe("round trip collection", () => {
   it("flags a broken adapter result as an error rather than an empty search", () => {
     const broken: Message[] = [
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: {} }] },
-      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "{}" }], isError: true }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: "{}" }], isError: true }] },
     ];
     const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()]);
     const parts = serverToolParts(collectServerToolCalls(broken, matched), "anthropic");
@@ -164,7 +164,7 @@ describe("Anthropic server tool rendering", () => {
   const parts = serverToolParts(
     collectServerToolCalls([
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["tokyo"] } }] },
-      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E", snippet: "s" }]) }] }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E", snippet: "s" }]) }] }] },
     ], hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()])),
     "anthropic",
   );
@@ -239,7 +239,7 @@ describe("Anthropic server tool rendering", () => {
     const custom = serverToolParts(
       collectServerToolCalls([
         { role: "assistant", content: [{ type: "tool_use", id: "toolu_9", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: {} }] },
-        { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_9", content: [{ type: "text", text: JSON.stringify({ results: [{ url: "u" }] }) }] }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_9", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, content: [{ type: "text", text: JSON.stringify({ results: [{ url: "u" }] }) }] }] },
       ], hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound({ serverTool: { name: "web_search", resultType: "web_fetch_result", resultPath: "/results" } })])),
       "anthropic",
     );

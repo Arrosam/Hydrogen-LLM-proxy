@@ -268,7 +268,7 @@ export function buildOcrRequest(request: Request, images: ImagePart[], ocr: Agen
     content.push(img);
   });
   const data: RequestData = {
-    requestedService: request.requestedService,
+    requestedService: ocr.service ?? request.requestedService,
     system: ocr.prompt && ocr.prompt.trim() ? ocr.prompt : DEFAULT_OCR_PROMPT,
     messages: [{ role: "user", content }],
     params: ocrParams(ocr),

@@ -1,0 +1,1417 @@
+{
+  "ticket": "HYD-TOOL-MISMATCH-FASTFAIL",
+  "base": "8c12ff24b72767bcc7b0438a4091c36e7ecddccc",
+  "node": "v22.22.2",
+  "environment": "darwin/arm64",
+  "providers": "synthetic loopback only",
+  "scenarios": [
+    {
+      "id": "first mismatch to immediate compatible stage",
+      "status": 200,
+      "elapsedMs": 38,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 37
+    },
+    {
+      "id": "multiple mismatches preserve strict order",
+      "status": 200,
+      "elapsedMs": 13,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2,
+        3
+      ],
+      "passed": true,
+      "headersMs": 13
+    },
+    {
+      "id": "all policy mismatches keep final native error",
+      "status": 400,
+      "elapsedMs": 10,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 10
+    },
+    {
+      "id": "all mismatch stream stays HTTP 400",
+      "status": 400,
+      "elapsedMs": 9,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 9
+    },
+    {
+      "id": "all mismatch background stays HTTP 400",
+      "status": 400,
+      "elapsedMs": 8,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 8
+    },
+    {
+      "id": "all mismatches report last wire failure",
+      "status": 400,
+      "elapsedMs": 7,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 7
+    },
+    {
+      "id": "wire mismatch to next native stage",
+      "status": 200,
+      "elapsedMs": 11,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 11
+    },
+    {
+      "id": "retry400 tool-error lookalike retains 3 upstream attempts",
+      "status": 200,
+      "elapsedMs": 53,
+      "requests": {
+        "retry400": 3
+      },
+      "requestOrder": [
+        "retry400",
+        "retry400",
+        "retry400"
+      ],
+      "stages": [
+        1,
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 53
+    },
+    {
+      "id": "retry503 tool-error lookalike retains 3 upstream attempts",
+      "status": 200,
+      "elapsedMs": 60,
+      "requests": {
+        "retry503": 3
+      },
+      "requestOrder": [
+        "retry503",
+        "retry503",
+        "retry503"
+      ],
+      "stages": [
+        1,
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 56
+    },
+    {
+      "id": "caller duplicate cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 2
+    },
+    {
+      "id": "caller missingChoice cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 3,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 3
+    },
+    {
+      "id": "caller droppedEntry cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller badName cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller badSchema cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller badAllowed cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller conflictingSession cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "caller privateHistory cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "Completion n>1 cannot evade global validation",
+      "status": 400,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 2
+    },
+    {
+      "id": "openai_completion malformed declaration stays terminal",
+      "status": 400,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 1
+    },
+    {
+      "id": "anthropic malformed declaration stays terminal",
+      "status": 400,
+      "elapsedMs": 2,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true,
+      "headersMs": 2
+    },
+    {
+      "id": "key scope cannot use fallback",
+      "status": 403,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "no tools uses ordinary first stage",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true,
+      "headersMs": 7
+    },
+    {
+      "id": "compatible streaming fallback",
+      "status": 200,
+      "elapsedMs": 56,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4
+    },
+    {
+      "id": "slow compatible fallback releases stream headers",
+      "status": 200,
+      "elapsedMs": 856,
+      "requests": {
+        "slow": 1
+      },
+      "requestOrder": [
+        "slow"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "providerDelayMs": 800
+    },
+    {
+      "id": "slow compatible fallback returns background ID immediately",
+      "status": 200,
+      "elapsedMs": 828,
+      "requests": {
+        "slow": 1
+      },
+      "requestOrder": [
+        "slow"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "providerDelayMs": 800
+    },
+    {
+      "id": "ordinary mapping retry releases existing background lifecycle",
+      "status": 200,
+      "elapsedMs": 824,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        1
+      ],
+      "passed": true,
+      "headersMs": 4,
+      "configuredRetryMs": 800
+    },
+    {
+      "id": "model-round failover never replays completed tool side effect",
+      "status": 200,
+      "elapsedMs": 15,
+      "requests": {
+        "compatible": 2,
+        "adapter": 1
+      },
+      "requestOrder": [
+        "compatible",
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 15
+    },
+    {
+      "id": "Anthropic native sequential fallback",
+      "status": 200,
+      "elapsedMs": 4,
+      "requests": {
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "anthropic"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4
+    },
+    {
+      "id": "pending seed buffered is unexecuted",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending buffered uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 13,
+      "requests": {
+        "adapter": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 12,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed stream is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending stream uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 59,
+      "requests": {
+        "adapter": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed background is unexecuted",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending background uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 32,
+      "requests": {
+        "adapter": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed reliable is unexecuted",
+      "status": 200,
+      "elapsedMs": 5,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending reliable uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 58,
+      "requests": {
+        "adapter": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed anthropic is unexecuted",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "anthropic"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending anthropic uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 11,
+      "requests": {
+        "adapter": 1,
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "anthropic"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 10,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed anthropic-stream is unexecuted",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "anthropic"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending anthropic-stream uses frozen next stage once",
+      "status": 200,
+      "elapsedMs": 59,
+      "requests": {
+        "adapter": 1,
+        "anthropic": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "anthropic"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 6,
+      "totalAttempts": 2,
+      "tokenCharges": 2,
+      "adapterCalls": 1,
+      "privateReceipts": 1
+    },
+    {
+      "id": "pending seed many-buffered is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending many buffered keeps sequential order and no replay",
+      "status": 200,
+      "elapsedMs": 10,
+      "requests": {
+        "adapter": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "adapter",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2,
+        3
+      ],
+      "passed": true,
+      "headersMs": 9,
+      "totalAttempts": 3,
+      "tokenCharges": 2,
+      "privateReceipts": 1,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-policy-buffered is unexecuted",
+      "status": 200,
+      "elapsedMs": 9,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-policy buffered keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 7,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 6,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-policy-stream is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-policy stream keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 5,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-policy-background is unexecuted",
+      "status": 200,
+      "elapsedMs": 5,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-policy background keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 6,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 6,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-wire-buffered is unexecuted",
+      "status": 200,
+      "elapsedMs": 8,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-wire buffered keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 6,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-wire-stream is unexecuted",
+      "status": 200,
+      "elapsedMs": 8,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-wire stream keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 6,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed all-wire-background is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending all-wire background keeps sequential order and no replay",
+      "status": 400,
+      "elapsedMs": 5,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "privateReceipts": 0,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed retry-buffered is unexecuted",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "retained pending retry buffered keeps sequential order and no replay",
+      "status": 200,
+      "elapsedMs": 56,
+      "requests": {
+        "adapter": 1,
+        "retryPending": 3
+      },
+      "requestOrder": [
+        "adapter",
+        "retryPending",
+        "retryPending",
+        "retryPending"
+      ],
+      "stages": [
+        1,
+        2,
+        2,
+        2
+      ],
+      "passed": true,
+      "headersMs": 56,
+      "totalAttempts": 4,
+      "tokenCharges": 2,
+      "privateReceipts": 1,
+      "configuredMismatchBackoffMs": 600000
+    },
+    {
+      "id": "pending seed durable-recovery is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "completed pending receipt survives real HTTP event-store failure",
+      "status": 200,
+      "elapsedMs": 58,
+      "requests": {
+        "adapter": 1
+      },
+      "requestOrder": [
+        "adapter"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "semanticStatus": 502,
+      "privateReceipts": 1
+    },
+    {
+      "id": "original saved source recovery reuses receipt without adapter IO",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "compatible": 1
+      },
+      "requestOrder": [
+        "compatible"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "adapterCalls": 0,
+      "totalAttempts": 2
+    },
+    {
+      "id": "pending seed cancel-unknown is unexecuted",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "first": 1
+      },
+      "requestOrder": [
+        "first"
+      ],
+      "stages": [
+        1
+      ],
+      "passed": true
+    },
+    {
+      "id": "cancelled pending adapter retains unknown durable claim",
+      "status": 200,
+      "elapsedMs": 17,
+      "requests": {
+        "adapterSlow": 1
+      },
+      "requestOrder": [
+        "adapterSlow"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "semanticStatus": 499,
+      "totalAttempts": 2,
+      "tokenCharges": 0,
+      "adapterCalls": 1,
+      "modelCalls": 0
+    },
+    {
+      "id": "unknown pending outcome cannot replay from original source",
+      "status": 502,
+      "elapsedMs": 5,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "independent tool-free ocr normal; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 14,
+      "requests": {
+        "ocr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "ocr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 13,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "ocr root scope permits internal reference but denies direct child API",
+      "status": 403,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "independent tool-free ocr retry; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 59,
+      "requests": {
+        "retryOcr": 3,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "retryOcr",
+        "retryOcr",
+        "retryOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 56,
+      "childAttempts": 3,
+      "totalAttempts": 5,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 849,
+      "requests": {
+        "slowOcr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "slowOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr background; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 832,
+      "requests": {
+        "slowOcr": 1,
+        "compatible": 1
+      },
+      "requestOrder": [
+        "slowOcr",
+        "compatible"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 4,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 4,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free ocr all-stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 838,
+      "requests": {
+        "slowOcr": 1
+      },
+      "requestOrder": [
+        "slowOcr"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 5,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 400
+    },
+    {
+      "id": "independent tool-free ocr all-background; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 817,
+      "requests": {
+        "slowOcr": 1
+      },
+      "requestOrder": [
+        "slowOcr"
+      ],
+      "stages": [
+        1,
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 8,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 400
+    },
+    {
+      "id": "independent tool-free asr normal; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 9,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 8,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "asr root scope permits internal reference but denies direct child API",
+      "status": 403,
+      "elapsedMs": 1,
+      "requests": {},
+      "requestOrder": [],
+      "stages": [],
+      "passed": true
+    },
+    {
+      "id": "independent tool-free asr retry; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 53,
+      "requests": {
+        "retryAsr": 3,
+        "completion": 1
+      },
+      "requestOrder": [
+        "retryAsr",
+        "retryAsr",
+        "retryAsr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 51,
+      "childAttempts": 3,
+      "totalAttempts": 5,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "independent tool-free asr stream; outer sequential mismatch",
+      "status": 200,
+      "elapsedMs": 810,
+      "requests": {
+        "slowAsr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "slowAsr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "headersMs": 810,
+      "childAttempts": 1,
+      "totalAttempts": 3,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "finalJobStatus": 200
+    },
+    {
+      "id": "public STT/internal ASR configured fields nested",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "publicFields": {
+        "language": "en",
+        "prompt": "Recognize English proper names.\r\nKeep punctuation."
+      },
+      "internalFields": {
+        "language": "en",
+        "prompt": "Recognize English proper names.\r\nKeep punctuation."
+      },
+      "publicProviderCalls": 1,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "totalAttempts": 3
+    },
+    {
+      "id": "public STT/internal ASR configured fields direct-precedence",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "publicFields": {
+        "language": "en",
+        "prompt": "Use direct English hint."
+      },
+      "internalFields": {
+        "language": "en",
+        "prompt": "Use direct English hint."
+      },
+      "publicProviderCalls": 1,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "totalAttempts": 3
+    },
+    {
+      "id": "public STT/internal ASR configured fields direct-null-empty",
+      "status": 200,
+      "elapsedMs": 7,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "publicFields": {
+        "language": null,
+        "prompt": ""
+      },
+      "internalFields": {
+        "language": null,
+        "prompt": ""
+      },
+      "publicProviderCalls": 1,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "totalAttempts": 3
+    },
+    {
+      "id": "public STT/internal ASR configured fields empty",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "publicFields": {
+        "language": "",
+        "prompt": ""
+      },
+      "internalFields": {
+        "language": "",
+        "prompt": ""
+      },
+      "publicProviderCalls": 1,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "totalAttempts": 3
+    },
+    {
+      "id": "public STT/internal ASR configured fields null",
+      "status": 200,
+      "elapsedMs": 6,
+      "requests": {
+        "asr": 1,
+        "completion": 1
+      },
+      "requestOrder": [
+        "asr",
+        "completion"
+      ],
+      "stages": [
+        1,
+        2
+      ],
+      "passed": true,
+      "publicFields": {
+        "language": null,
+        "prompt": null
+      },
+      "internalFields": {
+        "language": null,
+        "prompt": null
+      },
+      "publicProviderCalls": 1,
+      "childToolCount": 0,
+      "topLevelLogRows": 1,
+      "requestCharges": 1,
+      "tokenCharges": 2,
+      "totalAttempts": 3
+    }
+  ],
+  "passed": 78,
+  "failed": 0,
+  "limitations": [
+    "ASR audio is supported through Chat Completions; public Responses background cannot express Completion input_audio.",
+    "Internal ASR forwards only the authorized configured language/prompt fields; wider public STT parameter parity is unchanged and existing zero-token STT accounting is preserved."
+  ]
+}

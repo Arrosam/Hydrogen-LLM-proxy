@@ -65,7 +65,12 @@ export interface ToolUsePart {
   serverTool?: boolean;
   /** Private execution provenance. Wire parsers never accept this from clients.
    * It preserves the exact executor and emitted name through saved history. */
-  hydrogenTool?: { id?: number; emittedName: string; declaredName: string; declarationType: string; instanceId?: string };
+  hydrogenTool?: { id?: number; emittedName: string; declaredName: string; declarationType: string; instanceId?: string;
+    /** Private lifecycle: absence denotes an unexecuted pause. A started call
+     * without its authoritative receipt has an unknown outcome and cannot run again. */
+    execution?: "started" | "completed";
+    /** Private saved-response claim owner; only its runner may publish a receipt. */
+    claimedBy?: string };
 }
 
 export interface ToolResultPart {

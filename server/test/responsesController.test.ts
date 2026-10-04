@@ -43,7 +43,9 @@ beforeEach(() => {
   const invoke = async (request: Request, options: InvokeOptions = {}): Promise<Invocation> => {
     const serverTools = prepareServerTools(request, options.serverTools);
     requests.push(serverTools.request); if (wait) await wait;
-    const content = outputs.shift() ?? [{ type: "text", text: "Hello world" }];
+    // Each synthetic model response owns its call objects, like parsed wire
+    // output; one test's completed lifecycle must not contaminate another.
+    const content = structuredClone(outputs.shift() ?? [{ type: "text", text: "Hello world" }]);
     return { attempts: 1, attemptPath: [], result: { ok: true, value: { family: "openai_responses", providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {},
       serverTools, response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
   };
