@@ -10,7 +10,7 @@ The aggregate card is `docs/feature-integration-preview.md`. Source cards cover 
 
 - The policy test still expected checkbox selection after the combobox integration; it now exercises existing-ID combobox selection/removal and keeps the original declaration and persistence assertions.
 - The SDK initialization test hardcoded the previous release version; it now checks the current package version.
-- CA-01: response synthesis used a bare provider ID to suppress client calls or conflate separate local receipts. Red regressions and independent actual-controller reproduction preceded the private-instance matching correction.
+- CA-01: response synthesis used a bare provider ID to suppress client calls or conflate separate local receipts. Independent runtime reproduction and root HTTP red regressions preceded the private-instance matching correction.
 - CA-02: a private local receipt discharged a distinct same-batch client call with a reused ID. Red HTTP regressions in both protocols and JSON/SSE preceded the private-receipt exclusion in saved continuation validation.
 - Narrow browser review found clipped modal actions and a flipped popup hiding the binding-limit error. Responsive wrapping and library-controlled popup closure address those observations; pointer/keyboard rejection tests preserve atomic IDs and the query.
 
