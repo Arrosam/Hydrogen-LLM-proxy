@@ -1,0 +1,93 @@
+{
+  "runAt": "2026-10-03T13:54:37.631Z",
+  "runtime": {
+    "node": "v22.22.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "library": "@modelcontextprotocol/sdk@1.32.0",
+  "client": "Client + StreamableHTTPClientTransport",
+  "application": "real buildApp with disposable SQLite and loopback HTTP receiver",
+  "credentials": "pre-existing synthetic fixture Keys; no production or generated real credentials",
+  "cases": [
+    {
+      "id": "SDK-01",
+      "scenario": "Official SDK initializes and sends initialized notification; only tools listing capability advertised",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-02",
+      "scenario": "Known Hydrogen entry retains downstream name and actual saved parameter schema",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-03",
+      "scenario": "SDK can attempt calls despite advisory metadata; endpoint rejects known/unknown calls and remains usable without DB writes",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-04",
+      "scenario": "Admin-declared upstream placeholder passes official SDK listing validation, warns unknown schema and rejects attempted call",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-05",
+      "scenario": "Actual SDK cursor pagination covers 101 entries in 100+1 pages with stable repeat listing",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-06",
+      "scenario": "Next page re-reads current description/schema using an earlier cursor",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-07",
+      "scenario": "Old cursor reads current policy and binding edits; catalog shrink returns live empty page without recovery",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-08",
+      "scenario": "Valid empty service succeeds; malformed saved configuration is a sanitized explicit MCP error",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-09",
+      "scenario": "Micro Agent union includes local and admin-declared tools available only in later stages",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-10",
+      "scenario": "Root-scoped Key can inspect compound service but cannot initialize the referenced child as a separate target",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-11",
+      "scenario": "Existing SDK connection cannot list after current Key revocation",
+      "result": "pass"
+    },
+    {
+      "id": "SDK-12",
+      "scenario": "Zero receiver/model/transport/quota/usage/log/decrypting reads and zero inference counters; no private fields in response",
+      "result": "pass"
+    }
+  ],
+  "finalCounters": {
+    "upstreamHttp": 0,
+    "modelFactory": 0,
+    "upstreamTransport": 0,
+    "catalogResolve": 0,
+    "quotaReserve": 0,
+    "usage": 0,
+    "requestLog": 0,
+    "decryptingToolRead": 0
+  },
+  "inferenceUsage": {
+    "requests": 0,
+    "tokens": 0
+  },
+  "sqliteWriteStatementsDuringProtocolSequence": 0,
+  "limits": [
+    "This validates official SDK listing compatibility; ordinary agent applications may ignore custom metadata and attempt calls.",
+    "No live providers, public network execution, browser/CORS use, production deployment or current 2026 SDK v2 protocol certification."
+  ]
+}

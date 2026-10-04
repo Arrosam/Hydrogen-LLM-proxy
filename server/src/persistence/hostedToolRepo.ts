@@ -7,6 +7,10 @@ import { toolValidator } from "../execution/toolSchema";
 
 type ToolRow = typeof hostedTools.$inferSelect;
 export type PublicHostedTool = Omit<HttpTool, "headers"> & { id: number; headerNames: string[]; hasHeaders: boolean };
+const DefinitionSchema = HttpToolSchema.pick({ name: true, description: true, parameters: true, enabled: true, serverTool: true });
+/** The same persisted definition used by inference, without adapter configuration
+ * or decrypted credentials. This projection cannot be used to execute a tool. */
+export type HostedToolDefinition = Pick<HttpTool, "name" | "description" | "parameters" | "enabled" | "serverTool"> & { id: number };
 
 export class HostedToolRepo {
   constructor(private readonly db: DB, private readonly masterKey: Buffer) {}
@@ -65,5 +69,12 @@ export class HostedToolRepo {
     const ids = this.boundIds(serviceId);
     if (!ids.length) return [];
     return this.db.select().from(hostedTools).where(and(inArray(hostedTools.id, ids), eq(hostedTools.enabled, true))).all().map(row => this.materialize(row));
+  }
+
+  definitionsForService(serviceId: number): HostedToolDefinition[] {
+    return this.db.select({ id: hostedTools.id, name: hostedTools.name, config: hostedTools.config, enabled: hostedTools.enabled })
+      .from(hostedTools).innerJoin(serviceTools, eq(serviceTools.toolId, hostedTools.id))
+      .where(and(eq(serviceTools.serviceId, serviceId), eq(hostedTools.enabled, true))).all()
+      .map(row => ({ ...DefinitionSchema.parse({ ...row.config, name: row.name, enabled: row.enabled }), id: row.id }));
   }
 }
