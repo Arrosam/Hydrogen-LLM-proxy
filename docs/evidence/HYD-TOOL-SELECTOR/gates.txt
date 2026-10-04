@@ -1,0 +1,50 @@
+Hydrogen hosted tool selector gate evidence
+Node v22.22.2; npm10.9.7; Darwin arm64
+
+Baseline tests
+ Test Files  75 passed (75)
+      Tests  1462 passed (1462)
+   Start at  23:37:48
+   Duration  145.06s (tests 94%, import 3%, transform 3%)
+ Test Files  6 passed (6)
+      Tests  42 passed (42)
+   Start at  23:40:13
+   Duration  2.08s (environment 41%, tests 31%, transform 14%, import 13%)
+
+Feature full tests
+ Test Files  75 passed (75)
+      Tests  1462 passed (1462)
+   Start at  23:48:44
+   Duration  144.70s (tests 95%, import 3%, transform 2%)
+ Test Files  7 passed (7)
+      Tests  56 passed (56)
+   Start at  23:51:09
+   Duration  2.54s (environment 39%, tests 35%, import 14%, transform 11%)
+
+Post-fix web tests
+ Test Files  7 passed (7)
+      Tests  56 passed (56)
+   Start at  23:56:11
+   Duration  2.57s (environment 40%, tests 35%, import 15%, transform 10%)
+
+npm run typecheck: pass (server and web)
+npm run build: pass (Vite web and server bundles)
+Final catalog-refresh fix tests
+ Test Files  7 passed (7)
+      Tests  57 passed (57)
+   Start at  00:12:56
+   Duration  2.68s (environment 41%, tests 33%, import 14%, transform 11%)
+Final catalog-refresh npm run typecheck: pass (server and web)
+Final catalog-refresh npm run build: pass (web and server)
+Final-source full npm test: exit0
+ Test Files  75 passed (75)
+      Tests  1462 passed (1462)
+   Start at  00:15:34
+   Duration  144.77s (tests 95%, import 3%, transform 2%)
+ Test Files  7 passed (7)
+      Tests  57 passed (57)
+   Start at  00:18:00
+   Duration  2.57s (environment 40%, tests 35%, import 14%, transform 11%)
+npm audit --json: exit1, five existing high findings (braces/chokidar/fast-glob/micromatch/tailwindcss)
+git diff --check: pass
+Official npm added20 packages; zero existing locked versions changed

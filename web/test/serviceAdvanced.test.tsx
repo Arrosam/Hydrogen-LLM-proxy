@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceEditor } from "../src/components/ServiceEditor";
 import { I18nProvider } from "../src/lib/i18n";
 import type { HostedTool, Mapping, Model, ModelService, Provider, ServiceSteps } from "../src/types";
+import { comboboxLayout } from "./comboboxLayout";
+
+comboboxLayout();
 
 vi.mock("../src/auth", () => ({ useAuth: () => ({ user: { id: 1, role: "admin" } }) }));
 vi.mock("../src/components/Toast", () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }));
@@ -244,13 +247,14 @@ describe("service Advanced section", () => {
   it("preserves hosted tool bindings and attachment budget after collapsing", async () => {
     const { onSaved } = renderEditor();
     expandAdvanced();
-    fireEvent.click(await screen.findByRole("checkbox", { name: "demo_lookup" }));
+    fireEvent.focus(await screen.findByRole("combobox", { name: "Bound tools" }));
+    fireEvent.mouseDown(await screen.findByRole("option", { name: /demo_lookup/ }), { button: 0 });
     fireEvent.change(screen.getByLabelText("Streaming delivery"), { target: { value: "final" } });
     fireEvent.change(screen.getByLabelText("Attachment inlining budget (MiB)"), { target: { value: "24" } });
     fireEvent.click(advancedButton());
     expandAdvanced();
     expect((screen.getByLabelText("Attachment inlining budget (MiB)") as HTMLInputElement).value).toBe("24");
-    expect((screen.getByRole("checkbox", { name: "demo_lookup" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("button", { name: "Remove demo_lookup" })).toBeTruthy();
     fireEvent.click(advancedButton());
     expect(await save(onSaved)).toMatchObject({ toolIds: [tool.id], steps: { maxAttachmentBytes: 24 * 1024 * 1024, hostedTools: { streamMode: "final", maxRounds: 8, maxCalls: 16 } } });
   });
