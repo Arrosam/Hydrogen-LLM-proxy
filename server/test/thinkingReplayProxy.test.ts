@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { parseResponse, parseStream } from "../src/core/format";
+import { parseRequest, parseResponse, parseStream } from "../src/core/format";
 import type { Family } from "../src/core/format/family";
 import type { Request } from "../src/core/ir/request";
 import type { ThinkingFormat } from "../src/core/ir/thinkingFormat";
@@ -19,6 +19,9 @@ import type { Invocation, StreamInvocation } from "../src/execution/outcome";
 import { runHostedTools } from "../src/execution/hostedToolLoop";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
+import { ServiceFactory } from "../src/execution/serviceFactory";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, prepareServerTools } from "../src/execution/serverTools";
+import type { InvokeOptions } from "../src/execution/modelService";
 import { ProxyController } from "../src/transport/proxyController";
 import { ResponsesController } from "../src/transport/responsesController";
 import type { ProxyDeps } from "../src/transport/deps";
@@ -34,9 +37,10 @@ const FORMATS: ThinkingFormat[] = ["original", "reasoning", "reasoning_content",
 type Style = "signed" | "redacted" | "unsigned" | "plain";
 let db: OpenedDatabase, dir: string, app: FastifyInstance, tokens: TokenRepo;
 let secret: string, tokenId: number, requests: Request[], family: Family, style: Style, hasTool: boolean;
+let toolName: string;
 let reads: number, closed: boolean, statefulEnabled: boolean, omitStart: boolean;
 let logs: LogParams[], active: ActiveRequestRegistry;
-let invoke: (request: Request) => Promise<Invocation>;
+let invoke: (request: Request, options?: InvokeOptions) => Promise<Invocation>;
 let invocationGate: Promise<void> | undefined;
 const frame = (type: string, data: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 const chatFrame = (delta: Record<string, unknown>, finish: string | null = null) => `data: ${JSON.stringify({ id: "up", model: "up", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
@@ -44,23 +48,23 @@ function content() {
   return [
     ...(style === "plain" ? [] : style === "redacted" ? [{ type: "redacted_thinking", data: REDACTED }]
       : [{ type: "thinking", thinking: THOUGHT, ...(style === "signed" ? { signature: SIGNATURE } : {}) }]),
-    hasTool ? TOOL : { type: "text", text: "answer" },
+    hasTool ? { ...TOOL, name: toolName } : { type: "text", text: "answer" },
   ];
 }
 function body(): Record<string, unknown> {
   if (family === "openai_completion") return { id: "up", model: "up", choices: [{ message: {
     role: "assistant", content: "answer", ...(style === "plain" ? {} : { reasoning_content: THOUGHT }),
-    ...(hasTool ? { tool_calls: [{ id: "call1", type: "function", function: { name: "lookup", arguments: JSON.stringify(TOOL.input) } }] } : {}),
+    ...(hasTool ? { tool_calls: [{ id: "call1", type: "function", function: { name: toolName, arguments: JSON.stringify(TOOL.input) } }] } : {}),
   }, finish_reason: hasTool ? "tool_calls" : "stop" }], usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14 } };
   if (family === "openai_responses") return { id: "up", model: "up", status: "completed", output: [
     { type: "reasoning", id: "rs_original", encrypted_content: SIGNATURE, summary: [{ type: "summary_text", text: THOUGHT }] },
-    { type: "function_call", id: "fc1", call_id: "call1", name: "lookup", arguments: JSON.stringify(TOOL.input) },
+    { type: "function_call", id: "fc1", call_id: "call1", name: toolName, arguments: JSON.stringify(TOOL.input) },
   ], usage: { input_tokens: 5, output_tokens: 9, total_tokens: 14 } };
   return { id: "up", model: "up", content: content(), stop_reason: hasTool ? "tool_use" : "end_turn", usage: { input_tokens: 5, output_tokens: 9 } };
 }
 function frames(): string[] {
   if (family === "openai_completion") return [chatFrame({ role: "assistant" }), chatFrame({ reasoning_content: THOUGHT }), chatFrame({ content: "answer" }),
-    ...(hasTool ? [chatFrame({ tool_calls: [{ index: 0, id: "call1", type: "function", function: { name: "lookup", arguments: JSON.stringify(TOOL.input) } }] })] : []),
+    ...(hasTool ? [chatFrame({ tool_calls: [{ index: 0, id: "call1", type: "function", function: { name: toolName, arguments: JSON.stringify(TOOL.input) } }] })] : []),
     chatFrame({}, hasTool ? "tool_calls" : "stop"), "data: [DONE]\n\n"];
   if (family === "openai_responses") return [frame("response.created", { response: { id: "up", model: "up" } }),
     frame("response.output_item.added", { output_index: 0, item: { type: "reasoning", id: "rs_original", summary: [] } }),
@@ -85,21 +89,29 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-replay-")); db = openDatabase(dir);
   const key = Buffer.alloc(32, 7);
   tokens = new TokenRepo(db.db, key); const token = tokens.create({ name: "owner" }); secret = token.secret; tokenId = token.token.id;
-  const services = new ServiceRepo(db.db), tools = new HostedToolRepo(db.db, key), repo = new ResponseRepo(db.db, () => 0);
+  const services = new ServiceRepo(db.db), tools = new HostedToolRepo(db.db, key), repo = new ResponseRepo(db.db, () => 0, Date.now, key);
   for (const thinkingFormat of FORMATS) services.create({ name: thinkingFormat, definition: { steps: [{ model: "m", provider: "p" }], thinkingFormat } });
-  requests = []; logs = []; family = "anthropic"; style = "signed"; hasTool = true; reads = 0; closed = false; statefulEnabled = false; omitStart = false; invocationGate = undefined;
+  requests = []; logs = []; family = "anthropic"; style = "signed"; hasTool = true; toolName = "lookup"; reads = 0; closed = false; statefulEnabled = false; omitStart = false; invocationGate = undefined;
   active = new ActiveRequestRegistry();
-  invoke = async request => {
-    requests.push(request); if (invocationGate) await invocationGate;
-    return { attempts: 1, attemptPath: [], result: { ok: true, value: { family, providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: request.render({ upstreamModel: "up" }), response: parseResponse(family, body()) } } };
+  invoke = async (request, options = {}) => {
+    const serverTools = prepareServerTools(request, options.serverTools);
+    requests.push(serverTools.request); if (invocationGate) await invocationGate;
+    return { attempts: 1, attemptPath: [], result: { ok: true, value: { family, providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: serverTools.request.render({ upstreamModel: "up" }), serverTools, response: parseResponse(family, body()) } } };
   };
-  const stream = async (request: Request): Promise<StreamInvocation> => {
-    requests.push(request); if (invocationGate) await invocationGate;
+  const stream = async (request: Request, options: InvokeOptions = {}): Promise<StreamInvocation> => {
+    const serverTools = prepareServerTools(request, options.serverTools);
+    requests.push(serverTools.request); if (invocationGate) await invocationGate;
     const wire = frames();
     async function* upstream() { try { for (const f of wire) { reads++; yield f; } } finally { closed = true; } }
-    return { attempts: 1, attemptPath: [], result: { ok: true, value: { family, providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {}, dropReasoning: false, events: parseStream(family, upstream()) } } };
+    return { attempts: 1, attemptPath: [], result: { ok: true, value: { family, providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {}, serverTools, dropReasoning: false, events: parseStream(family, upstream()) } } };
   };
-  const deps = { services, tokens, factory: { forRow: () => ({ executor: { invoke, stream } }) },
+  const executor = {
+    invoke: (request: Request, _overrides: unknown, options?: InvokeOptions) => invoke(request, options),
+    stream: (request: Request, _overrides: unknown, options?: InvokeOptions) => stream(request, options),
+    prepareTools: (request: Request, _overrides: unknown, options?: InvokeOptions) => prepareServerTools(request, options?.serverTools),
+  };
+  const captureFactory = new ServiceFactory(services, { catalog: {} as ProxyDeps["catalog"], transport: {} as ProxyDeps["transport"] }, 100_000, null, tools);
+  const deps = { services, tokens, factory: { forRow: () => ({ executor }), snapshot: captureFactory.snapshot.bind(captureFactory), fromSnapshot: () => ({ executor }) },
     logger: { capture: JSON.stringify, record: (log: LogParams) => logs.push(log) },
     usage: new UsageMeter(tokens), activeRequests: active,
     streamCommitGraceMs: 1, jsonCommitGraceMs: 1, streamPingIntervalMs: 5,
@@ -230,22 +242,30 @@ describe("stateful continuation and hosted execution stay canonical", () => {
   });
 
   it("hosted tools still hide process thinking while replaying signed originals", async () => {
-    await request("original");
-    const seed = requests[0]; requests = [];
-    const tool = HttpToolSchema.parse({ name: "lookup", parameters: { type: "object" }, url: "https://adapter.test/run", bodyTemplate: { args: "{{arguments}}" }, resultPath: "/result" });
+    const seed = parseRequest("anthropic", { model: "original", max_tokens: 64, messages: [{ role: "user", content: "find Paris" }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }] });
+    toolName = `${DEFAULT_SERVER_TOOL_NAME_PREFIX}lookup`;
+    const tool = HttpToolSchema.parse({ name: "lookup", parameters: { type: "object" }, url: "https://adapter.test/run", bodyTemplate: { args: "{{arguments}}" }, resultPath: "/result", serverTool: { name: "web_search" } });
     const events: unknown[] = [];
-    const next = async (req: Request) => { const result = await invoke(req); style = "plain"; hasTool = false; return result; };
-    const executor = { invoke: next, stream: async (req: Request): Promise<StreamInvocation> => {
-      const result = await next(req);
-      if (!result.result.ok) throw new Error("fixture invocation failed");
-      const value = result.result.value;
-      return { attempts: 1, attemptPath: [], result: { ok: true, value: { ...value, dropReasoning: false, events: fabricateStream(value.response.data(), Infinity) } } };
-    } };
+    const next = async (req: Request, options?: InvokeOptions) => { const result = await invoke(req, options); style = "plain"; hasTool = false; return result; };
+    const executor = {
+      prepareTools: (req: Request, _overrides: unknown, options?: InvokeOptions) => prepareServerTools(req, options?.serverTools),
+      invoke: (req: Request, _overrides: unknown, options?: InvokeOptions) => next(req, options),
+      stream: async (req: Request, _overrides: unknown, options?: InvokeOptions): Promise<StreamInvocation> => {
+        const result = await next(req, options);
+        if (!result.result.ok) throw new Error("fixture invocation failed");
+        const value = result.result.value;
+        return { attempts: 1, attemptPath: [], result: { ok: true, value: { ...value, dropReasoning: false, events: fabricateStream(value.response.data(), Infinity) } } };
+      },
+    };
     const transport = { postStream: vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from(['{"result":"found"}']) })) };
     const run = await runHostedTools(executor, seed, [tool], transport, { sessionId: "session", thinkingFormat: "none", config: HostedToolOptionsSchema.parse({ streamMode: "all" }), emit: async ev => { events.push(ev); } });
     expect(run.value.response.text()).toBe("answer");
     expect(JSON.stringify(events)).not.toContain(THOUGHT);
     expect(requests[1].messages.flatMap(m => m.content)).toContainEqual({ type: "reasoning", origin: "anthropic", text: THOUGHT, signature: SIGNATURE });
     expect(transport.postStream).toHaveBeenCalledTimes(1);
+    expect(requests[0].tools?.map(declaration => declaration.name)).toEqual([`${DEFAULT_SERVER_TOOL_NAME_PREFIX}lookup`]);
+    expect(requests[1].messages.flatMap(m => m.content)).toContainEqual(expect.objectContaining({ type: "tool_use", id: "call1", name: `${DEFAULT_SERVER_TOOL_NAME_PREFIX}lookup` }));
+    expect(requests[1].messages.flatMap(m => m.content)).toContainEqual(expect.objectContaining({ type: "tool_result", toolUseId: "call1" }));
   });
 });

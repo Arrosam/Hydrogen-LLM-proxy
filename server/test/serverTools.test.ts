@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { AnthropicRequest, AnthropicResponse, buildRequest, buildResponse } from "../src/core/format";
 import type { RenderTarget } from "../src/core/ir/request";
 import type { Message } from "../src/core/ir/content";
-import { fabricateStream } from "../src/core/ir/stream";
+import { collectStream, fabricateStream } from "../src/core/ir/stream";
 import { HttpToolSchema, serverToolOutcome, type HttpTool } from "../src/execution/toolHttp";
-import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts, serverToolDeclaration } from "../src/execution/serverTools";
+import { collectServerToolCalls, hostedServerTools, rewriteServerTools, serverToolParts, serverToolDeclaration, serverToolResponseContent } from "../src/execution/serverTools";
 
 const target = (extra: Partial<RenderTarget> = {}): RenderTarget => ({ upstreamModel: "up", ...extra });
 
@@ -41,8 +41,8 @@ describe("server tool declarations", () => {
 
   it("matches a declaration against the tool's own contract, and ignores tools without one", () => {
     const request = parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]);
-    // Keyed by the BOUND tool name, so the history collector can find the call.
-    expect(hostedServerTools(request.tools, [bound()]).get("search")?.declaration.name).toBe("web_search");
+    // Keyed by the exact emitted name, so the history collector can find the owned call.
+    expect(hostedServerTools(request.tools, [bound()]).get("provider_server_side_search")?.declaration.name).toBe("web_search");
 
     const request2 = parse([{ type: "web_search_20250305", name: "lookup", max_uses: 5 }]);
     expect(hostedServerTools(request2.tools, [plainTool()]).size).toBe(0);
@@ -52,7 +52,7 @@ describe("server tool declarations", () => {
     const request = parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }, { name: "my_fn", input_schema: { type: "object", properties: {} } }]);
     const matched = hostedServerTools(request.tools, [bound()]);
     const rewritten = rewriteServerTools(request.tools, matched)!;
-    expect(rewritten[0]!.name).toBe("search");
+    expect(rewritten[0]!.name).toBe("provider_server_side_search");
     expect(rewritten[0]!.parameters).toEqual(bound().parameters);
     expect(rewritten[0]!.hosted).toBe(true);
     // The client's own tool is untouched.
@@ -94,7 +94,7 @@ describe("adapter result selection", () => {
 
 describe("round trip collection", () => {
   const history = (): Message[] => [
-    { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "search", input: { queries: ["a"] } }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["a"] } }] },
     { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E" }]) }] }] },
     { role: "assistant", content: [{ type: "text", text: "answer" }] },
   ];
@@ -110,9 +110,9 @@ describe("round trip collection", () => {
 
   it("keeps every round of a multi-round run, not just the last", () => {
     const multi: Message[] = [
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "search", input: { queries: ["a"] } }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["a"] } }] },
       { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "u1" }]) }] }] },
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_2", name: "search", input: { queries: ["b"] } }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_2", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["b"] } }] },
       { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_2", content: [{ type: "text", text: JSON.stringify([{ url: "u2" }]) }] }] },
       { role: "assistant", content: [{ type: "text", text: "answer" }] },
     ];
@@ -122,7 +122,7 @@ describe("round trip collection", () => {
 
   it("flags a broken adapter result as an error rather than an empty search", () => {
     const broken: Message[] = [
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "search", input: {} }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: {} }] },
       { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "{}" }], isError: true }] },
     ];
     const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()]);
@@ -130,12 +130,40 @@ describe("round trip collection", () => {
     expect(parts[0]!.errorCode).toBe("unavailable");
     expect(parts[0]!.content).toEqual([]);
   });
+
+  it("pairs resumed results by exact ID across intervening user input", () => {
+    const resumed = history();
+    resumed.splice(1, 0, { role: "user", content: [{ type: "text", text: "Please continue." }, { type: "tool_result", toolUseId: "client_call", content: [{ type: "text", text: "unrelated" }], isError: true }] });
+    const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search" }]).tools, [bound()]);
+    const calls = collectServerToolCalls(resumed, matched);
+    expect(calls[0]).toMatchObject({ id: "toolu_1", payload: [{ url: "https://e.com", title: "E" }], isError: false });
+    const content = serverToolResponseContent(resumed, serverToolParts(calls, "anthropic"), 2);
+    expect(content).toEqual([
+      expect.objectContaining({ type: "server_tool_result", id: "toolu_1", resultOnly: true, content: [{ url: "https://e.com", title: "E" }] }),
+      { type: "text", text: "answer" },
+    ]);
+    const result = resumed[2]!.content[0]!;
+    if (result.type !== "tool_result") throw new Error("fixture result missing");
+    result.isError = true;
+    expect(collectServerToolCalls(resumed, matched)[0]!.isError).toBe(true);
+  });
+
+  it("does not replay old completed results or acquire a prefix client call", () => {
+    const completed = history();
+    const matched = hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search" }]).tools, [bound()]);
+    const parts = serverToolParts(collectServerToolCalls(completed, matched), "anthropic");
+    expect(serverToolResponseContent(completed, parts, 2)).toEqual([{ type: "text", text: "answer" }]);
+    const clientCall = completed[0]!.content[0]!;
+    if (clientCall.type !== "tool_use") throw new Error("fixture call missing");
+    delete clientCall.hydrogenTool;
+    expect(serverToolResponseContent(completed, parts, 1)).toEqual([{ type: "text", text: "answer" }]);
+  });
 });
 
 describe("Anthropic server tool rendering", () => {
   const parts = serverToolParts(
     collectServerToolCalls([
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "search", input: { queries: ["tokyo"] } }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: { queries: ["tokyo"] } }] },
       { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: JSON.stringify([{ url: "https://e.com", title: "E", snippet: "s" }]) }] }] },
     ], hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound()])),
     "anthropic",
@@ -173,6 +201,21 @@ describe("Anthropic server tool rendering", () => {
     expect(closed).toBe(opened);
   });
 
+  it("carries a resumed result without repeating its previously delivered call", async () => {
+    const resumedPart = { ...parts[0]!, resultOnly: true };
+    const response = buildResponse("anthropic", { id: "msg_resume", model: "svc", created: 0, content: [resumedPart, { type: "text", text: "answer" }], stopReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
+    expect((response.renderSelf("svc").content as Record<string, unknown>[]).map(part => part.type)).toEqual(["web_search_result", "text"]);
+    const collected = await collectStream(fabricateStream(response.data(), Infinity));
+    expect(collected.data.content).toContainEqual(expect.objectContaining({ id: "toolu_1", resultOnly: true, input: { queries: ["tokyo"] } }));
+    const frames: string[] = [];
+    for await (const frame of AnthropicResponse.serializeStream(fabricateStream(collected.data, Infinity), { model: "svc" })) frames.push(frame);
+    const events = frames.filter(frame => frame.startsWith("event:")).map(frame => ({ event: /event: (\S+)/.exec(frame)![1], data: JSON.parse(/data: (.*)/.exec(frame)![1]) }));
+    const starts = events.filter(event => event.event === "content_block_start");
+    expect(starts.map(event => event.data.content_block.type)).toEqual(["web_search_result", "text"]);
+    expect(starts[0]!.data.content_block).toMatchObject({ tool_use_id: "toolu_1", content: [{ url: "https://e.com", title: "E", snippet: "s" }] });
+    expect(events.filter(event => event.event === "content_block_stop")).toHaveLength(starts.length);
+  });
+
   it("renders one web_search_call item on the Responses wire", () => {
     const response = buildResponse("openai_responses", { id: "resp_1", model: "svc", created: 0, content: [...parts, { type: "text", text: "answer" }], stopReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
     const output = response.renderSelf("svc").output as Record<string, unknown>[];
@@ -184,10 +227,18 @@ describe("Anthropic server tool rendering", () => {
     });
   });
 
+  it("projects adapter entries as native Responses URL sources", () => {
+    const response = buildResponse("openai_responses", { id: "resp_native_source", model: "svc", created: 0,
+      content: [{ ...parts[0]!, content: [{ type: "web_search_result", title: "Selected result", url: "https://selected.test/" }] }],
+      stopReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
+    const output = response.renderSelf("svc").output as Array<{ action: { sources: unknown[] } }>;
+    expect(output[0]!.action.sources).toEqual([{ type: "url", title: "Selected result", url: "https://selected.test/" }]);
+  });
+
   it("honours a contract that declares another result block type", () => {
     const custom = serverToolParts(
       collectServerToolCalls([
-        { role: "assistant", content: [{ type: "tool_use", id: "toolu_9", name: "search", input: {} }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "toolu_9", name: "provider_server_side_search", hydrogenTool: { emittedName: "provider_server_side_search", declaredName: "web_search", declarationType: "web_search_20250305" }, input: {} }] },
         { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_9", content: [{ type: "text", text: JSON.stringify({ results: [{ url: "u" }] }) }] }] },
       ], hostedServerTools(parse([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]).tools, [bound({ serverTool: { name: "web_search", resultType: "web_fetch_result", resultPath: "/results" } })])),
       "anthropic",
@@ -260,8 +311,8 @@ describe("protocol-neutral gating", () => {
     expect((request.render(target()).tools as Record<string, unknown>[])[0]).toEqual({ type: "web_search_20250305", name: "web_search", max_uses: 5 });
   });
 
-  it("drops it cleanly when crossing families (unchanged behaviour)", () => {
+  it("rejects an unsupported raw declaration when crossing families", () => {
     const request = buildRequest("openai_completion", { requestedService: "svc", messages: [{ role: "user", content: [{ type: "text", text: "q" }] }], tools: [{ name: "web_search", parameters: {}, raw: { family: "anthropic", value: { type: "web_search_20250305", name: "web_search" } } }], params: {}, stream: false });
-    expect(request.render(target()).tools).toBeUndefined();
+    expect(() => request.render(target())).toThrow("cannot be sent to openai_completion");
   });
 });

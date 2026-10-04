@@ -110,7 +110,7 @@ export async function boot(options: { deferredStats?: boolean; reportStartup?: S
   });
   const stats = new StatsQueries(db);
   const hostedTools = new HostedToolRepo(db, config.masterKey);
-  const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000);
+  const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000, Date.now, config.masterKey);
   startupStage(report, "responses.recover", () => responses.failInterrupted());
   startupStage(report, "responses.prune", () => responses.prune());
   // Production captures a fixed boundary only. The readonly seed worker starts
@@ -131,7 +131,7 @@ export async function boot(options: { deferredStats?: boolean; reportStartup?: S
   const activeRequests = new ActiveRequestRegistry();
   const factory = new ServiceFactory(
     services,
-    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes() },
+    { catalog, transport, progress: activeRequests, simulatedStreamingTokenRate: () => settings.simulatedStreamingTokenRate(), promptCacheTtlMinutes: () => settings.promptCacheTtlMinutes(), serverToolNamePrefix: () => settings.serverToolNamePrefix() },
     () => settings.logPayloadMaxChars(),
     new ImageDescriptionCache(imageCache, () => settings.imageCacheMaxBytes()),
     hostedTools,

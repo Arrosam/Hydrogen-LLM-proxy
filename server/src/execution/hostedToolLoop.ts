@@ -1,6 +1,6 @@
 import { buildRequest, buildResponse } from "../core/format/registry";
 import type { Request } from "../core/ir/request";
-import type { ContentPart, Message, ToolUsePart } from "../core/ir/content";
+import type { ContentPart, Message, ToolResultPart, ToolUsePart } from "../core/ir/content";
 import { collectStream, withoutReasoning, type StreamEvent } from "../core/ir/stream";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import type { Transport } from "../core/upstream/transport";
@@ -11,12 +11,13 @@ import type { ModelService, InvokeOptions } from "./modelService";
 import type { InvokeValue } from "./outcome";
 import { HostedToolOptionsSchema, type HostedToolOptions } from "./definition";
 import { callHttpTool, type HttpTool } from "./toolHttp";
-import { pendingHostedResults } from "./serverTools";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, localToolHistory, markLocalToolCall, pendingHostedCalls, pendingServerTools, prepareServerTools, retainServerToolReceipts, ServerToolPreflightError, validateServerToolBindings, type HostedServerTools, type HostedToolReceipt, type PreparedServerTools, type ServerToolRuntime } from "./serverTools";
 import { toolValidator } from "./toolSchema";
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
 import { genId } from "../util/ids";
 import { serializeForLog } from "../util/logPayload";
 import type { AttemptRecord } from "./steps";
+import type { RequestOverrides } from "../core/ir/params";
 
 export type HostedEvent = { type: string; round: number; [key: string]: unknown };
 export interface HostedContext {
@@ -40,14 +41,18 @@ export interface HostedRun {
   paused: boolean;
   /** Calls a pause declined to run; they are reported to the client as pending. */
   declined: string[];
+  /** Exact declarations/executors that this run actually owned, across rounds. */
+  serverTools: HostedServerTools;
+  /** Completed work available to enclosing loops as private receipts. */
+  receipts: HostedToolReceipt[];
 }
 export class HostedRunError extends Error {
-  constructor(message: string, readonly statusCode: number, readonly usage: Usage, readonly calls: ServiceCall[]) { super(message); }
+  constructor(message: string, readonly statusCode: number, readonly usage: Usage, readonly calls: ServiceCall[], readonly errorBody?: unknown) { super(message); }
 }
 
 /** One bounded model/tool loop. Tools are forwarded sequentially and never retried here. */
 export async function runHostedTools(
-  executor: Pick<ModelService, "invoke" | "stream"> & Partial<Pick<ModelService, "thinkingProcessing">>,
+  executor: Pick<ModelService, "invoke" | "stream"> & Partial<Pick<ModelService, "thinkingProcessing" | "prepareTools" | "serverToolNamePrefix">>,
   request: Request,
   tools: HttpTool[],
   transport: Pick<Transport, "postStream">,
@@ -58,27 +63,36 @@ export async function runHostedTools(
     onModelEvent?: (event: StreamEvent) => Promise<void>;
     thinkingFormat?: ThinkingFormat;
     logMaxChars?: () => number;
-    /**
-     * Client-declared name → bound tool name, for calls a paused turn handed
-     * back. The client only ever saw the declared name, so that is the one a
-     * resumed request can resolve.
-     */
-    declaredNames?: Map<string, string>;
+    /** Frozen once for the run, preserving an explicitly empty prefix. */
+    serverToolNamePrefix?: string;
+    /** Caller overrides remain stronger than every step's own parameters. */
+    modelOverrides?: RequestOverrides;
   },
 ): Promise<HostedRun> {
   const config = options.config ?? HostedToolOptionsSchema.parse({});
-  const named = new Map(tools.filter(t => t.enabled).map(t => [t.name, t]));
+  const availability = { tools, prefix: options.serverToolNamePrefix ?? options.serverTools?.prefix ?? executor.serverToolNamePrefix ?? DEFAULT_SERVER_TOOL_NAME_PREFIX };
+  validateServerToolBindings(tools, request.family);
   const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
   const localLimit = { remaining: config.maxCalls };
   const logMaxChars = context.logMaxChars ?? (() => 100_000);
-  const invokeOptions = { ...options, hosted: context,
+  const invokeOptions: InvokeOptions = { ...options, hosted: context, serverTools: availability,
     thinkingProcessing: executor.thinkingProcessing !== false && options.thinkingProcessing !== false };
   const presentationFormat = invokeOptions.thinkingProcessing ? context.thinkingFormat : "original";
   const calls: ServiceCall[] = [], traces: HostedEvent[] = context.traces;
   let usage: Usage = { ...ZERO_USAGE }, attempts = 0;
-  const fail = (message: string, status = 502): never => { throw new HostedRunError(message, status, usage, calls); };
-  for (const tool of request.tools ?? []) if (named.has(tool.name) && !tool.hosted) fail(`Client tool name '${tool.name}' conflicts with a hosted tool`, 400);
-  const definitions = [...(request.tools ?? []).filter(t => !named.has(t.name)), ...[...named.values()].map(t => ({ name: t.name, description: t.description, parameters: t.parameters, hosted: true }))];
+  const fail = (message: string, status = 502, errorBody?: unknown): never => { throw new HostedRunError(message, status, usage, calls, errorBody); };
+  const prepare = (input: Request): PreparedServerTools => executor.prepareTools
+    ? executor.prepareTools(input, options.modelOverrides, invokeOptions)
+    : prepareServerTools(input.withOverrides(options.modelOverrides), availability);
+  const initial = prepare(request);
+  // Work on a private history: resolving a pending wire call must not mutate a
+  // caller's Request or another invocation sharing that history.
+  const history: Message[] = structuredClone(request.messages);
+  let runtime: ServerToolRuntime = initial;
+  let matched = pendingServerTools(history, availability, runtime);
+  const owned: HostedServerTools = new Map(matched);
+  const receipts: HostedToolReceipt[] = [];
+  let named = new Map([...matched].map(([name, entry]) => [name, entry.tool]));
   // A paused run ends with an assistant turn whose hosted calls were never run —
   // that shape IS the resume signal, so a client continuing from a saved
   // response needs no extra bookkeeping. Executing them here is what makes
@@ -87,17 +101,6 @@ export async function runHostedTools(
   // A resumed turn carries the client-declared name; bind it before anything
   // looks the call up, so the same resolution serves both the pending scan and
   // the model's own output below.
-  if (options.declaredNames) {
-    for (const message of request.messages) {
-      for (const part of message.content) {
-        // A paused turn can only carry a call whose block was `server_tool_use`.
-        if (part.type !== "tool_use" || part.serverTool !== true) continue;
-        const bound = options.declaredNames.get(part.name);
-        if (bound && named.has(bound)) part.name = bound;
-      }
-    }
-  }
-  const history: Message[] = [...request.messages];
   const emit = async (event: HostedEvent, retain = true): Promise<void> => {
     if (retain) traces.push(event);
     if (options.emit && config.streamMode !== "final") await options.emit(event);
@@ -105,12 +108,12 @@ export async function runHostedTools(
   const seen = new Set<string>();
   /** The loop's answer to a spent budget: keep the turn, ask to be continued. */
   const pause = (value: InvokeValue, declined: string[]): HostedRun => ({
-    value: { ...value, response: buildResponse(value.family, { ...value.response.data(), stopReason: "pause_turn", usage }) },
-    history, calls, attempts, traces, paused: true, declined,
+    value: { ...value, hostedToolReceipts: receipts, response: buildResponse(value.family, { ...value.response.data(), stopReason: "pause_turn", usage }) },
+    history, calls, attempts, traces, paused: true, declined, serverTools: owned, receipts,
   });
   const done = (value: InvokeValue, content: ContentPart[]): HostedRun => ({
-    value: { ...value, response: buildResponse(value.family, { ...value.response.data(), content, usage }) },
-    history, calls, attempts, traces, paused: false, declined: [],
+    value: { ...value, hostedToolReceipts: receipts, response: buildResponse(value.family, { ...value.response.data(), content, usage }) },
+    history, calls, attempts, traces, paused: false, declined: [], serverTools: owned, receipts,
   });
 
   /**
@@ -141,7 +144,9 @@ export async function runHostedTools(
           : await callHttpTool(tool, { arguments: call.input as Record<string, unknown>, tool: { name: tool.name }, call: { id: callId }, session: { id: options.sessionId } }, transport, options.signal);
       context.remainingCalls = Math.max(0, context.remainingCalls - 1);
       for (const limit of context.callLimits ?? []) limit.remaining = Math.max(0, limit.remaining - 1);
-      results.push({ type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError });
+      const canonicalResult: ToolResultPart = { type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError, hydrogenTool: structuredClone(call.hydrogenTool) };
+      results.push(canonicalResult);
+      receipts.push({ call: structuredClone(call), result: canonicalResult, entry: matched.get(call.name)! });
       await emit({ type: "hydrogen.tool.completed", round, call_id: callId, model_call_id: call.id, name: call.name, ...result });
       options.progress?.record("llm", "tool.complete", `hosted tool ${call.name} ${result.isError ? "returned an error" : "completed"}`);
     }
@@ -152,37 +157,40 @@ export async function runHostedTools(
   // A resumed request still carries the assistant turn the pause stopped on, with
   // the calls it never ran. Run them before asking the model anything: they are
   // the work the pause declined, and the model's next turn depends on them.
-  const pending = pendingHostedResults(request.messages, named);
+  const pendingCalls = pendingHostedCalls(history, named);
   (context.callLimits ??= []).push(localLimit);
   try {
-  if (pending.length) {
-    const pendingCalls = request.messages.flatMap(message => message.content).filter((part): part is ToolUsePart => part.type === "tool_use" && pending.some(result => result.type === "tool_result" && result.toolUseId === part.id));
+  if (pendingCalls.length) {
     // Still spent: stay paused rather than half-running a batch.
     if (await runBatch(pendingCalls, 0) === null) fail("Hosted tool call budget is exhausted; raise it before resuming", 402);
   }
   for (let round = 1; round <= config.maxRounds; round++) {
+    invokeOptions.serverToolRound = round;
     options.signal?.throwIfAborted();
     // This round is consumed by the model call below. Nested loops share the
     // budget, so a real exhaustion is still a hard failure; a request that merely
     // ran out of its OWN ceiling pauses below instead.
     if (--context.remainingRounds < 0) fail("Nested hosted tool loops reached the shared model-round limit");
     if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) fail("Tool-loop context exceeds 25 MiB", 413);
-    const next = buildRequest(request.family, { ...request.data(), messages: [...history], tools: definitions,
+    const next = buildRequest(request.family, { ...request.data(), messages: [...history],
       // A forced tool choice applies to the first turn, not forever.
-      toolChoice: round === 1 && request.toolChoice?.type === "tool"
-        ? { type: "tool", name: options.declaredNames?.get(request.toolChoice.name) ?? request.toolChoice.name }
-        : round === 1 ? request.toolChoice : { type: "auto" } });
+      toolChoice: round === 1 ? request.toolChoice : { type: "auto" } });
+    const prepared = prepare(next);
+    // A real executor must see original declarations so each fallback/stage
+    // prepares its own policy. Small injected test/custom executors without a
+    // preparation API receive this loop's explicitly prepared declarations.
+    const modelRequest = executor.prepareTools ? next : buildRequest(next.family, { ...prepared.request.data(), messages: localToolHistory(prepared.request.messages) });
     let value: InvokeValue;
     if (options.onModelEvent || options.emit && config.streamMode === "all") {
       const started = Date.now();
-      const inv = await executor.stream(next.withStream(true), undefined, invokeOptions);
+      const inv = await executor.stream(modelRequest.withStream(true), executor.prepareTools ? options.modelOverrides : undefined, invokeOptions);
       attempts += inv.attempts;
       const path = Array.isArray(inv.attemptPath) ? inv.attemptPath : [];
       const nested = path.some(entry => entry && typeof entry === "object" && "stage" in entry);
       const call: ServiceCall = { stage: `tool round ${round}`, service: request.requestedService, kind: nested ? "agent" : "service", status: inv.result.ok ? 200 : failureStatus(inv.result),
         latencyMs: Date.now() - started, attempts: nested ? [] : path as AttemptRecord[], ...(nested ? { calls: path as ServiceCall[] } : {}), streamed: true };
       calls.push(call);
-      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, call.status); }
+      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, call.status, inv.result.errorBody); }
       const stream = inv.result.value;
       call.request = serializeForLog(stream.upstreamRequest, logMaxChars());
       let roundUsage: Usage = { ...ZERO_USAGE };
@@ -220,32 +228,35 @@ export async function runHostedTools(
       call.latencyMs = Date.now() - started; call.usage = value.response.usage;
       call.response = serializeForLog(value.response.toLogPayload(), logMaxChars());
     } else {
-      const invoked = await callService(executor, next.withStream(false), undefined,
+      const invoked = await callService(executor, modelRequest.withStream(false), executor.prepareTools ? options.modelOverrides : undefined,
         { stage: `tool round ${round}`, service: request.requestedService }, invokeOptions, logMaxChars);
       calls.push(invoked.call);
       attempts += invoked.attempts;
       if (!invoked.result.ok) {
         usage = addUsage(usage, invoked.call.usage ?? ZERO_USAGE);
-        return fail(failureMessage(invoked.result), failureStatus(invoked.result));
+        return fail(failureMessage(invoked.result), failureStatus(invoked.result), invoked.result.errorBody);
       }
       value = invoked.result.value;
     }
     usage = addUsage(usage, value.response.usage);
     const empty = missingAnswerReason(value.response.content, value.response.stopReason);
     if (empty) fail(empty);
+    const childReceipts = value.hostedToolReceipts ?? [];
+    receipts.push(...childReceipts);
+    for (const receipt of retainServerToolReceipts(history, childReceipts)) owned.set(receipt.entry.emittedName, receipt.entry);
     history.push({ role: "assistant", content: value.response.content });
     const requested = value.response.content.filter((p): p is ToolUsePart => p.type === "tool_use");
-    // A resumed turn's call may carry the declared name; resolve it to the bound
-    // tool before deciding whether this round has provider-executed work.
-    for (const part of value.response.content) {
-      if (part.type !== "tool_use" || named.has(part.name)) continue;
-      const bound = options.declaredNames?.get(part.name);
-      if (!bound || !named.has(bound)) continue;
-      part.name = bound;
-      part.serverTool = true;
+    runtime = value.serverTools ?? prepared;
+    matched = runtime.matched;
+    named = new Map([...matched].map(([name, entry]) => [name, entry.tool]));
+    for (const part of requested) {
+      const entry = matched.get(part.name);
+      if (!entry) continue;
+      markLocalToolCall(part, entry);
+      owned.set(entry.emittedName, entry);
     }
     const hosted = requested.filter(t => named.has(t.name));
-    if (hosted.length && request.toolChoice?.type === "none") fail("Model called a hosted tool despite tool_choice:none");
+    if (hosted.length && runtime.toolChoice?.type === "none") fail("Model called a hosted tool despite tool_choice:none");
     const client = requested.filter(t => !named.has(t.name));
     if (hosted.length > 128) fail("Model requested too many hosted tools in one round");
 
@@ -276,6 +287,7 @@ export async function runHostedTools(
   return fail("Hosted tool loop reached its model-round limit");
   } catch (error) {
     if (error instanceof HostedRunError) throw error;
+    if (error instanceof ServerToolPreflightError) throw new HostedRunError(error.message, error.statusCode, usage, calls, error.errorBody);
     throw new HostedRunError(options.signal?.aborted ? "Response execution cancelled" : "Hosted tool execution failed", options.signal?.aborted ? 499 : 502, usage, calls);
   } finally {
     const index = context.callLimits?.indexOf(localLimit) ?? -1;

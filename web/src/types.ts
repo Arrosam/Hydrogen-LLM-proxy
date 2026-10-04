@@ -132,6 +132,12 @@ export interface Overrides {
   system?: string;
 }
 
+/** Plain client-declared names, matched exactly without type/version qualifiers. */
+export interface ServerToolPolicy {
+  mode: "blacklist" | "whitelist";
+  names: string[];
+}
+
 export interface ServiceStep {
   model: string;
   provider: string;
@@ -140,6 +146,8 @@ export interface ServiceStep {
   thinking?: ThinkingLevel;
   overrides?: Overrides;
   thinkingParser?: ThinkingParser;
+  /** Present replaces the entire service policy; absent inherits it. */
+  serverToolPolicy?: ServerToolPolicy;
 }
 
 /** What kind of API a Model Service serves. Omitted = "chat". "ocr" runs the
@@ -181,6 +189,8 @@ export type ThinkingParser =
 
 export interface ServiceSteps {
   hostedTools?: HostedToolOptions;
+  /** Absent uses an empty blacklist, permitting extra upstream server tools. */
+  serverToolPolicy?: ServerToolPolicy;
   category?: ServiceCategory;
   timeoutMs: number;
   steps: ServiceStep[];

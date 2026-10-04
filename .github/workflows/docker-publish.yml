@@ -2,7 +2,7 @@ name: Publish Docker image (GHCR)
 
 # Builds the Hydrogen image and pushes it to the GitHub Container Registry so
 # Rainyun (and anyone else) can pull a pre-built public image by URL:
-#   ghcr.io/<owner>/hydrogen-llm-proxy:latest
+#   ghcr.io/<owner>/hydrogen-llm-proxy:preview
 #
 # No extra secrets required - the built-in GITHUB_TOKEN can push to GHCR.
 # After the first successful run, make the package Public once:
@@ -14,6 +14,13 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release_channel:
+        description: "Release channel. Stable explicitly designates the selected final version tag."
+        required: true
+        default: preview
+        type: choice
+        options: [preview, stable]
 
 permissions:
   contents: read
@@ -43,6 +50,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      # Automatic main/tag builds always use preview. Explicit stable dispatch
+      # must select a final version tag; validate before registry login/push.
+      - name: Validate release channel
+        id: channel
+        env:
+          RELEASE_CHANNEL: ${{ inputs.release_channel || 'preview' }}
+        run: node scripts/release-plan.mjs --github-output
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
@@ -58,10 +77,9 @@ jobs:
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
           images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=sha,format=short
+          flavor: |
+            latest=false
+          tags: ${{ steps.channel.outputs.metadata_tags }}
 
       # Rainyun runs an amd64 Kubernetes cluster; build linux/amd64 by default.
       # Add linux/arm64 to `platforms` if you also need ARM (slower: native

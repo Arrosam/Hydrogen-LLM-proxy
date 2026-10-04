@@ -12,6 +12,7 @@ import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
+import { DEFAULT_SERVER_TOOL_NAME_PREFIX, DEFAULT_SERVER_TOOL_POLICY, prepareServerTools, ServerToolPreflightError, validateRenderedServerTools, validateServerToolBindings, localToolHistory, type PreparedServerTools, type ServerToolAvailability, type ServerToolRuntime } from "./serverTools";
 
 /** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
  * upstream headers — only for an upstream of the SAME wire family, and never
@@ -51,6 +52,8 @@ export interface ServiceDeps {
   simulatedStreamingTokenRate?: number | (() => number);
   /** Auto-cache breakpoint lifetime in minutes (Settings, default 30). */
   promptCacheTtlMinutes?: number | (() => number);
+  /** Prefix for declared Hydrogen server tools. An explicit empty value is valid. */
+  serverToolNamePrefix?: string | (() => string);
 }
 
 export interface InvokeOptions {
@@ -67,6 +70,11 @@ export interface InvokeOptions {
   maxAttachmentBytes?: number;
   /** An enclosing agent can disable inline thinking decoding for the entire run. */
   thinkingProcessing?: boolean;
+  /** Frozen availability for the enclosing declared-tool loop. Bindings alone
+   * never expose a function or give a model call local ownership. */
+  serverTools?: ServerToolAvailability;
+  /** Internal loop turn: a forced choice is released after the first round. */
+  serverToolRound?: number;
 }
 
 /**
@@ -96,9 +104,53 @@ export class ModelService {
     return this.def.thinkingProcessing !== false;
   }
 
+  get serverToolNamePrefix(): string {
+    const prefix = this.deps.serverToolNamePrefix;
+    return (typeof prefix === "function" ? prefix() : prefix) ?? DEFAULT_SERVER_TOOL_NAME_PREFIX;
+  }
+
+  private toolAvailability(opts: InvokeOptions): ServerToolAvailability {
+    return { tools: opts.serverTools?.tools ?? [], prefix: opts.serverTools?.prefix ?? this.serverToolNamePrefix };
+  }
+
+  /** Synchronous tool preflight for controllers before committing a stream or
+   * reserving a background response. The first resolvable upstream step is the
+   * selected step; unused fallback policies do not reject a successful primary. */
+  prepareTools(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): PreparedServerTools {
+    const availability = this.toolAvailability(opts);
+    validateServerToolBindings(availability.tools, request.family);
+    for (const step of this.def.steps) {
+      const resolved = this.deps.catalog.resolve(step.model, step.provider, request.family);
+      if (!resolved.ok) continue;
+      const prepared = prepareServerTools(this.merge(request, step, overrides, opts), availability,
+        step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, resolved.target.family);
+      this.validateToolBody(prepared, resolved.target.family, resolved.target);
+      return prepared;
+    }
+    return prepareServerTools(request.withOverrides(overrides), availability);
+  }
+
+  private validateToolBody(prepared: PreparedServerTools, family: Family, target: { upstreamModel: string; providerMaxOutputTokens?: number }): void {
+    // Tool preflight must precede attachment downloads. Empty message content
+    // renders the same effective tools/choice without needing file conversion.
+    const toolRequest = buildRequest(family, { ...prepared.request.data(), messages: [] });
+    validateRenderedServerTools(toolRequest.render(target), family, prepared);
+  }
+
+  private runtime(prepared: PreparedServerTools): ServerToolRuntime {
+    const { request: _request, ...runtime } = prepared;
+    return runtime;
+  }
+
   /** Layer the request with the step's config then the caller's override (override wins). */
-  private merge(request: Request, step: ServiceStep, overrides?: RequestOverrides): Request {
+  private merge(request: Request, step: ServiceStep, overrides?: RequestOverrides, opts?: InvokeOptions): Request {
     let merged = request.withOverrides(stepOverrides(step)).withOverrides(overrides);
+    if ((opts?.serverToolRound ?? 1) > 1) {
+      const params = structuredClone(merged.params);
+      if (params.extra) delete params.extra.tool_choice;
+      if (params.passthrough) delete params.passthrough.params.tool_choice;
+      merged = buildRequest(merged.family, { ...merged.data(), toolChoice: { type: "auto" }, params });
+    }
     // Thread the operator's auto-cache TTL to renderers that need it (only the
     // Anthropic renderer reads it, and only when the client hinted caching).
     if (merged.params.cacheHint && merged.params.cacheTtlMinutes == null) {
@@ -124,6 +176,12 @@ export class ModelService {
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const prog = opts.progress ?? null;
+    const availability = this.toolAvailability(opts);
+    try { validateServerToolBindings(availability.tools, request.family); }
+    catch (error) {
+      if (!(error instanceof ServerToolPreflightError)) throw error;
+      return { result: error.failure(), attempts: 0, attemptPath: [] };
+    }
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
@@ -132,17 +190,25 @@ export class ModelService {
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
       const t = res.target;
-      const merged = this.merge(request, step, overrides);
+      const merged = this.merge(request, step, overrides, opts);
+      let prepared: PreparedServerTools;
+      try {
+        prepared = prepareServerTools(merged, availability, step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, t.family);
+        this.validateToolBody(prepared, t.family, t);
+      } catch (error) {
+        if (!(error instanceof ServerToolPreflightError)) throw error;
+        return error.failure();
+      }
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
       // A URL attachment this family cannot carry is downloaded and inlined
       // first (see fileFetch). Resolved per step, because the very same request
       // needs no pre-pass at all on a family that takes URLs natively.
-      const ready = await this.inlineFiles(merged, t.family, prog, {
+      const ready = await this.inlineFiles(prepared.request, t.family, prog, {
         timeoutMs,
         signal: opts.signal,
         maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
       });
-      const egress = buildRequest(t.family, ready.data());
+      const egress = buildRequest(t.family, { ...ready.data(), messages: localToolHistory(ready.messages) });
       const target: SendTarget = {
         thinkingParser: this.def.thinkingProcessing !== false && opts.thinkingProcessing !== false ? step.thinkingParser : undefined,
         upstreamModel: t.upstreamModel,
@@ -153,6 +219,11 @@ export class ModelService {
         signal: opts.signal,
         proxy: t.upstream.proxy,
       };
+      try { validateRenderedServerTools(egress.render(target), t.family, prepared); }
+      catch (error) {
+        if (!(error instanceof ServerToolPreflightError)) throw error;
+        return error.failure();
+      }
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
       const sent = await egress.send(this.deps.transport, target);
@@ -176,6 +247,7 @@ export class ModelService {
           providerName: t.providerName,
           modelName: t.modelName,
           upstreamRequest: sent.sentBody,
+          serverTools: this.runtime(prepared),
         },
       };
     }, { progress: prog, signal: opts.signal });
@@ -204,6 +276,8 @@ export class ModelService {
           providerName: v.providerName,
           modelName: v.modelName,
           upstreamRequest: v.upstreamRequest,
+          serverTools: v.serverTools,
+          hostedToolReceipts: v.hostedToolReceipts,
           // Reasoning was already stripped in invoke() if the level was disabled.
           dropReasoning: false,
         },
@@ -215,6 +289,7 @@ export class ModelService {
 
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
     const prog = opts.progress ?? null;
+    const availability = this.toolAvailability(opts);
     const startedAt = Date.now();
     // Reliable streaming: buffer the upstream (retrying a truncated stream) and
     // replay the complete result as a paced simulated stream — the client never
@@ -230,6 +305,11 @@ export class ModelService {
     if (this.def.reliableStreaming) {
       return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
     }
+    try { validateServerToolBindings(availability.tools, request.family); }
+    catch (error) {
+      if (!(error instanceof ServerToolPreflightError)) throw error;
+      return { result: error.failure(), attempts: 0, attemptPath: [] };
+    }
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
       prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
       const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
@@ -238,14 +318,22 @@ export class ModelService {
         return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
       }
       const t = res.target;
-      const merged = this.merge(request, step, overrides);
+      const merged = this.merge(request, step, overrides, opts);
+      let prepared: PreparedServerTools;
+      try {
+        prepared = prepareServerTools(merged, availability, step.serverToolPolicy ?? this.def.serverToolPolicy ?? DEFAULT_SERVER_TOOL_POLICY, t.family);
+        this.validateToolBody(prepared, t.family, t);
+      } catch (error) {
+        if (!(error instanceof ServerToolPreflightError)) throw error;
+        return error.failure();
+      }
       const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
-      const ready = await this.inlineFiles(merged, t.family, prog, {
+      const ready = await this.inlineFiles(prepared.request, t.family, prog, {
         timeoutMs,
         signal: opts.signal,
         maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
       });
-      const egress = buildRequest(t.family, ready.data());
+      const egress = buildRequest(t.family, { ...ready.data(), messages: localToolHistory(ready.messages) });
       const target: SendTarget = {
         thinkingParser: this.def.thinkingProcessing !== false && opts.thinkingProcessing !== false ? step.thinkingParser : undefined,
         upstreamModel: t.upstreamModel,
@@ -256,6 +344,11 @@ export class ModelService {
         signal: opts.signal,
         proxy: t.upstream.proxy,
       };
+      try { validateRenderedServerTools(egress.withStream(true).render(target), t.family, prepared); }
+      catch (error) {
+        if (!(error instanceof ServerToolPreflightError)) throw error;
+        return error.failure();
+      }
       prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });
       prog?.record("llm", "llm.send", `stream request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
       const sent = await egress.relay(this.deps.transport, target);
@@ -274,6 +367,7 @@ export class ModelService {
           providerName: t.providerName,
           modelName: t.modelName,
           upstreamRequest: sent.sentBody,
+          serverTools: this.runtime(prepared),
           dropReasoning: merged.params.thinking === "disabled",
         },
       };

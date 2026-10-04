@@ -28,6 +28,22 @@ import { ProgressRecorder } from "../observability/progressRecorder";
 import { JsonKeepalive } from "./jsonKeepalive";
 import type { ProxyDeps } from "./deps";
 
+/** Preserve the defined codes of terminal local tool preflight failures. All
+ * other failures keep the existing ingress envelope and privacy boundary. */
+function proxyFailureBody(family: Family, status: number, message: string, failure: AttemptFailure): Record<string, unknown> {
+  const body = buildErrorBody(family, status, message);
+  if (!failure.terminal || !failure.errorBody || typeof failure.errorBody !== "object") return body;
+  const source = (failure.errorBody as Record<string, unknown>).error;
+  const code = source && typeof source === "object" ? (source as Record<string, unknown>).code : undefined;
+  if (code === "hydrogen_tool_name_conflict" || code === "tool_not_found") (body.error as Record<string, unknown>).code = code;
+  return body;
+}
+
+function proxyFailureFrame(family: Family, status: number, message: string, failure: AttemptFailure): string {
+  const body = JSON.stringify(proxyFailureBody(family, status, message, failure));
+  return family === "anthropic" || family === "openai_responses" ? `event: error\ndata: ${body}\n\n` : `data: ${body}\n\n`;
+}
+
 interface RequestCtx {
   traceId: string;
   token: Token;
@@ -506,7 +522,7 @@ export class ProxyController {
     const raw = reply.raw;
     try {
       if (!raw.destroyed && !raw.writableEnded) {
-        raw.write(buildErrorFrame(ctx.ingress, status, message));
+        raw.write(proxyFailureFrame(ctx.ingress, status, message, failure));
         raw.end();
       }
     } catch { /* the connection died first; the log below still tells the truth */ }
@@ -539,7 +555,7 @@ export class ProxyController {
     const raw = reply.raw;
     try {
       if (!raw.destroyed && !raw.writableEnded) {
-        raw.write(JSON.stringify(buildErrorBody(ctx.ingress, status, message)));
+        raw.write(JSON.stringify(proxyFailureBody(ctx.ingress, status, message, failure)));
         raw.end();
       }
     } catch { /* the connection died first; the log below still tells the truth */ }
@@ -570,7 +586,7 @@ export class ProxyController {
       latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error: detailedError,
     });
     this.deps.usage.record(ctx.token.id, usage.totalTokens);
-    return reply.code(status).send(buildErrorBody(ctx.ingress, status, message));
+    return reply.code(status).send(proxyFailureBody(ctx.ingress, status, message, failure));
   }
 
   /** Relay a canonical event stream to the client, tapping it for the request log.

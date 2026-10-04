@@ -2,7 +2,7 @@ import { ModelService, type InvokeOptions, type ServiceDeps } from "./modelServi
 import { mergeOverrides, type RequestOverrides } from "../core/ir/params";
 import type { Request } from "../core/ir/request";
 import type { Response } from "../core/ir/response";
-import { buildResponse } from "../core/format/registry";
+import { buildRequest, buildResponse } from "../core/format/registry";
 import { textOf, type ImagePart } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import { callService, countAttempts, requestPayload, responsePayload, type ServiceCall } from "./serviceCall";
@@ -24,6 +24,7 @@ import { imageHash, type OcrCacheStore } from "./ocrCache";
 import type { AttemptFailure, AttemptResult } from "./steps";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
+import { prepareServerTools, retainServerToolReceipts, ServerToolPreflightError, validateServerToolBindings, type HostedToolReceipt, type PreparedServerTools } from "./serverTools";
 
 /** How deep nested Micro Agents may reference one another before we stop. */
 const MAX_AGENT_DEPTH = 8;
@@ -134,6 +135,43 @@ export class MicroAgent extends ModelService {
     return this.agent.thinkingProcessing !== false;
   }
 
+  /** Preflight the first model stage actually reachable through the initial
+   * routers. Later routes remain governed by their own selected Model Service;
+   * they may depend on model output that does not exist yet. */
+  override prepareTools(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): PreparedServerTools {
+    const availability = { tools: opts.serverTools?.tools ?? [], prefix: opts.serverTools?.prefix ?? this.serverToolNamePrefix };
+    validateServerToolBindings(availability.tools, request.family);
+    const outputs = new Map<string, string>(), responses = new Map<string, Response>();
+    const byName = new Map(this.agent.stages.map((stage, i) => [stage.name, i]));
+    let idx = 0;
+    while (idx >= 0 && idx < this.agent.stages.length) {
+      const stage = this.agent.stages[idx];
+      if (isRouter(stage)) {
+        outputs.set(stage.name, "");
+        const next = nextStep(stage, idx, byName, inputContext(request), outputs);
+        if ("end" in next) break;
+        idx = next.index;
+        continue;
+      }
+      const combined = mergeOverrides(stageOverrides(stage), overrides);
+      const stageReq = buildStageRequest(request, stage, outputs, responses, request.stream, combined?.system);
+      const childOverrides = withoutSystem(combined);
+      if (stage.service) {
+        const stack = opts.stack ?? [];
+        if (stack.includes(stage.service) || stack.length >= MAX_AGENT_DEPTH) break;
+        const resolved = this.resolver.resolve(stage.service);
+        if (!resolved.ok) break;
+        return resolved.executor.prepareTools
+          ? resolved.executor.prepareTools(stageReq, childOverrides, { ...opts, serverTools: availability, stack: [...stack, stage.service] })
+          : prepareServerTools(stageReq.withOverrides(childOverrides), availability);
+      }
+      if (stage.steps?.length) return new ModelService({ timeoutMs: stage.timeoutMs ?? this.agent.timeoutMs, steps: stage.steps }, this.deps).prepareTools(stageReq, childOverrides, { ...opts, serverTools: availability });
+      break;
+    }
+    // No model stage was selected; no binding is offered to a provider.
+    return prepareServerTools(buildStageRequest(request, { name: "preflight", input: [], tools: "none" } as AgentDef["stages"][number], outputs, responses, request.stream), availability);
+  }
+
   /** Resolve the (possibly live) log-payload max-chars to a concrete number. */
   private resolveLogMaxChars(): number {
     const v = this.logMaxChars;
@@ -175,15 +213,23 @@ export class MicroAgent extends ModelService {
     let lastUpstreamRequest: Record<string, unknown> = {};
     let terminal = agent.stages[0]?.name ?? "";
     let returnStage: string | undefined = agent.output;
+    let source = request;
+    const receipts: HostedToolReceipt[] = [];
 
     const fail = (result: AttemptFailure): Invocation => ({ result, attemptPath: calls, attempts: countAttempts(calls), usage: calls.reduce((sum, call) => addUsage(sum, call.usage ?? ZERO_USAGE), ZERO_USAGE) });
     const errorInv = (message: string): Invocation => fail({ ok: false, status: 0, kind: "error", message });
     const commit = (name: string, value: InvokeValue): void => {
+      const childReceipts = value.hostedToolReceipts ?? [];
+      receipts.push(...childReceipts);
+      if (childReceipts.length) {
+        const history = structuredClone(source.messages);
+        if (retainServerToolReceipts(history, childReceipts).length) source = buildRequest(source.family, { ...source.data(), messages: history });
+      }
       outputs.set(name, textOf(value.response.content));
       // Store only what a later stage or the final response needs (the response
       // and the small identity fields) and drop the full wire body, so it is
       // collectible as soon as the next stage begins.
-      const stored: InvokeValue = { ...value, upstreamRequest: {} };
+      const stored: InvokeValue = { ...value, upstreamRequest: {}, hostedToolReceipts: undefined };
       values.set(name, stored);
       responses.set(name, value.response);
       lastUpstreamRequest = value.upstreamRequest;
@@ -192,7 +238,7 @@ export class MicroAgent extends ModelService {
     };
 
     try {
-      let source = request;
+      this.prepareTools(request, overrides, opts);
 
       // --- OCR pre-pass -----------------------------------------------------
       if (agent.ocr) {
@@ -403,7 +449,7 @@ export class MicroAgent extends ModelService {
               prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
               prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
+              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound);
               calls.push(call);
               if (!result.ok) {
                 prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -415,7 +461,7 @@ export class MicroAgent extends ModelService {
           } else if (stage.steps && stage.steps.length) {
             prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing);
+            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit, opts.thinkingProcessing, opts.serverTools, opts.serverToolRound);
             calls.push(call);
             if (!result.ok) {
               prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
@@ -447,10 +493,11 @@ export class MicroAgent extends ModelService {
       const response = buildResponse(chosen.family, { ...chosen.response.data(), usage });
       // Carry the last stage's wire body for the request log; the per-stage
       // bodies were deliberately released above.
-      const value: InvokeValue = { ...chosen, upstreamRequest: lastUpstreamRequest, response };
+      const value: InvokeValue = { ...chosen, upstreamRequest: lastUpstreamRequest, response, hostedToolReceipts: receipts };
       prog?.record("agent", "agent.complete", `micro agent completed: ${calls.length} call(s), ${usage.totalTokens} tokens`, { calls: calls.length, totalTokens: usage.totalTokens });
       return { result: { ok: true, value }, attemptPath: calls, attempts: countAttempts(calls) };
     } catch (e) {
+      if (e instanceof ServerToolPreflightError) return fail(e.failure());
       const message = e instanceof Error ? e.message : String(e);
       prog?.record("error", "agent.exception", `agent execution error: ${message}`);
       return errorInv(`agent execution error: ${message}`);
@@ -469,8 +516,10 @@ export class MicroAgent extends ModelService {
     hosted?: InvokeOptions["hosted"],
     maxAttachmentBytes?: number,
     thinkingProcessing?: boolean,
+    serverTools?: InvokeOptions["serverTools"],
+    serverToolRound?: number,
   ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing }, () => this.resolveLogMaxChars());
+    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes, thinkingProcessing, serverTools, serverToolRound }, () => this.resolveLogMaxChars());
   }
 
   private stageRequestPayload(stageReq: Request): string {

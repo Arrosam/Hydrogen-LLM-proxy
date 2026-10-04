@@ -50,11 +50,11 @@ export type StreamEvent =
   /** A provider-executed call the proxy ran itself. Distinct from `tool_start`:
    * the client is not being asked to run anything, so it must not appear in a
    * client's pending-tool bookkeeping. */
-  | { type: "server_tool_start"; family?: "anthropic" | "openai_responses"; id: string; name: string; input: unknown }
+  | { type: "server_tool_start"; family?: "anthropic" | "openai_responses"; id: string; name: string; input: unknown; resultOnly?: boolean }
   /** The result half of a provider-executed round trip. `blockType` is the
    * client protocol's result block type (web_search_result, ...); `content` is
    * the adapter's entries, opaque here. */
-  | { type: "server_tool_result"; family?: "anthropic" | "openai_responses"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean }
+  | { type: "server_tool_result"; family?: "anthropic" | "openai_responses"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean; resultOnly?: boolean }
   /** A cumulative accounting snapshot, retained even if the next read throws. */
   | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -274,7 +274,8 @@ export async function collectStream(
         const call = serverCalls.get(ev.id);
         serverContent.push({ type: "server_tool_result", family: ev.family ?? call?.family ?? "anthropic",
           id: ev.id, name: ev.name, input: call?.input ?? {}, blockType: ev.blockType, content: ev.content,
-          ...(ev.errorCode !== undefined ? { errorCode: ev.errorCode } : {}), ...(ev.notExecuted ? { notExecuted: true } : {}) });
+          ...(ev.errorCode !== undefined ? { errorCode: ev.errorCode } : {}), ...(ev.notExecuted ? { notExecuted: true } : {}),
+          ...(ev.resultOnly || call?.resultOnly ? { resultOnly: true } : {}) });
         serverCalls.delete(ev.id);
         break;
       }
@@ -449,9 +450,9 @@ export async function* fabricateStream(
       // The call and its result arrive together: the proxy already ran the
       // tool, so there is nothing to stream in between and no client-side
       // bookkeeping to open. Pace them so the two blocks never race.
-      yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input ?? {} };
+      yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input ?? {}, ...(p.resultOnly ? { resultOnly: true } : {}) };
       await pace(2);
-      yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}), ...(p.notExecuted ? { notExecuted: true } : {}) };
+      yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}), ...(p.notExecuted ? { notExecuted: true } : {}), ...(p.resultOnly ? { resultOnly: true } : {}) };
       await pace(2);
     }
   }

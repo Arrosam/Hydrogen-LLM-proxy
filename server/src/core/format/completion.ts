@@ -21,6 +21,7 @@ import { parseSSE, safeParseJson, type ResponseData, type StreamContext, type St
 import { genId, nowSeconds } from "../../util/ids";
 import {
   applyNonCanonical,
+  assertToolFamily,
   boolOrUndef,
   capMaxTokens,
   collectPassthrough,
@@ -219,7 +220,7 @@ function parseTools(raw: unknown): Tool[] | undefined {
     if (!fn.name) {
       // Built-in / custom tool types this format cannot model: keep verbatim
       // for same-family replay instead of silently dropping them.
-      if (entry.type) tools.push({ name: String(entry.type), parameters: {}, raw: { family: "openai_completion", value: entry } });
+      if (entry.type) tools.push({ name: String(entry.name ?? (entry.custom as Record<string, unknown> | undefined)?.name ?? entry.type), parameters: {}, raw: { family: "openai_completion", value: entry } });
       continue;
     }
     tools.push({
@@ -240,6 +241,7 @@ function parseToolChoice(raw: unknown): ToolChoice | undefined {
   if (typeof raw === "object") {
     const fn = ((raw as Record<string, unknown>).function ?? {}) as Record<string, unknown>;
     if (fn.name) return { type: "tool", name: String(fn.name) };
+    return { type: "raw", family: "openai_completion", value: raw as Record<string, unknown> };
   }
   return undefined;
 }
@@ -254,6 +256,8 @@ function toolChoiceToOpenAI(choice: ToolChoice): unknown {
       return "required";
     case "tool":
       return { type: "function", function: { name: choice.name } };
+    case "raw":
+      return choice.value;
   }
 }
 
@@ -497,6 +501,7 @@ export class OpenAICompletionRequest extends Request {
   }
 
   render(target: RenderTarget): Record<string, unknown> {
+    assertToolFamily(this.tools, this.toolChoice, this.family);
     const messages: Record<string, unknown>[] = [];
     if (this.system) messages.push({ role: "system", content: this.system });
 

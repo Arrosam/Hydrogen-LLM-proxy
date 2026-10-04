@@ -16,6 +16,9 @@ import { ResponseRepo } from "../src/persistence/responseRepo";
 import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
+import { ServiceFactory } from "../src/execution/serviceFactory";
+import { prepareServerTools } from "../src/execution/serverTools";
+import type { InvokeOptions } from "../src/execution/modelService";
 import type { Invocation } from "../src/execution/outcome";
 import { ResponsesController } from "../src/transport/responsesController";
 import { ProxyController } from "../src/transport/proxyController";
@@ -34,32 +37,40 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-state-api-")); db = openDatabase(dir);
   const key = Buffer.alloc(32, 2);
   tokens = new TokenRepo(db.db, key); owner = tokens.create({ name: "owner" }); stranger = tokens.create({ name: "stranger" });
-  services = new ServiceRepo(db.db); tools = new HostedToolRepo(db.db, key); repo = new ResponseRepo(db.db, () => 0);
+  services = new ServiceRepo(db.db); tools = new HostedToolRepo(db.db, key); repo = new ResponseRepo(db.db, () => 0, Date.now, key);
   serviceId = services.create({ name: "svc", definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] } }).id;
   requests = []; outputs = []; wait = undefined; streamGate = undefined;
-  const invoke = async (request: Request): Promise<Invocation> => {
-    requests.push(request); if (wait) await wait;
+  const invoke = async (request: Request, options: InvokeOptions = {}): Promise<Invocation> => {
+    const serverTools = prepareServerTools(request, options.serverTools);
+    requests.push(serverTools.request); if (wait) await wait;
     const content = outputs.shift() ?? [{ type: "text", text: "Hello world" }];
     return { attempts: 1, attemptPath: [], result: { ok: true, value: { family: "openai_responses", providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {},
-      response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
+      serverTools, response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
   };
   adapter = vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from(['{"result":"found"}']) }));
-  const deps = { services, tokens, transport: { postStream: adapter }, factory: { forRow: () => ({ executor: { invoke, stream: async (request: Request) => {
-    const inv = await invoke(request); if (!inv.result.ok) throw new Error("fixture");
+  const executor = { invoke: (request: Request, _overrides: unknown, options?: InvokeOptions) => invoke(request, options),
+    prepareTools: (request: Request, _overrides: unknown, options?: InvokeOptions) => prepareServerTools(request, options?.serverTools),
+    stream: async (request: Request, _overrides: unknown, options?: InvokeOptions) => {
+    const inv = await invoke(request, options); if (!inv.result.ok) throw new Error("fixture");
     const data = inv.result.value.response.data();
     async function* events() { for await (const event of fabricateStream(data, Infinity)) { yield event; if (event.type === "text_delta" && streamGate) await streamGate; } }
     return { ...inv, result: { ok: true, value: { ...inv.result.value, dropReasoning: false, events: events() } } };
-  } } }) }, logger: { capture: JSON.stringify, record: vi.fn() }, usage: new UsageMeter(tokens), activeRequests: new ActiveRequestRegistry() } as unknown as ProxyDeps;
+  } };
+  const captureFactory = new ServiceFactory(services, { catalog: {} as ProxyDeps["catalog"], transport: { postStream: adapter } as unknown as ProxyDeps["transport"] }, 1000, null, tools);
+  const deps = { services, tokens, transport: { postStream: adapter }, factory: {
+    forRow: () => ({ executor }), snapshot: captureFactory.snapshot.bind(captureFactory), fromSnapshot: () => ({ executor }),
+  }, logger: { capture: JSON.stringify, record: vi.fn() }, usage: new UsageMeter(tokens), activeRequests: new ActiveRequestRegistry() } as unknown as ProxyDeps;
   app = Fastify(); const controller = new ResponsesController(deps, repo, tools);
   controller.register(app); new ProxyController(deps, controller).register(app);
 });
 afterEach(async () => { await app.close(); db.sqlite.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 function bind(mode: "all" | "progress" | "final" = "progress") {
-  const tool = tools.create(HttpToolSchema.parse({ name: "lookup", parameters: { type: "object" }, url: "https://adapter.test/run", bodyTemplate: { args: "{{arguments}}" }, resultPath: "/result" }));
+  const tool = tools.create(HttpToolSchema.parse({ name: "lookup", parameters: { type: "object" }, url: "https://adapter.test/run", bodyTemplate: { args: "{{arguments}}" }, resultPath: "/result", serverTool: { name: "web_search" } }));
   tools.bind(serviceId, [tool.id]);
   services.update(serviceId, { definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }], hostedTools: HostedToolOptionsSchema.parse({ streamMode: mode }) } });
 }
 const toolCall: ContentPart = { type: "tool_use", id: "call1", name: "lookup", input: {} };
+const hostedCall: ContentPart = { type: "tool_use", id: "call1", name: "provider_server_side_lookup", input: {} };
 
 describe("Responses and Conversations HTTP API", () => {
   it("conversation mode retains Anthropic signatures and redacted blocks for the next turn", async () => {
@@ -169,8 +180,8 @@ describe("Responses and Conversations HTTP API", () => {
     expect((await app.inject({ method: "DELETE", url: `/v1/conversations/${conversation.id}`, headers: headers() })).json().deleted).toBe(true);
   });
   it.each(["all", "progress", "final"] as const)("streams %s tool progress, returns stable final output and resumes by event sequence", async mode => {
-    bind(mode); outputs.push([toolCall]);
-    const response = await create({ stream: true, background: true });
+    bind(mode); outputs.push([hostedCall]);
+    const response = await create({ stream: true, background: true, tools: [{ type: "web_search" }] });
     const events = response.body.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
     expect(events.some(e => e.type === "hydrogen.model.delta")).toBe(mode === "all");
     expect(events.some(e => e.type === "hydrogen.tool.started")).toBe(mode !== "final");
@@ -194,9 +205,9 @@ describe("Responses and Conversations HTTP API", () => {
     expect((await create()).statusCode).toBe(429);
   });
   it("executes mixed Anthropic tools and continues from Hydrogen's saved context", async () => {
-    bind(); outputs.push([toolCall, { type: "tool_use", id: "local1", name: "local", input: {} }]);
-    const first = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: { model: "svc", max_tokens: 20, messages: [{ role: "user", content: "hi" }], tools: [{ name: "local", input_schema: { type: "object" } }] } });
-    const body = first.json(); expect(body.type).toBe("message"); expect(body.content).toHaveLength(1); expect(body.content[0].name).toBe("local");
+    bind(); outputs.push([hostedCall, { type: "tool_use", id: "local1", name: "local", input: {} }]);
+    const first = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: { model: "svc", max_tokens: 20, messages: [{ role: "user", content: "hi" }], tools: [{ type: "web_search_20250305", name: "web_search" }, { name: "local", input_schema: { type: "object" } }] } });
+    const body = first.json(); expect(body.type).toBe("message"); expect(body.content.some((part: Record<string, unknown>) => part.type === "tool_use" && part.name === "local")).toBe(true);
     const next = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: { model: "svc", max_tokens: 20, hydrogen: { previous_response_id: body.hydrogen.response_id }, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "local1", content: "local result" }] }] } });
     expect(next.statusCode).toBe(200); expect(requests[1].messages).toHaveLength(4); expect(adapter).toHaveBeenCalledTimes(1);
   });

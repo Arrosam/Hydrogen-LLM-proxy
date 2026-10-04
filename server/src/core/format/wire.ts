@@ -1,7 +1,15 @@
 /** Small wire-format coercion helpers shared by the format subclasses. */
 
-import type { ImagePart } from "../ir/content";
+import type { ImagePart, Tool, ToolChoice } from "../ir/content";
 import type { Family, GenerationParams } from "../ir/params";
+import { FormatConversionError } from "./errors";
+
+/** Raw provider tools/choices have no portable client-function equivalent. */
+export function assertToolFamily(tools: Tool[] | undefined, choice: ToolChoice | undefined, family: Family): void {
+  const foreign = tools?.find(tool => tool.raw && tool.raw.family !== family);
+  if (foreign?.raw) throw new FormatConversionError(`Tool '${foreign.name}' from ${foreign.raw.family} cannot be sent to ${family}`);
+  if (choice?.type === "raw" && choice.family !== family) throw new FormatConversionError(`Native tool_choice from ${choice.family} cannot be sent to ${family}`);
+}
 
 /**
  * The cache-hit count out of an OpenAI-shaped `usage` object, whatever the

@@ -15,7 +15,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import "../src/core/format";
 import { openDatabase, type OpenedDatabase } from "../src/db";
-import { buildResponse } from "../src/core/format/registry";
+import { buildRequest, buildResponse } from "../src/core/format/registry";
 import { fabricateStream } from "../src/core/ir/stream";
 import type { ContentPart } from "../src/core/ir/content";
 import type { Request } from "../src/core/ir/request";
@@ -25,6 +25,11 @@ import { ResponseRepo } from "../src/persistence/responseRepo";
 import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
+import { ServiceFactory } from "../src/execution/serviceFactory";
+import { localToolHistory } from "../src/execution/serverTools";
+import type { InvokeOptions, ModelService, ServiceDeps } from "../src/execution/modelService";
+import type { RequestOverrides } from "../src/core/ir/params";
+import type { Catalog } from "../src/catalog/catalog";
 import type { Invocation } from "../src/execution/outcome";
 import { ResponsesController } from "../src/transport/responsesController";
 import { ProxyController } from "../src/transport/proxyController";
@@ -52,22 +57,35 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-server-tools-")); db = openDatabase(dir);
   const key = Buffer.alloc(32, 2);
   tokens = new TokenRepo(db.db, key); owner = tokens.create({ name: "owner" });
-  services = new ServiceRepo(db.db); tools = new HostedToolRepo(db.db, key); repo = new ResponseRepo(db.db, () => 0);
+  services = new ServiceRepo(db.db); tools = new HostedToolRepo(db.db, key); repo = new ResponseRepo(db.db, () => 0, Date.now, key);
   const serviceId = services.create({ name: "svc", definition: { timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] } }).id;
   outputs = []; seen = [];
-  const invoke = async (request: Request): Promise<Invocation> => {
-    seen.push(request);
-    const content = outputs.shift() ?? [{ type: "text", text: "done" }];
+  const invoke = async (executor: ModelService, request: Request, overrides?: RequestOverrides, opts?: InvokeOptions): Promise<Invocation> => {
+    const prepared = executor.prepareTools(request, overrides, opts);
+    seen.push(buildRequest("openai_responses", { ...prepared.request.data(), messages: localToolHistory(prepared.request.messages) }));
+    const { request: _request, ...serverTools } = prepared;
+    const content = structuredClone(outputs.shift() ?? [{ type: "text", text: "done" }]);
     return { attempts: 1, attemptPath: [], result: { ok: true, value: { family: "openai_responses", providerName: "p", modelName: "m", upstreamModel: "up", upstreamRequest: {},
+      serverTools,
       response: buildResponse("openai_responses", { id: "upstream-id", model: "up", created: 1, content, stopReason: content.some(p => p.type === "tool_use") ? "tool_use" : "stop", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } }) } } };
   };
   adapter = vi.fn(async () => ({ status: 200, headers: {}, body: Readable.from([ADAPTER_BODY]) }));
-  const deps = { services, tokens, transport: { postStream: adapter }, factory: { forRow: () => ({ executor: { invoke, stream: async (request: Request) => {
-    const inv = await invoke(request); if (!inv.result.ok) throw new Error("fixture");
-    const data = inv.result.value.response.data();
-    async function* events() { for await (const event of fabricateStream(data, Infinity)) yield event; }
-    return { ...inv, result: { ok: true, value: { ...inv.result.value, dropReasoning: false, events: events() } } };
-  } } }) }, logger: { capture: JSON.stringify, record: vi.fn() }, usage: new UsageMeter(tokens), activeRequests: new ActiveRequestRegistry() } as unknown as ProxyDeps;
+  const catalog = { resolve: () => ({ ok: true, target: { family: "openai_responses", providerName: "p", modelName: "m", upstreamModel: "up", url: "https://provider.test/responses", headers: {}, upstream: {} } }) } as unknown as Catalog;
+  const serviceDeps = { catalog, transport: { postStream: adapter } } as unknown as ServiceDeps;
+  const factory = new ServiceFactory(services, serviceDeps, 10_000, null, tools);
+  const fromSnapshot = factory.fromSnapshot.bind(factory);
+  factory.fromSnapshot = snapshot => {
+    const built = fromSnapshot(snapshot);
+    built.executor.invoke = (request, overrides, opts) => invoke(built.executor, request, overrides, opts);
+    built.executor.stream = async (request, overrides, opts) => {
+      const inv = await invoke(built.executor, request, overrides, opts); if (!inv.result.ok) throw new Error("fixture");
+      const data = inv.result.value.response.data();
+      async function* events() { for await (const event of fabricateStream(data, Infinity)) yield event; }
+      return { ...inv, result: { ok: true, value: { ...inv.result.value, dropReasoning: false, events: events() } } };
+    };
+    return built;
+  };
+  const deps = { services, tokens, catalog, transport: serviceDeps.transport, factory, logger: { capture: JSON.stringify, record: vi.fn() }, usage: new UsageMeter(tokens), activeRequests: new ActiveRequestRegistry() } as unknown as ProxyDeps;
   app = Fastify(); const controller = new ResponsesController(deps, repo, tools);
   controller.register(app); new ProxyController(deps, controller).register(app);
 
@@ -89,8 +107,8 @@ beforeEach(() => {
 });
 afterEach(async () => { await app.close(); db.sqlite.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
-/** The model is offered the BOUND tool, so that is the name it calls. */
-const searchCall: ContentPart = { type: "tool_use", id: "toolu_1", name: "search", input: { queries: ["tokyo"] } };
+/** The model calls exactly the emitted function name. */
+const searchCall: ContentPart = { type: "tool_use", id: "toolu_1", name: "provider_server_side_search", input: { queries: ["tokyo"] } };
 
 describe("server-side tool round trip over HTTP", () => {
   it("returns the provider call and its adapter-sourced result to a declaring client", async () => {
@@ -119,7 +137,7 @@ describe("server-side tool round trip over HTTP", () => {
     // The declaration carries no parameters, so without the rewrite the model
     // would be handed a tool it could never call.
     const offered = seen[0]!.tools!;
-    expect(offered.map(t => t.name)).toEqual(["search"]);
+    expect(offered.map(t => t.name)).toEqual(["provider_server_side_search"]);
     expect(offered[0]!.parameters).toMatchObject({ properties: { queries: { type: "array" } } });
   });
 
@@ -184,7 +202,7 @@ describe("server-side tool round trip over HTTP", () => {
   // told which calls it may not make and can adjust on the spot.
   it("reports a call the budget refused, without ending the turn", async () => {
     limit({ maxCalls: 1 });
-    const second: ContentPart = { type: "tool_use", id: "toolu_2", name: "search", input: { queries: ["kyoto"] } };
+    const second: ContentPart = { type: "tool_use", id: "toolu_2", name: "provider_server_side_search", input: { queries: ["kyoto"] } };
     outputs.push([searchCall, second], [{ type: "text", text: "answer" }]);
     const response = await app.inject({ method: "POST", url: "/v1/messages", headers: headers(), payload: declare([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]) });
     expect(response.statusCode).toBe(200);

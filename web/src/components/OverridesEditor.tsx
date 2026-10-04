@@ -145,13 +145,11 @@ export function OverridesEditor({ overrides, onChange }: Props) {
   const hasDuplicates = [...keyCounts.values()].some((n) => n > 1);
 
   return (
-    <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="label mb-0">
-          {t("overrides.title")}
-          <span className="ml-2 normal-case text-ink-500">{t("overrides.titleHint")}</span>
-        </span>
-        <div className="flex items-center gap-1">
+    <fieldset className="min-w-0 space-y-3 rounded-lg border border-ink-700 p-4">
+      <legend className="px-2 text-sm font-semibold text-ink-200">{t("overrides.title")}</legend>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-ink-400">{t("overrides.titleHint")}</p>
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
             className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${mode === "gui" ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"}`}
@@ -172,7 +170,7 @@ export function OverridesEditor({ overrides, onChange }: Props) {
       </div>
 
       {mode === "gui" ? (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {rows.length === 0 && (
             <p className="text-xs text-ink-500">{t("overrides.emptyHint")}</p>
           )}
@@ -180,9 +178,9 @@ export function OverridesEditor({ overrides, onChange }: Props) {
           {rows.map((row, i) => {
             const dup = (keyCounts.get(row.key.trim()) ?? 0) > 1;
             return (
-              <div key={row.id} className="flex items-start gap-1.5">
+              <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_auto]">
                 <input
-                  className={`input h-8 w-40 py-0 font-mono text-xs ${dup ? "border-red-500/70" : ""}`}
+                  className={`input col-span-2 min-w-0 font-mono text-xs sm:col-span-1 ${dup ? "border-red-500/70" : ""}`}
                   type="text"
                   placeholder={t("overrides.paramPlaceholder")}
                   title={dup ? t("overrides.duplicateKey") : undefined}
@@ -190,7 +188,7 @@ export function OverridesEditor({ overrides, onChange }: Props) {
                   onChange={(e) => updateRow(i, { key: e.target.value })}
                 />
                 <input
-                  className="input h-8 flex-1 py-0 font-mono text-xs"
+                  className="input min-w-0 font-mono text-xs"
                   type="text"
                   value={row.value}
                   onChange={(e) => updateRow(i, { value: e.target.value })}
@@ -199,7 +197,7 @@ export function OverridesEditor({ overrides, onChange }: Props) {
                 />
                 <button
                   type="button"
-                  className="btn-danger btn-xs shrink-0"
+                  className="btn-danger btn-xs self-center"
                   onClick={() => removeRow(i)}
                   title={t("overrides.removeOverrideTitle")}
                 >
@@ -236,6 +234,6 @@ export function OverridesEditor({ overrides, onChange }: Props) {
           </p>
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }

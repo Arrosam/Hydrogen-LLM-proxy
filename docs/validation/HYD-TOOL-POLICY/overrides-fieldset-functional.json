@@ -1,0 +1,13 @@
+{
+  "scenario": "Browser-saved parameter survives reload and reaches fake upstream as a number; removed extra absent; no declaration exposes no tool",
+  "result": "pass",
+  "verifiedAt": "2026-10-03T13:22:42.737Z",
+  "baseline": "8c12ff24b72767bcc7b0438a4091c36e7ecddccc",
+  "source": "local overrides fieldset follow-up",
+  "responseStatus": 200,
+  "modelRequests": 1,
+  "adapterRequests": 0,
+  "upstreamTemperature": 0.5,
+  "upstreamTools": [],
+  "externalRequests": 0
+}

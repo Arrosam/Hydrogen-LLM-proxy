@@ -36,11 +36,8 @@ describe("F2: server-side / non-function tools", () => {
     expect(tools[1].input_schema).toBeDefined();
   });
 
-  it("drops it cleanly when crossing families — never an empty-schema client tool", () => {
-    const body = OpenAICompletionRequest.construct(anthReq).render(target());
-    const tools = body.tools as Record<string, unknown>[];
-    expect(tools).toHaveLength(1); // only my_fn
-    expect(JSON.stringify(tools)).not.toContain("web_search");
+  it("rejects a raw server declaration that cannot cross families", () => {
+    expect(() => OpenAICompletionRequest.construct(anthReq).render(target())).toThrow("cannot be sent to openai_completion");
   });
 
   it("keeps OpenAI built-in tools verbatim on their own families", () => {
@@ -51,8 +48,7 @@ describe("F2: server-side / non-function tools", () => {
     });
     const tools = req.render(target()).tools as Record<string, unknown>[];
     expect(tools[0]).toEqual({ type: "web_search" });
-    const anth = AnthropicRequest.construct(req).render(target()).tools as Record<string, unknown>[];
-    expect(anth).toHaveLength(1); // web_search dropped, f kept
+    expect(() => AnthropicRequest.construct(req).render(target())).toThrow("cannot be sent to anthropic");
   });
 });
 

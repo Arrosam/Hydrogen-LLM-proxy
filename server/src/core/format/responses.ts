@@ -19,6 +19,7 @@ import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from ".
 import { genId, nowSeconds } from "../../util/ids";
 import {
   applyNonCanonical,
+  assertToolFamily,
   boolOrUndef,
   capMaxTokens,
   collectPassthrough,
@@ -56,7 +57,7 @@ function parseSearchCall(item: Record<string, unknown>): ServerToolResultPart {
 function renderSearchCall(p: ServerToolResultPart): Record<string, unknown> {
   const action = (p.input ?? {}) as Record<string, unknown>;
   return { id: p.id, type: "web_search_call", status: p.notExecuted ? "in_progress" : p.errorCode !== undefined ? "failed" : "completed",
-    action: { type: "search", ...action, ...(p.content.length ? { sources: p.content.filter((entry): entry is { url: string } => entry !== null && typeof entry === "object" && typeof (entry as { url?: unknown }).url === "string").map(entry => ({ type: "url", ...entry })) } : {}) } };
+    action: { type: "search", ...action, ...(p.content.length ? { sources: p.content.filter((entry): entry is { url: string } => entry !== null && typeof entry === "object" && typeof (entry as { url?: unknown }).url === "string").map(entry => ({ ...entry, type: "url" })) } : {}) } };
 }
 
 function contentToParts(content: unknown): ContentPart[] {
@@ -164,6 +165,7 @@ function parseToolChoice(raw: unknown): ToolChoice | undefined {
   if (typeof raw === "object") {
     const c = raw as Record<string, unknown>;
     if (c.type === "function" && c.name) return { type: "tool", name: String(c.name) };
+    return { type: "raw", family: "openai_responses", value: c };
   }
   return undefined;
 }
@@ -178,6 +180,8 @@ function toolChoiceToResponses(choice: ToolChoice): unknown {
       return "required";
     case "tool":
       return { type: "function", name: choice.name };
+    case "raw":
+      return choice.value;
   }
 }
 
@@ -395,6 +399,7 @@ export class OpenAIResponsesRequest extends Request {
   }
 
   render(target: RenderTarget): Record<string, unknown> {
+    assertToolFamily(this.tools, this.toolChoice, this.family);
     const input: Record<string, unknown>[] = [];
     // Stale (tool-less prior-turn) reasoning is shed; tool-call turns keep
     // theirs -- DeepSeek-family Responses upstreams 400 a thinking-mode tool

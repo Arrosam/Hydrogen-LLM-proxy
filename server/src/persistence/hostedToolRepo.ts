@@ -25,7 +25,7 @@ export class HostedToolRepo {
   }
 
   materialize(row: ToolRow): HttpTool {
-    return { ...row.config, name: row.name, enabled: row.enabled, headers: JSON.parse(decryptSecret(row.headersSecret, this.masterKey)) as Record<string, string> };
+    return { ...row.config, id: row.id, name: row.name, enabled: row.enabled, headers: JSON.parse(decryptSecret(row.headersSecret, this.masterKey)) as Record<string, string> };
   }
 
   create(input: HttpTool): PublicHostedTool {

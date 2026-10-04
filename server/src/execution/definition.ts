@@ -188,6 +188,14 @@ export const OverridesSchema = z
 
 // --- Model Service (resilience step chain) --------------------------------
 
+/** Exact client-declared server-tool names. A present step policy replaces the
+ * whole service policy. Absence inherits; an explicit empty list is retained. */
+export const ServerToolPolicySchema = z.object({
+  mode: z.enum(["blacklist", "whitelist"]),
+  names: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Use an exact tool name with 1–64 letters, digits, underscores or hyphens")).max(200),
+}).strict();
+export type ServerToolPolicy = z.infer<typeof ServerToolPolicySchema>;
+
 export const StepSchema = z.object({
   /** Internal catalog model name. */
   model: z.string().min(1),
@@ -203,6 +211,8 @@ export const StepSchema = z.object({
   /** Decode inline reasoning for this upstream before canonical history is stored.
    * Absent/off trusts native structured fields and never scans answer text. */
   thinkingParser: ThinkingParserSchema.optional(),
+  /** Whole upstream override; absent inherits this Model Service's policy. */
+  serverToolPolicy: ServerToolPolicySchema.optional(),
 });
 
 /**
@@ -242,6 +252,8 @@ export const AttachmentBudgetSchema = z.number().int().min(0).max(MAX_ATTACHMENT
 
 export const ServiceStepsSchema = z.object({
   hostedTools: HostedToolOptionsSchema.optional(),
+  /** Omitted = an empty blacklist, allowing extra upstream server tools. */
+  serverToolPolicy: ServerToolPolicySchema.optional(),
   kind: z.literal("model_service").optional(),
   /** Omitted = "chat" (backward compatible with pre-category definitions). */
   category: ServiceCategorySchema.optional(),
@@ -311,6 +323,7 @@ export const AgentTransitionSchema = z.object({
 
 export const AgentStageSchema = z.object({
   name: z.string().min(1).max(60),
+  serverToolPolicy: z.never({ invalid_type_error: "Configure serverToolPolicy in the referenced Model Service or its upstream steps; Micro Agent stages do not define this policy" }).optional(),
   /** Name of a saved Model Service / Micro Agent for this stage. */
   service: z.string().min(1).optional(),
   /** Inline step chain (alternative to `service`). No service/steps = a router. */
@@ -360,6 +373,7 @@ export const AgentAsrSchema = z.object({
 
 export const AgentSchema = z.object({
   hostedTools: HostedToolOptionsSchema.optional(),
+  serverToolPolicy: z.never({ invalid_type_error: "Configure serverToolPolicy in each referenced Model Service or its upstream steps; Micro Agents do not define this policy" }).optional(),
   // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
   kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
   timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),

@@ -5,13 +5,15 @@ import { z } from "zod";
 import type { Family } from "../core/format/family";
 import { buildRequest, buildResponse, parseRequest } from "../core/format/registry";
 import type { Message } from "../core/ir/content";
+import type { RequestOverrides } from "../core/ir/params";
 import { ZERO_USAGE } from "../core/ir/usage";
 import { thinkingReplayError } from "../core/ir/thinkingReplay";
 import { requireClientToken } from "../auth/tokenAuth";
 import { buildErrorBody } from "../core/proxy/errors";
-import { parseService, isChatPipeline, serviceCategory, serviceThinkingFormat } from "../execution/definition";
+import { parseService, isChatPipeline, isAgent, serviceCategory, serviceThinkingFormat, stepOverrides } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
-import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
+import { collectServerToolCalls, serverToolDeclaration, serverToolParts, serverToolResponseContent, ServerToolPreflightError } from "../execution/serverTools";
+import type { ServiceSnapshot } from "../execution/serviceSnapshot";
 import { ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { bestEffortLogger } from "../observability/requestLogger";
@@ -29,7 +31,24 @@ const page = z.object({ after: z.string().optional(), order: z.enum(["asc", "des
 const idFrom = (req: FastifyRequest, key = "id") => z.record(z.string()).parse(req.params)[key]!;
 const active = (row: Pick<StoredResponse, "status">) => row.status === "queued" || row.status === "in_progress";
 const list = (data: WireItem[], has_more = false) => ({ object: "list", data, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null, has_more });
-type Job = { abort: AbortController; done: Promise<WireItem>; bytes: number; status?: number; error?: string | null };
+type Job = { abort: AbortController; done: Promise<WireItem>; bytes: number; status?: number; error?: string | null; errorBody?: WireItem };
+
+function nativeFailure(family: Family, status: number, message: string, source?: unknown): WireItem {
+  const body = buildErrorBody(family, status, message);
+  const error = source && typeof source === "object" ? (source as WireItem).error : undefined;
+  const code = error && typeof error === "object" ? (error as WireItem).code : undefined;
+  // These terminal local failures already use the ingress protocol. Preserve
+  // their defined code without copying a foreign provider's entire envelope.
+  if (code === "hydrogen_tool_name_conflict" || code === "tool_not_found") (body.error as WireItem).code = code;
+  return body;
+}
+
+/** A later fallback may replace tools even when the primary offers none. Its
+ * model events must stay buffered until the winning ownership map is known. */
+function hasToolOverlay(params?: RequestOverrides): boolean {
+  return !!params && ((!!params.extra && Object.hasOwn(params.extra, "tools"))
+    || (!!params.passthrough?.params && Object.hasOwn(params.passthrough.params, "tools")));
+}
 
 /** Durable, API-Key-owned orchestration; the regular proxy remains the stateless path. */
 export class ResponsesController {
@@ -155,6 +174,7 @@ export class ResponsesController {
   async create(req: FastifyRequest, reply: FastifyReply, family: Family): Promise<unknown> {
     try { return await this.createOwned(req, reply, family); }
     catch (error) {
+      if (error instanceof ServerToolPreflightError) return reply.code(error.statusCode).send(error.errorBody);
       const status = error instanceof Error && "statusCode" in error ? Number(error.statusCode) : error instanceof z.ZodError ? 400 : 500;
       return reply.code(status).send(buildErrorBody(family, status, status < 500 ? (error as Error).message : "Response execution failed"));
     }
@@ -180,25 +200,43 @@ export class ResponsesController {
     if (Object.keys(forwarded).length) request = request.withOverrides({ forwardHeaders: { family, headers: forwarded } });
     if (!request.requestedService) throw new ResponseStateError("Missing model", 400);
     if ((request.params.n ?? 1) > 1) throw new ResponseStateError("n > 1 is unsupported", 400);
-    const service = this.deps.services.getByName(request.requestedService);
-    if (!service || !service.enabled) throw new ResponseStateError("Model service not found");
-    if (token.scopeServices?.length && !token.scopeServices.includes(service.id)) throw new ResponseStateError("API key does not allow this service", 403);
-    const definition = parseService(service.definition);
-    if (!isChatPipeline(serviceCategory(definition))) throw new ResponseStateError("Use the service's dedicated endpoint", 400);
     let prefix: Message[] = [];
     let previousSession: string | undefined;
+    let snapshot: ServiceSnapshot | undefined;
     const conversation = conversationId ? this.repo.conversation(conversationId, token.id) : undefined;
     if (conversationId && !conversation) throw new ResponseStateError("Conversation not found");
-    if (conversation) prefix = historyMessages(this.repo.allItems(conversation.id, token.id));
+    if (conversation) {
+      const retainedItems = this.repo.allItems(conversation.id, token.id);
+      prefix = historyMessages(retainedItems);
+      snapshot = this.repo.conversationSnapshot(conversation.id, token.id);
+      if (!snapshot && (this.repo.hasConversationResponses(conversation.id, token.id) || retainedItems.some(hasPrivateHistoryField))) {
+        throw new ResponseStateError("The conversation has no retained configuration; start a new session", 409);
+      }
+    }
     if (previousId) {
       const previous = this.repo.response(previousId, token.id);
       if (!previous || previous.response.store === false) throw new ResponseStateError("Previous response not found");
       if (active(previous) || previous.status === "failed" || previous.status === "cancelled") throw new ResponseStateError("Previous response is not ready for continuation", 409);
+      snapshot = this.repo.responseSnapshot(previousId, token.id);
+      if (!snapshot) throw new ResponseStateError("The previous response has no retained configuration; start a new session", 409);
       prefix = previous.history;
       const previousHydrogen = previous.response.hydrogen as WireItem | undefined;
       if (typeof previousHydrogen?.session_id === "string") previousSession = previousHydrogen.session_id;
       this.repo.touchResponse(previousId, token.id);
     }
+    if (!snapshot) {
+      const current = this.deps.services.getByName(request.requestedService);
+      if (!current || !current.enabled) throw new ResponseStateError("Model service not found");
+      snapshot = this.deps.factory.snapshot(current);
+    }
+    const service = snapshot.services.find(node => node.id === snapshot!.rootId);
+    if (!service) throw new Error("Session configuration has no root service");
+    if (request.requestedService !== service.name) throw new ResponseStateError("A continued session must use its original model service name", 400);
+    // Configuration is retained; API key ownership, scope, expiry and quota
+    // still come from the currently authenticated key on every turn.
+    if (token.scopeServices?.length && !token.scopeServices.includes(service.id)) throw new ResponseStateError("API key does not allow this service", 403);
+    const definition = parseService(service.definition);
+    if (!isChatPipeline(serviceCategory(definition))) throw new ResponseStateError("Use the service's dedicated endpoint", 400);
     // A continuation supplies only new input. Every outstanding client call must be resolved.
     if (prefix.length) {
       const pending = new Set<string>();
@@ -213,18 +251,18 @@ export class ResponsesController {
     }
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
     if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
-    const bound = this.tools.forService(service.id);
-    // A client may DECLARE a provider-executed tool by name. When a bound tool
-    // opts into that contract, the declaration is an instruction to run it, not
-    // a client tool that would collide with the hosted one.
-    const serverTools = hostedServerTools(request.tools, bound);
-    // A tool a client declares by the name a bound tool's OWN contract names is an
-    // instruction to run that tool, not a collision. Any other name a hosted tool
-    // answers to still is one: the model would see two definitions of it.
-    const declaredNames = new Set(bound.flatMap(tool => tool.serverTool ? [tool.serverTool.name] : []));
-    if (request.tools?.some(tool => !declaredNames.has(tool.name) && bound.some(b => b.name === tool.name))) throw new ResponseStateError("Client and hosted tool names must be distinct", 400);
-    const tools = rewriteServerTools(request.tools, serverTools);
-    const executor = this.deps.factory.forRow(service).executor;
+    const bound = service.tools;
+    const serverToolNamePrefix = snapshot.serverToolNamePrefix;
+    const executor = this.deps.factory.fromSnapshot(snapshot).executor;
+    // Keep declarations intact until the executor evaluates its effective
+    // step policy and request overrides. Reject before reserving/streaming.
+    const prepared = executor.prepareTools(request, undefined, { serverTools: { tools: bound, prefix: serverToolNamePrefix } });
+    const bufferTools = isAgent(definition)
+      || prepared.matched.size > 0
+      || [...(request.tools ?? []), ...(prepared.request.tools ?? [])].some(tool => serverToolDeclaration(tool))
+      || request.messages.some(message => message.content.some(part => part.type === "tool_use" && !!part.hydrogenTool))
+      || hasToolOverlay(request.params)
+      || definition.steps.some(step => hasToolOverlay(stepOverrides(step)));
     const id = genId("resp"), created = Math.floor(Date.now() / 1000), started = Date.now();
     const sessionId = conversationId ?? previousSession ?? id;
     const initial: WireItem = { id, object: "response", created_at: created, status: "queued", model: service.name, output: [], error: null, incomplete_details: null,
@@ -232,8 +270,8 @@ export class ResponsesController {
     const releaseJob = this.deps.requestGate?.acquire();
     const releaseQuota = req.quotaLease?.retain();
     let row: StoredResponse;
-    try { row = this.repo.createResponse({ id, tokenId: token.id, serviceId: service.id, previousResponseId: previousId, conversationId, status: "queued", background: flags.background, response: initial,
-      inputItems: messagesToItems(request.messages).map(item => ({ ...item, id: item.id ?? genId("item") })), history: request.messages }, conversation?.revision); }
+    try { row = this.repo.createResponse({ id, tokenId: token.id, serviceId: this.deps.services.get(service.id) ? service.id : null, previousResponseId: previousId, conversationId, status: "queued", background: flags.background, response: initial,
+      inputItems: messagesToItems(request.messages).map(item => ({ ...item, id: item.id ?? genId("item") })), history: request.messages }, conversation?.revision, snapshot); }
     catch (error) { releaseJob?.(); releaseQuota?.(); throw error; }
     const traceId = genId("req"), abort = new AbortController();
     const http = { method: req.method, path: req.url.split("?")[0]!, query: "", headers: req.headers as Record<string, unknown>, bodyPayload: this.deps.logger.capture(body) };
@@ -258,7 +296,7 @@ export class ResponsesController {
       let output = initial;
       let served: InvokeValue | undefined;
       const envelope = { ...initial }; delete envelope.output; delete envelope.status; delete envelope.error; delete envelope.incomplete_details;
-      // A declared server tool rules out the live path: it streams the model's
+      // A possible server-tool round trip rules out the live path: it streams the model's
       // turn straight through, which is exactly the turn the round trip has to be
       // synthesized into. Those requests take the buffered path and fabricate
       // their stream, so the client receives the same blocks either way.
@@ -266,18 +304,15 @@ export class ResponsesController {
       // the complete canonical response before delivering its tool calls.
       const stateless = !flags.store && !conversationId;
       const lossyEphemeral = stateless && ["none", "think_tags"].includes(serviceThinkingFormat(definition));
-      const live = flags.stream && !lossyEphemeral && !bound.length && !serverTools.size && family === "openai_responses"
+      const live = flags.stream && !lossyEphemeral && !bufferTools && family === "openai_responses"
         ? liveResponseWire(service.name, envelope, emit, serviceThinkingFormat(definition)) : undefined;
       try {
         abort.signal.throwIfAborted();
         this.repo.transition(id, token.id, "in_progress", { ...initial, status: "in_progress" });
         if (family === "openai_responses") await emit({ type: "response.in_progress", response: { ...initial, status: "in_progress" } });
-        // Declared server tools are rewritten into the bound tools the model can
-        // actually call; every other request is passed through untouched.
-        const effective = serverTools.size ? buildRequest(family, { ...request.data(), tools }) : request;
-        const run = await runHostedTools(executor, effective, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools,
+        const run = await runHostedTools(executor, request, bound, this.deps.transport, { signal: abort.signal, sessionId, config: definition.hostedTools, serverToolNamePrefix,
           progress, emit: flags.stream && !lossyEphemeral ? emit : undefined, onModelEvent: live?.send, thinkingFormat: serviceThinkingFormat(definition), logMaxChars: this.deps.logMaxChars,
-          declaredNames: serverTools.size ? new Map([...declaredServerTools(serverTools)].map(([declared, entry]) => [declared, entry.tool.name])) : undefined });
+        });
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
@@ -286,20 +321,16 @@ export class ResponsesController {
         // Give the client the provider-executed round trips it asked for. The
         // parts come from the run's UNTRUNCATED history, not the clipped trace,
         // and carry no knowledge of any particular tool or adapter.
+        const serverTools = run.serverTools;
         if (serverTools.size) {
           const synthesisFamily = family === "openai_responses" ? "openai_responses" as const : family === "anthropic" ? "anthropic" as const : undefined;
           const parts = synthesisFamily ? serverToolParts(collectServerToolCalls(run.history, serverTools), synthesisFamily) : [];
           if (parts.length) {
             // The sequence comes from the history so every round survives, in
             // this wire's order: a text block, the call, its result, the answer.
-            // A model that read "search the web" may also answer with the
-            // DECLARED name it was never offered (the declaration is replaced by
-            // the bound tool, whose form carries the parameters). Such a call
-            // reaches no adapter, so it is dropped rather than handed back as
-            // something for the client to run.
-            const declared = new Set([...serverTools.values()].map(entry => entry.declaration.name));
-            const content = serverToolResponseContent(run.history, parts, prefix.length, new Set(run.declined))
-              .filter(part => part.type !== "tool_use" || !declared.has(part.name));
+            // Synthesis uses the exact call IDs the runtime owned. Ordinary
+            // client calls retain their own names, including a server alias.
+            const content = serverToolResponseContent(run.history, parts, prefix.length, new Set(run.declined));
             if (content.length) final = buildResponse(family, { ...final.data(), content });
           }
         }
@@ -329,12 +360,14 @@ export class ResponsesController {
       } catch (caught) {
         await live?.close().catch(() => undefined);
         const cancelled = abort.signal.aborted;
-        status = cancelled ? 499 : caught instanceof HostedRunError || caught instanceof ResponseStateError ? caught.statusCode : 502;
-        error = cancelled ? "Response execution cancelled" : caught instanceof HostedRunError || caught instanceof ResponseStateError ? caught.message : "Response execution failed";
+        status = cancelled ? 499 : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.statusCode : 502;
+        error = cancelled ? "Response execution cancelled" : caught instanceof HostedRunError || caught instanceof ResponseStateError || caught instanceof ServerToolPreflightError ? caught.message : "Response execution failed";
         if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; }
-        const failed = this.repo.transition(id, token.id, cancelled ? "cancelled" : "failed", { ...initial, error: { code: cancelled ? "cancelled" : "execution_failed", message: error } });
+        job.errorBody = nativeFailure(family, status, error, caught instanceof HostedRunError || caught instanceof ServerToolPreflightError ? caught.errorBody : undefined);
+        const code = (job.errorBody.error as WireItem).code;
+        const failed = this.repo.transition(id, token.id, cancelled ? "cancelled" : "failed", { ...initial, error: { code: code ?? (cancelled ? "cancelled" : "execution_failed"), message: error } });
         output = failed?.response ?? this.repo.response(id, token.id)?.response ?? initial;
-        if (failed) this.repo.addEvent(id, token.id, { type: family === "anthropic" ? "hydrogen.response.failed" : `response.${failed.status}`, response: output });
+        if (failed) this.repo.addEvent(id, token.id, family === "anthropic" ? job.errorBody : { type: `response.${failed.status}`, response: output });
       } finally {
         job.status = status; job.error = error;
         this.deps.activeRequests.finish(traceId, status, error ?? undefined);
@@ -366,7 +399,7 @@ export class ResponsesController {
         throw error;
       } finally { heartbeat.stop(); }
       if ((job.status ?? 200) >= 400) {
-        output = { ...buildErrorBody(family, job.status!, job.error ?? "Response execution failed"), hydrogen: { response_id: id } };
+        output = { ...(job.errorBody ?? buildErrorBody(family, job.status!, job.error ?? "Response execution failed")), hydrogen: { response_id: id } };
         if (!heartbeat.committed) reply.code(job.status!);
       }
       if (heartbeat.finish(output)) return;

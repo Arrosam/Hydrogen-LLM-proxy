@@ -1,11 +1,14 @@
 import type { ModelServiceRow } from "../db/schema";
-import type { ServiceRepo } from "../persistence/serviceRepo";
 import { isAgent, isChatPipeline, parseService, serviceCategory, type ServiceDef } from "./definition";
 import { ModelService, type ServiceDeps } from "./modelService";
 import { MicroAgent, type MicroAgentDeps, type ResolveResult, type ServiceResolver } from "./microAgent";
 import type { OcrCacheStore } from "./ocrCache";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { HostedToolService } from "./hostedToolService";
+import type { ServiceSnapshot, SnapshotService } from "./serviceSnapshot";
+
+type ServiceLookup = { getByName(name: string): Pick<ModelServiceRow, "id" | "name" | "enabled" | "definition"> | undefined };
+type BoundToolLookup = Pick<HostedToolRepo, "forService">;
 
 /**
  * Builds a runnable executor (ModelService or MicroAgent) from a saved service.
@@ -15,13 +18,52 @@ import { HostedToolService } from "./hostedToolService";
  */
 export class ServiceFactory implements ServiceResolver {
   constructor(
-    private readonly services: ServiceRepo,
+    private readonly services: ServiceLookup,
     private readonly deps: ServiceDeps,
     private readonly logMaxChars: number | (() => number),
     /** Image-description cache for the OCR pre-pass; omitted = no caching. */
     private readonly ocrCache: OcrCacheStore | null = null,
-    private readonly hostedTools: HostedToolRepo | null = null,
+    private readonly hostedTools: BoundToolLookup | null = null,
   ) {}
+
+  /** Capture only session-relevant feature configuration. Upstream catalog,
+   * credentials and SSRF checks remain live security boundaries. */
+  snapshot(row: Pick<ModelServiceRow, "id" | "name" | "enabled" | "definition">): ServiceSnapshot {
+    const services: SnapshotService[] = [];
+    const visited = new Set<number>();
+    const capture = (current: typeof row): void => {
+      if (visited.has(current.id)) return;
+      visited.add(current.id);
+      services.push({ id: current.id, name: current.name, enabled: current.enabled,
+        definition: structuredClone(current.definition), tools: structuredClone(this.hostedTools?.forService(current.id) ?? []) });
+      let def: ServiceDef;
+      try { def = parseService(current.definition); } catch { return; }
+      if (!isAgent(def)) return;
+      for (const name of [...def.stages.map(stage => stage.service), def.ocr?.service, def.asr?.service]) {
+        const child = name ? this.services.getByName(name) : undefined;
+        if (child) capture(child);
+      }
+    };
+    capture(row);
+    const prefix = this.deps.serverToolNamePrefix;
+    return { version: 1, rootId: row.id, services, serverToolNamePrefix: typeof prefix === "function" ? prefix() : prefix ?? "provider_server_side_" };
+  }
+
+  /** Build every nested resolver from the original graph, including definitions
+   * and tools subsequently renamed, disabled or removed from operator config. */
+  fromSnapshot(snapshot: ServiceSnapshot): { executor: ModelService; isAgent: boolean } {
+    if (snapshot.version !== 1) throw new Error("Unsupported service snapshot version");
+    const frozen = structuredClone(snapshot);
+    const root = frozen.services.find(service => service.id === frozen.rootId);
+    if (!root) throw new Error("Service snapshot has no root service");
+    const factory = new ServiceFactory(
+      { getByName: name => frozen.services.find(service => service.name === name) },
+      { ...this.deps, serverToolNamePrefix: frozen.serverToolNamePrefix },
+      this.logMaxChars, this.ocrCache,
+      { forService: id => frozen.services.find(service => service.id === id)?.tools ?? [] },
+    );
+    return factory.buildDef(parseService(root.definition));
+  }
 
   private microDeps(): MicroAgentDeps {
     return { ...this.deps, resolver: this, logMaxChars: this.logMaxChars, ocrCache: this.ocrCache };
@@ -40,7 +82,7 @@ export class ServiceFactory implements ServiceResolver {
   }
 
   /** Include nested stage bindings when choosing the stateful Anthropic route. */
-  hasHostedTools(row: ModelServiceRow, visited = new Set<number>()): boolean {
+  hasHostedTools(row: Pick<ModelServiceRow, "id" | "name" | "enabled" | "definition">, visited = new Set<number>()): boolean {
     if (visited.has(row.id) || !row.enabled) return false;
     visited.add(row.id);
     if (this.hostedTools?.forService(row.id).length) return true;
