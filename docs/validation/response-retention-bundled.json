@@ -1,0 +1,86 @@
+{
+  "environment": {
+    "node": "v22.22.2",
+    "platform": "darwin",
+    "arch": "arm64",
+    "worker": "bundled CJS, launched outside repository cwd"
+  },
+  "fixture": {
+    "expiredRows": 1024,
+    "freshRows": 2048,
+    "payloadBytes": 4096,
+    "fixtureBytes": 44134864,
+    "maximumHeapMiB": 128
+  },
+  "startupMs": 456,
+  "oldSynchronousMs": 12.65,
+  "cleanupMs": 570,
+  "health": {
+    "samples": 64,
+    "maximumMs": 2.77
+  },
+  "databaseWrites": {
+    "samples": 8,
+    "maximumMs": 3.36
+  },
+  "settings": {
+    "samples": 2,
+    "maximumMs": 5
+  },
+  "actual": {
+    "stored_responses": 2048,
+    "response_events": 0,
+    "response_conversations": 8,
+    "conversation_items": 0
+  },
+  "expectedBeforeNewConversations": {
+    "stored_responses": 2048,
+    "response_events": 0,
+    "response_conversations": 0,
+    "conversation_items": 0
+  },
+  "configurationPreserved": true,
+  "imageCachePreserved": true,
+  "foreignKeyCheck": "passed",
+  "shutdownMs": 8,
+  "gracefulExitCode": 0,
+  "maintenanceCyclesReported": [
+    {
+      "message": "response retention completed",
+      "responses": 1024,
+      "conversations": 100,
+      "scanned": 1124,
+      "batches": 37
+    }
+  ],
+  "plans": {
+    "oldResponses": [
+      "SEARCH stored_responses USING INDEX stored_responses_status_idx (status=?)",
+      "SEARCH response_events USING COVERING INDEX response_events_response_idx (response_id=?)"
+    ],
+    "oldConversations": [
+      "SEARCH response_conversations USING INDEX response_conversations_touch_idx (touched_at<?)",
+      "CORRELATED SCALAR SUBQUERY 1",
+      "SEARCH r USING INDEX stored_responses_status_idx (status=?)",
+      "SEARCH conversation_items USING COVERING INDEX conversation_items_order_idx (conversation_id=?)"
+    ],
+    "candidates": [
+      "SEARCH stored_responses USING COVERING INDEX stored_responses_touch_idx (touched_at<?)"
+    ],
+    "sameTimestamp": [
+      "SEARCH stored_responses USING COVERING INDEX stored_responses_touch_idx (touched_at=? AND rowid>?)"
+    ],
+    "conversationDelete": [
+      "SEARCH response_conversations USING INTEGER PRIMARY KEY (rowid=?)",
+      "LIST SUBQUERY 1",
+      "SEARCH stored_responses USING INDEX stored_responses_status_idx (status=?)",
+      "CREATE BLOOM FILTER",
+      "SEARCH conversation_items USING COVERING INDEX conversation_items_order_idx (conversation_id=?)"
+    ]
+  },
+  "limitations": [
+    "Synthetic SSD fixture cannot establish production I/O performance or active incident SQL",
+    "The cycle budget is checked between native calls; cascades and active-set scans may exceed it",
+    "No Docker image, production access, publication or deployment"
+  ]
+}
