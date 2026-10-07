@@ -1,6 +1,6 @@
 {
   "name": "hydrogen-llm-proxy",
-  "version": "2.3.0-preview.2",
+  "version": "2.3.0-preview.3",
   "private": true,
   "description": "Hydrogen - a lightweight, self-hosted personal LLM proxy",
   "license": "MIT",
@@ -34,6 +34,8 @@
     "drizzle-orm": "^0.45.3"
   },
   "overrides": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2"
   }
 }

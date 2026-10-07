@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "2.3.0-preview.2",
+  "version": "2.3.0-preview.3",
   "private": true,
   "type": "module",
   "scripts": {
