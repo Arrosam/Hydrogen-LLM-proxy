@@ -68,9 +68,7 @@ export class SettingsRepo {
   }
 
   responseRetentionDays(): number {
-    const raw = this.get("response_retention_days");
-    const days = raw == null ? 30 : Number(raw);
-    return Number.isInteger(days) && days >= 0 && days <= 3650 ? days : 30;
+    return parseResponseRetentionDays(this.get("response_retention_days"));
   }
 
   set(key: string, value: string): void {
@@ -233,6 +231,12 @@ export class SettingsRepo {
       promptCacheTtlMinutes: this.promptCacheTtlMinutes(),
     };
   }
+}
+
+/** Shared with background expiry; zero and invalid values keep existing semantics. */
+export function parseResponseRetentionDays(raw: string | undefined): number {
+  const days = raw == null ? 30 : Number(raw);
+  return Number.isInteger(days) && days >= 0 && days <= 3650 ? days : 30;
 }
 
 /** Parse a human duration string ("12h", "30m", "3600s", "2d") to ms. Returns null if unparseable. */

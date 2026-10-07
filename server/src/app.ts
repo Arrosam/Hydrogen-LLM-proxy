@@ -77,7 +77,14 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   // so a deployment can be checked against the repo: without it there is no
   // way to tell whether a fix is actually running.
   app.get("/healthz", async () => ({ status: "ok", build: process.env.GIT_SHA || "dev" }));
-  app.addHook("onClose", async () => { c.statsCache.close(); });
+  app.addHook("onListen", async () => {
+    c.responsePruner.start(result => {
+      if (result.deferred) app.log.warn({ reason: result.deferred, scanned: result.scanned, batches: result.batches }, "response retention deferred");
+      if (result.responses || result.conversations) app.log.info({ responses: result.responses, conversations: result.conversations,
+        scanned: result.scanned, batches: result.batches }, "response retention completed");
+    }, error => app.log.warn({ err: error }, "response retention deferred"));
+  });
+  app.addHook("onClose", async () => { c.responsePruner.close(); c.statsCache.close(); });
 
   // Speech-to-text and image-edit passthroughs preserve multipart file parts;
   // buffer them raw (Fastify has no default parser for this content type).

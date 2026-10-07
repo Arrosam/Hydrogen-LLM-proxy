@@ -35,6 +35,8 @@ import { UpdateService } from "../update/updateService";
 import { ProxyRepo } from "../persistence/proxyRepo";
 import { EgressProxyPool } from "../core/upstream/egress/pool";
 import { startupStage, startupStageAsync, type StartupReporter } from "../util/startup";
+import { ResponsePruner } from "../persistence/responsePruner";
+import path from "node:path";
 
 /**
  * The composition root: owns every long-lived instance and wires the dependency
@@ -57,6 +59,7 @@ export interface Container {
   services: ServiceRepo;
   hostedTools: HostedToolRepo;
   responses: ResponseRepo;
+  responsePruner: ResponsePruner;
   tokens: TokenRepo;
   users: UserRepo;
   logs: RequestLogRepo;
@@ -112,7 +115,8 @@ export async function boot(options: { deferredStats?: boolean; reportStartup?: S
   const hostedTools = new HostedToolRepo(db, config.masterKey);
   const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000, Date.now, config.masterKey);
   startupStage(report, "responses.recover", () => responses.failInterrupted());
-  startupStage(report, "responses.prune", () => responses.prune());
+  // Expiry starts only after listen, on its own bounded worker connection.
+  const responsePruner = new ResponsePruner(path.resolve(config.dataDir, "hydrogen.db"));
   // Production captures a fixed boundary only. The readonly seed worker starts
   // after listen; completed requests above the boundary are folded live.
   const statsCache = new StatsCache(stats, settings);
@@ -143,7 +147,7 @@ export async function boot(options: { deferredStats?: boolean; reportStartup?: S
 
   return {
     config, sqlite, db,
-    providers, proxies, egressPool, providerModels, models, mappings, services, hostedTools, responses, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
+    providers, proxies, egressPool, providerModels, models, mappings, services, hostedTools, responses, responsePruner, tokens, users, logs, settings, stats, statsCache, pruner, imageCache,
     catalog, ssrf, transport, validator, factory, requestLogger, usageMeter, activeRequests, updates, requestGate,
   };
 }

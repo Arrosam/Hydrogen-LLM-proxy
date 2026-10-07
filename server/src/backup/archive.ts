@@ -264,87 +264,93 @@ export async function exportBackup(
   const toolHeaders: NonNullable<SecretPayload["toolHeaders"]> = [];
   const sessionSnapshots: NonNullable<SecretPayload["sessionSnapshots"]> = [];
 
-  for (const table of TABLES) {
-    if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
-    if (CACHE_TABLES.has(table) && !opts.includeImageCache) continue;
-    // Reject a huge table before materializing even its first potentially huge
-    // payload row. JSON escaping is accounted for by the per-row check below.
-    const columns = sqlite.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as Array<{ name: string }>;
-    const measured = sqlite.prepare(`SELECT coalesce(sum(${columns.map(col => `coalesce(length(cast(${quoteIdent(col.name)} as blob)),0)`).join("+")}),0) AS bytes FROM ${quoteIdent(table)}`).get() as { bytes: number };
-    if (measured.bytes > MAX_BACKUP_BYTES / 2 - bytes) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
-    const rows: Row[] = [];
-    for (const raw of sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).iterate()) {
-      const row = raw as Row;
-      bytes += Buffer.byteLength(JSON.stringify(row)) + 1;
-      if (bytes > MAX_BACKUP_BYTES / 2) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
-      rows.push(row);
-    }
-
-    if (table === "hosted_tools") {
-      for (const row of rows) {
-        toolHeaders.push({ id: row.id as number, headers: decryptSecret(JSON.parse(row.headers_secret as string), masterKey) });
-        delete row.headers_secret;
+  const collect = () => {
+    for (const table of TABLES) {
+      if (LOG_TABLES.has(table) && !opts.includeLogs) continue;
+      if (CACHE_TABLES.has(table) && !opts.includeImageCache) continue;
+      // Reject a huge table before materializing even its first potentially huge
+      // payload row. JSON escaping is accounted for by the per-row check below.
+      const columns = sqlite.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as Array<{ name: string }>;
+      const measured = sqlite.prepare(`SELECT coalesce(sum(${columns.map(col => `coalesce(length(cast(${quoteIdent(col.name)} as blob)),0)`).join("+")}),0) AS bytes FROM ${quoteIdent(table)}`).get() as { bytes: number };
+      if (measured.bytes > MAX_BACKUP_BYTES / 2 - bytes) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
+      const rows: Row[] = [];
+      for (const raw of sqlite.prepare(`SELECT * FROM ${quoteIdent(table)}`).iterate()) {
+        const row = raw as Row;
+        bytes += Buffer.byteLength(JSON.stringify(row)) + 1;
+        if (bytes > MAX_BACKUP_BYTES / 2) throw new BackupError("Backup exceeds the safe export budget; export without logs or shorten retention first");
+        rows.push(row);
       }
-    }
 
-    if (table === "providers") {
-      for (const row of rows) {
-        const apiKey = decryptProviderKey(
-          {
-            keyCiphertext: (row.key_ciphertext as string | null) ?? null,
-            keyIv: (row.key_iv as string | null) ?? null,
-            keyTag: (row.key_tag as string | null) ?? null,
-          },
-          masterKey,
-        );
-        if (apiKey != null) providerKeys.push({ id: row.id as number, apiKey });
-        for (const col of PROVIDER_KEY_COLUMNS) delete row[col];
-      }
-    }
-
-    if (table === "proxies") {
-      for (const row of rows) {
-        const ciphertext = (row.password_ciphertext as string | null) ?? null;
-        const iv = (row.password_iv as string | null) ?? null;
-        const tag = (row.password_tag as string | null) ?? null;
-        if (ciphertext && iv && tag) {
-          proxyPasswords.push({ id: row.id as number, password: decryptSecret({ ciphertext, iv, tag }, masterKey) });
+      if (table === "hosted_tools") {
+        for (const row of rows) {
+          toolHeaders.push({ id: row.id as number, headers: decryptSecret(JSON.parse(row.headers_secret as string), masterKey) });
+          delete row.headers_secret;
         }
-        for (const col of PROXY_PASSWORD_COLUMNS) delete row[col];
       }
-    }
 
-    if (table === "tokens") {
-      for (const row of rows) {
-        const ciphertext = (row.key_ciphertext as string | null) ?? null;
-        const iv = (row.key_iv as string | null) ?? null;
-        const tag = (row.key_tag as string | null) ?? null;
-        if (ciphertext && iv && tag) {
-          const secret = decryptSecret({ ciphertext, iv, tag }, masterKey);
-          tokenKeys.push({ id: row.id as number, secret });
+      if (table === "providers") {
+        for (const row of rows) {
+          const apiKey = decryptProviderKey(
+            {
+              keyCiphertext: (row.key_ciphertext as string | null) ?? null,
+              keyIv: (row.key_iv as string | null) ?? null,
+              keyTag: (row.key_tag as string | null) ?? null,
+            },
+            masterKey,
+          );
+          if (apiKey != null) providerKeys.push({ id: row.id as number, apiKey });
+          for (const col of PROVIDER_KEY_COLUMNS) delete row[col];
         }
-        for (const col of TOKEN_KEY_COLUMNS) delete row[col];
       }
-    }
 
-    if (table === "stored_responses" || table === "response_conversations") {
-      for (const row of rows) {
-        sessionSnapshots.push({ table, id: row.id as string,
-          snapshot: row.service_snapshot_secret == null ? null : decryptSnapshot(row.service_snapshot_secret, masterKey) });
-        delete row.service_snapshot_secret;
+      if (table === "proxies") {
+        for (const row of rows) {
+          const ciphertext = (row.password_ciphertext as string | null) ?? null;
+          const iv = (row.password_iv as string | null) ?? null;
+          const tag = (row.password_tag as string | null) ?? null;
+          if (ciphertext && iv && tag) {
+            proxyPasswords.push({ id: row.id as number, password: decryptSecret({ ciphertext, iv, tag }, masterKey) });
+          }
+          for (const col of PROXY_PASSWORD_COLUMNS) delete row[col];
+        }
       }
-    }
 
-    if (table === "settings") {
-      const kept = rows.filter((r) => !LOCAL_ONLY_SETTINGS.has(String(r.key)));
-      tables[table] = kept;
-      counts[table] = kept.length;
-      continue;
-    }
+      if (table === "tokens") {
+        for (const row of rows) {
+          const ciphertext = (row.key_ciphertext as string | null) ?? null;
+          const iv = (row.key_iv as string | null) ?? null;
+          const tag = (row.key_tag as string | null) ?? null;
+          if (ciphertext && iv && tag) {
+            const secret = decryptSecret({ ciphertext, iv, tag }, masterKey);
+            tokenKeys.push({ id: row.id as number, secret });
+          }
+          for (const col of TOKEN_KEY_COLUMNS) delete row[col];
+        }
+      }
 
-    tables[table] = rows;
-    counts[table] = rows.length;
-  }
+      if (table === "stored_responses" || table === "response_conversations") {
+        for (const row of rows) {
+          sessionSnapshots.push({ table, id: row.id as string,
+            snapshot: row.service_snapshot_secret == null ? null : decryptSnapshot(row.service_snapshot_secret, masterKey) });
+          delete row.service_snapshot_secret;
+        }
+      }
+
+      if (table === "settings") {
+        const kept = rows.filter((r) => !LOCAL_ONLY_SETTINGS.has(String(r.key)));
+        tables[table] = kept;
+        counts[table] = kept.length;
+        continue;
+      }
+
+      tables[table] = rows;
+      counts[table] = rows.length;
+    }
+  };
+  // Background expiry can commit between table reads. A readonly WAL snapshot
+  // keeps parents, items/events and sealed session records from one database
+  // state, without holding the writer through the asynchronous passphrase KDF.
+  sqlite.transaction(collect).deferred();
 
   const metadata = { format: BACKUP_FORMAT as typeof BACKUP_FORMAT, version: BACKUP_VERSION, createdAt, appVersion: opts.appVersion,
     includesLogs: opts.includeLogs, includesImageCache: opts.includeImageCache, counts };

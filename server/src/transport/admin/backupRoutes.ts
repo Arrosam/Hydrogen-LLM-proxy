@@ -59,6 +59,7 @@ export async function backupRoutes(app: FastifyInstance, c: Container): Promise<
     const release = c.requestGate.beginMaintenance();
     try {
       c.responses.beginRestore();
+      await c.responsePruner.pause();
       report = await restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
     } catch (e) {
       // A bad passphrase or a malformed package is the caller's mistake, not a
@@ -69,6 +70,7 @@ export async function backupRoutes(app: FastifyInstance, c: Container): Promise<
       throw e;
     } finally {
       c.responses.endRestore();
+      c.responsePruner.resume();
       release();
     }
     // The settings table was replaced underneath the cached allowlist.

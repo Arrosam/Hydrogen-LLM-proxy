@@ -131,7 +131,8 @@ describe("review control-integrity regressions", () => {
   });
   it("preflights oversized backup tables without materializing rows", async () => {
     const iterate = vi.fn();
-    const sqlite = { prepare: (sql: string) => sql.startsWith("PRAGMA") ? { all: () => [{ name: "id" }] } : { get: () => ({ bytes: 128 * 1024 * 1024 }), iterate } };
+    const sqlite = { transaction: (fn: () => void) => ({ deferred: fn }),
+      prepare: (sql: string) => sql.startsWith("PRAGMA") ? { all: () => [{ name: "id" }] } : { get: () => ({ bytes: 128 * 1024 * 1024 }), iterate } };
     await expect(exportBackup(sqlite as never, Buffer.alloc(32), { passphrase: "test-passphrase", includeLogs: true, includeImageCache: false, appVersion: "test" })).rejects.toThrow("safe export budget");
     expect(iterate).not.toHaveBeenCalled();
   });

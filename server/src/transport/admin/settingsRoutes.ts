@@ -51,7 +51,7 @@ export async function settingsRoutes(app: FastifyInstance, c: Container): Promis
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
     const value = parsed.data;
     c.settings.set("response_retention_days", String(value.days));
-    c.responses.prune();
+    c.responsePruner.request();
     return value;
   });
   // The Settings page is admin-only, so its data is too -- with one exception,

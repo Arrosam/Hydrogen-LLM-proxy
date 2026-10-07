@@ -152,14 +152,7 @@ export class ResponsesController {
       this.repo.deleteItem(idFrom(req), req.clientToken!.id, idFrom(req, "itemId"));
       return present(conversation(req));
     });
-    const prune = setInterval(() => {
-      // A prune fault (a full disk, say) must not become an uncaught exception
-      // in a timer and take the process down; the next tick retries.
-      try { this.repo.prune(); } catch (error) { app.log.warn({ err: error }, "response prune failed"); }
-    }, 60_000);
-    prune.unref();
     app.addHook("onClose", async () => {
-      clearInterval(prune);
       for (const job of this.jobs.values()) job.abort.abort();
       await Promise.allSettled([...this.jobs.values()].map(job => job.done));
     });

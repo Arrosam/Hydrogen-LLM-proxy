@@ -54,6 +54,7 @@ export async function createDiscoveryHarness() {
     config: { isProduction: true, trustProxy: false, sessionSecret: "synthetic-discovery-cursor-key" },
     services, hostedTools: tools, tokens, requestGate: new RequestGate(),
     settings: { logPayloadMaxChars: () => 2000 }, statsCache: { close: () => {} },
+    responsePruner: { start: () => {}, close: () => {} },
     factory: unavailable("modelFactory"), transport: unavailable("upstreamTransport"), catalog: unavailable("catalogResolve"),
     usageMeter: unavailable("usage"), requestLogger: unavailable("requestLog"),
   } as unknown as Container);

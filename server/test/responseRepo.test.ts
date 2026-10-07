@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { openDatabase, type OpenedDatabase } from "../src/db";
 import { ResponseRepo } from "../src/persistence/responseRepo";
+import { ResponseRetentionQueries } from "../src/persistence/responseRetention";
 import { TokenRepo } from "../src/persistence/tokenRepo";
 import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
@@ -164,7 +165,7 @@ describe("owned response state", () => {
     expect(repo.response("resp-expiry", owner)).toBeDefined();
     ttl = 1_000;
     expect(repo.response("resp-expiry", owner)).toBeUndefined();
-    repo.prune();
+    new ResponseRetentionQueries(opened.sqlite, 32, () => ttl).batch("responses", null, now);
     expect(opened.sqlite.prepare("select id from stored_responses where id = ?").get("resp-expiry")).toBeUndefined();
   });
   it("marks interrupted jobs failed on restart without replaying tools", () => {

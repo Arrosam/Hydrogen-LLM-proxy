@@ -309,12 +309,4 @@ export class ResponseRepo {
     return rows.length;
   }
 
-  prune(): void {
-    const ttl = this.retentionMs();
-    if (ttl <= 0) return;
-    const cutoff = this.now() - ttl;
-    this.db.delete(storedResponses).where(and(lt(storedResponses.touchedAt, cutoff), inArray(storedResponses.status, ["completed", "failed", "cancelled", "incomplete"]))).run();
-    // Active response reservations keep their conversation alive even during a long tool call.
-    this.db.delete(responseConversations).where(and(lt(responseConversations.touchedAt, cutoff), sql`not exists (select 1 from stored_responses r where r.conversation_id = ${responseConversations.id} and r.status in ('queued', 'in_progress'))`)).run();
-  }
 }

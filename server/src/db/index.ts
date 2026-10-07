@@ -39,6 +39,12 @@ export function openDatabase(dataDir: string, report?: StartupReporter): OpenedD
       : /^\s*ROLLBACK/i.test(query) ? "rollback" : "statement";
     reportStartup(report, "db.migrate.sql", "begin", { operation });
   } } : false });
+  // Maintenance now has a second writer. Reserve the writer before application
+  // transaction guard reads, otherwise a worker commit can cause an immediate
+  // SQLITE_BUSY_SNAPSHOT on the later write. Nested savepoints remain native;
+  // explicit caller behavior (for a readonly snapshot, for example) is preserved.
+  const transaction = db.transaction.bind(db);
+  db.transaction = (fn, options) => transaction(fn, { ...options, behavior: options?.behavior ?? "immediate" });
 
   const migrationsFolder = resolveMigrationsDir();
   if (!migrationsFolder) {

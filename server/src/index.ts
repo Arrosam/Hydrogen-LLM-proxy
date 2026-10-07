@@ -48,6 +48,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     app.log.info(`received ${signal}, shutting down`);
+    container.responsePruner.close();
     if (pruneTimer) clearInterval(pruneTimer);
     try {
       await closeWithDeadline(app, SHUTDOWN_GRACE_MS);
