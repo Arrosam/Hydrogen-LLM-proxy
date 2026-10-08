@@ -1,0 +1,29 @@
+# Response retention background-cleanup wording
+
+Status: implemented locally; focused scope/compiled assertions and web validation passed. Independent source and evidence/handoff review passed without findings. Browser acceptance is unverified. This correction is not published or deployed.
+
+The preview.3 retention worker saves policy before asynchronous cleanup completes, but the Settings description still promises immediate deletion. The coordinator explicitly authorized correcting this wording after local acceptance-gap triage. Base: `315a44a5733503386576229ce66f1a877d9add6f`, existing isolated branch `codex/response-retention-worker-20261007`. This continues the selected released baseline, rather than establishing a new main development baseline.
+
+Scope: change only the English and Chinese description literals in `ResponseRetentionCard`. Both are inline in `web/src/pages/Settings.tsx`; supported UI languages are `en` and `zh`. Explain background cleanup and that saving does not wait for completion. Preserve continuation refresh, zero meaning indefinite retention, active-job protection, bounds, defaults, API calls and all handlers. No retention/configuration setting, credentials, dependencies, backend, schema, history, release or production change.
+
+Acceptance criteria:
+
+1. Both language variants describe background cleanup without immediate-completion wording, preserving the existing zero/continuation/active-job meaning.
+2. A focused AST scope assertion confirms the only product changes are those two literals; existing Settings controls and save behavior remain identical.
+3. The actual web package typecheck, tests and build pass. Independent review checks meaning, translations, scope and evidence. No new literal-matching unit test is required for this copy-only change; it would duplicate the implementation. Focused scope and compiled-output assertions supplement existing web tests.
+4. Prepare exact isolated fixture/startup requirements for a browser-capable task without starting a service or creating credentials. Real browser acceptance remains pending.
+
+Risk selection: language equivalence and preservation of configuration semantics; source/AST comparison guards the narrow edit. Existing unit tests and compilation are supporting evidence, not real browser acceptance. The parent's dedicated browser task reports inventory `browsers: []` and `Browser is not available: iab`, with no Chrome extension exposed. Do not attempt more browsers or another route.
+
+Rollback: revert the local wording commit; no data or protocol transition is involved. GraphFlow tools/CLI and browser controls are unavailable; no GraphFlow execution descriptor was received.
+
+## Validation and handoff record
+
+- Node v22.22.2, npm 10.9.7, Darwin arm64. The existing worktree's own dependencies/lockfile were reused unchanged; lockfile SHA256 remains `41a560727be51e48b00f089f0db2f2edceb6c6d37508af64747220402db18b18`. No install, dependency/audit scope change or version bump.
+- `npm run typecheck:web` passed. `npm run test --workspace web -- --maxWorkers=1` passed 9 files/99 tests. `npm run build:web` passed with the existing web chunk-size warning. These actual web package scripts cover the touched subsystem; unchanged backend/release gates were not repeated.
+- Focused `verify-copy.mjs` assertions compare parsed original/current TSX: exactly two string literals differ, every non-description AST node is identical, both languages preserve zero/continuation/active-job meaning and state background/nonblocking save semantics. Compiled-output assertions find both new descriptions and neither previous description in the application bundle. This temporary evidence verifier is not a new product unit test or browser execution.
+- Independent Sol reviewer `/root/retention_copy_review` found no source/copy/translation findings and agreed the focused scope assertion plus existing web checks is appropriate. It independently inspected the verifier, gate logs, compiled assertion receipt, prepared configuration and startup handoff; final review passed with no findings. It accepted the source and automated evidence while retaining browser/full-runtime limits. It did not execute tests, browser checks or services.
+- Local evidence directory: `/Users/samuel/Documents/Codex/2026-10-07/task-4/hydrogen-retention-copy-evidence`. It contains gate logs, focused JSON assertions, the verifier and `browser-startup-handoff.md`. The handoff gives exact existing fixture paths, guarded command shapes and real-backend identity/data requirements. Prepared component Vite configuration loads with API proxies disabled; command shapes pass zsh syntax checks. Neither command was executed. A first `.ts` config name raised a module-format warning; the explicit `.mts` config/import was rechecked without it.
+- Existing component browser fixture is credential-free but mocks transport and does not render this Settings card. Full Settings startup remains conditional on an already provisioned authorized synthetic database/login/key/session secret; automatic bootstrap/token-creating fixtures must not be run to fill the gap. No runtime or credentials were created, no database or retention setting was read/changed, and DF's profile/port 3080 were untouched.
+
+AC1/AC2 passed focused source/translation checks; AC3 web validation and independent final review passed; AC4 preparation passed configuration/syntax checks. Actual browser appearance/interaction, startup execution and full browser acceptance remain untested because supported controls are unavailable. No alternate browser route or further attempt was made. Production preview.3 remains a separate previously released/deployed artifact; this local correction changes no production state. The local logical-unit commit and precise source/evidence handoff are reported at task completion.
