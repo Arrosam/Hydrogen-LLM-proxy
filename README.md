@@ -434,10 +434,12 @@ and request history. Treat it as sensitive.
 
 ## Development
 
+Development rules and acceptance workflow: [AGENTS.md](AGENTS.md) and [development workflow](docs/development-workflow.md).
+
 ```bash
-npm install
+npm ci
 npm run dev            # server (tsx watch) + web (vite), together
-npm run test           # server unit tests: translation, step engine, streaming
+npm run test           # server and web tests
 npm run typecheck
 npm run db:generate    # regenerate SQL migrations after a schema change
 ```

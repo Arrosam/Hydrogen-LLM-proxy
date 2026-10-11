@@ -399,10 +399,12 @@ Responses 和 Anthropic Messages 支持在管理端绑定 HTTP 托管工具。Hy
 
 ## 开发
 
+开发规则与验收流程：[AGENTS.md](AGENTS.md) 和 [开发流程说明](docs/development-workflow.md)。
+
 ```bash
-npm install
+npm ci
 npm run dev            # server (tsx watch) + web (vite)，同时运行
-npm run test           # 服务端单元测试：翻译、步骤引擎、流式
+npm run test           # 服务端与 Web 测试
 npm run typecheck
 npm run db:generate    # schema 变更后重新生成 SQL 迁移
 ```
