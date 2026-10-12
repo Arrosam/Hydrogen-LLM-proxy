@@ -426,3 +426,333 @@ describe("TTS (binary out) and STT (multipart in)", () => {
     expect(forwarded.trimEnd().endsWith(`--${STT_BOUNDARY}--`)).toBe(true);
   });
 });
+
+// --- request guards, failure paths and accounting ---------------------------
+
+/** The newest request_logs row written for one key. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const lastLogFor = (tokenId: number): any => c.logs.query({ tokenId, limit: 1 }).rows[0];
+
+/** A fresh key, so each case reads its own log rows and quota counters. */
+function mintKey(input: Record<string, unknown>): { id: number; headers: Record<string, string> } {
+  const made = c.tokens.create(input) as { token: { id: number }; secret: string };
+  return { id: made.token.id, headers: { authorization: `Bearer ${made.secret}` } };
+}
+
+/** Run `fn` with a service switched off, and switch it back on whatever happens. */
+async function withServiceDisabled(id: number, fn: () => Promise<void>): Promise<void> {
+  c.services.update(id, { enabled: false });
+  try {
+    await fn();
+  } finally {
+    c.services.update(id, { enabled: true });
+  }
+}
+
+describe("API-key service scope on the media endpoints", () => {
+  it("a key scoped to another service is refused before anything goes upstream, and the refusal is logged", async () => {
+    const key = mintKey({ name: "scoped-rerank", scopeServices: [c.services.getByName("reranker").id] });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { object: "list", data: [] }));
+
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error.message).toBe("This token is not allowed to use 'emb'.");
+    expect(upstream.requests).toHaveLength(0);
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(403);
+    expect(row.error).toBe("service out of token scope");
+    expect(row.serviceId).toBe(embServiceId);
+    expect(row.serviceName).toBe("emb");
+  });
+
+  it("the same key is refused when polling a video job of an out-of-scope service", async () => {
+    const key = mintKey({ name: "scoped-rerank-poll", scopeServices: [c.services.getByName("reranker").id] });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { id: "video_abc", status: "completed" }));
+
+    const id = `video_abc-h${videoServiceId}x${providerId}e0`;
+    const polled = await app.inject({ method: "GET", url: `/v1/videos/${id}`, headers: key.headers });
+    expect(polled.statusCode).toBe(403);
+    expect(polled.json().error.message).toBe("This token is not allowed to use 'video-svc'.");
+    const content = await app.inject({ method: "GET", url: `/v1/videos/${id}/content`, headers: key.headers });
+    expect(content.statusCode).toBe(403);
+    expect(upstream.requests).toHaveLength(0);
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(403);
+    expect(row.error).toBe("service out of token scope");
+    expect(row.serviceId).toBe(videoServiceId);
+  });
+
+  it("a scoped key still reaches the service it is scoped to", async () => {
+    const key = mintKey({ name: "scoped-rerank-ok", scopeServices: [c.services.getByName("reranker").id] });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { results: [] }));
+    const r = await app.inject({
+      method: "POST", url: "/v1/rerank", headers: key.headers,
+      payload: { model: "reranker", query: "q", documents: ["a"] },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  it("an empty scope list means every service", async () => {
+    const key = mintKey({ name: "scope-empty", scopeServices: [] });
+    upstream.setHandler(jsonHandler(200, { object: "list", data: [] }));
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(200);
+  });
+});
+
+describe("media request validation", () => {
+  it("a body without a model is a 400", async () => {
+    upstream.requests.length = 0;
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: auth(), payload: {} });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("Missing 'model' (must be a Model Service name).");
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("an unknown service name is a 404", async () => {
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: auth(), payload: { model: "ghost", input: "x" } });
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error.message).toBe("Model 'ghost' not found.");
+  });
+
+  it("a disabled service answers exactly like a missing one", async () => {
+    upstream.requests.length = 0;
+    await withServiceDisabled(embServiceId, async () => {
+      const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: auth(), payload: { model: "emb", input: "x" } });
+      expect(r.statusCode).toBe(404);
+      expect(r.json().error.message).toBe("Model 'emb' not found.");
+    });
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("a Micro Agent is refused on a media endpoint", async () => {
+    c.services.create({
+      name: "agent-svc",
+      definition: { kind: "micro_agent", timeoutMs: 10_000, stages: [{ name: "s1", service: "chat-svc", input: [] }] },
+    });
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: auth(), payload: { model: "agent-svc", input: "x" } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("'agent-svc' is a Micro Agent; this endpoint serves embedding Model Services only.");
+  });
+
+  it("a service whose stored definition no longer parses is a 500, not a crash", async () => {
+    c.services.create({ name: "broken-svc", definition: { category: "embedding", steps: "not-a-list" } });
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: auth(), payload: { model: "broken-svc", input: "x" } });
+    expect(r.statusCode).toBe(500);
+    expect(r.json().error.message).toBe("Model 'broken-svc' has an invalid definition.");
+  });
+
+  it("transcription refuses a body that is not multipart", async () => {
+    const r = await app.inject({
+      method: "POST", url: "/v1/audio/transcriptions",
+      headers: { ...auth(), "content-type": "application/json" },
+      payload: { model: "stt-svc" },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("Expected a multipart/form-data body.");
+  });
+
+  it("transcription without a model part is a 400", async () => {
+    upstream.requests.length = 0;
+    const payload = [
+      `--${STT_BOUNDARY}`,
+      'Content-Disposition: form-data; name="file"; filename="a.wav"',
+      "Content-Type: audio/wav",
+      "",
+      "RIFF-FAKE-AUDIO-DATA",
+      `--${STT_BOUNDARY}--`,
+      "",
+    ].join(CRLF);
+    const r = await app.inject({
+      method: "POST", url: "/v1/audio/transcriptions",
+      headers: { ...auth(), "content-type": `multipart/form-data; boundary=${STT_BOUNDARY}` },
+      payload,
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("Missing 'model' (must be a Model Service name).");
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("a key that has spent its request quota is refused with 429", async () => {
+    const key = mintKey({ name: "spent", maxRequests: 1 });
+    c.tokens.incrementUsage(key.id, 1, 0);
+    upstream.requests.length = 0;
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(429);
+    expect(r.json().error.message).toBe("API key request quota exceeded.");
+    expect(upstream.requests).toHaveLength(0);
+  });
+});
+
+describe("media upstream failures", () => {
+  it("a non-retryable upstream 400 is relayed once, in an OpenAI error envelope, and logged", async () => {
+    const key = mintKey({ name: "fail-400" });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(400, { error: { message: "bad input" } }));
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: { message: "bad input", type: "invalid_request_error", code: null, param: null } });
+    expect(upstream.requests).toHaveLength(1);
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(400);
+    expect(row.error).toBe("bad input");
+    expect(row.attempts).toBe(1);
+    expect(row.totalTokens).toBe(0);
+  });
+
+  it("a retryable 503 on every attempt surfaces as 503 once the step's attempts are spent", async () => {
+    const key = mintKey({ name: "fail-503" });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(503, { error: { message: "busy" } }));
+    const r = await app.inject({
+      method: "POST", url: "/v1/images/generations", headers: key.headers,
+      payload: { model: "img", prompt: "a cat" },
+    });
+    expect(r.statusCode).toBe(503);
+    expect(r.json().error.message).toBe("busy");
+    expect(r.json().error.type).toBe("server_error");
+    expect(upstream.requests).toHaveLength(2); // the img step's maxAttempts
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(503);
+    expect(row.attempts).toBe(2);
+  });
+
+  it("a connection that dies without an answer is a 502", async () => {
+    const key = mintKey({ name: "fail-net" });
+    upstream.requests.length = 0;
+    upstream.setHandler((_req, res) => { res.destroy(); });
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(502);
+    expect(r.json().error.type).toBe("server_error");
+    // A dead connection is a default retry trigger: the step's three attempts all run.
+    expect(upstream.requests).toHaveLength(3);
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(502);
+    expect(row.attempts).toBe(3);
+    expect(row.error).toBeTruthy();
+  });
+
+  it("tts relays the upstream's JSON error message and logs it", async () => {
+    const key = mintKey({ name: "tts-400" });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(400, { error: { message: "voice not found" } }));
+    const r = await app.inject({
+      method: "POST", url: "/v1/audio/speech", headers: key.headers,
+      payload: { model: "tts-svc", input: "hello", voice: "nope" },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("voice not found");
+    expect(upstream.requests).toHaveLength(1);
+
+    const row = lastLogFor(key.id);
+    expect(row.httpStatus).toBe(400);
+    expect(row.error).toBe("voice not found");
+  });
+
+  it("tts turns a non-JSON upstream error page into a JSON error with the upstream status", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler((_req, res) => {
+      res.writeHead(500, { "content-type": "text/html" });
+      res.end("<html>oops</html>");
+    });
+    const r = await app.inject({
+      method: "POST", url: "/v1/audio/speech", headers: auth(),
+      payload: { model: "tts-svc", input: "hello", voice: "alloy" },
+    });
+    expect(r.statusCode).toBe(500);
+    // The bare text body is the only message there is.
+    expect(r.json().error.message).toBe("<html>oops</html>");
+    expect(r.json().error.type).toBe("server_error");
+    expect(upstream.requests).toHaveLength(1); // 500 is not a retry trigger
+  });
+});
+
+describe("stt step-override edge cases", () => {
+  it("a null override is skipped rather than sent as a field", async () => {
+    c.services.create({
+      name: "stt-null",
+      definition: {
+        category: "stt", timeoutMs: 10_000,
+        steps: [{ model: "m1", provider: "fake", overrides: { extra: { language: "en", skip: null } } }],
+      },
+    });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { text: "ok" }));
+    const r = await app.inject(sttRequest("stt-null"));
+    expect(r.statusCode).toBe(200);
+    const forwarded = upstream.requests[0].body.toString();
+    expect(forwarded).toContain(`name="language"${CRLF}${CRLF}en${CRLF}`);
+    expect(forwarded).not.toContain('name="skip"');
+  });
+
+  it("an override whose name cannot be a form field fails the request without calling upstream", async () => {
+    c.services.create({
+      name: "stt-badname",
+      definition: {
+        category: "stt", timeoutMs: 10_000,
+        steps: [{ model: "m1", provider: "fake", overrides: { extra: { "bad name": 1 } } }],
+      },
+    });
+    const key = mintKey({ name: "stt-badname-key" });
+    upstream.requests.length = 0;
+    upstream.setHandler(jsonHandler(200, { text: "ok" }));
+    const r = await app.inject({ ...sttRequest("stt-badname"), headers: { ...sttRequest("stt-badname").headers, ...key.headers } });
+    expect(r.statusCode).toBe(502);
+    expect(r.json().error.message).toBe("step override 'bad name' is not a usable form field name");
+    expect(upstream.requests).toHaveLength(0);
+    expect(lastLogFor(key.id).httpStatus).toBe(502);
+  });
+});
+
+describe("media usage accounting", () => {
+  const used = (id: number): { usedRequests: number; usedTokens: number } => c.tokens.get(id);
+
+  it("an embedding reply with only prompt_tokens meters that as the total", async () => {
+    const key = mintKey({ name: "usage-prompt-only" });
+    upstream.setHandler(jsonHandler(200, { object: "list", data: [], usage: { prompt_tokens: 7 } }));
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(200);
+
+    const row = lastLogFor(key.id);
+    expect(row.promptTokens).toBe(7);
+    expect(row.completionTokens).toBe(0);
+    expect(row.totalTokens).toBe(7);
+    expect(used(key.id)).toMatchObject({ usedRequests: 1, usedTokens: 7 });
+  });
+
+  it("an embedding reply with no usage counts the request and zero tokens", async () => {
+    const key = mintKey({ name: "usage-none" });
+    upstream.setHandler(jsonHandler(200, { object: "list", data: [] }));
+    const r = await app.inject({ method: "POST", url: "/v1/embeddings", headers: key.headers, payload: { model: "emb", input: "x" } });
+    expect(r.statusCode).toBe(200);
+
+    const row = lastLogFor(key.id);
+    expect(row.promptTokens).toBe(0);
+    expect(row.totalTokens).toBe(0);
+    expect(used(key.id)).toMatchObject({ usedRequests: 1, usedTokens: 0 });
+  });
+
+  it("usage reported by a rerank upstream is not metered (only embeddings are)", async () => {
+    const key = mintKey({ name: "usage-rerank" });
+    upstream.setHandler(jsonHandler(200, { results: [], usage: { total_tokens: 9 } }));
+    const r = await app.inject({
+      method: "POST", url: "/v1/rerank", headers: key.headers,
+      payload: { model: "reranker", query: "q", documents: ["a"] },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().usage.total_tokens).toBe(9); // still passed through to the client
+
+    const row = lastLogFor(key.id);
+    expect(row.totalTokens).toBe(0);
+    expect(used(key.id)).toMatchObject({ usedRequests: 1, usedTokens: 0 });
+  });
+});

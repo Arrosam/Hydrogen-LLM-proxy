@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { parseCgroupLimit, containerMemoryMb, heapAlreadySized, ensureHeapSized, inContainer } from "../src/util/heap";
 
@@ -122,5 +122,142 @@ describe("ensureHeapSized", () => {
       expect(ensureHeapSized({ argv: base.argv, execArgv, env, read: () => "4294967296", spawnFn, onExit: () => undefined })).toBe(false);
       expect(calls).toHaveLength(0);
     }
+  });
+});
+
+describe("cgroup memory parsing: boundaries", () => {
+  it("never reports a real limit below 1 MiB as zero", () => {
+    expect(parseCgroupLimit("1048575")).toBe(1); // one byte short of a MiB
+    expect(parseCgroupLimit("1")).toBe(1);
+    expect(parseCgroupLimit("1048576")).toBe(1);
+  });
+
+  it("treats zero as no limit, and the last byte below 1 TiB as a real one", () => {
+    expect(parseCgroupLimit("0")).toBeUndefined();
+    expect(parseCgroupLimit("1099511627775")).toBe(1048575);
+  });
+
+  it("rejects signed and fractional values rather than guessing", () => {
+    expect(parseCgroupLimit("-1")).toBeUndefined();
+    expect(parseCgroupLimit("1.5e9")).toBeUndefined();
+  });
+});
+
+describe("ensureHeapSized: sizing floor, percent and child supervision", () => {
+  const base = { argv: ["node", "server.cjs"], execArgv: [] as string[] };
+  const MIB = 1024 * 1024;
+
+  // Every re-exec hooks SIGTERM/SIGINT on the real process and prints a line;
+  // neither should outlive the test that caused it.
+  let sigterm: NodeJS.SignalsListener[];
+  let sigint: NodeJS.SignalsListener[];
+  beforeEach(() => {
+    sigterm = process.listeners("SIGTERM");
+    sigint = process.listeners("SIGINT");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    for (const l of process.listeners("SIGTERM")) if (!sigterm.includes(l)) process.removeListener("SIGTERM", l);
+    for (const l of process.listeners("SIGINT")) if (!sigint.includes(l)) process.removeListener("SIGINT", l);
+    vi.restoreAllMocks();
+  });
+
+  /** The --max-old-space-size the child was started with for this container. */
+  function sizedFor(limitMb: number, env: NodeJS.ProcessEnv = {}): string | undefined {
+    const { calls, spawnFn } = fakeSpawn();
+    ensureHeapSized({ ...base, env, read: () => String(limitMb * MIB), spawnFn, onExit: () => undefined });
+    return calls[0]?.args.find((a) => a.startsWith("--max-old-space-size="));
+  }
+
+  it("never sizes the heap below 128 MiB, however small the container", () => {
+    expect(sizedFor(64)).toBe("--max-old-space-size=128");
+    expect(sizedFor(128)).toBe("--max-old-space-size=128");
+    expect(sizedFor(129)).toBe("--max-old-space-size=129");
+  });
+
+  it("applies the floor after the percent, not before", () => {
+    expect(sizedFor(200, { NODE_HEAP_PERCENT: "50" })).toBe("--max-old-space-size=128");
+    expect(sizedFor(4096, { NODE_HEAP_PERCENT: "50" })).toBe("--max-old-space-size=2048");
+  });
+
+  it.each(["0", "101", "abc", "-5", ""])("falls back to 100%% for NODE_HEAP_PERCENT=%j", (percent) => {
+    expect(sizedFor(4096, { NODE_HEAP_PERCENT: percent })).toBe("--max-old-space-size=4096");
+  });
+
+  it("accepts the whole 0 < percent <= 100 range, fractions included", () => {
+    expect(sizedFor(4096, { NODE_HEAP_PERCENT: "100" })).toBe("--max-old-space-size=4096");
+    expect(sizedFor(4096, { NODE_HEAP_PERCENT: "12.5" })).toBe("--max-old-space-size=512");
+  });
+
+  it("puts the heap flag after the existing exec flags and before the script and its arguments", () => {
+    const { calls, spawnFn } = fakeSpawn();
+    ensureHeapSized({
+      argv: ["node", "server.cjs", "--port", "8080"], execArgv: ["--enable-source-maps"], env: { KEEP: "me" },
+      read: () => String(512 * MIB), spawnFn, onExit: () => undefined,
+    });
+    expect(calls[0].cmd).toBe(process.execPath);
+    expect(calls[0].args).toEqual(["--enable-source-maps", "--max-old-space-size=512", "server.cjs", "--port", "8080"]);
+    expect(calls[0].env).toMatchObject({ KEEP: "me", HYDROGEN_HEAP_RESPAWNED: "1" });
+  });
+
+  it.each(["-p", "--print", "--eval"])("never re-execs a %s launch", (flag) => {
+    const { calls, spawnFn } = fakeSpawn();
+    const respawned = ensureHeapSized({
+      argv: ["node", "server.cjs"], execArgv: [flag, "1+1"], env: {},
+      read: () => "4294967296", spawnFn, onExit: () => undefined,
+    });
+    expect(respawned).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("never re-execs when there is no script path to relaunch", () => {
+    const { calls, spawnFn } = fakeSpawn();
+    expect(ensureHeapSized({ argv: ["node"], execArgv: [], env: {}, read: () => "4294967296", spawnFn, onExit: () => undefined })).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  /** Start a supervised child and collect what the parent would exit with. */
+  function supervised() {
+    const { child, spawnFn } = fakeSpawn();
+    const exits: number[] = [];
+    ensureHeapSized({ ...base, env: {}, read: () => "4294967296", spawnFn, onExit: (code) => exits.push(code) });
+    return { child, exits };
+  }
+
+  it("exits with the child's own exit code", () => {
+    const { child, exits } = supervised();
+    child.emit("exit", 3, null);
+    expect(exits).toEqual([3]);
+  });
+
+  it("exits 0 when the child exits cleanly or reports no code at all", () => {
+    const clean = supervised();
+    clean.child.emit("exit", 0, null);
+    expect(clean.exits).toEqual([0]);
+    const codeless = supervised();
+    codeless.child.emit("exit", null, null);
+    expect(codeless.exits).toEqual([0]);
+  });
+
+  it("exits 1 when the child was killed by a signal", () => {
+    const { child, exits } = supervised();
+    child.emit("exit", null, "SIGKILL");
+    expect(exits).toEqual([1]);
+  });
+
+  it("exits 1 when the child could not be started", () => {
+    const { child, exits } = supervised();
+    child.emit("error", new Error("spawn ENOENT"));
+    expect(exits).toEqual([1]);
+  });
+
+  it("forwards SIGTERM and SIGINT to the child", () => {
+    const { child } = supervised();
+    const added = (signal: "SIGTERM" | "SIGINT", before: NodeJS.SignalsListener[]) =>
+      process.listeners(signal).filter((l) => !before.includes(l));
+    for (const l of added("SIGTERM", sigterm)) l("SIGTERM");
+    for (const l of added("SIGINT", sigint)) l("SIGINT");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGINT");
   });
 });

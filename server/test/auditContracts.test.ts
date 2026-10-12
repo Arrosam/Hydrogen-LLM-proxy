@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import type { TokenRepo } from "../src/persistence/tokenRepo";
 import { requireClientToken } from "../src/auth/tokenAuth";
+import { tokenAllowsService } from "../src/auth/authorization";
 import { mergeParams, mergeOverrides } from "../src/core/ir/params";
 import { fuzzyRewriteUrl } from "../src/transport/fuzzyUrl";
 import { toId } from "../src/util/validate";
@@ -66,4 +67,29 @@ it.each([{n:0},{n:3},{n:2**21},{r:0},{r:33},{p:0},{p:17},{n:2**20,r:32}])("rejec
 });
 it.each(["UpstreamUrlError","FormatConversionError"])("does not retry permanent %s merely because its URL contains timeout",name=>{
  const error=new Error("https://timeout.example.com");error.name=name;expect(classifyError(error).kind).toBe("error");
+});
+it.each([
+ [null, 5, true], [[], 5, true], [[5], 5, true], [[5,6], 6, true], [[6], 5, false], ["5", 5, true], [undefined, 5, true],
+])("applies API-key service scope %j to service %i",(scopeServices,serviceId,expected)=>{
+ expect(tokenAllowsService({scopeServices:scopeServices as never},serviceId)).toBe(expected);
+});
+it.each([
+ [{authorization:"bearer  k "}, "k"], [{authorization:"BEARER k"}, "k"], [{authorization:"Bearer k"}, "k"],
+ [{authorization:"Basic xxx","x-api-key":" k "}, "k"], [{"x-api-key":"k"}, "k"],
+ [{authorization:"Bearer b","x-api-key":"x"}, "b"],
+ [{authorization:"Basic xxx"}, null], [{"x-api-key":""}, null], [{authorization:"Bearer "}, null],
+ [{authorization:"Bearer","x-api-key":"x"}, "x"], [{}, null],
+])("extracts the presented credential from %j",async (headers,expected)=>{
+ const seen:string[]=[];
+ const token={enabled:true,expiresAt:null,maxRequests:null,maxTokens:null,usedRequests:0,usedTokens:0};
+ const req={headers} as unknown as FastifyRequest;
+ let status=200; let body:unknown;
+ const reply={code(n:number){status=n;return this;},send(b:unknown){body=b;return this;}} as unknown as FastifyReply;
+ await requireClientToken({authenticate:(p:string)=>{seen.push(p);return token;}} as unknown as TokenRepo,"openai_completion")(req,reply);
+ if(expected===null){
+  // Nothing usable was presented: refused before the key store is ever consulted.
+  expect(status).toBe(401);expect((body as {error:{message:string}}).error.message).toBe("Missing API key.");expect(seen).toEqual([]);
+ }else{
+  expect(status).toBe(200);expect(seen).toEqual([expected]);
+ }
 });

@@ -93,11 +93,12 @@ describe("constrained (media) endpoint resolution", () => {
     // Primary Anthropic, both families enabled: an Anthropic client still gets
     // the Anthropic endpoint, and a preference the mapping does not serve still
     // falls back to the primary rather than erroring.
+    const familyOf = (r: ReturnType<Catalog["resolve"]>) => (r.ok ? r.target.family : undefined);
     const c = catalogOf({ altEndpoints: RESPONSES_ALT, families: ["anthropic", "openai_responses"] });
-    expect(c.resolve("m", "p", "anthropic").ok && c.resolve("m", "p", "anthropic").target.family).toBe("anthropic");
-    expect(c.resolve("m", "p", "openai_responses").ok && c.resolve("m", "p", "openai_responses").target.family).toBe("openai_responses");
-    expect(c.resolve("m", "p", "openai_completion").ok && c.resolve("m", "p", "openai_completion").target.family).toBe("anthropic");
-    expect(c.resolve("m", "p").ok && c.resolve("m", "p").target.family).toBe("anthropic");
+    expect(c.resolve("m", "p", "anthropic").ok && familyOf(c.resolve("m", "p", "anthropic"))).toBe("anthropic");
+    expect(c.resolve("m", "p", "openai_responses").ok && familyOf(c.resolve("m", "p", "openai_responses"))).toBe("openai_responses");
+    expect(c.resolve("m", "p", "openai_completion").ok && familyOf(c.resolve("m", "p", "openai_completion"))).toBe("anthropic");
+    expect(c.resolve("m", "p").ok && familyOf(c.resolve("m", "p"))).toBe("anthropic");
   });
 });
 
@@ -339,5 +340,67 @@ describe("media services on an Anthropic-primary provider", () => {
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().error.message).toContain("no longer OpenAI-compatible");
+  });
+});
+
+describe("video poll/download guards", () => {
+  /** A job id as POST /v1/videos would have returned it for the alternate endpoint. */
+  const jobId = (): string => `vid_1-h${videoServiceId}x${dualProviderId}e1`;
+
+  it("a job whose service has since been disabled is a 404, for the poll and the download", async () => {
+    upstream.requests.length = 0;
+    c.services.update(videoServiceId, { enabled: false });
+    try {
+      const polled = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}`, headers: auth() });
+      expect(polled.statusCode).toBe(404);
+      expect(polled.json().error.message).toBe("The service that created this video no longer exists.");
+      const content = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}/content`, headers: auth() });
+      expect(content.statusCode).toBe(404);
+    } finally {
+      c.services.update(videoServiceId, { enabled: true });
+    }
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("a job whose provider has since been disabled is a 404", async () => {
+    upstream.requests.length = 0;
+    c.providers.update(dualProviderId, { enabled: false });
+    try {
+      const polled = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}`, headers: auth() });
+      expect(polled.statusCode).toBe(404);
+      expect(polled.json().error.message).toBe("The provider that created this video no longer exists.");
+    } finally {
+      c.providers.update(dualProviderId, { enabled: true });
+    }
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("an upstream error on the poll is relayed with its status and its id left unsuffixed", async () => {
+    upstream.requests.length = 0;
+    upstream.setHandler(json(404, { id: "vid_1", error: { message: "no such video" } }));
+    const polled = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}`, headers: auth() });
+    expect(polled.statusCode).toBe(404);
+    expect(polled.json()).toEqual({ id: "vid_1", error: { message: "no such video" } });
+    expect(upstream.requests[0].url).toBe("/openai/v1/videos/vid_1");
+  });
+
+  it("a successful poll body without a string id is passed through untouched", async () => {
+    upstream.setHandler(json(200, { status: "processing", progress: 40 }));
+    const noId = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}`, headers: auth() });
+    expect(noId.statusCode).toBe(200);
+    expect(noId.json()).toEqual({ status: "processing", progress: 40 });
+
+    upstream.setHandler(json(200, { id: 5, status: "processing" }));
+    const numericId = await app.inject({ method: "GET", url: `/v1/videos/${jobId()}`, headers: auth() });
+    expect(numericId.statusCode).toBe(200);
+    expect(numericId.json()).toEqual({ id: 5, status: "processing" });
+  });
+
+  it("a suffix with no upstream id in front of it is not a video id", async () => {
+    upstream.requests.length = 0;
+    const r = await app.inject({ method: "GET", url: `/v1/videos/-h${videoServiceId}x${dualProviderId}e1`, headers: auth() });
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error.message).toContain("Unknown video id");
+    expect(upstream.requests).toHaveLength(0);
   });
 });

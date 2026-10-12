@@ -1,0 +1,97 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buffered chat run > raw tuple 1`] = `"{"ok":true,"status":200,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/chat/completions"},"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}]},"response":{"id":"c","object":"chat.completion","created":N,"model":"m@fake","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}},"thinkingFormat":"original","usage":{"promptTokens":1,"completionTokens":2,"totalTokens":3},"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":200,"kind":"ok","latencyMs":N}]}"`;
+
+exports[`buffered chat run > raw tuple whose upstream refuses 1`] = `"{"ok":false,"status":400,"message":"bad thing","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":400,"kind":"http","latencyMs":N,"error":"upstream returned 400","upstreamError":"bad thing","errorBody":"{\\n  \\"error\\": {\\n    \\"message\\": \\"bad thing\\"\\n  }\\n}"}],"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}]}}"`;
+
+exports[`buffered chat run > raw tuple with no such endpoint (with advice), and with no such mapping > no endpoint 1`] = `"{"ok":false,"status":502,"message":"m@fake has no anthropic endpoint enabled (add it to the provider, then enable it on the mapping)","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":0,"kind":"error","latencyMs":N,"error":"m@fake has no anthropic endpoint enabled (add it to the provider, then enable it on the mapping)"}],"upstreamRequest":null}"`;
+
+exports[`buffered chat run > raw tuple with no such endpoint (with advice), and with no such mapping > no mapping 1`] = `"{"ok":false,"status":502,"message":"mapping ghost@fake: model_not_found","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"ghost","provider":"fake","status":0,"kind":"error","latencyMs":N,"error":"mapping ghost@fake: model_not_found"}],"upstreamRequest":null}"`;
+
+exports[`buffered chat run > saved service 1`] = `"{"ok":true,"status":200,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":""},"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}]},"response":{"id":"c","object":"chat.completion","created":N,"model":"svc","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}},"thinkingFormat":"original","usage":{"promptTokens":1,"completionTokens":2,"totalTokens":3},"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":200,"kind":"ok","latencyMs":N}]}"`;
+
+exports[`buffered chat run > saved service whose upstream refuses 1`] = `"{"ok":false,"status":400,"message":"bad thing","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":400,"kind":"http","latencyMs":N,"error":"upstream returned 400","upstreamError":"bad thing","errorBody":"{\\n  \\"error\\": {\\n    \\"message\\": \\"bad thing\\"\\n  }\\n}","retry":{"retryIndex":0,"delayMs":0,"suppressed":true,"reason":"trigger not in retry.on [429, 499, 502, 503, timeout, network]"}}],"upstreamRequest":null}"`;
+
+exports[`media run > a connection that dies 1`] = `"{"ok":false,"status":0,"latencyMs":N,"message":"other side closed","served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/rerank"}}"`;
+
+exports[`media run > a raw tuple with no usable endpoint, and with no mapping > anthropic format 1`] = `"{"error":"rerank is an OpenAI-shaped endpoint; a anthropic endpoint does not serve it"}"`;
+
+exports[`media run > a raw tuple with no usable endpoint, and with no mapping > no endpoint 1`] = `"{"error":"m@fake has no openai_responses endpoint enabled for embedding"}"`;
+
+exports[`media run > a raw tuple with no usable endpoint, and with no mapping > no mapping 1`] = `"{"error":"mapping ghost@fake: model_not_found"}"`;
+
+exports[`media run > a refused JSON category, speech and transcription each report in their own key order > embedding 1`] = `"{"ok":false,"status":400,"latencyMs":N,"message":"bad thing","served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/embeddings"},"upstreamRequest":{"input":"hi","model":"up"},"response":{"error":{"message":"bad thing"}}}"`;
+
+exports[`media run > a refused JSON category, speech and transcription each report in their own key order > stt 1`] = `"{"ok":false,"status":400,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/audio/transcriptions"},"upstreamRequest":{"input":"hi","model":"up","file":"(a\\"b.wav, audio/wav, 4 bytes)"},"message":"bad thing","response":{"error":{"message":"bad thing"}}}"`;
+
+exports[`media run > a refused JSON category, speech and transcription each report in their own key order > tts 1`] = `"{"ok":false,"status":400,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/audio/speech"},"upstreamRequest":{"input":"hi","model":"up"},"message":"bad thing","response":{"error":{"message":"bad thing"}}}"`;
+
+exports[`media run > a saved service resolves through its first step 1`] = `"{"ok":false,"status":400,"latencyMs":N,"message":"bad thing","served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/embeddings"},"upstreamRequest":{"input":"hi","model":"up"},"response":{"error":{"message":"bad thing"}}}"`;
+
+exports[`streamed chat run > answers with the bench's own SSE header set 1`] = `
+{
+  "cache-control": "no-cache, no-transform",
+  "connection": "keep-alive",
+  "content-type": "text/event-stream; charset=utf-8",
+  "x-accel-buffering": "no",
+}
+`;
+
+exports[`streamed chat run > raw tuple whose connection dies 1`] = `
+"event: bench
+data: {"ok":false,"status":0,"message":"other side closed","latencyMs":N}
+
+"
+`;
+
+exports[`streamed chat run > raw tuple whose upstream refuses 1`] = `
+"event: bench
+data: {"ok":false,"status":400,"message":"bad thing","latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/chat/completions"},"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}},"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":400,"kind":"http","latencyMs":N,"error":"upstream returned 400","upstreamError":"bad thing","errorBody":"{\\n  \\"error\\": {\\n    \\"message\\": \\"bad thing\\"\\n  }\\n}"}]}
+
+"
+`;
+
+exports[`streamed chat run > raw tuple with no such endpoint, and with no such mapping > no endpoint 1`] = `
+"event: bench
+data: {"ok":false,"status":502,"message":"m@fake has no anthropic endpoint enabled","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":0,"kind":"error","latencyMs":N,"error":"m@fake has no anthropic endpoint enabled"}]}
+
+"
+`;
+
+exports[`streamed chat run > raw tuple with no such endpoint, and with no such mapping > no mapping 1`] = `
+"event: bench
+data: {"ok":false,"status":502,"message":"mapping ghost@fake: model_not_found","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"ghost","provider":"fake","status":0,"kind":"error","latencyMs":N,"error":"mapping ghost@fake: model_not_found"}]}
+
+"
+`;
+
+exports[`streamed chat run > raw tuple: the whole stream, client frames then the bench frame 1`] = `
+"data: {"id":"c","object":"chat.completion.chunk","created":N,"model":"m@fake","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"c","object":"chat.completion.chunk","created":N,"model":"m@fake","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}
+
+data: {"id":"c","object":"chat.completion.chunk","created":N,"model":"m@fake","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"c","object":"chat.completion.chunk","created":N,"model":"m@fake","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
+
+data: [DONE]
+
+event: bench
+data: {"ok":true,"status":200,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":"http://127.0.0.1:PORT/v1/chat/completions"},"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}},"usage":{"promptTokens":1,"completionTokens":2,"totalTokens":3,"incomplete":false},"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":200,"kind":"ok","latencyMs":N}]}
+
+"
+`;
+
+exports[`streamed chat run > saved service whose upstream refuses 1`] = `
+"event: bench
+data: {"ok":false,"status":400,"message":"bad thing","latencyMs":N,"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":400,"kind":"http","latencyMs":N,"error":"upstream returned 400","upstreamError":"bad thing","errorBody":"{\\n  \\"error\\": {\\n    \\"message\\": \\"bad thing\\"\\n  }\\n}","retry":{"retryIndex":0,"delayMs":0,"suppressed":true,"reason":"trigger not in retry.on [429, 499, 502, 503, timeout, network]"}}]}
+
+"
+`;
+
+exports[`streamed chat run > saved service: the bench frame 1`] = `
+"event: bench
+data: {"ok":true,"status":200,"latencyMs":N,"served":{"model":"m","provider":"fake","family":"openai_completion","upstreamModel":"up","url":""},"upstreamRequest":{"model":"up","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}},"usage":{"promptTokens":1,"completionTokens":2,"totalTokens":3,"incomplete":false},"attemptPath":[{"step":1,"attempt":1,"model":"m","provider":"fake","status":200,"kind":"ok","latencyMs":N}]}
+
+"
+`;

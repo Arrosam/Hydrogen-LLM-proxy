@@ -57,10 +57,10 @@ describe("EP: a proxy host is operator infrastructure, not an upstream", () => {
 
   /**
    * `localhost` is the thing an operator actually types, and on most machines
-   * it resolves to ::1 before 127.0.0.1. The shared address classifier refuses
-   * ::1 -- it parses as a v4-compatible 0.0.0.1, which is inside the
-   * always-refused 0.0.0.0/8 -- so without an explicit loopback exception the
-   * most obvious proxy anyone could configure would be rejected.
+   * it resolves to ::1 before 127.0.0.1. The shared address classifier treats
+   * ::1 as loopback (allowed with allowPrivate, which a proxy host always
+   * has) rather than as the v4-compatible 0.0.0.1 it also spells, so the
+   * most obvious proxy anyone could configure is accepted.
    */
   it("localhost is accepted however it resolves", async () => {
     const addrs = await resolveProxyHost(proxy({ host: "localhost" }));
@@ -215,10 +215,10 @@ describe("ST: every provider-addressed request carries the proxy", () => {
     expect(src).not.toMatch(/\bproxy\b/);
   });
 
-  it("both SendTarget literals in modelService carry the proxy", () => {
+  it("the one SendTarget literal in modelService carries the proxy", () => {
     const src = code(fs.readFileSync(path.join(SRC, "execution/modelService.ts"), "utf8"));
-    expect((src.match(/const target: SendTarget = \{/g) ?? []).length).toBe(2);
-    expect((src.match(/proxy: t\.upstream\.proxy/g) ?? []).length).toBe(2);
+    expect((src.match(/const target: SendTarget = \{/g) ?? []).length).toBe(1);
+    expect((src.match(/proxy: t\.upstream\.proxy/g) ?? []).length).toBe(1);
   });
 
   /**
@@ -231,5 +231,45 @@ describe("ST: every provider-addressed request carries the proxy", () => {
   it("the provider test builds an UpstreamProvider that carries a proxy", () => {
     const src = code(fs.readFileSync(path.join(SRC, "transport/admin/providerRoutes.ts"), "utf8"));
     expect(src).toMatch(/discoverModels\(c\.transport, \{[^}]*\bproxy\b/);
+  });
+});
+
+// --- BVA: port and host boundaries (coverage additions) ----------------------
+
+describe("BVA: proxy port range and the refused set", () => {
+  it.each([1, 65535])("port %d is inside the range", async (port) => {
+    await expect(resolveProxyHost(proxy({ port }))).resolves.toEqual([{ address: "127.0.0.1", family: 4 }]);
+  });
+
+  it.each([0, 65536, -1, 1.5, Number.NaN])("port %d is out of range", async (port) => {
+    const pending = resolveProxyHost(proxy({ port }));
+    await expect(pending).rejects.toBeInstanceOf(UpstreamUrlError);
+    await expect(pending).rejects.toThrow(/has an invalid port/);
+  });
+
+  it.each([22, 25, 465, 587])("port %d is in range but is never a proxy", async (port) => {
+    const pending = resolveProxyHost(proxy({ port }));
+    await expect(pending).rejects.toBeInstanceOf(UpstreamUrlError);
+    await expect(pending).rejects.toThrow(`uses port ${port}, which is not a proxy port`);
+  });
+
+  it.each([21, 23, 24, 26, 464, 466, 586, 588])("port %d, next to a refused one, is fine", async (port) => {
+    await expect(resolveProxyHost(proxy({ port }))).resolves.toHaveLength(1);
+  });
+});
+
+describe("EP: the proxy host string", () => {
+  it.each(["", "   "])("a blank host (%j) is refused by name", async (host) => {
+    const pending = resolveProxyHost(proxy({ host, name: "blank" }));
+    await expect(pending).rejects.toBeInstanceOf(UpstreamUrlError);
+    await expect(pending).rejects.toThrow('proxy "blank" has no host');
+  });
+
+  it("surrounding whitespace is trimmed", async () => {
+    await expect(resolveProxyHost(proxy({ host: " 127.0.0.1 " }))).resolves.toEqual([{ address: "127.0.0.1", family: 4 }]);
+  });
+
+  it("the port is checked before the host", async () => {
+    await expect(resolveProxyHost(proxy({ host: "", port: 0 }))).rejects.toThrow(/has an invalid port/);
   });
 });

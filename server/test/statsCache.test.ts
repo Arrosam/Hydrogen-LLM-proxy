@@ -7,7 +7,7 @@ import { openDatabase, type DB } from "../src/db";
 import { RequestLogRepo, type LogInsert } from "../src/persistence/requestLogRepo";
 import { SettingsRepo } from "../src/persistence/settingsRepo";
 import { StatsQueries } from "../src/persistence/statsQueries";
-import { StatsCache, STATS_CACHE_SETTINGS_KEY } from "../src/persistence/statsCache";
+import { StatsCache, STATS_CACHE_SETTINGS_KEY, type RequestStat } from "../src/persistence/statsCache";
 import { RequestLogger } from "../src/observability/requestLogger";
 
 let dir: string;
@@ -55,6 +55,9 @@ function row(patch: Partial<LogInsert> = {}): LogInsert {
     promptTokens: 10,
     completionTokens: 5,
     totalTokens: 15,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    reasoningTokens: 0,
     latencyMs: 100,
     attempts: 1,
     attemptPath: [],
@@ -216,5 +219,177 @@ describe("StatsCache", () => {
     // (within the rounding each bucket applies).
     const weighted = points.reduce((n, p) => n + p.avgLatencyMs * p.requests, 0) / summary.requests;
     expect(Math.abs(weighted - summary.avgLatencyMs)).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("StatsCache: which persisted blobs are trusted", () => {
+  /** A persisted blob that, if trusted, is unmistakable: it claims 999 requests
+   * and a lastId far above any row, so nothing would be folded in after it. */
+  const bogus = (patch: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      v: 3, lastId: 1_000_000_000, requests: 999, errors: 0,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0, latencySumMs: 0,
+      byDay: {}, byService: {}, byModel: {}, byProvider: {},
+      ...patch,
+    });
+
+  /** Boot a cache over whatever blob is persisted. */
+  function boot(blob: string): StatsCache {
+    settings.set(STATS_CACHE_SETTINGS_KEY, blob);
+    const cache = new StatsCache(queries, settings);
+    cache.init();
+    return cache;
+  }
+
+  it("carries a current-version blob forward as it is", () => {
+    logs.insert(row({ requestedService: "svc5" }));
+    const cache = boot(bogus());
+    expect(cache.summary().requests).toBe(999);
+    settings.clear(STATS_CACHE_SETTINGS_KEY);
+  });
+
+  it("discards a blob written by an older cache version and reseeds from the table", () => {
+    const cache = boot(bogus({ v: 2 }));
+    expectMatchesSql(cache);
+    expect(cache.summary().requests).not.toBe(999);
+    // The reseed is what a restart now loads.
+    expect(JSON.parse(settings.get(STATS_CACHE_SETTINGS_KEY)!)).toMatchObject({ v: 3, requests: cache.summary().requests });
+  });
+
+  it.each(["byDay", "byService", "byModel", "byProvider"])("reseeds when a current-version blob has no %s", (missing) => {
+    const cache = boot(bogus({ [missing]: undefined }));
+    expectMatchesSql(cache);
+    expect(cache.summary().requests).not.toBe(999);
+  });
+
+  it("reseeds when a counter the loader checks is not a number", () => {
+    expectMatchesSql(boot(bogus({ lastId: "12" })));
+    expectMatchesSql(boot(bogus({ requests: null })));
+  });
+
+  it.each(["null", "", "[]", "42"])("reseeds from a blob of %j", (blob) => {
+    const cache = boot(blob);
+    expectMatchesSql(cache);
+    expect(cache.summary().requests).toBeGreaterThan(0);
+  });
+});
+
+describe("StatsCache: classifying a recorded request", () => {
+  const stat = (patch: Partial<RequestStat> = {}): RequestStat => ({
+    id: 0, httpStatus: 200,
+    promptTokens: 4, completionTokens: 6, totalTokens: 10,
+    cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0,
+    latencyMs: 50, requestedService: "svc", servedModel: "gpt-x", servedProvider: "prov",
+    ...patch,
+  });
+
+  /** A cache seeded from the table. Dropped again by `discard`, so a counter
+   * these tests bump by hand never reaches the next test through the blob. */
+  function fresh(): StatsCache {
+    settings.clear(STATS_CACHE_SETTINGS_KEY);
+    const cache = new StatsCache(queries, settings);
+    cache.init();
+    return cache;
+  }
+  function discard(cache: StatsCache): void {
+    cache.flush(); // cancels the pending delayed save
+    settings.clear(STATS_CACHE_SETTINGS_KEY);
+  }
+
+  it("counts a status as an error from 400 upward, and not at 399", () => {
+    const cache = fresh();
+    const before = cache.summary();
+    const today = new Date().toISOString().slice(0, 10);
+    const dayErrors = (): number => cache.timeSeries().find((p) => p.day === today)?.errors ?? 0;
+    const dayBefore = dayErrors();
+
+    cache.recordRequest(stat({ httpStatus: 399 }));
+    expect(cache.summary().errors).toBe(before.errors);
+    expect(cache.summary().requests).toBe(before.requests + 1);
+    expect(dayErrors()).toBe(dayBefore);
+
+    cache.recordRequest(stat({ httpStatus: 400 }));
+    expect(cache.summary().errors).toBe(before.errors + 1);
+    expect(cache.summary().requests).toBe(before.requests + 2);
+    expect(dayErrors()).toBe(dayBefore + 1);
+    discard(cache);
+  });
+
+  it("files a request with no service name under (unknown)", () => {
+    const cache = fresh();
+    const unknownBefore = cache.byService().find((g) => g.key === "(unknown)")?.requests ?? 0;
+    cache.recordRequest(stat({ requestedService: null }));
+    expect(cache.byService().find((g) => g.key === "(unknown)")).toMatchObject({ requests: unknownBefore + 1 });
+    discard(cache);
+  });
+
+  it("counts a request nothing served without inventing a model or provider for it", () => {
+    const cache = fresh();
+    const before = { summary: cache.summary(), served: cache.byModelProvider() };
+    cache.recordRequest(stat({ servedModel: null, servedProvider: null, totalTokens: 0, promptTokens: 0, completionTokens: 0 }));
+    expect(cache.summary().requests).toBe(before.summary.requests + 1);
+    expect(cache.byModelProvider()).toEqual(before.served);
+    discard(cache);
+  });
+
+  it("adds every token counter and averages latency by division", () => {
+    const cache = fresh();
+    cache.reset(); // from zero, so the totals below are exact
+
+    cache.recordRequest(stat({ latencyMs: 10, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1 }));
+    cache.recordRequest(stat({ latencyMs: 25, httpStatus: 500 }));
+    expect(cache.summary()).toEqual({
+      requests: 2, errors: 1, promptTokens: 8, completionTokens: 12, totalTokens: 20,
+      cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1,
+      avgLatencyMs: 18, // round(35 / 2)
+    });
+    expect(cache.byService()).toEqual([{ key: "svc", requests: 2, totalTokens: 20 }]);
+    discard(cache);
+  });
+});
+
+describe("StatsCache: rebuild and flush", () => {
+  it("rebuild() drops history the table no longer holds, and persists the result", () => {
+    settings.clear(STATS_CACHE_SETTINGS_KEY);
+    logs.insert(row({ requestedService: "doomed", totalTokens: 77 }));
+    const cache = new StatsCache(queries, settings);
+    cache.init();
+    expect(cache.byService().some((g) => g.key === "doomed")).toBe(true);
+
+    // Rows vanish without the cache being told (a restore replaces the table).
+    sqlite.prepare("DELETE FROM request_logs WHERE requested_service = 'doomed'").run();
+    expect(cache.byService().some((g) => g.key === "doomed")).toBe(true); // all-time by construction
+
+    cache.rebuild();
+    expectMatchesSql(cache);
+    expect(cache.byService().some((g) => g.key === "doomed")).toBe(false);
+
+    const restarted = new StatsCache(queries, settings);
+    restarted.init();
+    expect(restarted.summary()).toEqual(cache.summary());
+    expect(restarted.byService()).toEqual(cache.byService());
+  });
+
+  it("flush() writes nothing when no bump is pending, and once when one is", () => {
+    const cache = new StatsCache(queries, settings);
+    cache.init();
+    const write = vi.spyOn(settings, "set");
+    try {
+      cache.flush();
+      expect(write).not.toHaveBeenCalled();
+
+      cache.recordDeliveryFailure();
+      expect(write).not.toHaveBeenCalled(); // deferred, not written per request
+      cache.flush();
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0][0]).toBe(STATS_CACHE_SETTINGS_KEY);
+
+      cache.flush(); // already persisted
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      write.mockRestore();
+      settings.clear(STATS_CACHE_SETTINGS_KEY);
+    }
   });
 });

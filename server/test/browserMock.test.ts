@@ -21,17 +21,16 @@ import "../src/core/format"; // register wire formats
 import { OpenAICompletionRequest } from "../src/core/format";
 import { ModelService, type ServiceDeps } from "../src/execution/modelService";
 import { MicroAgent, type MicroAgentDeps } from "../src/execution/microAgent";
-import { parseService, type ServiceSteps, type AgentDef } from "../src/execution/definition";
+import type { ServiceSteps, AgentDef } from "../src/execution/definition";
 import { newAccumulator, tapStream, fabricateStream, type StreamAccumulator } from "../src/core/ir/stream";
 import { serializeStream } from "../src/core/format/registry";
 import type { Transport, TransportJsonResult, TransportStreamResult, TransportOptions } from "../src/core/upstream/transport";
 import type { Catalog } from "../src/catalog/catalog";
 import type { GenerationParams } from "../src/core/ir/params";
 import type { Family } from "../src/core/format/family";
-import type { StreamEvent } from "../src/core/ir/stream";
 import { ActiveRequestRegistry } from "../src/observability/activeRequests";
 import { ProgressRecorder } from "../src/observability/progressRecorder";
-import { runSteps, type AttemptResult } from "../src/execution/steps";
+import { retryConfig } from "./retryFixture";
 
 // ---------------------------------------------------------------------------
 // Mock upstream fixtures
@@ -101,7 +100,7 @@ function createMockTransport(opts: MockTransportOpts): Transport {
   let failCountJson = 0;
 
   return {
-    async postStream(url: string, headers: Record<string, string>, body: unknown, o: TransportOptions): Promise<TransportStreamResult> {
+    async postStream(_url: string, _headers: Record<string, string>, _body: unknown, _o: TransportOptions): Promise<TransportStreamResult> {
       let behavior = opts.postStreamBehavior ?? { kind: "ok_stream" };
 
       if (behavior.kind === "fail_then_ok") {
@@ -130,7 +129,7 @@ function createMockTransport(opts: MockTransportOpts): Transport {
       }
     },
 
-    async postJson(url: string, headers: Record<string, string>, body: unknown, o: TransportOptions): Promise<TransportJsonResult> {
+    async postJson(_url: string, _headers: Record<string, string>, _body: unknown, _o: TransportOptions): Promise<TransportJsonResult> {
       let behavior = opts.postJsonBehavior ?? { kind: "ok" };
 
       if (behavior.kind === "fail_then_ok") {
@@ -387,7 +386,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.1 Upstream 503 error with retry succeeds on second attempt", async () => {
     transportOpts.postJsonBehavior = { kind: "fail_then_ok", failTimes: 1, failStatus: 503 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-1";
@@ -403,7 +402,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.2 Upstream 429 rate limit with retry succeeds on second attempt", async () => {
     transportOpts.postJsonBehavior = { kind: "fail_then_ok", failTimes: 1, failStatus: 429 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-2";
@@ -419,7 +418,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.3 Persistent 503 error exhausts retries and returns failure", async () => {
     transportOpts.postJsonBehavior = { kind: "error", status: 503 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-3";
@@ -436,7 +435,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.4 Persistent 429 rate limit exhausts retries and returns 429", async () => {
     transportOpts.postJsonBehavior = { kind: "error", status: 429 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-4";
@@ -453,7 +452,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.5 Upstream 500 error (non-retriable) fails immediately without retry", async () => {
     transportOpts.postJsonBehavior = { kind: "error", status: 500 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-5";
@@ -470,7 +469,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.6 Upstream 502 error triggers retry (502 is in retry.on)", async () => {
     transportOpts.postJsonBehavior = { kind: "fail_then_ok", failTimes: 1, failStatus: 502 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-6";
@@ -499,7 +498,7 @@ describe("2. Exception and failure scenario tests", () => {
   it("2.8 Streaming 429 error is retried and succeeds", async () => {
     transportOpts.postStreamBehavior = { kind: "fail_then_ok", failTimes: 1, failStatus: 429 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-exc-8";
@@ -531,7 +530,7 @@ describe("2. Exception and failure scenario tests", () => {
     };
     const svc = new ModelService(
       steps([
-        { model: "m1", provider: "p1", retry: { on: [], maxAttempts: 1 } },
+        { model: "m1", provider: "p1", retry: retryConfig({ on: [], maxAttempts: 1 }) },
         { model: "m2", provider: "p2" },
       ]),
       { catalog: fakeCatalog(), transport: multiTransport, progress: registry },
@@ -571,7 +570,7 @@ describe("3. Streaming mid-stream crash/abort extreme scenarios", () => {
       },
     };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [502, 429, 503, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [502, 429, 503, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       { catalog: fakeCatalog(), transport: truncTransport, progress: registry },
     );
     const traceId = "trace-crash-1";
@@ -603,7 +602,7 @@ describe("3. Streaming mid-stream crash/abort extreme scenarios", () => {
       },
     };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [502, 429, 503, "timeout", "error"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [502, 429, 503, "timeout", "error"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       { catalog: fakeCatalog(), transport: abortTransport, progress: registry },
     );
     const traceId = "trace-crash-2";
@@ -620,7 +619,7 @@ describe("3. Streaming mid-stream crash/abort extreme scenarios", () => {
 
   it("3.3 Persistent stream truncation exhausts retries and returns error", async () => {
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [502, 429, 503, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [502, 429, 503, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       { catalog: fakeCatalog(), transport: createMockTransport({ calls: [], postStreamBehavior: { kind: "stream_truncated" } }), progress: registry },
     );
     const traceId = "trace-crash-3";
@@ -675,7 +674,7 @@ describe("3. Streaming mid-stream crash/abort extreme scenarios", () => {
       },
     };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [502, 429, 503, "timeout", "error"], maxAttempts: 2, backoff: { initialMs: 1, maxMs: 5 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [502, 429, 503, "timeout", "error"], maxAttempts: 2, backoff: { initialMs: 1, maxMs: 5 } }) }]),
       { catalog: fakeCatalog(), transport: crashTransport, progress: registry },
     );
 
@@ -735,7 +734,7 @@ describe("4. Active request monitoring verification", () => {
   it("4.2 Retry scenario: retry.trigger and retry.delay events are captured", async () => {
     transportOpts.postJsonBehavior = { kind: "fail_then_ok", failTimes: 1, failStatus: 503 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-mon-2";
@@ -757,7 +756,7 @@ describe("4. Active request monitoring verification", () => {
   it("4.3 Failed request: retry.exhausted events are captured", async () => {
     transportOpts.postJsonBehavior = { kind: "error", status: 503 };
     const svc = new ModelService(
-      steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       makeDeps(transport, registry),
     );
     const traceId = "trace-mon-3";
@@ -765,7 +764,7 @@ describe("4. Active request monitoring verification", () => {
     const prog = makeRecorder(registry, traceId);
 
     const inv = await svc.invoke(baseReq(), undefined, { progress: prog });
-    registry.finish(traceId, inv.result.status, inv.result.message);
+    registry.finish(traceId, inv.result.ok ? 200 : inv.result.status, inv.result.ok ? undefined : inv.result.message);
 
     const entry = registry.get(traceId)!;
     expect(entry.done).toBe(true);
@@ -855,7 +854,7 @@ describe("5. Stability under unstable upstream conditions", () => {
       const scenario = scenarios[i];
       const t: Transport = createMockTransport({ calls: [], postJsonBehavior: scenario.behavior });
       const svc = new ModelService(
-        steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 5 } } }]),
+        steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 3, backoff: { initialMs: 1, maxMs: 5 } }) }]),
         { catalog: fakeCatalog(), transport: t, progress: registry },
       );
       const traceId = `trace-stab-1-${i}`;
@@ -888,7 +887,7 @@ describe("5. Stability under unstable upstream conditions", () => {
       behaviors.map(async (behavior, i) => {
         const t: Transport = createMockTransport({ calls: [], postJsonBehavior: behavior });
         const svc = new ModelService(
-          steps([{ model: "m", provider: "p", retry: { on: [429, 503, 502, "timeout"], maxAttempts: 5, backoff: { initialMs: 1, maxMs: 5 } } }]),
+          steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429, 503, 502, "timeout"], maxAttempts: 5, backoff: { initialMs: 1, maxMs: 5 } }) }]),
           { catalog: fakeCatalog(), transport: t, progress: registry },
         );
         const traceId = `trace-stab-2-${i}`;

@@ -12,21 +12,19 @@
  *  8. 499 error is still logged (retained logging capability)
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Readable } from "node:stream";
 import "../src/core/format"; // register wire formats
 import { OpenAICompletionRequest } from "../src/core/format";
 import { ModelService, type ServiceDeps } from "../src/execution/modelService";
 import { runSteps, is499Retryable, type AttemptResult } from "../src/execution/steps";
-import { newAccumulator, tapStream, fabricateStream } from "../src/core/ir/stream";
 import { serializeStream } from "../src/core/format/registry";
 import { ActiveRequestRegistry } from "../src/observability/activeRequests";
 import { ProgressRecorder } from "../src/observability/progressRecorder";
-import type { Transport, TransportJsonResult, TransportStreamResult, TransportOptions } from "../src/core/upstream/transport";
+import type { Transport } from "../src/core/upstream/transport";
 import type { Catalog } from "../src/catalog/catalog";
 import type { ServiceSteps } from "../src/execution/definition";
 import type { Family } from "../src/core/format/family";
-import { Writable } from "node:stream";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -84,19 +82,6 @@ function baseReq(stream = false): OpenAICompletionRequest {
     params: {},
     stream,
   });
-}
-
-class MockRawResponse extends Writable {
-  chunks: string[] = [];
-  destroyed = false;
-  writableEnded = false;
-  _write(chunk: string | Buffer, _enc: string, cb: () => void): void {
-    this.chunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-    cb();
-  }
-  flush(): void {}
-  end(cb?: () => void): this { this.writableEnded = true; if (cb) cb(); return this; }
-  destroy(): this { this.destroyed = true; return this; }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,18 +259,15 @@ describe("Custom error code retry configuration", () => {
     expect(calls).toBe(2); // 1 failed (499) + 1 succeeded
 
     if (streamInv.result.ok) {
-      // Relay the fabricated stream — must complete without interruption
-      const raw = new MockRawResponse();
-      const outGen = serializeStream("openai_completion", streamInv.result.value.events, { model: "svc" });
-      for await (const chunk of outGen) {
-        if (raw.destroyed || raw.writableEnded) break;
-        raw.write(chunk);
-        raw.flush();
-      }
-      if (!raw.writableEnded) raw.end();
-      const output = raw.chunks.join("");
+      // The retried attempt's events are the whole answer. (How the controller
+      // relays them to a client is ProxyController's business: repro499.test.ts
+      // "reliable streaming: 499 on attempt 1 then success" runs this end to end.)
+      let output = "";
+      for await (const frame of serializeStream("openai_completion", streamInv.result.value.events, { model: "svc" })) output += frame;
       expect(output).toContain("hello");
+      expect(output).toContain('"finish_reason":"stop"');
       expect(output).toContain("[DONE]");
+      expect(output).not.toContain("closed"); // nothing of the failed attempt leaked
     }
   });
 

@@ -98,7 +98,7 @@ describe("UpdateService.check", () => {
   it("offers the next release candidate to a deployment running one", async () => {
     // The reported bug: /releases/latest hides the prerelease and answers with
     // the last stable one -- older than what is running, so never an upgrade.
-    const fetchImpl = vi.fn(async () => feed(rel("v1.7.0-rc.2"), rel("v1.6.1")));
+    const fetchImpl = vi.fn(async (_input: Parameters<typeof fetch>[0]) => feed(rel("v1.7.0-rc.2"), rel("v1.6.1")));
     const s = await svc("1.7.0-rc.1", fetchImpl).check();
     expect(s.latest).toBe("1.7.0-rc.2");
     expect(s.updateAvailable).toBe(true);
@@ -189,5 +189,152 @@ describe("UpdateService.check", () => {
 
     const enabled = svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0"))), { restartEnabled: true });
     expect((await enabled.check()).restartSupported).toBe(true);
+  });
+});
+
+describe("UpdateService.check: concurrency and cache lifetime", () => {
+  it("shares one upstream fetch between overlapping checks, forced or not", async () => {
+    let release!: (r: Response) => void;
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    const service = svc("1.4.1", fetchImpl);
+
+    const pending = Promise.all([service.check(true), service.check(true), service.check()]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    release(feed(rel("v1.6.0")));
+    const [a, b, c] = await pending;
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(a.latest).toBe("1.6.0");
+    expect(b).toBe(a); // the very same status object, not three equal ones
+    expect(c).toBe(a);
+
+    // The in-flight slot is released once it settles: the next forced check
+    // goes back to GitHub instead of waiting on a finished promise.
+    const next = service.check(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    release(feed(rel("v1.7.0")));
+    expect((await next).latest).toBe("1.7.0");
+  });
+
+  it("releases the in-flight slot when the fetch fails too", async () => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => {
+      throw new Error("socket hang up");
+    });
+    const service = svc("1.4.1", fetchImpl);
+    const [a, b] = await Promise.all([service.check(), service.check()]);
+    expect(b).toBe(a);
+    expect(a.error).toContain("socket hang up");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a success from cache until exactly the TTL has elapsed", async () => {
+    const ttl = 60_000;
+    const fetchImpl = vi.fn(async () => feed(rel("v1.6.0")));
+    const service = svc("1.4.1", fetchImpl, { cacheTtlMs: ttl });
+    const first = await service.check();
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(first.checkedAt + ttl - 1);
+      expect(await service.check()).toBe(first);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      clock.mockReturnValue(first.checkedAt + ttl); // age == ttl is already stale
+      const second = await service.check();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(second).not.toBe(first);
+      expect(second.checkedAt).toBe(first.checkedAt + ttl);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("keeps a success for ten minutes when no TTL is configured", async () => {
+    const fetchImpl = vi.fn(async () => feed(rel("v1.6.0")));
+    const service = svc("1.4.1", fetchImpl);
+    const first = await service.check();
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(first.checkedAt + 10 * 60 * 1000 - 1);
+      await service.check();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(first.checkedAt + 10 * 60 * 1000);
+      await service.check();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+describe("UpdateService.check: feed error partitions", () => {
+  const failing = (status: number) => svc("1.4.1", vi.fn(async () => new Response("{}", { status }))).check();
+
+  it("names a 429 as a rate limit, with the status", async () => {
+    const s = await failing(429);
+    expect(s.error).toMatch(/rate limit hit \(429\)/);
+    expect(s.latest).toBeNull();
+    expect(s.updateAvailable).toBe(false);
+  });
+
+  it("reports any other failure status verbatim", async () => {
+    expect((await failing(500)).error).toBe("GitHub API returned 500");
+    expect((await failing(404)).error).toBe("GitHub API returned 404");
+  });
+
+  it("reports a 200 whose body is not JSON as unreadable", async () => {
+    const s = await svc("1.4.1", vi.fn(async () => new Response("not json", { status: 200 }))).check();
+    expect(s.error).toBe("GitHub API returned an unreadable body");
+    expect(s.latest).toBeNull();
+  });
+
+  it("truncates release notes to 4000 characters and reports an empty body as null", async () => {
+    const long = await svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0", { body: "n".repeat(4001) })))).check();
+    expect(long.releaseNotes).toHaveLength(4000);
+    const exact = await svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0", { body: "n".repeat(4000) })))).check();
+    expect(exact.releaseNotes).toHaveLength(4000);
+
+    const empty = await svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0", { body: "" })))).check();
+    expect(empty.releaseNotes).toBeNull();
+    const missing = await svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0", { body: null })))).check();
+    expect(missing.releaseNotes).toBeNull();
+    expect(missing.error).toBeUndefined();
+  });
+
+  it("reports a non-string release URL or publish date as null", async () => {
+    const s = await svc("1.4.1", vi.fn(async () => feed(rel("v1.6.0", { html_url: 42, published_at: null })))).check();
+    expect(s.latest).toBe("1.6.0");
+    expect(s.releaseUrl).toBeNull();
+    expect(s.publishedAt).toBeNull();
+  });
+
+  it("skips feed entries that are not objects", async () => {
+    const s = await svc("1.4.1", vi.fn(async () => feed(null as never, "x" as never, rel("v1.6.0")))).check();
+    expect(s.error).toBeUndefined();
+    expect(s.latest).toBe("1.6.0");
+  });
+
+  it("holds an error for exactly thirty seconds, even against a forced check", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValueOnce(feed(rel("v1.6.0")));
+    const service = svc("1.4.1", fetchImpl);
+    const first = await service.check();
+    expect(first.error).toBe("GitHub API returned 500");
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(first.checkedAt + 29_999);
+      expect(await service.check()).toBe(first);
+      expect(await service.check(true)).toBe(first);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      clock.mockReturnValue(first.checkedAt + 30_000);
+      const second = await service.check();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(second.error).toBeUndefined();
+      expect(second.latest).toBe("1.6.0");
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

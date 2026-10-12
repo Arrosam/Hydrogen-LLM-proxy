@@ -33,7 +33,11 @@ interface Harness {
 
 let harness: Harness | null = null;
 
+/** Keep-alive settings a test overrides; cleared again so later tests boot with the defaults. */
+const KEEPALIVE_ENV = ["STREAM_COMMIT_GRACE_MS", "JSON_COMMIT_GRACE_MS", "STREAM_PING_INTERVAL_MS"] as const;
+
 afterEach(async () => {
+  for (const key of KEEPALIVE_ENV) delete process.env[key];
   if (!harness) return;
   await harness.app.close();
   await harness.upstream.close();
@@ -42,7 +46,12 @@ afterEach(async () => {
   harness = null;
 });
 
-async function boot(definition: unknown, script: UpstreamBehavior[], ttfbMs: number): Promise<Harness> {
+async function boot(
+  definition: unknown,
+  script: UpstreamBehavior[],
+  ttfbMs: number,
+  o: { text?: string; delayMs?: number; env?: Partial<Record<(typeof KEEPALIVE_ENV)[number], string>> } = {},
+): Promise<Harness> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-gone-"));
   process.env.NODE_ENV = "test";
   process.env.DATA_DIR = dataDir;
@@ -52,7 +61,10 @@ async function boot(definition: unknown, script: UpstreamBehavior[], ttfbMs: num
   process.env.SESSION_SECRET = "disconnect-test-session-secret";
   process.env.SIMULATED_STREAMING_TOKEN_RATE = "2000000";
 
-  const upstream = await startFakeUpstream({ text: "THE ANSWER", chunkChars: 200, script, ttfbMs });
+  for (const key of KEEPALIVE_ENV) delete process.env[key];
+  Object.assign(process.env, o.env ?? {});
+
+  const upstream = await startFakeUpstream({ text: o.text ?? "THE ANSWER", chunkChars: 200, script, ttfbMs, delayMs: o.delayMs });
 
   const { boot: bootContainer } = await import("../src/composition/container");
   const { buildApp } = await import("../src/app");
@@ -154,4 +166,111 @@ describe("client disconnect while the proxy is still working", () => {
     expect(row.error).toBeNull();
     expect(row.attempts).toBe(2); // the 503 was still retried
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// Coverage additions: the client leaves AFTER bytes have started flowing.
+// ---------------------------------------------------------------------------
+
+interface Hangup {
+  /** Everything the client had received when it hung up. */
+  received: string;
+  status: number;
+  /** When the client destroyed the connection (epoch ms). */
+  at: number;
+}
+
+/** Send a request and destroy the connection as soon as `seen` says enough arrived. */
+function hangUpOnce(port: number, secret: string, stream: boolean, seen: (received: string) => boolean): Promise<Hangup> {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify({ model: "svc", stream, messages: [{ role: "user", content: "hi" }] }));
+    let received = "";
+    let status = 0;
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      req.destroy();
+      resolve({ received, status, at: Date.now() });
+    };
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions",
+        headers: { "content-type": "application/json", authorization: `Bearer ${secret}`, "content-length": String(payload.length) } },
+      (res) => {
+        status = res.statusCode ?? 0;
+        res.setEncoding("utf8");
+        res.on("data", (c: string) => {
+          received += c;
+          if (seen(received)) finish();
+        });
+        res.on("end", () => { if (!done) reject(new Error(`the response ended before the client hung up: ${received.slice(0, 200)}`)); });
+        res.on("error", () => { /* our own destroy */ });
+      });
+    req.on("error", (e) => { if (!done) reject(e); });
+    req.end(payload);
+  });
+}
+
+describe("client disconnect after the response has started", () => {
+  it("passthrough stream: the relay stops, and the row is 499 — long before the upstream would have finished", async () => {
+    // ~330 KB of SSE written 16 KiB at a time with a 150 ms pause after each:
+    // left alone, this upstream keeps the relay busy for about three seconds.
+    const ANSWER_CHARS = 200_000;
+    const h = await boot(
+      { timeoutMs: 30_000, steps: [{ model: "m", provider: "fake", retry: { maxAttempts: 3, on: [503], intervalMs: 0 } }] },
+      [], 0, { text: "y".repeat(ANSWER_CHARS), delayMs: 150, env: { STREAM_COMMIT_GRACE_MS: "600000" } },
+    );
+
+    const gone = await hangUpOnce(h.port, h.secret, true, (r) => r.includes('"content":"yyy'));
+
+    expect(gone.status).toBe(200); // the stream had genuinely started
+    expect(gone.received).not.toContain("[DONE]");
+    expect(gone.received.length).toBeLessThan(ANSWER_CHARS);
+
+    const row = await finalRow(h, 1_500);
+    expect(Date.now() - gone.at).toBeLessThan(1_500); // the relay did not drain the upstream to the end
+    expect(row.http_status).toBe(499);
+    expect(row.error).toBeTruthy();
+    expect(row.attempts).toBe(1);
+    expect(h.upstream.requests).toBe(1); // a disconnect is not a reason to retry
+  }, 15_000);
+
+  it("reliable streaming, after the keep-alive committed and pinged: the work is aborted and the row is 499", async () => {
+    // Commit after 100 ms, ping every 100 ms; the upstream would answer 503 after 1.5 s.
+    const h = await boot(
+      { ...RETRYING, reliableStreaming: true },
+      [{ kind: "status", status: 503 }, { kind: "status", status: 503 }], 1_500,
+      { env: { STREAM_COMMIT_GRACE_MS: "100", STREAM_PING_INTERVAL_MS: "100" } },
+    );
+
+    const gone = await hangUpOnce(h.port, h.secret, true, (r) => r.includes(": ping"));
+
+    expect(gone.status).toBe(200); // committed by the keep-alive
+    expect(gone.received).not.toContain("data:"); // pings only: neither an answer nor an error frame
+
+    const row = await finalRow(h, 1_200);
+    expect(Date.now() - gone.at).toBeLessThan(1_200); // before the upstream's 1.5 s, i.e. caused by the abort
+    expect(row.http_status).toBe(499);
+    expect(row.error).toContain("client disconnected");
+    expect(h.upstream.requests).toBe(1); // the 503 retry chain never started
+  }, 15_000);
+
+  it("non-streaming, after the JSON keep-alive committed: the work is aborted and the row is 499", async () => {
+    const h = await boot(
+      RETRYING,
+      [{ kind: "status", status: 503 }, { kind: "status", status: 503 }], 1_500,
+      { env: { JSON_COMMIT_GRACE_MS: "100", STREAM_PING_INTERVAL_MS: "100" } },
+    );
+
+    const gone = await hangUpOnce(h.port, h.secret, false, (r) => r.length >= 2);
+
+    expect(gone.status).toBe(200);
+    expect(gone.received.trim()).toBe(""); // heartbeat whitespace only
+
+    const row = await finalRow(h, 1_200);
+    expect(Date.now() - gone.at).toBeLessThan(1_200);
+    expect(row.http_status).toBe(499);
+    expect(row.error).toContain("client disconnected");
+    expect(h.upstream.requests).toBe(1);
+  }, 15_000);
 });

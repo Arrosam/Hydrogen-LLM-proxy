@@ -419,6 +419,66 @@ describe("abort signal stops the retry loop", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("an abort during a pending retry delay ends the run without waiting the delay out", async () => {
+    const controller = new AbortController();
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 3, on: [503], intervalMs: 600_000 } }]);
+
+    let attempts = 0;
+    const slept: number[] = [];
+    const { result, path } = await runSteps<string>(def, async () => {
+      attempts += 1;
+      return httpFail(503);
+    }, {
+      // A delay that never elapses: only the abort can end it.
+      sleep: (ms) => {
+        slept.push(ms);
+        setTimeout(() => controller.abort(), 10);
+        return new Promise<void>(() => {});
+      },
+      signal: controller.signal,
+    });
+
+    expect(slept).toEqual([600_000]); // the delay did start
+    expect(attempts).toBe(1); // ...and attempt 2 never ran
+    expect(path).toHaveLength(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe(503);
+  }, 1_000);
+
+  it("a delay that elapses normally with a signal attached still leads to the next attempt", async () => {
+    const controller = new AbortController();
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 2, on: [503], intervalMs: 600_000 } }]);
+
+    const slept: number[] = [];
+    let attempts = 0;
+    const { result } = await runSteps<string>(def, async () => {
+      attempts += 1;
+      return attempts === 1 ? httpFail(503) : success();
+    }, { sleep: async (ms) => { slept.push(ms); }, signal: controller.signal });
+
+    expect(slept).toEqual([600_000]);
+    expect(attempts).toBe(2);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a signal aborted while the attempt is in flight means the retry delay is never started", async () => {
+    const controller = new AbortController();
+    const def = chain([{ model: "m", provider: "p", retry: { maxAttempts: 3, on: [503], intervalMs: 600_000 } }]);
+
+    const sleep = vi.fn(() => new Promise<void>(() => {}));
+    let attempts = 0;
+    const { result, path } = await runSteps<string>(def, async () => {
+      attempts += 1;
+      controller.abort();
+      return httpFail(503);
+    }, { sleep, signal: controller.signal });
+
+    expect(sleep).not.toHaveBeenCalled();
+    expect(attempts).toBe(1);
+    expect(path).toHaveLength(1);
+    expect(result.ok).toBe(false);
+  }, 1_000);
+
   it("the abort also cuts a multi-step chain short", async () => {
     const controller = new AbortController();
     const def = chain([
@@ -557,6 +617,17 @@ describe("ST: step-chain state transitions", () => {
     expect(visited).toEqual([1]); // step 2 is never reached
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.status).toBe(500);
+  });
+
+  it("ST4' advanceOn [] is not 'omitted': it advances on nothing", async () => {
+    const def = chain([s({ maxAttempts: 1, on: [] }, []), s({ maxAttempts: 1, on: [] })]);
+    // The empty list must survive schema parsing, or this would be ST2 again.
+    expect(def.steps[0].advanceOn).toEqual([]);
+    const { visited, result } = await drive(def, [httpFail(503), success()]);
+
+    expect(visited).toEqual([1]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe(503);
   });
 
   it("ST5 advanceOn 'exhausted' -> always transitions once retries are spent", async () => {

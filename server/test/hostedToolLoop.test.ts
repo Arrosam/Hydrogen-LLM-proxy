@@ -5,8 +5,9 @@ import { buildRequest, buildResponse } from "../src/core/format/registry";
 import { fabricateStream } from "../src/core/ir/stream";
 import type { ContentPart } from "../src/core/ir/content";
 import type { Request } from "../src/core/ir/request";
-import type { Invocation } from "../src/execution/outcome";
-import { runHostedTools } from "../src/execution/hostedToolLoop";
+import type { Invocation, StreamInvocation } from "../src/execution/outcome";
+import type { StreamEvent } from "../src/core/ir/stream";
+import { HostedRunError, runHostedTools } from "../src/execution/hostedToolLoop";
 import { HttpToolSchema } from "../src/execution/toolHttp";
 import { HostedToolOptionsSchema } from "../src/execution/definition";
 import { parseService, type AgentDef } from "../src/execution/definition";
@@ -46,7 +47,7 @@ describe("hosted model/tool loop", () => {
     const deps = { transport: t, catalog: {} } as unknown as ServiceDeps;
     const child = new HostedToolService(e as unknown as ModelService, deps, [tool]);
     const agent = new MicroAgent(parseService({ kind: "micro_agent", stages: [{ name: "stage", service: "child", input: [] }] }) as AgentDef,
-      { ...deps, logMaxChars: 10000, resolver: { resolve: () => ({ ok: true, executor: child, isAgent: false }) } });
+      { ...deps, logMaxChars: 10000, resolver: { resolve: () => ({ ok: true, executor: child, isAgent: false }), sttDef: () => ({ ok: false, message: "not used" }) } });
     const run = await runHostedTools(agent, request, [tool], t, { sessionId: "shared", config: HostedToolOptionsSchema.parse({ maxCalls: 1 }) });
     expect(run.value.response.text()).toBe("done");
     expect(run.value.response.usage.totalTokens).toBe(15);
@@ -105,5 +106,96 @@ describe("hosted model/tool loop", () => {
     const e = executor([]);
     await expect(runHostedTools(e, buildRequest(request.family, { ...request.data(), tools: [{ name: "lookup", parameters: {} }] }), [tool], t, { sessionId: "s" })).rejects.toThrow("conflicts");
     expect(e.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("hosted loop guards on the model's output", () => {
+  const withChoice = (toolChoice: Request["toolChoice"]) => buildRequest(request.family, { ...request.data(), toolChoice });
+
+  it("does not host a disabled tool: its call goes back to the client", async () => {
+    const e = executor([[call]]), t = transport();
+    const run = await runHostedTools(e, request, [{ ...tool, enabled: false }], t, { sessionId: "s" });
+    expect((e.requests[0].tools ?? []).map(d => d.name)).not.toContain("lookup");
+    expect(t.postStream).not.toHaveBeenCalled();
+    expect(e.invoke).toHaveBeenCalledTimes(1);
+    expect(run.value.response.toolCalls().map(c => c.id)).toEqual(["c1"]);
+    expect(run.paused).toBe(false);
+  });
+  it("rejects a hosted call the model makes despite tool_choice:none", async () => {
+    const t = transport();
+    await expect(runHostedTools(executor([[call]]), withChoice({ type: "none" }), [tool], t, { sessionId: "s" }))
+      .rejects.toMatchObject({ statusCode: 502, message: "Model called a hosted tool despite tool_choice:none" });
+    expect(t.postStream).not.toHaveBeenCalled();
+  });
+  it("applies a forced tool choice to the first round only", async () => {
+    const e = executor([[call]]);
+    await runHostedTools(e, withChoice({ type: "tool", name: "lookup" }), [tool], transport(), { sessionId: "s" });
+    expect(e.requests[0].toolChoice).toEqual({ type: "tool", name: "lookup" });
+    expect(e.requests[1].toolChoice).toEqual({ type: "auto" });
+  });
+  it("surfaces an upstream failure with its status, the usage so far and every model call", async () => {
+    const e = executor([[call]]);
+    const invoke = vi.fn(async (req: Request): Promise<Invocation> => e.requests.length === 0
+      ? e.invoke(req)
+      : { attempts: 1, attemptPath: [], result: { ok: false, status: 429, kind: "http", message: "slow down" } });
+    const error = await runHostedTools({ invoke, stream: e.stream }, request, [tool], transport(), { sessionId: "s" }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(HostedRunError);
+    expect(error).toMatchObject({ statusCode: 429, message: "slow down", usage: { totalTokens: 5 } });
+    expect((error as HostedRunError).calls).toHaveLength(2);
+  });
+  it("fails with the missing-answer reason when the model returns nothing", async () => {
+    await expect(runHostedTools(executor([[]]), request, [tool], transport(), { sessionId: "s" }))
+      .rejects.toMatchObject({ statusCode: 502, message: "upstream returned no answer or tool call" });
+  });
+});
+
+describe("hosted loop size and ceiling rules", () => {
+  const many = (n: number): ContentPart[] => Array.from({ length: n }, (_, i) => ({ ...call, id: `c${i}` }));
+
+  it("refuses more than 128 hosted calls in one round before running any", async () => {
+    const t = transport();
+    await expect(runHostedTools(executor([many(129)]), request, [tool], t, { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxCalls: 128 }) }))
+      .rejects.toMatchObject({ statusCode: 502, message: expect.stringContaining("too many hosted tools") });
+    expect(t.postStream).not.toHaveBeenCalled();
+  });
+  it("runs exactly 128 hosted calls in one round", async () => {
+    const t = transport();
+    const run = await runHostedTools(executor([many(128)]), request, [tool], t, { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxCalls: 128 }) });
+    expect(t.postStream).toHaveBeenCalledTimes(128);
+    expect(run.traces.filter(event => event.type === "hydrogen.tool.completed" && event.isError === false)).toHaveLength(128);
+    expect(run.value.response.text()).toBe("done");
+  });
+  it("does not pause at the round ceiling when a client call shares the round", async () => {
+    const e = executor([[call, { type: "tool_use", id: "client", name: "local", input: {} }]]), t = transport();
+    const run = await runHostedTools(e, request, [tool], t, { sessionId: "s", config: HostedToolOptionsSchema.parse({ maxRounds: 1 }) });
+    expect(run.paused).toBe(false);
+    expect(run.declined).toEqual([]);
+    expect(t.postStream).toHaveBeenCalledTimes(1);
+    expect(e.invoke).toHaveBeenCalledTimes(1);
+    expect(run.value.response.toolCalls().map(c => c.id)).toEqual(["client"]);
+    expect(run.value.response.stopReason).not.toBe("pause_turn");
+  });
+  it("rejects a tool-loop history over 25 MiB with 413 before calling the model", async () => {
+    const e = executor([]);
+    const big = buildRequest(request.family, { ...request.data(), messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(26 * 1024 * 1024) }] }] });
+    await expect(runHostedTools(e, big, [tool], transport(), { sessionId: "s" })).rejects.toMatchObject({ statusCode: 413 });
+    expect(e.invoke).not.toHaveBeenCalled();
+  });
+  it("fails a truncated model stream with 502 and keeps the usage it reported", async () => {
+    const roundUsage = { promptTokens: 2, completionTokens: 3, totalTokens: 5 };
+    async function* events(): AsyncGenerator<StreamEvent> {
+      yield { type: "start", id: "up", model: "up", created: 1 };
+      yield { type: "text_delta", text: "partial" };
+      yield { type: "usage", usage: roundUsage };
+      yield { type: "finish", stopReason: "stop", incomplete: true };
+    }
+    const stream = vi.fn(async (): Promise<StreamInvocation> => ({ attempts: 1, attemptPath: [], result: { ok: true, value: {
+      family: "openai_responses", modelName: "m", providerName: "p", upstreamModel: "up", upstreamRequest: {}, dropReasoning: false, events: events() } } }));
+    const invoke = vi.fn();
+    const error = await runHostedTools({ invoke, stream }, request, [tool], transport(), { sessionId: "s", config: HostedToolOptionsSchema.parse({ streamMode: "all" }), emit: async () => {} })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ statusCode: 502, usage: { totalTokens: 5 } });
+    expect((error as HostedRunError).calls).toHaveLength(1);
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

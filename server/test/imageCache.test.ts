@@ -316,7 +316,7 @@ const fakeCatalog = (): Catalog =>
     exists: () => true,
   }) as unknown as Catalog;
 
-const noResolver: ServiceResolver = { resolve: () => ({ ok: false, message: "not used" }) };
+const noResolver: ServiceResolver = { resolve: () => ({ ok: false, message: "not used" }), sttDef: () => ({ ok: false, message: "not used" }) };
 
 const ocrAgent = (): AgentDef =>
   parseService({
@@ -475,5 +475,77 @@ describe("MicroAgent OCR pre-pass with the image cache", () => {
     for (const label of labels) expect(text).toContain(`desc:${label}`);
     // ...and every freshly transcribed image was cached.
     expect(repo.stats().entries).toBe(80);
+  });
+});
+
+// --- repository: eviction paging and exact-fit boundaries --------------------
+
+describe("ImageCacheRepo eviction boundaries", () => {
+  /** Every hash currently cached, sorted. */
+  const allHashes = (n: number): string[] => [...repo.lookup(Array.from({ length: n }, (_, i) => mk(i + 1).hash)).keys()].sort();
+
+  /** Fill with `n` hundred-byte entries, each stamped one millisecond later
+   * than the one before, so least-recently-used order is h001, h002, ... */
+  function fill(n: number, budget: number): void {
+    for (let i = 1; i <= n; i++) repo.put([mk(i)], T0 + i, budget);
+  }
+
+  it("stores an entry of exactly the budget by evicting everything else", () => {
+    fillToBudget();
+
+    const exact = { hash: "big1", description: "x".repeat(BUDGET - 4) };
+    expect(entrySize(exact.hash, exact.description)).toBe(BUDGET);
+    expect(repo.put([exact], T0 + 11, BUDGET)).toEqual({ stored: 1, skipped: 0, evicted: 10 });
+    expect(repo.stats()).toEqual({ entries: 1, usedBytes: BUDGET });
+    expect(repo.lookup(["big1"]).get("big1")).toBe(exact.description);
+  });
+
+  it("refuses an entry one byte over the budget and evicts nothing for it", () => {
+    fillToBudget();
+
+    const over = { hash: "big1", description: "x".repeat(BUDGET - 3) };
+    expect(entrySize(over.hash, over.description)).toBe(BUDGET + 1);
+    expect(repo.put([over], T0 + 11, BUDGET)).toEqual({ stored: 0, skipped: 1, evicted: 0 });
+    expect(repo.stats()).toEqual({ entries: 10, usedBytes: BUDGET });
+    expect(hashesPresent()).toHaveLength(10);
+  });
+
+  it("evicts across several pages of candidates, keeping exactly the newest", () => {
+    fill(600, 60_000);
+    expect(repo.stats()).toEqual({ entries: 600, usedBytes: 60_000 });
+
+    // 590 victims: two full pages of 256 and part of a third.
+    expect(repo.enforceBudget(1000)).toBe(590);
+    expect(repo.stats()).toEqual({ entries: 10, usedBytes: 1000 });
+    expect(allHashes(600)).toEqual(Array.from({ length: 10 }, (_, i) => mk(591 + i).hash));
+  });
+
+  it("looks past a whole page of protected rows to find something evictable", () => {
+    fill(300, 30_000);
+
+    // Rewrite the 256 least-recently-used rows one byte larger each. They are
+    // the entire first page of eviction candidates and none may be evicted, so
+    // the 256 bytes have to come from the rows behind them.
+    const rewrites = Array.from({ length: 256 }, (_, i) => mk(i + 1, "y".repeat(97)));
+    expect(repo.put(rewrites, T0 + 1000, 30_000)).toEqual({ stored: 256, skipped: 0, evicted: 3 });
+
+    expect(repo.stats()).toEqual({ entries: 297, usedBytes: 30_000 - 300 + 256 });
+    const present = allHashes(300);
+    expect(present.slice(0, 256)).toEqual(rewrites.map((r) => r.hash)); // every rewritten row survived
+    expect(present).not.toContain(mk(257).hash);
+    expect(present).not.toContain(mk(258).hash);
+    expect(present).not.toContain(mk(259).hash);
+    expect(present).toContain(mk(260).hash);
+    expect(repo.lookup([mk(1).hash]).get(mk(1).hash)).toBe("y".repeat(97));
+  });
+
+  it("evicts in ascending hash order when every row carries the same timestamp", () => {
+    // One batch, one timestamp -- and written highest hash first, so neither
+    // recency nor insertion order can explain which rows go.
+    const batch = Array.from({ length: 10 }, (_, i) => mk(10 - i));
+    expect(repo.put(batch, T0, BUDGET)).toEqual({ stored: 10, skipped: 0, evicted: 0 });
+
+    expect(repo.enforceBudget(700)).toBe(3);
+    expect(hashesPresent()).toEqual(["h004", "h005", "h006", "h007", "h008", "h009", "h010"]);
   });
 });

@@ -4,6 +4,9 @@ import { ProgressRecorder } from "../src/observability/progressRecorder";
 import { runSteps, type AttemptResult } from "../src/execution/steps";
 import type { ServiceSteps } from "../src/execution/definition";
 import type { ProgressEvent } from "../src/observability/activeRequests";
+import Fastify from "fastify";
+import { activeRequestRoutes } from "../src/transport/admin/activeRequestRoutes";
+import { retryConfig } from "./retryFixture";
 
 const noSleep = { sleep: async () => {} };
 
@@ -37,30 +40,42 @@ describe("ActiveRequestRegistry", () => {
     expect(done.done).toBe(true);
   });
 
-  it("flags requests as blocked after the threshold", () => {
+  it("flags requests as blocked after the threshold", async () => {
+    // `blocked` is computed by the admin API's serializer, so ask the API.
+    const startedAt = 1_700_000_000_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
     reg.start({ traceId: "trace-blocked", tokenId: null, serviceId: null, serviceName: null, ingress: "openai_completion", streaming: false });
-    const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + BLOCK_THRESHOLD_MS + 5000);
-    const active = reg.listActive();
-    expect(active[0]).toBeDefined();
-    // blocked is computed in the API serializer, not stored; but we can check elapsed
-    const elapsed = Date.now() - active[0].startedAt;
-    expect(elapsed).toBeGreaterThan(BLOCK_THRESHOLD_MS);
-    clock.mockRestore();
+    const app = Fastify({ logger: false });
+    await activeRequestRoutes(app, { activeRequests: reg } as never);
+    const listed = async () => (await app.inject({ url: "/active-requests" })).json<{ active: Array<{ traceId: string; blocked: boolean; elapsedMs: number }> }>().active[0];
+    try {
+      clock.mockReturnValue(startedAt + BLOCK_THRESHOLD_MS - 5000);
+      expect(await listed()).toMatchObject({ traceId: "trace-blocked", blocked: false, elapsedMs: BLOCK_THRESHOLD_MS - 5000 });
+      clock.mockReturnValue(startedAt + BLOCK_THRESHOLD_MS + 5000);
+      expect(await listed()).toMatchObject({ traceId: "trace-blocked", blocked: true, elapsedMs: BLOCK_THRESHOLD_MS + 5000 });
+    } finally {
+      clock.mockRestore();
+      await app.close();
+    }
   });
 
   it("retains only the last N completed requests (ring buffer)", () => {
-    for (let i = 0; i < 10; i++) {
+    const RETENTION = 64; // what `reg` was built with
+    const finish = (i: number): void => {
       reg.start({ traceId: `trace-${i}`, tokenId: null, serviceId: null, serviceName: null, ingress: "openai_completion", streaming: false });
       reg.finish(`trace-${i}`, 200);
-    }
-    expect(reg.listCompleted()).toHaveLength(10);
-    // Now overflow the ring buffer (retention = 64, add 60 more).
-    for (let i = 10; i < 80; i++) {
-      reg.start({ traceId: `trace-${i}`, tokenId: null, serviceId: null, serviceName: null, ingress: "openai_completion", streaming: false });
-      reg.finish(`trace-${i}`, 200);
-    }
-    expect(reg.listCompleted().length).toBeLessThanOrEqual(64);
+    };
+    for (let i = 0; i < 10; i++) finish(i);
+    // Ask for more than the default page (50), or the page size hides the ring's.
+    expect(reg.listCompleted(1_000)).toHaveLength(10);
+    // Now overflow the ring buffer: 80 finished in all.
+    for (let i = 10; i < 80; i++) finish(i);
+    const kept = reg.listCompleted(1_000).map((r) => r.traceId);
+    expect(kept).toHaveLength(RETENTION);
+    expect(kept[0]).toBe("trace-79"); // newest first
+    expect(kept.at(-1)).toBe("trace-16"); // the oldest 16 were dropped
+    expect(reg.get("trace-15")).toBeUndefined();
+    expect(reg.get("trace-16")).toBeDefined();
   });
 
   it("get() finds both active and completed requests", () => {
@@ -187,7 +202,7 @@ describe("Retry progress backtracking via runSteps", () => {
     };
 
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 5, intervalMs: 10 } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 5, intervalMs: 10 }) }]),
       attempt,
       { sleep: async () => {}, progress: prog },
     );
@@ -213,7 +228,7 @@ describe("Retry progress backtracking via runSteps", () => {
     const attempt = async (): Promise<AttemptResult<string>> => ({ ok: false, status: 503, kind: "http", message: "always fails" });
 
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 3, intervalMs: 0 } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 3, intervalMs: 0 }) }]),
       attempt,
       { sleep: async () => {}, progress: prog },
     );
@@ -244,7 +259,7 @@ describe("Retry progress backtracking via runSteps", () => {
     };
 
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { on: [429], maxAttempts: 3, backoff: { initialMs: 50, maxMs: 200 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ on: [429], maxAttempts: 3, backoff: { initialMs: 50, maxMs: 200 } }) }]),
       attempt,
       { ...noSleep, progress: new ProgressRecorder(reg, traceId) },
     );
@@ -339,5 +354,249 @@ describe("Performance overhead", () => {
     expect(list).toHaveLength(N);
     // Should be < 5ms for 1000 entries.
     expect(elapsed).toBeLessThan(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage additions
+// ---------------------------------------------------------------------------
+
+const begin = (reg: ActiveRequestRegistry, traceId: string): void =>
+  reg.start({ traceId, tokenId: 1, serviceId: 2, serviceName: "svc", ingress: "openai_completion", streaming: false });
+
+describe("BVA: per-request progress-event cap (500)", () => {
+  it("keeps 500 events, drops the 501st, and still records the terminal 'done' event", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "t");
+    for (let i = 0; i < 499; i++) reg.record("t", "llm", "n", `event ${i}`);
+    expect(reg.get("t")!.events).toHaveLength(499);
+
+    reg.record("t", "llm", "n", "the 500th");
+    expect(reg.get("t")!.events).toHaveLength(500);
+
+    reg.record("t", "llm", "n", "the 501st");
+    reg.record("t", "retry", "n", "also over the cap");
+    expect(reg.get("t")!.events).toHaveLength(500);
+    expect(reg.stats().totalEvents).toBe(500);
+    expect(reg.get("t")!.events[499].message).toBe("the 500th");
+
+    reg.record("t", "done", "request.complete", "finished");
+    const events = reg.get("t")!.events;
+    expect(events).toHaveLength(501);
+    expect(events[500]).toMatchObject({ phase: "done", node: "request.complete", message: "finished" });
+    expect(reg.stats().totalEvents).toBe(501);
+
+    reg.record("t", "error", "n", "an error after the cap");
+    expect(reg.get("t")!.events).toHaveLength(501);
+    expect(reg.get("t")!.events[500].phase).toBe("done");
+  });
+
+  it("the cap is per request: a second request is unaffected by a saturated one", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "full");
+    begin(reg, "other");
+    for (let i = 0; i < 600; i++) reg.record("full", "llm", "n", "x");
+    reg.record("other", "llm", "n", "still recorded");
+    expect(reg.get("full")!.events).toHaveLength(500);
+    expect(reg.get("other")!.events).toHaveLength(1);
+  });
+});
+
+describe("ST: completed requests — retention, order, limit, amendment", () => {
+  const finishAll = (reg: ActiveRequestRegistry, ids: string[]): void => {
+    for (const id of ids) { begin(reg, id); reg.finish(id, 200); }
+  };
+  const ids = (list: Array<{ traceId: string }>): string[] => list.map((r) => r.traceId);
+
+  it("retains exactly the last N, newest first, and forgets the rest", () => {
+    const reg = new ActiveRequestRegistry(3);
+    finishAll(reg, ["t1", "t2", "t3"]);
+    expect(ids(reg.listCompleted(10))).toEqual(["t3", "t2", "t1"]); // exactly at capacity: nothing dropped
+
+    finishAll(reg, ["t4"]);
+    expect(ids(reg.listCompleted(10))).toEqual(["t4", "t3", "t2"]);
+    expect(reg.get("t1")).toBeUndefined();
+    expect(reg.stats().completed).toBe(3);
+  });
+
+  it("the default retention is 256", () => {
+    const reg = new ActiveRequestRegistry();
+    finishAll(reg, Array.from({ length: 257 }, (_, i) => `t${i}`));
+    expect(reg.stats().completed).toBe(256);
+    expect(reg.get("t0")).toBeUndefined();
+    expect(reg.get("t1")).toBeDefined();
+  });
+
+  it("listCompleted honours its limit and defaults to 50", () => {
+    const reg = new ActiveRequestRegistry(64);
+    finishAll(reg, Array.from({ length: 60 }, (_, i) => `t${i}`));
+    expect(ids(reg.listCompleted(2))).toEqual(["t59", "t58"]);
+    expect(reg.listCompleted()).toHaveLength(50);
+    expect(reg.listCompleted()[0].traceId).toBe("t59");
+    expect(reg.listCompleted(1000)).toHaveLength(60);
+    expect(reg.stats().completed).toBe(60); // the limit is a view, not the retention
+  });
+
+  it("finish records the status and error; a missing error is stored as null", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "ok");
+    begin(reg, "bad");
+    reg.finish("ok", 200);
+    reg.finish("bad", 502, "upstream died");
+    expect(reg.get("ok")).toMatchObject({ done: true, httpStatus: 200, error: null });
+    expect(reg.get("bad")).toMatchObject({ done: true, httpStatus: 502, error: "upstream died" });
+    expect(reg.stats()).toMatchObject({ active: 0, completed: 2 });
+  });
+
+  it("amendCompleted rewrites the outcome of a finished request", () => {
+    const reg = new ActiveRequestRegistry();
+    finishAll(reg, ["t1"]);
+    reg.amendCompleted("t1", 499, "reset");
+    expect(reg.get("t1")).toMatchObject({ httpStatus: 499, error: "reset", done: true });
+    expect(reg.listCompleted()[0]).toMatchObject({ httpStatus: 499, error: "reset" });
+  });
+
+  it("amendCompleted ignores a request that is still in flight, and an unknown id", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "live");
+    reg.amendCompleted("live", 499, "reset");
+    reg.amendCompleted("ghost", 499, "reset");
+    expect(reg.get("live")).toMatchObject({ httpStatus: null, error: null, done: false });
+    expect(reg.get("ghost")).toBeUndefined();
+    expect(reg.stats()).toMatchObject({ active: 1, completed: 0 });
+  });
+
+  it("finishing an unknown id, or the same id twice, changes nothing", () => {
+    const reg = new ActiveRequestRegistry();
+    reg.finish("ghost", 200);
+    expect(reg.stats().completed).toBe(0);
+
+    finishAll(reg, ["t1"]);
+    reg.finish("t1", 500, "second finish");
+    expect(reg.stats().completed).toBe(1);
+    expect(reg.get("t1")).toMatchObject({ httpStatus: 200, error: null });
+  });
+
+  it("events recorded after finish are dropped", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "t1");
+    reg.record("t1", "init", "a", "before");
+    reg.finish("t1", 200);
+    reg.record("t1", "done", "b", "after");
+    expect(reg.get("t1")!.events).toHaveLength(1);
+  });
+
+  it("reads are snapshots: mutating a returned entry does not change the registry", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "live");
+    reg.record("live", "init", "a", "first");
+    const listed = reg.listActive()[0];
+    listed.events.push({ ts: 0, phase: "error", node: "x", message: "injected" });
+    listed.serviceName = "tampered";
+    const got = reg.get("live")!;
+    got.events.length = 0;
+
+    expect(reg.get("live")!.events).toHaveLength(1);
+    expect(reg.listActive()[0].serviceName).toBe("svc");
+
+    reg.finish("live", 200);
+    reg.listCompleted()[0].httpStatus = 500;
+    expect(reg.get("live")!.httpStatus).toBe(200);
+  });
+
+  it("clear() empties everything, counters included", () => {
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "live");
+    reg.record("live", "init", "a", "first");
+    finishAll(reg, ["t1"]);
+    reg.clear();
+    expect(reg.stats()).toEqual({ active: 0, completed: 0, totalEvents: 0 });
+  });
+});
+
+// The "blocked" flag is not stored on the registry: it is computed where the
+// admin API serializes a request. These drive that route, so the 30 s
+// threshold is evaluated by production code rather than by the test's own
+// arithmetic.
+describe("BVA: the blocked flag the admin API reports (threshold 30 000 ms)", () => {
+  const T = 1_700_000_000_000;
+  let now = T;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  async function api(reg: ActiveRequestRegistry) {
+    const app = Fastify({ logger: false });
+    await activeRequestRoutes(app, { activeRequests: reg } as never);
+    return app;
+  }
+  interface Row { traceId: string; blocked: boolean; elapsedMs: number; done: boolean; eventCount: number; lastNode: string | null }
+  interface Listing { active: Row[]; completed: Row[]; blockThresholdMs: number; now: number }
+
+  it("exactly at the threshold a request is not blocked; one millisecond later it is", async () => {
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    now = T;
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "slow");
+    const app = await api(reg);
+    try {
+      now = T + BLOCK_THRESHOLD_MS;
+      let body = (await app.inject({ url: "/active-requests" })).json<Listing>();
+      expect(body.blockThresholdMs).toBe(30_000);
+      expect(body.active[0]).toMatchObject({ traceId: "slow", elapsedMs: 30_000, blocked: false });
+      expect((await app.inject({ url: "/active-requests/stats" })).json<{ blocked: number }>().blocked).toBe(0);
+
+      now = T + BLOCK_THRESHOLD_MS + 1;
+      body = (await app.inject({ url: "/active-requests" })).json<Listing>();
+      expect(body.active[0]).toMatchObject({ elapsedMs: 30_001, blocked: true });
+      expect((await app.inject({ url: "/active-requests/stats" })).json<{ blocked: number; active: number }>())
+        .toMatchObject({ blocked: 1, active: 1 });
+      const single = (await app.inject({ url: "/active-requests/slow" })).json<{ request: Row }>();
+      expect(single.request.blocked).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a finished request is never blocked, however long it took", async () => {
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    now = T;
+    const reg = new ActiveRequestRegistry();
+    begin(reg, "old");
+    const app = await api(reg);
+    try {
+      now = T + 10 * BLOCK_THRESHOLD_MS;
+      reg.finish("old", 200);
+      const body = (await app.inject({ url: "/active-requests" })).json<Listing>();
+      expect(body.active).toEqual([]);
+      expect(body.completed[0]).toMatchObject({ traceId: "old", done: true, blocked: false, elapsedMs: 300_000 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("blocked requests are listed first, then the longest-running", async () => {
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const reg = new ActiveRequestRegistry();
+    now = T;
+    begin(reg, "stuck");
+    now = T + 20_000;
+    begin(reg, "middle");
+    now = T + 25_000;
+    begin(reg, "young");
+    reg.record("young", "llm", "llm.send", "sending");
+    const app = await api(reg);
+    try {
+      now = T + 30_001;
+      const body = (await app.inject({ url: "/active-requests" })).json<Listing>();
+      expect(body.active.map((r) => [r.traceId, r.blocked])).toEqual([["stuck", true], ["middle", false], ["young", false]]);
+      expect(body.active[2]).toMatchObject({ eventCount: 1, lastNode: "llm.send" });
+
+      const filtered = (await app.inject({ url: "/active-requests?traceId=young" })).json<Listing>();
+      expect(filtered.active.map((r) => r.traceId)).toEqual(["young"]);
+
+      expect((await app.inject({ url: "/active-requests/ghost" })).statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
   });
 });

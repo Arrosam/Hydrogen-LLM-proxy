@@ -1,0 +1,1052 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`admin bench > chat: unknown id, invalid definition, media service > broken 1`] = `
+{
+  "body": {
+    "error": ""broken" has an invalid definition",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > chat: unknown id, invalid definition, media service > painter 1`] = `
+{
+  "body": {
+    "error": ""painter" is a image service; bench it from the media panel",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > chat: unknown id, invalid definition, media service > unknown 1`] = `
+{
+  "body": {
+    "error": "Model Service not found",
+  },
+  "logged": 0,
+  "status": 404,
+}
+`;
+
+exports[`admin bench > media: unknown id, invalid definition, agent, other category > agent 1`] = `
+{
+  "body": {
+    "error": ""agent" is a Micro Agent; it has no media endpoint",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > media: unknown id, invalid definition, agent, other category > broken 1`] = `
+{
+  "body": {
+    "error": ""broken" has an invalid definition",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > media: unknown id, invalid definition, agent, other category > chat category 1`] = `
+{
+  "body": {
+    "error": ""chat" is a chat-pipeline category; bench it from the chat panel",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > media: unknown id, invalid definition, agent, other category > painter 1`] = `
+{
+  "body": {
+    "error": ""painter" is a image service, not embedding",
+  },
+  "logged": 0,
+  "status": 400,
+}
+`;
+
+exports[`admin bench > media: unknown id, invalid definition, agent, other category > unknown 1`] = `
+{
+  "body": {
+    "error": "Model Service not found",
+  },
+  "logged": 0,
+  "status": 404,
+}
+`;
+
+exports[`anthropic messages > broken 1`] = `
+{
+  "body": {
+    "error": {
+      "message": "Model 'broken' has an invalid definition.",
+      "type": "api_error",
+    },
+    "type": "error",
+  },
+  "logged": 1,
+  "quotaSpent": 1,
+  "row": {
+    "attempts": 0,
+    "error": "invalid Model Service definition: [
+  {
+    "code": "too_small",
+    "minimum": 1,
+    "type": "array",
+    "inclusive": true,
+    "exact": false,
+    "message": "a Model Service needs at least one step",
+    "path": [
+      "steps"
+    ]
+  }
+]",
+    "http_status": 500,
+    "ingress": "anthropic",
+    "request_path": "/v1/messages",
+    "requested_service": "broken",
+    "service_id": "broken",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 500,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`anthropic messages > nope 1`] = `
+{
+  "body": {
+    "error": {
+      "message": "Model 'nope' not found. The 'model' field must be a Model Service or Micro Agent name.",
+      "type": "not_found_error",
+    },
+    "type": "error",
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'nope'",
+    "http_status": 404,
+    "ingress": "anthropic",
+    "request_path": "/v1/messages",
+    "requested_service": "nope",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`anthropic messages > off 1`] = `
+{
+  "body": {
+    "error": {
+      "message": "Model 'off' not found. The 'model' field must be a Model Service or Micro Agent name.",
+      "type": "not_found_error",
+    },
+    "type": "error",
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'off'",
+    "http_status": 404,
+    "ingress": "anthropic",
+    "request_path": "/v1/messages",
+    "requested_service": "off",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`anthropic messages > other-scoped 1`] = `
+{
+  "body": {
+    "error": {
+      "message": "This API key is not allowed to use 'svc'.",
+      "type": "permission_error",
+    },
+    "type": "error",
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "service out of token scope",
+    "http_status": 403,
+    "ingress": "anthropic",
+    "request_path": "/v1/messages",
+    "requested_service": "svc",
+    "service_id": "svc",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`anthropic messages > painter 1`] = `
+{
+  "body": {
+    "error": {
+      "message": "'painter' is a image service; use its dedicated endpoint instead of chat.",
+      "type": "invalid_request_error",
+    },
+    "type": "error",
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'painter' is a image service",
+    "http_status": 400,
+    "ingress": "anthropic",
+    "request_path": "/v1/messages",
+    "requested_service": "painter",
+    "service_id": "painter",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > a streaming request is rejected the same way, logged as streaming > broken 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'broken' has an invalid definition.",
+      "param": null,
+      "type": "server_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 1,
+  "row": {
+    "attempts": 0,
+    "error": "invalid Model Service definition: [
+  {
+    "code": "too_small",
+    "minimum": 1,
+    "type": "array",
+    "inclusive": true,
+    "exact": false,
+    "message": "a Model Service needs at least one step",
+    "path": [
+      "steps"
+    ]
+  }
+]",
+    "http_status": 500,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "broken",
+    "service_id": "broken",
+    "streaming": 1,
+    "trace_id": "trace",
+  },
+  "status": 500,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > a streaming request is rejected the same way, logged as streaming > unknown 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'nope' not found. The 'model' field must be a Model Service or Micro Agent name.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'nope'",
+    "http_status": 404,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "nope",
+    "service_id": null,
+    "streaming": 1,
+    "trace_id": "trace",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > broken 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'broken' has an invalid definition.",
+      "param": null,
+      "type": "server_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 1,
+  "row": {
+    "attempts": 0,
+    "error": "invalid Model Service definition: [
+  {
+    "code": "too_small",
+    "minimum": 1,
+    "type": "array",
+    "inclusive": true,
+    "exact": false,
+    "message": "a Model Service needs at least one step",
+    "path": [
+      "steps"
+    ]
+  }
+]",
+    "http_status": 500,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "broken",
+    "service_id": "broken",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 500,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > nope 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'nope' not found. The 'model' field must be a Model Service or Micro Agent name.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'nope'",
+    "http_status": 404,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "nope",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > off 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'off' not found. The 'model' field must be a Model Service or Micro Agent name.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'off'",
+    "http_status": 404,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "off",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > other-scoped 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "This API key is not allowed to use 'svc'.",
+      "param": null,
+      "type": "authentication_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "service out of token scope",
+    "http_status": 403,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "svc",
+    "service_id": "svc",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`chat completions > painter 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'painter' is a image service; use its dedicated endpoint instead of chat.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'painter' is a image service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/chat/completions",
+    "requested_service": "painter",
+    "service_id": "painter",
+    "streaming": 0,
+    "trace_id": "trace",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > agent 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'agent' is a Micro Agent; this endpoint serves embedding Model Services only.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'agent' is a Micro Agent",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "agent",
+    "service_id": "agent",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > broken 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'broken' has an invalid definition.",
+      "param": null,
+      "type": "server_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "invalid Model Service definition: [
+  {
+    "code": "too_small",
+    "minimum": 1,
+    "type": "array",
+    "inclusive": true,
+    "exact": false,
+    "message": "a Model Service needs at least one step",
+    "path": [
+      "steps"
+    ]
+  }
+]",
+    "http_status": 500,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "broken",
+    "service_id": "broken",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 500,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > filmer 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'filmer' is a video service; call it via /v1/videos.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'filmer' is a video service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "filmer",
+    "service_id": "filmer",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > no model at all 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Missing 'model' (must be a Model Service name).",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > nope 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'nope' not found.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'nope'",
+    "http_status": 404,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "nope",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > off 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model 'off' not found.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "unknown model 'off'",
+    "http_status": 404,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "off",
+    "service_id": null,
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > other-scoped 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "This token is not allowed to use 'embedder'.",
+      "param": null,
+      "type": "authentication_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "service out of token scope",
+    "http_status": 403,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "embedder",
+    "service_id": "embedder",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > painter 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'painter' is a image service; call it via /v1/images/generations.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'painter' is a image service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "painter",
+    "service_id": "painter",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > reader 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'reader' is a ocr service; call it via /v1/chat/completions.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'reader' is a ocr service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "reader",
+    "service_id": "reader",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > speech names its own category in the rejection > agent 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'agent' is a Micro Agent; this endpoint serves tts Model Services only.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'agent' is a Micro Agent",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/audio/speech",
+    "requested_service": "agent",
+    "service_id": "agent",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > speech names its own category in the rejection > embedder 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'embedder' is a embedding service; call it via /v1/embeddings.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'embedder' is a embedding service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/audio/speech",
+    "requested_service": "embedder",
+    "service_id": "embedder",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`media create (embeddings) > svc 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "'svc' is a chat service; call it via /v1/chat/completions.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "'svc' is a chat service",
+    "http_status": 400,
+    "ingress": "openai_completion",
+    "request_path": "/v1/embeddings",
+    "requested_service": "svc",
+    "service_id": "svc",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > broken 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "[
+  {
+    "code": "too_small",
+    "minimum": 1,
+    "type": "array",
+    "inclusive": true,
+    "exact": false,
+    "message": "a Model Service needs at least one step",
+    "path": [
+      "steps"
+    ]
+  }
+]",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > no model at all 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Missing model",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > nope 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model service not found",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > off 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Model service not found",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > other-scoped 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "API key does not allow this service",
+      "param": null,
+      "type": "authentication_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`responses (stateful path) > painter 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Use the service's dedicated endpoint",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 400,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > a key scoped elsewhere 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "This token is not allowed to use 'filmer'.",
+      "param": null,
+      "type": "authentication_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "service out of token scope",
+    "http_status": 403,
+    "ingress": "openai_completion",
+    "request_path": "/v1/videos/job1-h6x1e0",
+    "requested_service": "filmer",
+    "service_id": "filmer",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > a missing endpoint index 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "The endpoint that created this video no longer exists on its provider.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > a service that is gone, or disabled > disabled 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "The service that created this video no longer exists.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > a service that is gone, or disabled > gone 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "The service that created this video no longer exists.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > an id this proxy did not hand out 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "Unknown video id (expected an id returned by this proxy's POST /v1/videos).",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > the scope check comes before the provider check > missing provider 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "The provider that created this video no longer exists.",
+      "param": null,
+      "type": "invalid_request_error",
+    },
+  },
+  "logged": 0,
+  "quotaSpent": 0,
+  "row": null,
+  "status": 404,
+  "upstreamCalls": 0,
+}
+`;
+
+exports[`video poll > the scope check comes before the provider check > scoped + missing provider 1`] = `
+{
+  "body": {
+    "error": {
+      "code": null,
+      "message": "This token is not allowed to use 'filmer'.",
+      "param": null,
+      "type": "authentication_error",
+    },
+  },
+  "logged": 1,
+  "quotaSpent": 0,
+  "row": {
+    "attempts": 0,
+    "error": "service out of token scope",
+    "http_status": 403,
+    "ingress": "openai_completion",
+    "request_path": "/v1/videos/job1-h6x99999e0",
+    "requested_service": "filmer",
+    "service_id": "filmer",
+    "streaming": 0,
+    "trace_id": "req",
+  },
+  "status": 403,
+  "upstreamCalls": 0,
+}
+`;

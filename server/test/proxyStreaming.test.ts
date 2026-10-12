@@ -13,6 +13,8 @@
 
 import { describe, expect, it, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import "../src/core/format"; // register wire formats
 import { ProxyController } from "../src/transport/proxyController";
@@ -76,7 +78,7 @@ const fakeCatalog: Catalog = {
   exists: () => true,
 } as unknown as Catalog;
 
-function makeTransport(frames: string[], slowDelayMs?: number): Transport {
+function makeTransport(frames: string[], slowDelayMs?: number): Transport & Pick<ProxyDeps["transport"], "getJson"> {
   return {
     async postStream(
       _url: string,
@@ -135,6 +137,9 @@ function makeTokenRepo(): ProxyDeps["tokens"] {
     name: "test",
     keyHash: "hash",
     keyPrefix: "test",
+    keyCiphertext: null,
+    keyIv: null,
+    keyTag: null,
     ownerUserId: null,
     scopeServices: null,
     maxRequests: null,
@@ -158,7 +163,7 @@ function makeTokenRepo(): ProxyDeps["tokens"] {
 
 /** A minimal RequestLogger that captures the last logged entry. */
 type LoggerPort = ProxyDeps["logger"];
-class CapturingLogger implements LoggerPort {
+class CapturingLogger implements Pick<LoggerPort, "record" | "capture"> {
   lastEntry: LogParams | null = null;
   /** Payloads captured early, in call order, so a test can assert that the
    * controller serialized before releasing the object rather than after. */
@@ -195,7 +200,7 @@ function buildApp(
   const usage = makeUsageMeter();
   const factory = new ServiceFactory(services, { catalog: fakeCatalog, transport, progress: activeRequests }, 10000);
 
-  const deps: ProxyDeps = { services, factory, tokens, catalog: fakeCatalog, transport: transport as any, logger, usage, activeRequests };
+  const deps: ProxyDeps = { services, factory, tokens, catalog: fakeCatalog, transport: transport as any, logger: logger as unknown as LoggerPort, usage, activeRequests };
 
   const app = Fastify({ logger: false });
   new ProxyController(deps).register(app);
@@ -367,6 +372,244 @@ describe("ProxyController streaming — real Fastify integration", () => {
       }
     } finally {
       await shutdown();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The same relay, asserted on what the LOG says about it. These run the
+// controller's own write loop (the former relay.test.ts checked "logged ==
+// delivered" against a local copy of it, which could not fail when the
+// controller changed).
+// ---------------------------------------------------------------------------
+
+describe("ProxyController relay — the log row matches what the client received", () => {
+  const TOOL_FRAMES = [
+    'data: {"id":"c","model":"up","choices":[{"delta":{"role":"assistant"}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"hello\\"}"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  /** The answer cut off cleanly: no finish_reason, no [DONE]. */
+  const TRUNCATED_FRAMES = OK_FRAMES.slice(0, 2);
+
+  const openaiDeltas = (sse: string): string => {
+    let text = "";
+    for (const frame of sse.split("\n\n")) {
+      if (!frame.startsWith("data:") || frame.includes("[DONE]")) continue;
+      const delta = (JSON.parse(frame.slice(5)) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+      if (typeof delta === "string") text += delta;
+    }
+    return text;
+  };
+  const anthropicDeltas = (sse: string): string => {
+    let text = "";
+    for (const frame of sse.split("\n\n")) {
+      const line = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const j = JSON.parse(line.slice(5)) as { type?: string; delta?: { type?: string; text?: string } };
+      if (j.type === "content_block_delta" && j.delta?.type === "text_delta") text += j.delta.text ?? "";
+    }
+    return text;
+  };
+  /** The relay logs after the response settles, which can trail the client's read. */
+  async function logged(logger: CapturingLogger): Promise<LogParams> {
+    for (let i = 0; i < 100 && !logger.lastEntry; i++) await new Promise((r) => setTimeout(r, 10));
+    if (!logger.lastEntry) throw new Error("the relay never logged");
+    return logger.lastEntry;
+  }
+
+  it("OpenAI ingress: logged content equals the delivered deltas, with usage and stop reason", async () => {
+    const { app, logger } = buildApp(OK_FRAMES);
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/v1/chat/completions",
+        headers: { authorization: "Bearer test", "content-type": "application/json" },
+        payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+      const delivered = openaiDeltas(res.body);
+      expect(delivered).toBe("hello world this is a test");
+
+      const entry = await logged(logger);
+      expect(entry).toMatchObject({ httpStatus: 200, error: null, streaming: true, ingress: "openai_completion", egress: "openai_completion", attempts: 1 });
+      expect(entry.responseBody).toMatchObject({ streamed: true, role: "assistant", content: delivered, stop_reason: "stop" });
+      expect(entry.usage).toMatchObject({ promptTokens: 3, completionTokens: 5, totalTokens: 8 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("Anthropic ingress: the same upstream stream is re-framed, and the log still matches the delivered text", async () => {
+    const { app, logger } = buildApp(OK_FRAMES);
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/v1/messages",
+        headers: { "x-api-key": "test", "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        payload: { model: "svc", stream: true, max_tokens: 64, messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain("event: message_start");
+      expect(res.body).toContain("event: message_stop");
+      expect(res.body).not.toContain("[DONE]");
+      const delivered = anthropicDeltas(res.body);
+      expect(delivered).toBe("hello world this is a test");
+
+      const entry = await logged(logger);
+      expect(entry).toMatchObject({ httpStatus: 200, error: null, ingress: "anthropic", egress: "openai_completion" });
+      expect((entry.responseBody as { content: string }).content).toBe(delivered);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a tool-call stream is delivered whole and logged as a tool call", async () => {
+    const { app, logger } = buildApp(TOOL_FRAMES);
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/v1/chat/completions",
+        headers: { authorization: "Bearer test", "content-type": "application/json" },
+        payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain('"name":"lookup"');
+      expect(res.body).toContain("[DONE]");
+
+      const entry = await logged(logger);
+      expect(entry).toMatchObject({ httpStatus: 200, error: null });
+      const body = entry.responseBody as { stop_reason: string; tool_calls: Array<{ name: string }> };
+      expect(body.stop_reason).toBe("tool_use");
+      expect(body.tool_calls).toHaveLength(1);
+      expect(body.tool_calls[0].name).toBe("lookup");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("an upstream stream that ends cleanly without finishing is not terminated like a complete one, and is logged 502", async () => {
+    const { app, logger } = buildApp(TRUNCATED_FRAMES);
+    try {
+      // The controller aborts the connection rather than ending it, so the
+      // in-process client may see either a short body or a transport error.
+      const res = await app.inject({
+        method: "POST", url: "/v1/chat/completions",
+        headers: { authorization: "Bearer test", "content-type": "application/json" },
+        payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] },
+      }).catch(() => null);
+      if (res) {
+        expect(res.body).not.toContain("[DONE]");
+        expect(res.body).not.toContain('"finish_reason":"stop"');
+      }
+
+      const entry = await logged(logger);
+      expect(entry.httpStatus).toBe(502);
+      expect(entry.error).toBe("upstream stream ended before completion (truncated)");
+      expect(entry.responseBody).toMatchObject({ incomplete: true, content: "hello world this is a test" });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What the former relay.test.ts asserted of its copied loop and nothing else
+// asserted of the controller: reasoning in the log, chunk-by-chunk delivery,
+// and independence of consecutive relays.
+// ---------------------------------------------------------------------------
+
+describe("ProxyController relay — delivery properties", () => {
+  const post = (app: FastifyInstance) => app.inject({
+    method: "POST", url: "/v1/chat/completions",
+    headers: { authorization: "Bearer test", "content-type": "application/json" },
+    payload: { model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] },
+  });
+  async function logged(logger: CapturingLogger): Promise<LogParams> {
+    for (let i = 0; i < 100 && !logger.lastEntry; i++) await new Promise((r) => setTimeout(r, 10));
+    if (!logger.lastEntry) throw new Error("the relay never logged");
+    return logger.lastEntry;
+  }
+  const framesFor = (text: string): string[] => [
+    'data: {"id":"c","model":"up","choices":[{"delta":{"role":"assistant"}}]}\n\n',
+    `data: {"choices":[{"delta":{"content":${JSON.stringify(text)}}}]}\n\n`,
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}\n\n',
+    "data: [DONE]\n\n",
+  ];
+
+  it("a reasoning stream: the trace is delivered and the log records both the trace and the answer", async () => {
+    const frames = [
+      'data: {"id":"c","model":"up","choices":[{"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n',
+      ...framesFor("The quick brown fox.").slice(1),
+    ];
+    const { app, logger } = buildApp(frames);
+    try {
+      const res = await post(app);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain("thinking...");
+      expect(res.body).toContain("The quick brown fox.");
+      expect(res.body).toContain("[DONE]");
+      const entry = await logged(logger);
+      expect(entry).toMatchObject({ httpStatus: 200, error: null });
+      expect(entry.responseBody).toMatchObject({ content: "The quick brown fox.", reasoning: "thinking...", stop_reason: "stop" });
+      expect(entry.usage).toMatchObject({ totalTokens: 3 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("each chunk reaches the client as it is produced, not when the upstream finishes", async () => {
+    // The upstream pauses 300 ms before every frame: the content frame leaves it
+    // ~600 ms before the stream ends. A relay that buffered would hand the
+    // client everything at once, at the end.
+    const DELAY_MS = 300;
+    const { app } = buildApp(OK_FRAMES, { slowDelayMs: DELAY_MS });
+    try {
+      await app.listen({ port: 0, host: "127.0.0.1" });
+      const port = (app.server.address() as AddressInfo).port;
+      const seen = await new Promise<{ contentAt: number; endAt: number; body: string }>((resolve, reject) => {
+        const payload = JSON.stringify({ model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] });
+        const req = http.request({ host: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions",
+          headers: { authorization: "Bearer test", "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
+          let body = "", contentAt = 0;
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            body += chunk;
+            if (!contentAt && body.includes("hello world this is a test")) contentAt = Date.now();
+          });
+          res.on("end", () => resolve({ contentAt, endAt: Date.now(), body }));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+      expect(seen.body).toContain("[DONE]");
+      expect(seen.contentAt).toBeGreaterThan(0);
+      expect(seen.endAt - seen.contentAt).toBeGreaterThanOrEqual(DELAY_MS);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("consecutive relays each deliver and log their own content (no cross-talk)", async () => {
+    const frames = framesFor("first response");
+    const { app, logger } = buildApp(frames);
+    try {
+      const first = await post(app);
+      const firstEntry = await logged(logger);
+      expect(first.body).toContain("first response");
+      expect((firstEntry.responseBody as { content: string }).content).toBe("first response");
+
+      logger.lastEntry = null;
+      frames.splice(0, frames.length, ...framesFor("second response"));
+      const second = await post(app);
+      const secondEntry = await logged(logger);
+      expect(second.body).toContain("second response");
+      expect(second.body).not.toContain("first response");
+      expect((secondEntry.responseBody as { content: string }).content).toBe("second response");
+    } finally {
+      await app.close();
     }
   });
 });

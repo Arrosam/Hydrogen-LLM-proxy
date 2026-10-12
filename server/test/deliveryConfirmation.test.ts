@@ -76,8 +76,8 @@ async function boot(): Promise<Harness> {
   return harness;
 }
 
-function request(port: number, secret: string): { head: string; payload: string } {
-  const payload = JSON.stringify({ model: "svc", stream: true, messages: [{ role: "user", content: "hi" }] });
+function request(port: number, secret: string, stream = true): { head: string; payload: string } {
+  const payload = JSON.stringify({ model: "svc", stream, messages: [{ role: "user", content: "hi" }] });
   const head =
     `POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${secret}\r\n` +
     `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\n\r\n`;
@@ -170,5 +170,65 @@ describe("delivery confirmation — the log row matches what the client got", ()
     await new Promise((r) => setTimeout(r, 1_000));
     const rows = h.sqlite.prepare("SELECT COUNT(*) AS n FROM request_logs WHERE http_status = 200").get() as { n: number };
     expect(rows.n).toBe(2); // neither row was demoted
+  }, 30_000);
+});
+
+// The same contract on the NON-streaming path: one large JSON body instead of
+// a relayed stream, but the log row must still match what the client got.
+describe("delivery confirmation — non-streaming JSON responses", () => {
+  it("a client that stops reading and then aborts ends as 499 — not a lying 200", async () => {
+    const h = await boot();
+    const { head, payload } = request(h.port, h.secret, false);
+
+    const received = await new Promise<number>((resolve) => {
+      let bytes = 0;
+      const sock = net.connect(h.port, "127.0.0.1", () => sock.write(head + payload));
+      sock.on("data", (c: Buffer) => {
+        bytes += c.length;
+        if (bytes >= 16_384) sock.pause(); // stop reading: the TCP window closes
+      });
+      sock.on("close", () => resolve(bytes));
+      sock.on("error", () => { /* our own RST on destroy */ });
+      // Long enough for the proxy to have the whole answer and hand it to the
+      // socket; then abandon the connection the way a timed-out client does.
+      setTimeout(() => sock.destroy(), 500);
+    });
+
+    expect(received).toBeGreaterThan(0); // the response had started
+    expect(received).toBeLessThan(RESPONSE_CHARS); // ...but the client does not have the answer
+    // Whether the proxy sees the failure before or after 'finish' depends on
+    // how much the kernel buffered; either way the row must not stay 200.
+    const row = await finalStatus(h);
+    expect(row.http_status).toBe(499);
+    expect(row.error).toBeTruthy();
+  }, 30_000);
+
+  it("a client that reads the whole JSON body and closes cleanly keeps its 200", async () => {
+    const h = await boot();
+    const { head, payload } = request(h.port, h.secret, false);
+
+    const body = await new Promise<string>((resolve, reject) => {
+      let all = Buffer.alloc(0);
+      const sock = net.connect(h.port, "127.0.0.1", () => sock.write(head + payload));
+      sock.on("data", (c: Buffer) => {
+        all = Buffer.concat([all, c]);
+        const headerEnd = all.indexOf("\r\n\r\n");
+        if (headerEnd < 0) return;
+        const length = /content-length: (\d+)/i.exec(all.subarray(0, headerEnd).toString("latin1"));
+        if (!length) { reject(new Error("the JSON response carried no content-length")); sock.destroy(); return; }
+        if (all.length - headerEnd - 4 >= Number(length[1])) sock.end(); // clean FIN after reading it all
+      });
+      sock.on("error", reject);
+      sock.on("close", () => resolve(all.subarray(all.indexOf("\r\n\r\n") + 4).toString("utf8")));
+    });
+
+    const parsed = JSON.parse(body) as { choices: Array<{ message: { content: string } }> };
+    expect(parsed.choices[0].message.content).toBe("z".repeat(RESPONSE_CHARS));
+    // The clean close must NOT be mistaken for a failed delivery.
+    await new Promise((r) => setTimeout(r, 500));
+    const row = h.sqlite.prepare("SELECT http_status, error FROM request_logs ORDER BY id DESC LIMIT 1").get() as
+      { http_status: number; error: string | null };
+    expect(row.http_status).toBe(200);
+    expect(row.error).toBeNull();
   }, 30_000);
 });

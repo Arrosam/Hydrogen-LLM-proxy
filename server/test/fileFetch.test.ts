@@ -277,3 +277,139 @@ describe("through a Model Service", () => {
     expect((agent as { maxAttachmentBytes?: number }).maxAttachmentBytes).toBe(99);
   });
 });
+
+/** A transport whose GET returns whatever the script says, headers and body
+ * stream included, for the shapes `fetchTransport` cannot express. */
+function rawTransport(
+  script: (url: string, call: number) => { status: number; headers?: Record<string, string | string[] | undefined>; body?: Readable },
+): Transport & { seen: string[] } {
+  const seen: string[] = [];
+  return {
+    seen,
+    async postJson() { throw new Error("unused"); },
+    async postStream() { throw new Error("unused"); },
+    async getStream(url: string): Promise<TransportStreamResult> {
+      seen.push(url);
+      const r = script(url, seen.length);
+      return { status: r.status, headers: r.headers ?? {}, body: r.body ?? Readable.from([PDF_BYTES]) };
+    },
+  };
+}
+
+const twoDocs = (first: string, second: string) =>
+  AnthropicRequest.parse({
+    model: "svc",
+    messages: [{ role: "user", content: [
+      { type: "document", source: { type: "url", url: first } },
+      { type: "document", source: { type: "url", url: second } },
+    ] }],
+  });
+
+describe("redirect ceiling", () => {
+  const redirecting = (hops: number) =>
+    rawTransport((_url, call) =>
+      call <= hops
+        ? { status: 302, headers: { location: `https://files.example.com/hop${call}` } }
+        : { status: 200, headers: { "content-type": "application/pdf" } });
+
+  it("follows exactly five redirects", async () => {
+    const transport = redirecting(5);
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts)).resolves.toBeTruthy();
+    expect(transport.seen).toHaveLength(6);
+    expect(transport.seen.at(-1)).toBe("https://files.example.com/hop5");
+  });
+
+  it("gives up on the sixth redirect without fetching its target", async () => {
+    const transport = redirecting(6);
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts)).rejects.toThrow(/more than 5 redirects/);
+    expect(transport.seen).toHaveLength(6);
+  });
+
+  it("rejects a redirect that names no location", async () => {
+    const transport = rawTransport(() => ({ status: 302, headers: {} }));
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts)).rejects.toThrow(/redirect with no location header/);
+    expect(transport.seen).toEqual([PDF_URL]);
+  });
+
+  it("follows the first value of a repeated location header", async () => {
+    const transport = rawTransport((url) =>
+      url === PDF_URL ? { status: 302, headers: { location: ["https://a.example.com/x", "https://b.example.com/y"] } } : { status: 200 });
+    await inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts);
+    expect(transport.seen).toEqual([PDF_URL, "https://a.example.com/x"]);
+  });
+});
+
+describe("download cap", () => {
+  const MIB = Buffer.alloc(1024 * 1024);
+  const chunks = (n: number): Readable => Readable.from((async function* () { for (let i = 0; i < n; i++) yield MIB; })());
+
+  it("stops reading and rejects once a download passes 50 MiB", async () => {
+    const body = chunks(51);
+    const transport = rawTransport(() => ({ status: 200, body }));
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts)).rejects.toThrow(/exceeds the 52428800-byte download limit/);
+    expect(body.destroyed).toBe(true);
+  });
+
+  it("accepts a download of exactly 50 MiB", async () => {
+    const transport = rawTransport(() => ({ status: 200, body: chunks(50) }));
+    const ready = await inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts);
+    const file = ready.messages[0].content.find((p) => p.type === "file");
+    expect(file).toMatchObject({ source: { kind: "base64" } });
+    if (file?.type === "file" && file.source.kind === "base64") expect(Buffer.byteLength(file.source.data, "base64")).toBe(50 * 1024 * 1024);
+  });
+});
+
+describe("media type fallback", () => {
+  const labelled = async (contentType: string | string[] | undefined): Promise<string | undefined> => {
+    const transport = rawTransport(() => ({ status: 200, headers: { "content-type": contentType } }));
+    const ready = await inlineUrlFiles(withUrlDoc(), "openai_completion", transport, opts);
+    const file = ready.messages[0].content.find((p) => p.type === "file");
+    return file?.type === "file" && file.source.kind === "base64" ? file.source.mediaType : undefined;
+  };
+
+  it("labels a generic or missing content type as PDF", async () => {
+    expect(await labelled("application/octet-stream")).toBe("application/pdf");
+    expect(await labelled(undefined)).toBe("application/pdf");
+  });
+
+  it("drops parameters and takes the first of a repeated header", async () => {
+    expect(await labelled("text/plain; charset=utf-8")).toBe("text/plain");
+    expect(await labelled(["image/png", "text/html"])).toBe("image/png");
+  });
+});
+
+// The exact byte at which a budget starts rejecting is deliberately not pinned
+// here; these cases hold whichever way a file's size is rounded.
+describe("aggregate attachment budget", () => {
+  const OTHER_URL = "https://files.example.com/second.pdf";
+  const serving = () => fetchTransport(() => ({ status: 200, body: PDF_BYTES }));
+
+  it.each([0, -1])("treats a budget of %i as no budget", async (maxTotalBytes) => {
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", serving(), { ...opts, maxTotalBytes })).resolves.toBeTruthy();
+  });
+
+  // E3: the budget counts the file's own bytes, not its padded base64 length.
+  it("counts a file's exact byte size: a budget equal to it passes, one byte less rejects", async () => {
+    const size = PDF_BYTES.length;
+    expect(size % 3).not.toBe(0); // so the base64 form is padded
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", serving(), { ...opts, maxTotalBytes: size })).resolves.toBeTruthy();
+    await expect(inlineUrlFiles(withUrlDoc(), "openai_completion", serving(), { ...opts, maxTotalBytes: size - 1 })).rejects.toThrow(/configured for this service/);
+    await expect(inlineUrlFiles(twoDocs(PDF_URL, OTHER_URL), "openai_completion", serving(), { ...opts, maxTotalBytes: 2 * size })).resolves.toBeTruthy();
+  });
+
+  it("accepts attachments well inside the budget", async () => {
+    await expect(inlineUrlFiles(twoDocs(PDF_URL, OTHER_URL), "openai_completion", serving(), { ...opts, maxTotalBytes: 1_000 })).resolves.toBeTruthy();
+  });
+
+  it("counts every distinct URL, rejecting once the second download passes the budget", async () => {
+    const transport = serving();
+    await expect(inlineUrlFiles(twoDocs(PDF_URL, OTHER_URL), "openai_completion", transport, { ...opts, maxTotalBytes: 30 })).rejects.toThrow(/configured for this service/);
+    expect(transport.seen).toEqual([PDF_URL, OTHER_URL]);
+  });
+
+  it("counts a URL referenced twice once", async () => {
+    const transport = serving();
+    await expect(inlineUrlFiles(twoDocs(PDF_URL, PDF_URL), "openai_completion", transport, { ...opts, maxTotalBytes: 30 })).resolves.toBeTruthy();
+    expect(transport.seen).toEqual([PDF_URL]);
+  });
+});

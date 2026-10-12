@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { computeRetryDelay, is499Retryable, runSteps, type AttemptResult } from "../src/execution/steps";
 import type { ServiceSteps } from "../src/execution/definition";
+import { retryConfig } from "./retryFixture";
 
 const noSleep = { sleep: async () => {} };
 
@@ -15,7 +16,7 @@ describe("runSteps (retry / advance engine)", () => {
       n++;
       return n < 3 ? { ok: false, status: 503, kind: "http", message: "unavailable" } : { ok: true, value: "done" };
     };
-    const out = await runSteps(steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 5, intervalMs: 10 } }]), attempt, noSleep);
+    const out = await runSteps(steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 5, intervalMs: 10 }) }]), attempt, noSleep);
     expect(out.result.ok).toBe(true);
     expect(out.path).toHaveLength(3);
     expect(out.path[2].kind).toBe("ok");
@@ -27,7 +28,7 @@ describe("runSteps (retry / advance engine)", () => {
       n++;
       return { ok: false, status: 400, kind: "http", message: "bad" };
     };
-    const out = await runSteps(steps([{ model: "m", provider: "p", retry: { on: [503], maxAttempts: 5, intervalMs: 0 } }]), attempt, noSleep);
+    const out = await runSteps(steps([{ model: "m", provider: "p", retry: retryConfig({ on: [503], maxAttempts: 5, intervalMs: 0 }) }]), attempt, noSleep);
     expect(out.result.ok).toBe(false);
     expect(n).toBe(1);
   });
@@ -36,14 +37,14 @@ describe("runSteps (retry / advance engine)", () => {
     const attempt = async (step: { model: string }): Promise<AttemptResult<string>> =>
       step.model === "a" ? { ok: false, status: 503, kind: "http", message: "down" } : { ok: true, value: "served-by-b" };
     // Explicitly disable retry so the step advances immediately.
-    const out = await runSteps(steps([{ model: "a", provider: "p1", retry: { on: [], maxAttempts: 1 } }, { model: "b", provider: "p2" }]), attempt, noSleep);
+    const out = await runSteps(steps([{ model: "a", provider: "p1", retry: retryConfig({ on: [], maxAttempts: 1 }) }, { model: "b", provider: "p2" }]), attempt, noSleep);
     expect(out.result).toMatchObject({ ok: true, value: "served-by-b" });
     expect(out.path.map((p) => p.model)).toEqual(["a", "b"]);
   });
 
   it("respects advanceOn gating (stops when failure does not match)", async () => {
     const attempt = async (): Promise<AttemptResult<string>> => ({ ok: false, status: 500, kind: "http", message: "err" });
-    const out = await runSteps(steps([{ model: "a", provider: "p1", retry: { on: [], maxAttempts: 1 }, advanceOn: [502] }, { model: "b", provider: "p2" }]), attempt, noSleep);
+    const out = await runSteps(steps([{ model: "a", provider: "p1", retry: retryConfig({ on: [], maxAttempts: 1 }), advanceOn: [502] }, { model: "b", provider: "p2" }]), attempt, noSleep);
     expect(out.result.ok).toBe(false);
     expect(out.path.map((p) => p.model)).toEqual(["a"]);
   });
@@ -66,7 +67,7 @@ describe("runSteps (retry / advance engine)", () => {
       e.name = "TimeoutError";
       throw e;
     };
-    const out = await runSteps(steps([{ model: "m", provider: "p", retry: { on: ["timeout"], maxAttempts: 2, intervalMs: 0 } }]), attempt, noSleep);
+    const out = await runSteps(steps([{ model: "m", provider: "p", retry: retryConfig({ on: ["timeout"], maxAttempts: 2, intervalMs: 0 }) }]), attempt, noSleep);
     expect(out.result.ok).toBe(false);
     expect(out.path).toHaveLength(2);
     expect(out.path[0].kind).toBe("timeout");
@@ -89,7 +90,7 @@ describe("499 retry mechanism", () => {
       return n < 2 ? { ok: false, status: 499, kind: "http", message: "client closed" } : { ok: true, value: "ok" };
     };
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       attempt,
       noSleep,
     );
@@ -109,7 +110,7 @@ describe("499 retry mechanism", () => {
       return { ok: false, status: 499, kind: "http", message: "client closed" };
     };
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       attempt,
       noSleep,
     );
@@ -131,7 +132,7 @@ describe("499 retry mechanism", () => {
       return { ok: false, status: 499, kind: "http", message: "client closed" };
     };
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, idempotency: "unsafe", backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, idempotency: "unsafe", backoff: { initialMs: 1, maxMs: 10 } }) }]),
       attempt,
       noSleep,
     );
@@ -153,7 +154,7 @@ describe("499 retry mechanism", () => {
       return n < 3 ? { ok: false, status: 499, kind: "http", message: "client closed" } : { ok: true, value: "ok" };
     };
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, idempotency: "read", backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, idempotency: "read", backoff: { initialMs: 1, maxMs: 10 } }) }]),
       attempt,
       noSleep,
     );
@@ -169,7 +170,7 @@ describe("499 retry mechanism", () => {
     };
     // Default retry.on is [499], so 500 should not retry.
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, backoff: { initialMs: 1, maxMs: 10 } }) }]),
       attempt,
       noSleep,
     );
@@ -192,7 +193,7 @@ describe("499 retry mechanism", () => {
       return n < 3 ? { ok: false, status: 499, kind: "http", message: "closed" } : { ok: true, value: "ok" };
     };
     const out = await runSteps(
-      steps([{ model: "m", provider: "p", retry: { maxAttempts: 3, backoff: { initialMs: 100, maxMs: 1000 } } }]),
+      steps([{ model: "m", provider: "p", retry: retryConfig({ maxAttempts: 3, backoff: { initialMs: 100, maxMs: 1000 } }) }]),
       attempt,
       { sleep },
     );
@@ -210,7 +211,7 @@ describe("499 retry mechanism", () => {
 // --- computeRetryDelay unit tests ------------------------------------------
 
 describe("computeRetryDelay (exponential backoff with full jitter)", () => {
-  const cfg = { on: [499], maxAttempts: 3, intervalMs: 0, backoff: { initialMs: 100, maxMs: 1000 } };
+  const cfg = retryConfig({ on: [499], maxAttempts: 3, intervalMs: 0, backoff: { initialMs: 100, maxMs: 1000 } });
 
   it("returns 0 for attempt 1 (first call, no retry)", () => {
     expect(computeRetryDelay(1, cfg)).toBe(0);
@@ -233,7 +234,7 @@ describe("computeRetryDelay (exponential backoff with full jitter)", () => {
   });
 
   it("caps the base at maxMs (1000ms) even for high attempt numbers", () => {
-    const highCfg = { on: [499], maxAttempts: 20, intervalMs: 0, backoff: { initialMs: 100, maxMs: 1000 } };
+    const highCfg = retryConfig({ on: [499], maxAttempts: 20, intervalMs: 0, backoff: { initialMs: 100, maxMs: 1000 } });
     for (let i = 0; i < 50; i++) {
       // attempt 20 -> 2^18 = huge, but capped at 1000
       const d = computeRetryDelay(20, highCfg);
@@ -243,7 +244,7 @@ describe("computeRetryDelay (exponential backoff with full jitter)", () => {
   });
 
   it("falls back to fixed intervalMs when no backoff config", () => {
-    const fixedCfg = { on: [499], maxAttempts: 3, intervalMs: 250 };
+    const fixedCfg = retryConfig({ on: [499], maxAttempts: 3, intervalMs: 250 });
     expect(computeRetryDelay(1, fixedCfg)).toBe(0);
     expect(computeRetryDelay(2, fixedCfg)).toBe(250);
     expect(computeRetryDelay(3, fixedCfg)).toBe(250);

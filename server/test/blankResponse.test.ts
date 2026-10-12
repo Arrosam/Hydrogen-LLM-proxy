@@ -133,6 +133,62 @@ describe("HTTP 200 with invalid JSON response shape", () => {
   }
 });
 
+describe("EP: what a non-streaming upstream answer is taken to be", () => {
+  type Ctor = typeof OpenAICompletionRequest | typeof AnthropicRequest | typeof OpenAIResponsesRequest;
+  const send = async (Req: Ctor, status: number, json: unknown, text = json === undefined ? "" : JSON.stringify(json)) => {
+    const transport: Transport = {
+      async postJson() { return { status, headers: {}, json, text }; },
+      async postStream() { throw Error("unexpected stream"); },
+    };
+    return Req.parse({ messages: [], input: [] }).send(transport, { url: "http://unused", upstreamModel: "m", headers: {}, timeoutMs: 1000 });
+  };
+  const completion = { id: "c", model: "up", choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] };
+
+  it.each(["failed", "cancelled", "queued", "in_progress"])("a Responses body with status %s and no error key is an incomplete response", async status => {
+    expect(await send(OpenAIResponsesRequest, 200, { status, output: [] })).toMatchObject({
+      ok: false, status: 502, kind: "http", message: "upstream response did not complete", body: { status, output: [] },
+    });
+  });
+  it("a completed Responses body is a success", async () => {
+    expect(await send(OpenAIResponsesRequest, 200, { status: "completed", output: [] })).toMatchObject({ ok: true });
+  });
+  it("the status field means nothing outside the Responses family", async () => {
+    expect(await send(OpenAICompletionRequest, 200, { ...completion, status: "failed" })).toMatchObject({ ok: true });
+  });
+  it("an error key fails any family, and its message is the one reported", async () => {
+    expect(await send(OpenAICompletionRequest, 200, { ...completion, error: { message: "quota exceeded" } })).toMatchObject({ ok: false, status: 502, message: "quota exceeded" });
+    expect(await send(OpenAICompletionRequest, 200, { ...completion, error: "plain string" })).toMatchObject({ ok: false, status: 502, message: "upstream response did not complete" });
+  });
+  it("an explicit null error is not an error", async () => {
+    expect(await send(OpenAICompletionRequest, 200, { ...completion, error: null })).toMatchObject({ ok: true });
+  });
+  it("an empty choices array is not a completion", async () => {
+    expect(await send(OpenAICompletionRequest, 200, { choices: [] })).toMatchObject({ ok: false, status: 502, message: "upstream returned invalid openai_completion response", body: { choices: [] } });
+  });
+  it("Anthropic content that is not an array is not a message", async () => {
+    expect(await send(AnthropicRequest, 200, { content: "x" })).toMatchObject({ ok: false, status: 502, message: "upstream returned invalid anthropic response" });
+  });
+  it("a Responses body without an output array is not a response", async () => {
+    expect(await send(OpenAIResponsesRequest, 200, { status: "completed" })).toMatchObject({ ok: false, status: 502, message: "upstream returned invalid openai_responses response" });
+  });
+  it("a 200 whose body did not parse as JSON is an invalid body", async () => {
+    expect(await send(OpenAICompletionRequest, 200, undefined, "<html>ok</html>")).toMatchObject({ ok: false, status: 502, message: "upstream returned empty or invalid JSON body" });
+  });
+  it("a non-2xx with an unparsable body keeps its status and hands back the raw text", async () => {
+    expect(await send(OpenAICompletionRequest, 503, undefined, "<html>bad gateway</html>")).toMatchObject({
+      ok: false, status: 503, kind: "http", message: "upstream returned 503", body: "<html>bad gateway</html>",
+    });
+  });
+  it("a non-2xx with a JSON body hands back the parsed body", async () => {
+    expect(await send(OpenAICompletionRequest, 429, { error: { message: "slow down" } })).toMatchObject({ ok: false, status: 429, body: { error: { message: "slow down" } } });
+  });
+  it("the success range is 200-299: 299 is parsed, 300 is a failure even with a valid body", async () => {
+    expect(await send(OpenAICompletionRequest, 299, completion)).toMatchObject({ ok: true });
+    expect(await send(OpenAICompletionRequest, 300, completion)).toMatchObject({ ok: false, status: 300, message: "upstream returned 300" });
+    expect(await send(OpenAICompletionRequest, 199, completion)).toMatchObject({ ok: false, status: 199 });
+  });
+});
+
 describe("empty answer diagnostics", () => {
   it("distinguishes an empty response, thinking alone, and output exhaustion", () => {
     expect(missingAnswerReason([], "stop")).toContain("no answer");

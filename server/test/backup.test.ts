@@ -24,6 +24,9 @@ import { BackupError, exportBackup, restoreBackup, type BackupPackage } from "..
 import { PassphraseError, openWithPassphrase, sealWithPassphrase } from "../src/security/passphrase";
 import { HostedToolRepo } from "../src/persistence/hostedToolRepo";
 import { HttpToolSchema } from "../src/execution/toolHttp";
+import { TokenRepo } from "../src/persistence/tokenRepo";
+import { ProxyRepo } from "../src/persistence/proxyRepo";
+import { ResponseRepo } from "../src/persistence/responseRepo";
 
 const KEY_A = Buffer.alloc(32, 7); // the instance that takes the backup
 const KEY_B = Buffer.alloc(32, 9); // a fresh install with its own master key
@@ -40,6 +43,8 @@ function open(masterKey: Buffer): Instance {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hydro-backup-"));
   const { db, sqlite } = openDatabase(dir);
   verifyOrInitMasterKey(db, masterKey);
+  // Every real instance has an admin, and restore refuses a package without one.
+  sqlite.prepare("INSERT INTO users (username, password_hash, role, enabled) VALUES ('admin', 'x', 'admin', 1)").run();
   return { dir, sqlite, db };
 }
 
@@ -84,7 +89,8 @@ function seed(i: Instance, masterKey: Buffer): void {
     requestQuery: null, requestHeaders: { "content-type": "application/json" },
     requestBody: '{"model":"testG5"}', upstreamRequestBody: '{"model":"Qwen/Qwen3.5-4B"}',
     responseHeaders: null, responseBody: '{"ok":true}',
-    promptTokens: 1, completionTokens: 2, totalTokens: 3, latencyMs: 5,
+    promptTokens: 1, completionTokens: 2, totalTokens: 3,
+    cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0, latencyMs: 5,
     attempts: 1, attemptPath: [{ step: 1 }], error: null,
   };
   logs.insert(log);
@@ -115,6 +121,27 @@ const cacheImages = (i: Instance, entries: Array<{ hash: string; description: st
 /** What an instance has cached for `hash`, or undefined. */
 const cached = (i: Instance, hash: string): string | undefined => new ImageCacheRepo(i.db).lookup([hash]).get(hash);
 
+/** A hosted tool carrying a secret header, as the dashboard would create it. */
+const TOOL_SECRET = "Bearer tool-secret";
+const makeTool = (i: Instance, key: Buffer, name = "lookup") =>
+  new HostedToolRepo(i.db, key).create(
+    HttpToolSchema.parse({
+      name,
+      url: "https://adapter.test/run",
+      parameters: { type: "object" },
+      bodyTemplate: { args: "{{arguments}}" },
+      headers: { authorization: TOOL_SECRET },
+    }),
+  );
+
+/** Re-seal a package's secrets after editing them -- what a package written by
+ * an older build (or by hand, by someone who knows the passphrase) looks like. */
+async function resealed(pkg: BackupPackage, edit: (secrets: Record<string, unknown>) => void): Promise<BackupPackage> {
+  const secrets = JSON.parse(await openWithPassphrase(pkg.secrets, PASSPHRASE)) as Record<string, unknown>;
+  edit(secrets);
+  return { ...pkg, secrets: await sealWithPassphrase(JSON.stringify(secrets), PASSPHRASE) };
+}
+
 describe("passphrase sealing", () => {
   it("opens what it sealed", async () => {
     expect(await openWithPassphrase(await sealWithPassphrase("hello", "pass-phrase-1"), "pass-phrase-1")).toBe("hello");
@@ -136,6 +163,31 @@ describe("passphrase sealing", () => {
     const b = await sealWithPassphrase("same", "pass-phrase-1");
     expect(a.salt).not.toBe(b.salt);
     expect(a.ciphertext).not.toBe(b.ciphertext);
+  });
+
+  it("treats two Unicode spellings of the same passphrase as one", async () => {
+    // "é" typed as one code point on one keyboard and as e + combining accent on
+    // another: the same passphrase to the person, different bytes to scrypt.
+    const composed = "caf\u00e9-pass";
+    const decomposed = "cafe\u0301-pass";
+    expect(composed).not.toBe(decomposed);
+    expect(await openWithPassphrase(await sealWithPassphrase("hello", composed), decomposed)).toBe("hello");
+    expect(await openWithPassphrase(await sealWithPassphrase("hello", decomposed), composed)).toBe("hello");
+    // Compatibility forms fold too: a full-width digit is the digit.
+    expect(await openWithPassphrase(await sealWithPassphrase("hello", "pass-phrase-\uff11"), "pass-phrase-1")).toBe("hello");
+  });
+
+  it("still refuses a passphrase that only looks similar", async () => {
+    const sealed = await sealWithPassphrase("hello", "caf\u00e9-pass");
+    await expect(openWithPassphrase(sealed, "cafe-pass")).rejects.toThrow(PassphraseError);
+    await expect(openWithPassphrase(sealed, "Caf\u00e9-pass")).rejects.toThrow(/wrong passphrase, or this backup has been modified/);
+  });
+
+  it("refuses a key-derivation function it does not implement", async () => {
+    const sealed = await sealWithPassphrase("hello", "pass-phrase-1");
+    const foreign = { ...sealed, kdf: "argon2" } as unknown as typeof sealed;
+    await expect(openWithPassphrase(foreign, "pass-phrase-1")).rejects.toThrow(PassphraseError);
+    await expect(openWithPassphrase(foreign, "pass-phrase-1")).rejects.toThrow(/unsupported key-derivation function/);
   });
 
   it("rejects absurd KDF parameters rather than hanging on them", async () => {
@@ -275,6 +327,143 @@ describe("restore onto a DIFFERENT master key", () => {
     await restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE);
     expect(new ModelRepo(b.db).list()).toHaveLength(1);
     expect(new ProviderRepo(b.db, KEY_B).list()).toHaveLength(2);
+  });
+
+  it("brings API-key secrets back: still revealable, still authenticating", async () => {
+    const source = new TokenRepo(a.db, KEY_A);
+    const { token, secret } = source.create({ name: "k", maxRequests: 5 });
+    source.incrementUsage(token.id, 2, 30);
+
+    const pkg = await takeBackup(a, KEY_A);
+    const wire = JSON.stringify(pkg);
+    expect(wire).not.toContain(secret);
+    for (const row of pkg.tables.tokens) {
+      expect(row).not.toHaveProperty("key_ciphertext");
+      expect(row).not.toHaveProperty("key_iv");
+      expect(row).not.toHaveProperty("key_tag");
+    }
+
+    await restoreBackup(b.sqlite, KEY_B, overTheWire(pkg), PASSPHRASE);
+
+    const restored = new TokenRepo(b.db, KEY_B);
+    expect(restored.revealSecret(token.id)).toBe(secret);
+    expect(restored.authenticate(secret)?.id).toBe(token.id);
+    expect(restored.toPublic(restored.get(token.id)!)).toMatchObject({
+      name: "k", keyPrefix: token.keyPrefix, hasStoredKey: true, maxRequests: 5, usedRequests: 2, usedTokens: 30, enabled: true,
+    });
+    // Re-encrypted, not copied: the source's key can no longer open it.
+    expect(() => new TokenRepo(b.db, KEY_A).revealSecret(token.id)).toThrow();
+  });
+
+  it("brings an egress proxy's password back under the new key, and keeps a password-less one that way", async () => {
+    const source = new ProxyRepo(a.db, KEY_A);
+    const withPassword = source.create({ name: "px", scheme: "http", host: "127.0.0.1", port: 8080, username: "u", password: "p@ss-proxy-secret" });
+    const bare = source.create({ name: "px-open", scheme: "https", host: "proxy.test", port: 3128 });
+    const routed = new ProviderRepo(a.db, KEY_A).create({
+      name: "routed", type: "openai_completion", baseUrl: "https://api.example.com/v1", apiKey: null, proxyId: withPassword.id,
+    });
+
+    const pkg = await takeBackup(a, KEY_A);
+    expect(JSON.stringify(pkg)).not.toContain("p@ss-proxy-secret");
+    for (const row of pkg.tables.proxies) {
+      expect(row).not.toHaveProperty("password_ciphertext");
+      expect(row).not.toHaveProperty("password_iv");
+      expect(row).not.toHaveProperty("password_tag");
+    }
+    expect(pkg.counts.proxies).toBe(2);
+
+    const report = await restoreBackup(b.sqlite, KEY_B, overTheWire(pkg), PASSPHRASE);
+    expect(report.restored.proxies).toBe(2);
+
+    const restored = new ProxyRepo(b.db, KEY_B);
+    const row = restored.getByName("px")!;
+    expect(restored.toEgress(row)).toEqual({
+      id: withPassword.id, name: "px", scheme: "http", host: "127.0.0.1", port: 8080, username: "u", password: "p@ss-proxy-secret",
+    });
+    expect(restored.toPublic(row).hasPassword).toBe(true);
+
+    const open = restored.getByName("px-open")!;
+    expect(open.id).toBe(bare.id);
+    expect(restored.toPublic(open)).toMatchObject({ hasPassword: false, username: null, scheme: "https", host: "proxy.test", port: 3128 });
+    expect(restored.toEgress(open).password).toBeNull();
+
+    // The provider still points at its proxy (proxies are written first).
+    expect(new ProviderRepo(b.db, KEY_B).getByName("routed")?.proxyId).toBe(routed.proxyId);
+    expect(restored.usedBy(withPassword.id)).toEqual([{ id: routed.id, name: "routed" }]);
+  });
+
+  it("demotes responses that were still running to failed, and leaves finished ones untouched", async () => {
+    const owner = new TokenRepo(a.db, KEY_A).create({ name: "owner" }).token.id;
+    const source = new ResponseRepo(a.db, () => 0);
+    for (const status of ["queued", "in_progress", "completed", "cancelled"] as const) {
+      source.createResponse({
+        id: `resp-${status}`, tokenId: owner, status, background: true,
+        response: { id: `resp-${status}`, object: "response", status, output: [{ type: "message", text: status }] },
+        inputItems: [{ type: "message", role: "user", content: "hi" }], history: [],
+      });
+    }
+
+    const report = await restoreBackup(b.sqlite, KEY_B, overTheWire(await takeBackup(a, KEY_A)), PASSPHRASE);
+    expect(report.restored.stored_responses).toBe(4);
+
+    const restored = new ResponseRepo(b.db, () => 0);
+    for (const status of ["queued", "in_progress"]) {
+      const row = restored.response(`resp-${status}`, owner)!;
+      expect(row.status).toBe("failed");
+      expect(row.response).toEqual({
+        id: `resp-${status}`, object: "response", status: "failed", output: [{ type: "message", text: status }],
+        error: { code: "backup_restored", message: "Execution was not replayed after restoring a backup" },
+      });
+      expect(row.inputItems).toEqual([{ type: "message", role: "user", content: "hi" }]);
+    }
+
+    const raw = (i: Instance, id: string): unknown => i.sqlite.prepare("SELECT * FROM stored_responses WHERE id = ?").get(id);
+    for (const status of ["completed", "cancelled"]) {
+      expect(raw(b, `resp-${status}`)).toEqual(raw(a, `resp-${status}`));
+      expect(restored.response(`resp-${status}`, owner)?.status).toBe(status);
+    }
+    // The source is only read: its running responses are still running.
+    expect(source.response("resp-queued", owner)?.status).toBe("queued");
+  });
+
+  it("restores a package written before proxies and hosted tools existed, leaving the target's own alone", async () => {
+    const { token, secret } = new TokenRepo(a.db, KEY_A).create({ name: "old-key" });
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as BackupPackage;
+    for (const table of ["proxies", "hosted_tools", "service_tools"]) delete (pkg.tables as Record<string, unknown>)[table];
+    // ...and its sealed secrets knew only about provider keys.
+    const old = await resealed(pkg, (secrets) => {
+      delete secrets.tokenKeys;
+      delete secrets.proxyPasswords;
+      delete secrets.toolHeaders;
+    });
+
+    const ownProxy = new ProxyRepo(b.db, KEY_B).create({ name: "own-proxy", scheme: "http", host: "10.0.0.1", port: 1080, password: "own-password" });
+    const ownTool = makeTool(b, KEY_B, "own-tool");
+
+    const report = await restoreBackup(b.sqlite, KEY_B, old, PASSPHRASE);
+    expect(report.restored).toMatchObject({ proxies: 0, hosted_tools: 0, service_tools: 0, providers: 2, tokens: 1 });
+
+    // Configuration arrived...
+    const providers = new ProviderRepo(b.db, KEY_B);
+    expect(providers.toUpstream(providers.getByName("siliconflow")!).apiKey).toBe(API_KEY);
+    // ...and what the package never mentioned is exactly where it was.
+    const proxies = new ProxyRepo(b.db, KEY_B);
+    expect(proxies.toEgress(proxies.get(ownProxy.id)!).password).toBe("own-password");
+    const tools = new HostedToolRepo(b.db, KEY_B);
+    expect(tools.materialize(tools.get(ownTool.id)!).headers).toEqual({ authorization: TOOL_SECRET });
+
+    // A key with no sealed secret restores hash-only: it authenticates, but can
+    // never be shown again.
+    const restoredTokens = new TokenRepo(b.db, KEY_B);
+    expect(restoredTokens.authenticate(secret)?.id).toBe(token.id);
+    expect(restoredTokens.revealSecret(token.id)).toBeNull();
+    expect(restoredTokens.toPublic(restoredTokens.get(token.id)!).hasStoredKey).toBe(false);
+  });
+
+  it("reports what it restored", async () => {
+    const report = await restoreBackup(b.sqlite, KEY_B, overTheWire(await takeBackup(a, KEY_A)), PASSPHRASE);
+    expect(report).toMatchObject({ includedLogs: true, includedImageCache: false, providerKeysRestored: 1 });
+    expect(report.restored).toMatchObject({ providers: 2, models: 1, model_providers: 1, model_services: 1, request_logs: 1, image_cache: 0 });
   });
 
   it("a config-only (no-logs) restore preserves the target's own request history", async () => {
@@ -419,6 +608,65 @@ describe("a restore that cannot succeed changes nothing", () => {
     delete (pkg.tables as Record<string, unknown[]>).users;
     await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(/missing required table "users"/);
     survived();
+  });
+
+  it("rejects a package with no sealed secrets", async () => {
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as Partial<BackupPackage>;
+    delete pkg.secrets;
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(BackupError);
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(/missing sealed secrets/);
+    survived();
+  });
+
+  it("rejects a package whose table data is not an object", async () => {
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as BackupPackage;
+    for (const tables of ["x", null, 7]) {
+      const broken = { ...pkg, tables };
+      await expect(restoreBackup(b.sqlite, KEY_B, broken, PASSPHRASE)).rejects.toThrow(BackupError);
+      await expect(restoreBackup(b.sqlite, KEY_B, broken, PASSPHRASE)).rejects.toThrow(/missing table data/);
+    }
+    survived();
+  });
+
+  it("rejects a table that is not a list of rows", async () => {
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as BackupPackage;
+    (pkg.tables as Record<string, unknown>).users = {};
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(BackupError);
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(/table "users" is not a list of rows/);
+    survived();
+  });
+
+  it("rejects things that are not packages at all, and other products' files", async () => {
+    for (const junk of [null, undefined, "a string", 42]) {
+      await expect(restoreBackup(b.sqlite, KEY_B, junk, PASSPHRASE)).rejects.toThrow(/^not a backup file$/);
+    }
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as BackupPackage;
+    await expect(restoreBackup(b.sqlite, KEY_B, { ...pkg, format: "someone-elses-backup" }, PASSPHRASE)).rejects.toThrow(/not a Hydrogen backup file/);
+    survived();
+  });
+
+  it("rejects secrets sealed with a key-derivation function it does not implement", async () => {
+    const pkg = overTheWire(await takeBackup(a, KEY_A)) as BackupPackage;
+    (pkg.secrets as { kdf: string }).kdf = "argon2";
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(PassphraseError);
+    await expect(restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE)).rejects.toThrow(/unsupported key-derivation function/);
+    survived();
+  });
+
+  it("rolls back when a hosted tool arrives without its sealed headers", async () => {
+    makeTool(a, KEY_A);
+    const pkg = await resealed(overTheWire(await takeBackup(a, KEY_A)) as BackupPackage, (secrets) => {
+      delete secrets.toolHeaders;
+    });
+    expect(pkg.tables.hosted_tools).toHaveLength(1);
+
+    const attempt = restoreBackup(b.sqlite, KEY_B, pkg, PASSPHRASE);
+    await expect(attempt).rejects.toThrow(BackupError);
+    await expect(attempt).rejects.toThrow("Missing sealed tool headers");
+    // Providers come before hosted tools, so they had already been written.
+    survived();
+    expect(new ProviderRepo(b.db, KEY_B).list()).toHaveLength(0);
+    expect(new HostedToolRepo(b.db, KEY_B).list()).toHaveLength(0);
   });
 
   it("rolls back the whole transaction when a row is bad", async () => {

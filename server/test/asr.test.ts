@@ -3,7 +3,7 @@
  * mirroring the OCR pre-pass for images.
  */
 import { describe, expect, it } from "vitest";
-import { audioHash, buildTranscriptionForm, transcribeAudio } from "../src/execution/asr";
+import { audioHash, buildTranscriptionForm, safeAudioFormat, transcribeAudio } from "../src/execution/asr";
 import { collectAudio, translateAudioInRequest } from "../src/execution/agentContext";
 import { OpenAICompletionRequest } from "../src/core/format/completion";
 import type { Catalog } from "../src/catalog/catalog";
@@ -100,5 +100,70 @@ describe("transcription transport", () => {
     const out = await transcribeAudio({ timeoutMs: 1000, steps: [{ model: "m", provider: "p" }] }, { data: AUDIO_B64, format: "wav" }, { catalog, transport });
     expect(out.result.ok).toBe(false);
     expect((out.result as { message: string }).message).toContain("mapping m@p: mapping_not_found");
+  });
+});
+
+describe("audio format hint", () => {
+  it("normalizes a short alphanumeric token and falls back to wav otherwise", () => {
+    expect(safeAudioFormat("MP3")).toBe("mp3");
+    expect(safeAudioFormat("a".repeat(12))).toBe("a".repeat(12));
+    for (const raw of ["mp3; x", "", "a".repeat(13)]) expect(safeAudioFormat(raw)).toBe("wav");
+  });
+
+  it("never frames a hostile format into the multipart headers", () => {
+    const raw = buildTranscriptionForm("whisper-1", { data: AUDIO_B64, format: "../x" }).body.toString("latin1");
+    expect(raw).toContain('filename="audio.wav"');
+    expect(raw).toContain("Content-Type: audio/wav");
+  });
+});
+
+describe("transcription transport outcomes", () => {
+  const catalog = {
+    resolveWithin: () => ({
+      ok: true,
+      target: {
+        family: "openai_completion", upstreamModel: "whisper-1", endpointIndex: 0,
+        upstream: { type: "openai_completion", baseUrl: "http://u.test/v1", apiKey: "k", extraHeaders: null },
+      },
+    }),
+  } as unknown as Catalog;
+  const def = { timeoutMs: 10_000, steps: [{ model: "m", provider: "p" }] };
+  const audio = { data: AUDIO_B64, format: "wav" };
+  /** A transport that answers each upload with the next scripted response. */
+  const scripted = (responses: Array<Partial<TransportJsonResult>>): Transport & { calls: number } => {
+    const transport: Transport & { calls: number } = {
+      calls: 0,
+      postJson: async () => { throw new Error("unused"); },
+      postStream: async () => { throw new Error("unused"); },
+      postRaw: async (): Promise<TransportJsonResult> => ({ status: 200, headers: {}, json: undefined, text: "", ...responses[transport.calls++] }),
+    };
+    return transport;
+  };
+
+  it("retries a 503 under the default retry rules and returns the transcript", async () => {
+    const transport = scripted([{ status: 503, json: { error: { message: "busy" } } }, { status: 200, json: { text: "second try" } }]);
+    const out = await transcribeAudio(def, audio, { catalog, transport });
+    expect(out.result).toEqual({ ok: true, value: "second try" });
+    expect(transport.calls).toBe(2);
+    expect(out.path.map((a) => a.status)).toEqual([503, 200]);
+  });
+
+  it("reports a 400 with the upstream's own message, without retrying", async () => {
+    const transport = scripted([{ status: 400, json: { error: { message: "unsupported audio" } } }]);
+    const out = await transcribeAudio(def, audio, { catalog, transport });
+    expect(out.result).toMatchObject({ ok: false, status: 400, kind: "http", message: "unsupported audio" });
+    expect(transport.calls).toBe(1);
+  });
+
+  it("uses the raw body as the transcript when the response is not JSON", async () => {
+    const out = await transcribeAudio(def, audio, { catalog, transport: scripted([{ status: 200, json: undefined, text: " hello " }]) });
+    expect(out.result).toEqual({ ok: true, value: "hello" });
+  });
+
+  it("fails clearly on a transport that cannot upload multipart bodies", async () => {
+    const transport: Transport = { postJson: async () => { throw new Error("unused"); }, postStream: async () => { throw new Error("unused"); } };
+    const out = await transcribeAudio(def, audio, { catalog, transport });
+    expect(out.result).toMatchObject({ ok: false, status: 0, kind: "error" });
+    expect((out.result as { message: string }).message).toContain("does not support multipart uploads");
   });
 });

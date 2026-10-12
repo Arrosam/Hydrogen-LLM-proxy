@@ -1,0 +1,223 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`hosted tool schema rejections > create and patch answer their own text for a rejected parameter schema > create 1`] = `
+{
+  "body": {
+    "error": "Invalid tool parameter schema (JSON Schema draft 7, local references only)",
+  },
+  "status": 400,
+}
+`;
+
+exports[`hosted tool schema rejections > create and patch answer their own text for a rejected parameter schema > patch 1`] = `
+{
+  "body": {
+    "error": "Tool parameters must be an object JSON Schema",
+  },
+  "status": 400,
+}
+`;
+
+exports[`hosted tool schema rejections > create and patch answer their own text for a rejected parameter schema > patch unknown 1`] = `
+{
+  "body": {
+    "error": "Tool not found",
+  },
+  "status": 404,
+}
+`;
+
+exports[`hosted tool schema rejections > create and patch answer their own text for a rejected parameter schema > preview 1`] = `
+{
+  "body": {
+    "error": "Invalid template variable: nope.x",
+  },
+  "status": 400,
+}
+`;
+
+exports[`mapping schemas > update validates upstreamModel, families, priority, enabled -- in that order > create 1`] = `
+{
+  "body": {
+    "error": "modelId: Number must be greater than 0; providerId: Expected number, received string; upstreamModel: String must contain at least 1 character(s); families.0: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'bogus'; priority: Expected integer, received float; enabled: Expected boolean, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`mapping schemas > update validates upstreamModel, families, priority, enabled -- in that order > update 1`] = `
+{
+  "body": {
+    "error": "upstreamModel: String must contain at least 1 character(s); families.0: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'bogus'; priority: Expected integer, received float; enabled: Expected boolean, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > create and update report the same issues in the same order > create 1`] = `
+{
+  "body": {
+    "error": "name: String must contain at least 1 character(s); type: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'bogus'; baseUrl: baseUrl must use http or https; altEndpoints.0.type: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'nope'; altEndpoints.0.baseUrl: baseUrl must use http or https; apiKey: Expected string, received number; extraHeaders.a: Expected string, received number; maxOutputTokens: Number must be greater than 0; proxyId: Number must be greater than 0; enabled: Expected boolean, received string; availableModels.0: String must contain at least 1 character(s)",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > create and update report the same issues in the same order > update 1`] = `
+{
+  "body": {
+    "error": "name: String must contain at least 1 character(s); type: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'bogus'; baseUrl: baseUrl must use http or https; altEndpoints.0.type: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'nope'; altEndpoints.0.baseUrl: baseUrl must use http or https; apiKey: Expected string, received number; extraHeaders.a: Expected string, received number; maxOutputTokens: Number must be greater than 0; proxyId: Number must be greater than 0; enabled: Expected boolean, received string; availableModels.0: String must contain at least 1 character(s)",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > create requires name, type and baseUrl; update requires nothing > create {} 1`] = `
+{
+  "body": {
+    "error": "name: Required; type: Required; baseUrl: Required",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > the test route validates id, type, baseUrl, apiKey, extraHeaders, proxyId -- in that order -- and ignores the rest > {} 1`] = `
+{
+  "body": {
+    "error": "type: Required; baseUrl: Required",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > the test route validates id, type, baseUrl, apiKey, extraHeaders, proxyId -- in that order -- and ignores the rest > all wrong 1`] = `
+{
+  "body": {
+    "error": "id: Expected number, received string; type: Invalid enum value. Expected 'openai_completion' | 'anthropic' | 'openai_responses', received 'bogus'; baseUrl: baseUrl must use http or https; apiKey: Expected string, received number; extraHeaders.a: Expected string, received number; proxyId: Number must be greater than 0",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > the test route validates id, type, baseUrl, apiKey, extraHeaders, proxyId -- in that order -- and ignores the rest > id 0 1`] = `
+{
+  "body": {
+    "error": "id: Number must be greater than 0",
+  },
+  "status": 400,
+}
+`;
+
+exports[`provider schemas > update accepts nulls where create does and rejects a null name / type / baseUrl 1`] = `
+{
+  "body": {
+    "error": "name: Expected string, received null; type: Expected 'openai_completion' | 'anthropic' | 'openai_responses', received null; baseUrl: Expected string, received null; enabled: Expected boolean, received null; availableModels: Expected array, received null",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > an update with invalid steps answers the prefixed definition error > empty steps 1`] = `
+{
+  "body": {
+    "error": "invalid steps: steps: a Model Service needs at least one step",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > an update with invalid steps answers the prefixed definition error > not an object 1`] = `
+{
+  "body": {
+    "error": "invalid steps: (root): Expected object, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > an update with invalid steps answers the prefixed definition error > unmapped pair 1`] = `
+{
+  "body": {
+    "error": "These (model, provider) pairs are not mapped in the catalog: ghost@p",
+    "invalidPairs": [
+      "ghost@p",
+    ],
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > create and update report the same envelope issues in the same order > create 1`] = `
+{
+  "body": {
+    "error": "toolIds.0: Number must be greater than 0; toolIds.1: Expected number, received string; name: String must contain at least 1 character(s); description: Expected string, received number; enabled: Expected boolean, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > create and update report the same envelope issues in the same order > update 1`] = `
+{
+  "body": {
+    "error": "toolIds.0: Number must be greater than 0; toolIds.1: Expected number, received string; name: String must contain at least 1 character(s); description: Expected string, received number; enabled: Expected boolean, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > more than 64 tool ids is refused on both > create 1`] = `
+{
+  "body": {
+    "error": "toolIds: Array must contain at most 64 element(s)",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > more than 64 tool ids is refused on both > update 1`] = `
+{
+  "body": {
+    "error": "toolIds: Array must contain at most 64 element(s)",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > the OCR test maps an invalid ocr block and invalid ad-hoc steps like a definition > bad image 1`] = `
+{
+  "body": {
+    "error": "image.mediaType: mediaType must be an image/* MIME type; image.data: image data (base64) is required",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > the OCR test maps an invalid ocr block and invalid ad-hoc steps like a definition > bad ocr 1`] = `
+{
+  "body": {
+    "error": "invalid steps: timeoutMs: Expected number, received string",
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > the OCR test maps an invalid ocr block and invalid ad-hoc steps like a definition > unmapped ocr steps 1`] = `
+{
+  "body": {
+    "error": "These (model, provider) pairs are not mapped in the catalog: ghost@p",
+    "invalidPairs": [
+      "ghost@p",
+    ],
+  },
+  "status": 400,
+}
+`;
+
+exports[`service schemas > the dry-run maps invalid ad-hoc steps the same way 1`] = `
+{
+  "body": {
+    "error": "invalid steps: steps: a Model Service needs at least one step",
+  },
+  "status": 400,
+}
+`;

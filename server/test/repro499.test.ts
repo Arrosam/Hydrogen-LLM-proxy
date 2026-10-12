@@ -152,4 +152,38 @@ describe("upstream 499 retry behavior", () => {
     expect(got.status).toBe(200);
     expect(got.body).toContain("[DONE]");
   }, 30_000);
+
+  it("reliable streaming: 499 exhausted -> a plain 499 error response, no SSE and no partial answer", async () => {
+    const def = {
+      timeoutMs: 30_000,
+      reliableStreaming: true,
+      steps: [{ model: "m", provider: "fake", retry: { maxAttempts: 3, on: [499], intervalMs: 0, idempotency: "safe_write" } }],
+    };
+    const h = await boot(def, [{ kind: "status", status: 499 }, { kind: "status", status: 499 }, { kind: "status", status: 499 }]);
+
+    const got = await call(h.port, h.secret, true);
+
+    expect(h.upstream.requests).toBe(3); // every attempt was spent
+    expect(got.status).toBe(499);
+    expect(got.body).not.toContain("data:");
+    expect(got.body).not.toContain("ANSWER");
+    const error = (JSON.parse(got.body) as { error: { message: string; type: string } }).error;
+    expect(error.type).toBe("invalid_request_error");
+    expect(error.message).toBe("injected 499 on attempt 3"); // the LAST failure is the one reported
+  }, 30_000);
+
+  it("reliable streaming: a 499 under idempotency 'unsafe' is not retried", async () => {
+    const def = {
+      timeoutMs: 30_000,
+      reliableStreaming: true,
+      steps: [{ model: "m", provider: "fake", retry: { maxAttempts: 3, on: [499], intervalMs: 0, idempotency: "unsafe" } }],
+    };
+    const h = await boot(def, [{ kind: "status", status: 499 }, { kind: "ok" }]);
+
+    const got = await call(h.port, h.secret, true);
+
+    expect(h.upstream.requests).toBe(1);
+    expect(got.status).toBe(499);
+    expect(got.body).not.toContain("ANSWER");
+  }, 30_000);
 });

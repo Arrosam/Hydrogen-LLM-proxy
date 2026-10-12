@@ -24,6 +24,8 @@ const ADMIN_PASSWORD = "bench-test-admin-pass";
 interface Hit {
   path: string;
   body: Record<string, unknown>;
+  /** The request body exactly as received (a multipart form is not JSON). */
+  raw: string;
 }
 
 let app: FastifyInstance;
@@ -36,6 +38,10 @@ let upstream: http.Server;
 let baseUrl: string;
 /** Flipped per test to make the next upstream answer a failure. */
 let failWith: { status: number; body: unknown } | null = null;
+/** Flipped per test to make the upstream hang up without answering. */
+let dropConnection = false;
+/** What the fake speech endpoint answers with. */
+const SPEECH_BYTES = Buffer.from("FAKE-MP3-BYTES");
 
 /** One server playing every upstream shape; the path says which. */
 function startUpstream(): Promise<void> {
@@ -47,7 +53,12 @@ function startUpstream(): Promise<void> {
         const url = req.url ?? "";
         let body: Record<string, unknown> = {};
         try { body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}; } catch { body = { _raw: raw.slice(0, 200) }; }
-        hits.push({ path: url, body });
+        hits.push({ path: url, body, raw });
+
+        if (dropConnection) {
+          res.destroy();
+          return;
+        }
 
         if (failWith) {
           const f = failWith;
@@ -74,8 +85,15 @@ function startUpstream(): Promise<void> {
           return res.end();
         }
 
+        if (url.includes("/audio/speech")) {
+          res.writeHead(200, { "content-type": "audio/mpeg" });
+          return res.end(SPEECH_BYTES);
+        }
+
         res.writeHead(200, { "content-type": "application/json" });
-        if (url.includes("/messages")) {
+        if (url.includes("/audio/transcriptions")) {
+          res.end(JSON.stringify({ text: "hello world" }));
+        } else if (url.includes("/messages")) {
           res.end(JSON.stringify({
             id: "msg_1", type: "message", role: "assistant", model: "up",
             content: [{ type: "text", text: "pong" }], stop_reason: "end_turn",
@@ -370,5 +388,358 @@ describe("a bench run stays out of the traffic it is diagnosing", () => {
       body: CHAT_BODY,
     });
     expect(c.logs.query({ limit: 1 }).total).toBe(before);
+  });
+});
+
+// --- guards, failure frames and the remaining media shapes -------------------
+
+const RAW_CHAT = { kind: "raw", model: "m1", provider: "dual", providerFormat: "openai_completion" } as const;
+const RAW_MEDIA = RAW_CHAT;
+
+/** SSE frames of a streamed bench run, and the payload of its trailing `bench` frame. */
+function benchFrames(payload: string): { frames: string[]; meta: Record<string, unknown> } {
+  const frames = payload.split("\n\n").filter((f) => f.trim() !== "");
+  const bench = frames.filter((f) => f.startsWith("event: bench"));
+  expect(bench).toHaveLength(1);
+  // Always the last thing on the wire: nothing follows the bench's own summary.
+  expect(frames[frames.length - 1]).toBe(bench[0]);
+  const data = bench[0].split("\n").find((l) => l.startsWith("data:"))!;
+  return { frames, meta: JSON.parse(data.slice(5)) as Record<string, unknown> };
+}
+
+describe("chat bench request guards", () => {
+  it("an unknown service id is a 404", async () => {
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "service", serviceId: 99_999 },
+      ingress: "openai_completion",
+      body: CHAT_BODY,
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "Model Service not found" });
+  });
+
+  it("a body the chosen wire's parser refuses is a 400 naming that wire and the reason", async () => {
+    hits = [];
+    const res = await post("/admin/api/bench/chat", {
+      target: RAW_CHAT,
+      ingress: "anthropic",
+      body: {
+        model: "x", max_tokens: 64,
+        messages: [{ role: "user", content: [{ type: "document", source: { type: "base64" } }] }],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: "body is not a valid anthropic request: Anthropic base64 document source is missing data",
+    });
+    expect(hits).toHaveLength(0);
+  });
+
+  it("the wire parsers are lenient: a body with no messages is still run, not refused", async () => {
+    hits = [];
+    const res = await post("/admin/api/bench/chat", {
+      target: RAW_CHAT,
+      ingress: "anthropic",
+      body: { model: "x", max_tokens: 64 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].body.messages).toEqual([]);
+  });
+
+  it("a timeout below the one-second floor is rejected by the schema", async () => {
+    hits = [];
+    const res = await post("/admin/api/bench/chat", {
+      target: RAW_CHAT,
+      ingress: "openai_completion",
+      body: CHAT_BODY,
+      timeoutMs: 999,
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toContain("timeoutMs");
+    expect(hits).toHaveLength(0);
+  });
+
+  it("requires an admin session", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/admin/api/bench/chat",
+      payload: { target: RAW_CHAT, ingress: "openai_completion", body: CHAT_BODY },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+describe("streamed bench runs", () => {
+  it("a saved service streams the client's own frames, then one bench frame with usage and the attempt path", async () => {
+    hits = [];
+    const svc = c.services.getByName("svc");
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "service", serviceId: svc.id },
+      ingress: "openai_completion",
+      body: { ...CHAT_BODY, stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    const { frames, meta } = benchFrames(res.payload);
+    expect(frames.length).toBeGreaterThan(1);
+    expect(res.payload).toContain("pong");
+    expect(meta).toMatchObject({
+      ok: true,
+      status: 200,
+      served: { model: "m1", provider: "dual", family: "openai_completion", upstreamModel: "up" },
+      usage: { promptTokens: 100, completionTokens: 9, cachedInputTokens: 70 },
+    });
+    expect((meta.upstreamRequest as Record<string, unknown>).model).toBe("up");
+    expect(meta.attemptPath).toHaveLength(1);
+    expect(hits).toHaveLength(1);
+  });
+
+  it("a saved service whose upstream fails yields a single failing bench frame", async () => {
+    hits = [];
+    failWith = { status: 500, body: { error: { message: "boom" } } };
+    const svc = c.services.getByName("svc");
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "service", serviceId: svc.id },
+      ingress: "openai_completion",
+      body: { ...CHAT_BODY, stream: true },
+    });
+    failWith = null;
+    // The stream was already committed, so the failure travels in the frame.
+    expect(res.statusCode).toBe(200);
+    const { frames, meta } = benchFrames(res.payload);
+    expect(frames).toHaveLength(1);
+    expect(meta).toMatchObject({ ok: false, status: 500, message: "boom" });
+    expect(meta.attemptPath).toHaveLength(1);
+    expect(hits).toHaveLength(1);
+  });
+
+  it("a raw tuple with no such endpoint yields a single bench frame with the buffered run's status (502)", async () => {
+    hits = [];
+    const res = await post("/admin/api/bench/chat", {
+      target: { kind: "raw", model: "m1", provider: "dual", providerFormat: "openai_responses" },
+      ingress: "openai_completion",
+      body: { ...CHAT_BODY, stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const { frames, meta } = benchFrames(res.payload);
+    expect(frames).toHaveLength(1);
+    expect(meta).toMatchObject({ ok: false, status: 502 });
+    expect(meta.message).toContain("openai_responses");
+    expect(meta.attemptPath).toHaveLength(1);
+    expect(hits).toHaveLength(0);
+  });
+
+  it("a raw tuple whose upstream refuses yields a single bench frame with the upstream status and message", async () => {
+    hits = [];
+    failWith = { status: 429, body: { error: { message: "slow down" } } };
+    const res = await post("/admin/api/bench/chat", {
+      target: RAW_CHAT,
+      ingress: "openai_completion",
+      body: { ...CHAT_BODY, stream: true },
+    });
+    failWith = null;
+    const { frames, meta } = benchFrames(res.payload);
+    expect(frames).toHaveLength(1);
+    expect(meta).toMatchObject({ ok: false, status: 429, message: "slow down", served: { family: "openai_completion" } });
+    expect(hits).toHaveLength(1);
+  });
+});
+
+describe("media bench request guards", () => {
+  it("a chat-pipeline category is sent back to the chat panel", async () => {
+    for (const category of ["chat", "ocr"]) {
+      const res = await post("/admin/api/bench/media", { target: RAW_MEDIA, category, body: { model: "x" } });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: string }).error).toContain("chat-pipeline category");
+    }
+  });
+
+  it("an unknown service id is a 404", async () => {
+    const res = await post("/admin/api/bench/media", {
+      target: { kind: "service", serviceId: 99_999 },
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "Model Service not found" });
+  });
+
+  it("a Micro Agent has no media endpoint", async () => {
+    const agent = c.services.create({
+      name: "bench-agent",
+      definition: { kind: "micro_agent", timeoutMs: 10_000, stages: [{ name: "s1", service: "svc", input: [] }] },
+    });
+    const res = await post("/admin/api/bench/media", {
+      target: { kind: "service", serviceId: agent.id },
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: '"bench-agent" is a Micro Agent; it has no media endpoint' });
+  });
+
+  it("a service of another category is refused, naming both categories", async () => {
+    hits = [];
+    const emb = c.services.getByName("emb");
+    const res = await post("/admin/api/bench/media", {
+      target: { kind: "service", serviceId: emb.id },
+      category: "rerank",
+      body: { model: "x", query: "q", documents: ["a"] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: '"emb" is a embedding service, not rerank' });
+    expect(hits).toHaveLength(0);
+  });
+
+  it("a timeout below the one-second floor is rejected by the schema", async () => {
+    const res = await post("/admin/api/bench/media", {
+      target: RAW_MEDIA,
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+      timeoutMs: 999,
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toContain("timeoutMs");
+  });
+});
+
+describe("media bench runs", () => {
+  it("a saved media service is run through its own mapping", async () => {
+    hits = [];
+    const emb = c.services.getByName("emb");
+    const res = await post("/admin/api/bench/media", {
+      target: { kind: "service", serviceId: emb.id },
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+    });
+    expect(res.statusCode).toBe(200);
+    const out = res.json() as { ok: boolean; served: Record<string, unknown>; upstreamRequest: Record<string, unknown> };
+    expect(out.ok).toBe(true);
+    expect(out.served).toMatchObject({ model: "m1", provider: "dual", family: "openai_completion", upstreamModel: "up" });
+    expect(out.upstreamRequest).toEqual({ model: "up", input: "hello" });
+    expect(hits).toHaveLength(1);
+    expect(hits[0].path).toBe("/chat/v1/embeddings");
+  });
+
+  it("a saved media service gets one shot at its first step: no retry, no fallback", async () => {
+    const chain = c.services.create({
+      name: "emb-chain",
+      definition: {
+        timeoutMs: 10_000, category: "embedding",
+        steps: [
+          { model: "m1", provider: "dual", retry: { maxAttempts: 3, on: [503], intervalMs: 0 } },
+          { model: "m1", provider: "dual" },
+        ],
+      },
+    });
+    hits = [];
+    failWith = { status: 503, body: { error: { message: "busy" } } };
+    const res = await post("/admin/api/bench/media", {
+      target: { kind: "service", serviceId: chain.id },
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+    });
+    failWith = null;
+    expect(res.json()).toMatchObject({ ok: false, status: 503, message: "busy" });
+    expect(hits).toHaveLength(1);
+  });
+
+  it("an upstream refusal comes back in-body: HTTP 200 with ok:false and the upstream's status and words", async () => {
+    hits = [];
+    failWith = { status: 400, body: { error: { message: "bad input" } } };
+    const res = await post("/admin/api/bench/media", {
+      target: RAW_MEDIA,
+      category: "embedding",
+      body: { model: "x", input: "hello" },
+    });
+    failWith = null;
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      ok: false,
+      status: 400,
+      message: "bad input",
+      served: { model: "m1", provider: "dual", upstreamModel: "up" },
+      upstreamRequest: { model: "up", input: "hello" },
+      response: { error: { message: "bad input" } },
+    });
+    expect(hits).toHaveLength(1);
+  });
+
+  it("a connection that dies is reported as status 0, not as an HTTP error", async () => {
+    hits = [];
+    dropConnection = true;
+    let res;
+    try {
+      res = await post("/admin/api/bench/media", {
+        target: RAW_MEDIA,
+        category: "embedding",
+        body: { model: "x", input: "hello" },
+      });
+    } finally {
+      dropConnection = false;
+    }
+    expect(res.statusCode).toBe(200);
+    const out = res.json() as { ok: boolean; status: number; message: string; served: Record<string, unknown> };
+    expect(out.ok).toBe(false);
+    expect(out.status).toBe(0);
+    expect(out.message).toBeTruthy();
+    expect(out.served).toMatchObject({ model: "m1", provider: "dual" });
+    expect(hits).toHaveLength(1); // one attempt, as everywhere in the bench
+  });
+
+  it("a text-to-speech run returns the audio itself, base64 with its media type", async () => {
+    hits = [];
+    const res = await post("/admin/api/bench/media", {
+      target: RAW_MEDIA,
+      category: "tts",
+      body: { model: "x", input: "hello", voice: "alloy" },
+    });
+    expect(res.statusCode).toBe(200);
+    const out = res.json() as { ok: boolean; status: number; audio: Record<string, unknown>; upstreamRequest: Record<string, unknown> };
+    expect(out.ok).toBe(true);
+    expect(out.status).toBe(200);
+    expect(out.audio).toEqual({ mediaType: "audio/mpeg", bytes: SPEECH_BYTES.length, base64: SPEECH_BYTES.toString("base64") });
+    expect(out.upstreamRequest).toEqual({ model: "up", input: "hello", voice: "alloy" });
+    expect(hits[0].path).toBe("/chat/v1/audio/speech");
+    expect(hits[0].body.model).toBe("up");
+  });
+
+  it("a text-to-speech refusal reports the upstream's status and message instead of audio", async () => {
+    failWith = { status: 400, body: { error: { message: "voice not found" } } };
+    const res = await post("/admin/api/bench/media", {
+      target: RAW_MEDIA,
+      category: "tts",
+      body: { model: "x", input: "hello", voice: "nope" },
+    });
+    failWith = null;
+    const out = res.json() as Record<string, unknown>;
+    expect(out).toMatchObject({ ok: false, status: 400, message: "voice not found" });
+    expect(out.audio).toBeUndefined();
+  });
+
+  it("a speech-to-text run frames the recording as multipart, with the mapped model name", async () => {
+    hits = [];
+    const audio = Buffer.from("RIFF-FAKE-AUDIO-DATA");
+    const res = await post("/admin/api/bench/media", {
+      target: RAW_MEDIA,
+      category: "stt",
+      body: { model: "x", language: "en" },
+      file: { name: "a.wav", mediaType: "audio/wav", data: audio.toString("base64") },
+    });
+    expect(res.statusCode).toBe(200);
+    const out = res.json() as { ok: boolean; response: Record<string, unknown>; upstreamRequest: Record<string, unknown> };
+    expect(out.ok).toBe(true);
+    expect(out.response).toEqual({ text: "hello world" });
+    // The file is summarized in the report, never echoed back.
+    expect(out.upstreamRequest).toEqual({ model: "up", language: "en", file: `(a.wav, audio/wav, ${audio.length} bytes)` });
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0].path).toBe("/chat/v1/audio/transcriptions");
+    const form = hits[0].raw;
+    expect(form).toContain('name="model"\r\n\r\nup\r\n');
+    expect(form).toContain('name="language"\r\n\r\nen\r\n');
+    expect(form).toContain('name="file"; filename="a.wav"');
+    expect(form).toContain("RIFF-FAKE-AUDIO-DATA");
+    expect(form).not.toContain('\r\n\r\nx\r\n'); // the bench's placeholder model never goes upstream
   });
 });

@@ -19,7 +19,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 
-import { startFakeUpstream, type FakeUpstream, type UpstreamBehavior } from "./fixtures/fakeUpstream";
+import { startFakeUpstream, type FakeUpstream, type FakeUpstreamOptions, type UpstreamBehavior } from "./fixtures/fakeUpstream";
 
 // ---------------------------------------------------------------------------
 // sizes — "large input, large output"
@@ -69,7 +69,7 @@ afterEach(async () => {
   harness = null;
 });
 
-async function boot(definition: unknown, script: UpstreamBehavior[], timeoutMs = 60_000): Promise<Harness> {
+async function boot(definition: unknown, script: UpstreamBehavior[], timeoutMs = 60_000, upstreamOpts: Partial<FakeUpstreamOptions> = {}): Promise<Harness> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "hydrogen-resil-"));
   process.env.NODE_ENV = "test";
   process.env.DATA_DIR = dataDir;
@@ -84,7 +84,7 @@ async function boot(definition: unknown, script: UpstreamBehavior[], timeoutMs =
   process.env.STREAM_COMMIT_GRACE_MS = "600000"; // pacing is not what we test here
   void timeoutMs;
 
-  const upstream = await startFakeUpstream({ text: ANSWER, chunkChars: 200, script, seed: 3 });
+  const upstream = await startFakeUpstream({ text: ANSWER, chunkChars: 200, script, seed: 3, ...upstreamOpts });
 
   const { boot: bootContainer } = await import("../src/composition/container");
   const { buildApp } = await import("../src/app");
@@ -452,4 +452,69 @@ describe("Model Service (passthrough)", () => {
       expect(await loggedStatus(h)).not.toBe(200);
     }, 60_000);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The upstream answers 200, starts its body, then goes SILENT (no EOF, no
+// reset). Every "hang" above stalls before the headers; this is the other
+// place a stream can stall, and the only thing that ends it is the idle body
+// timeout the service's timeoutMs sets on the upstream stream.
+// ---------------------------------------------------------------------------
+
+describe("upstream goes silent mid-body", () => {
+  // The fixture pauses after every 16 KiB it writes. ANSWER is far larger than
+  // that, so the first pause lands mid-answer and outlasts the 1 s timeout.
+  const STALL = { delayMs: 1_500 };
+  const ONE_SECOND = 1_000; // the smallest timeout a service may declare
+
+  async function loggedRow(h: Harness): Promise<{ http_status: number; error: string | null; attempts: number }> {
+    await loggedStatus(h);
+    return h.sqlite.prepare("SELECT http_status, error, attempts FROM request_logs ORDER BY id DESC LIMIT 1").get() as
+      { http_status: number; error: string | null; attempts: number };
+  }
+
+  it("Reliable Streaming: each stalled attempt times out and is retried; exhaustion is a clean 502, never a partial answer", async () => {
+    const h = await boot(
+      { timeoutMs: ONE_SECOND, reliableStreaming: true, steps: [{ ...STEP, retry: { maxAttempts: 2, on: ["timeout"], intervalMs: 0 } }] },
+      [], 60_000, STALL,
+    );
+    const started = Date.now();
+    const got = await stream(h.port, h.secret);
+
+    expect(got.status).toBe(502);
+    expect(got.text).toBe(""); // no SSE content reached the client
+    expect(got.sawDone).toBe(false);
+    expect(h.upstream.requests).toBe(2); // the stall was classified as a retryable timeout
+    // Two idle timeouts, not two full (never-ending) bodies.
+    expect(Date.now() - started).toBeLessThan(8_000);
+
+    const row = await loggedRow(h);
+    expect(row.http_status).toBe(502);
+    expect(row.attempts).toBe(2);
+    expect(row.error).toMatch(/timeout/i);
+  }, 30_000);
+
+  it("passthrough: the 200 is already committed, so the client gets a short stream that is visibly broken", async () => {
+    const h = await boot(
+      { timeoutMs: ONE_SECOND, steps: [{ ...STEP, retry: { maxAttempts: 2, on: ["timeout"], intervalMs: 0 } }] },
+      [], 60_000, STALL,
+    );
+    const started = Date.now();
+    const got = await stream(h.port, h.secret);
+
+    expect(got.status).toBe(200);
+    expect(got.text.length).toBeGreaterThan(0); // the part that arrived before the stall was relayed
+    expect(got.text.length).toBeLessThan(ANSWER.length);
+    expect(ANSWER.startsWith(got.text)).toBe(true);
+    expect(got.sawDone).toBe(false);
+    expect(got.aborted).toBe(true); // not a clean end-of-message
+    expect(h.upstream.requests).toBe(1); // nothing to retry once bytes are on the wire
+    expect(Date.now() - started).toBeLessThan(8_000); // ended by the idle timeout, not by the upstream
+
+    // Which non-200 status this is logged under is an open question; that it
+    // is not recorded as a success, and says why, is the contract.
+    const row = await loggedRow(h);
+    expect(row.http_status).not.toBe(200);
+    expect(row.error).toBeTruthy();
+  }, 30_000);
 });

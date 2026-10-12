@@ -7,16 +7,15 @@
  *  5. Non-streaming requests fully buffer upstream response before returning
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Readable, Writable } from "node:stream";
 import "../src/core/format"; // register wire formats
 import { OpenAICompletionRequest } from "../src/core/format";
 import { ModelService, type ServiceDeps } from "../src/execution/modelService";
-import { fabricateStream, newAccumulator, tapStream, collectStream, type ResponseData } from "../src/core/ir/stream";
-import { serializeStream, parseStream } from "../src/core/format/registry";
+import { fabricateStream, newAccumulator, tapStream, type ResponseData } from "../src/core/ir/stream";
+import { serializeStream } from "../src/core/format/registry";
 import type { Transport, TransportJsonResult, TransportStreamResult, TransportOptions } from "../src/core/upstream/transport";
 import type { Catalog } from "../src/catalog/catalog";
-import type { GenerationParams } from "../src/core/ir/params";
 import type { Family } from "../src/core/format/family";
 import { loadConfig } from "../src/config";
 
@@ -104,7 +103,7 @@ function makeTransport(opts: {
   slowDelayMs?: number;
 }): Transport {
   return {
-    async postStream(url: string, headers: Record<string, string>, body: unknown, o: TransportOptions): Promise<TransportStreamResult> {
+    async postStream(_url: string, _headers: Record<string, string>, _body: unknown, _o: TransportOptions): Promise<TransportStreamResult> {
       const frames = opts.streamFrames ?? OK_FRAMES;
       const status = opts.status ?? 200;
       if (opts.slowDelayMs) {
@@ -115,7 +114,7 @@ function makeTransport(opts: {
       }
       return { status, headers: {}, body: readableOf(frames) };
     },
-    async postJson(url: string, headers: Record<string, string>, body: unknown, o: TransportOptions): Promise<TransportJsonResult> {
+    async postJson(_url: string, _headers: Record<string, string>, _body: unknown, _o: TransportOptions): Promise<TransportJsonResult> {
       const status = opts.status ?? 200;
       if (status >= 400) {
         return { status, headers: {}, json: { error: "fail" }, text: "" };
@@ -163,18 +162,6 @@ async function relayToRaw(events: AsyncGenerator<any>, model: string): Promise<{
   if (!raw.writableEnded) raw.end();
   return { raw, output: raw.chunks.join("") };
 }
-
-const COMPLETE_DATA: ResponseData = {
-  id: "r",
-  model: "m",
-  created: 1,
-  content: [
-    { type: "reasoning", text: "thinking about the answer" },
-    { type: "text", text: "The quick brown fox jumps over the lazy dog." },
-  ],
-  stopReason: "stop",
-  usage: { promptTokens: 10, completionTokens: 15, totalTokens: 25 },
-};
 
 // ===========================================================================
 // 1. Reliable Streaming ON: buffers full response, simulates paced stream
