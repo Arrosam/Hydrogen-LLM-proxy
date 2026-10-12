@@ -236,7 +236,8 @@ function audioPartValue(p: ContentPart): { input_audio?: { data?: unknown; forma
  * transcripts stay aligned with the parts they replace. */
 function transcribableAudio(p: ContentPart): AudioInput | undefined {
   const audio = audioPartValue(p)?.input_audio;
-  if (typeof audio?.data !== "string") return undefined;
+  // An empty string is no data either: there is nothing to upload.
+  if (typeof audio?.data !== "string" || !audio.data) return undefined;
   return { data: audio.data, format: String(audio.format ?? DEFAULT_AUDIO_FORMAT) };
 }
 

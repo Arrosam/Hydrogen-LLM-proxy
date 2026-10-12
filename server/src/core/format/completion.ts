@@ -291,6 +291,20 @@ function parseToolCalls(raw: unknown): ToolUsePart[] {
   return calls;
 }
 
+/**
+ * A streamed call not yet announced downstream (`delta.tool_calls`): the
+ * argument text that preceded its start and, once its id arrived without a
+ * name, the id and the name pieces gathered since.
+ */
+interface HeldToolCall {
+  id?: string;
+  name: string;
+  args: string;
+}
+
+/** Whether an id or a name has arrived for the call, i.e. it is more than stray argument text. */
+const isIdentified = (held: HeldToolCall): boolean => held.id !== undefined || held.name !== "";
+
 /** The `tool_calls` of an assistant message, or undefined when it made none. */
 function renderToolCalls(content: ContentPart[]): unknown[] | undefined {
   const calls = toolCallsOf(content).map((tc) => ({ id: tc.id, type: TOOL_TYPE_FUNCTION, function: { name: tc.name, arguments: tc.args } }));
@@ -643,8 +657,18 @@ export class OpenAICompletionResponse extends Response {
     let usage: ResponseData["usage"] | undefined;
     let reasoningTextSeen = false;
     const seenTools = new Set<number>();
-    /** Argument text that arrived before the chunk naming its call, by call index. */
-    const earlyToolArgs = new Map<number, string>();
+    /** What arrived for a call before it could be announced, by call index. */
+    const heldTools = new Map<number, HeldToolCall>();
+    /** Announces, in call order, every held call that was identified: nothing more can extend its name. */
+    const releaseHeldTools = function* (): Generator<StreamEvent> {
+      for (const [index, held] of [...heldTools].sort(([a], [b]) => a - b)) {
+        if (!isIdentified(held)) continue;
+        seenTools.add(index);
+        yield { type: "tool_start", index, id: held.id ?? genId(ID_PREFIX.CALL), name: held.name };
+        if (held.args) yield { type: "tool_args_delta", index, delta: held.args };
+      }
+      heldTools.clear();
+    };
 
     for await (const frame of parseSSE(readable)) {
       if (frame.data === SSE_DONE) {
@@ -698,23 +722,33 @@ export class OpenAICompletionResponse extends Response {
         const fn = (call.function ?? {}) as Record<string, unknown>;
         const args = typeof fn.arguments === "string" ? fn.arguments : "";
         if (!seenTools.has(index)) {
-          if (!(call.id || fn.name)) {
+          const held = heldTools.get(index) ?? { name: "", args: "" };
+          if (!fn.name || [...heldTools.values()].some(isIdentified)) {
             // Some servers send argument text ahead of the chunk that carries
             // the call's id and name. A delta for a call that has not started
             // belongs to nothing downstream, so it is held until the start.
-            if (args) earlyToolArgs.set(index, (earlyToolArgs.get(index) ?? "") + args);
+            // Others send the id alone and the name later, possibly in pieces
+            // with argument text in between. A start cannot be amended (on the
+            // Anthropic wire the name exists only there), and no chunk marks a
+            // name as finished, so such a call stays held until the stream
+            // ends — and so does every call that begins while one is held,
+            // or it would overtake the held call downstream.
+            if (call.id) held.id ??= String(call.id);
+            if (fn.name) held.name += String(fn.name);
+            held.args += args;
+            heldTools.set(index, held);
             continue;
           }
           seenTools.add(index);
-          yield { type: "tool_start", index, id: String(call.id ?? genId(ID_PREFIX.CALL)), name: String(fn.name ?? "") };
-          const early = earlyToolArgs.get(index);
-          if (early) yield { type: "tool_args_delta", index, delta: early };
-          earlyToolArgs.delete(index);
+          yield { type: "tool_start", index, id: String(call.id ?? genId(ID_PREFIX.CALL)), name: String(fn.name) };
+          if (held.args) yield { type: "tool_args_delta", index, delta: held.args };
+          heldTools.delete(index);
         }
         if (args) yield { type: "tool_args_delta", index, delta: args };
       }
 
       if (choice.finish_reason) {
+        yield* releaseHeldTools();
         stopReason = finishReasonToStop(choice.finish_reason as string);
         terminated = true;
       }
@@ -739,6 +773,8 @@ export class OpenAICompletionResponse extends Response {
         yield { type: "usage", usage };
       }
     }
+
+    yield* releaseHeldTools();
 
     // No terminal event (no [DONE], no finish_reason) means the upstream stream
     // was cut short. That includes a stream that never produced a single usable

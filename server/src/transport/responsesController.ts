@@ -12,6 +12,7 @@ import { buildErrorBody } from "../core/proxy/errors";
 import { parseService, isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { runHostedTools, HostedRunError } from "../execution/hostedToolLoop";
 import { collectServerToolCalls, declaredServerTools, hostedServerTools, rewriteServerTools, serverToolParts, serverToolResponseContent } from "../execution/serverTools";
+import { countAttempts } from "../execution/serviceCall";
 import { DEFAULT_ITEM_PAGE_SIZE, RESPONSE_EVENT_PAGE_SIZE, ResponseStateError, type ResponseRepo, type StoredResponse, type WireItem } from "../persistence/responseRepo";
 import type { HostedToolRepo } from "../persistence/hostedToolRepo";
 import { ProgressRecorder } from "../observability/progressRecorder";
@@ -378,7 +379,9 @@ export class ResponsesController {
         const cancelled = abort.signal.aborted;
         status = cancelled ? STATUS_CLIENT_CLOSED : caught instanceof HostedRunError || caught instanceof ResponseStateError ? caught.statusCode : STATUS_UPSTREAM_FAILURE;
         error = cancelled ? "Response execution cancelled" : caught instanceof HostedRunError || caught instanceof ResponseStateError ? caught.message : ERR_RESPONSE_EXECUTION_FAILED;
-        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; }
+        // A failed run made upstream requests too: count them from the calls it
+        // carries, the way the hosted executor reports its own failures.
+        if (caught instanceof HostedRunError) { usage = caught.usage; calls = caught.calls; attempts = countAttempts(caught.calls); }
         const failed = this.repo.transition(id, token.id, cancelled ? RESPONSE_STATUS.CANCELLED : RESPONSE_STATUS.FAILED, { ...initial, error: { code: cancelled ? "cancelled" : "execution_failed", message: error } });
         output = failed?.response ?? this.repo.response(id, token.id)?.response ?? initial;
         if (failed) this.repo.addEvent(id, token.id, { type: family === "anthropic" ? "hydrogen.response.failed" : `response.${failed.status}`, response: output });
