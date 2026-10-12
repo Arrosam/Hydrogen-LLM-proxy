@@ -1,11 +1,23 @@
 import { useState, type ReactNode } from "react";
 import { Modal } from "./Modal";
+import { Button, Icon } from "./Button";
+import { Notice } from "./Notice";
 import { useI18n } from "../lib/i18n";
+import { ACTION_ICON } from "../lib/icons";
+import { HTTP_CLIENT_CLOSED, isSuccessStatus } from "../lib/http";
 
-export function Spinner({ label }: { label?: string }) {
+/**
+ * The loading indicator. Default: a block in the flow of a page, with an
+ * optional caption. `fullScreen`: alone in the middle of the viewport, larger
+ * and in the brand colour (the app's first paint, before the session is known).
+ * `card`: the block is itself a card, a little shorter (a result that is still
+ * on its way, between other cards).
+ */
+export function Spinner({ label, fullScreen, card }: { label?: string; fullScreen?: boolean; card?: boolean }) {
+  const frame = fullScreen ? "h-screen text-brand-400" : `gap-2 ${card ? "py-12" : "py-16"} text-ink-400`;
   return (
-    <div className="flex items-center justify-center gap-2 py-16 text-ink-400">
-      <i className="bi bi-arrow-repeat animate-spin text-xl" />
+    <div className={`${card ? "card card-pad " : ""}flex items-center justify-center ${frame}`}>
+      <Icon name={ACTION_ICON.busy} className={fullScreen ? "text-3xl" : "text-xl"} />
       {label && <span className="text-sm">{label}</span>}
     </div>
   );
@@ -35,18 +47,12 @@ export function EmptyState({
 /** HTTP-status badge: 2xx green, 499 (client abort) gray, everything else red. */
 export function StatusBadge({ status, label }: { status: number; label?: string }) {
   const { t } = useI18n();
-  const cls =
-    status >= 200 && status < 300 ? "badge-green" : status === 499 ? "badge-gray" : "badge-red";
+  const cls = isSuccessStatus(status) ? "badge-green" : status === HTTP_CLIENT_CLOSED ? "badge-gray" : "badge-red";
   return <span className={cls}>{label ?? (status || t("common.statusError"))}</span>;
 }
 
 export function ErrorNote({ message }: { message: string }) {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-300">
-      <i className="bi bi-exclamation-octagon-fill" />
-      {message}
-    </div>
-  );
+  return <Notice tone="error">{message}</Notice>;
 }
 
 export function Toggle({
@@ -110,13 +116,12 @@ export function useConfirm(): {
       onClose={() => close(false)}
       footer={
         <>
-          <button className="btn-ghost" onClick={() => close(false)}>
+          <Button variant="ghost" onClick={() => close(false)}>
             {t("common.cancel")}
-          </button>
-          <button className="btn-danger" onClick={() => close(true)}>
-            <i className="bi bi-trash3" />
+          </Button>
+          <Button variant="danger" icon={ACTION_ICON.remove} onClick={() => close(true)}>
             {t("common.confirm")}
-          </button>
+          </Button>
         </>
       }
     >

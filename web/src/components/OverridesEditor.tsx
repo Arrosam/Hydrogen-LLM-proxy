@@ -1,64 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import type { Overrides } from "../types";
 import { useI18n } from "../lib/i18n";
-import { selectAll } from "../lib/input";
+import { formatJson } from "../lib/json";
+import { objectToRows, rowsToObject, type KeyValueRow } from "../lib/kv";
+import { SegmentedControl } from "./Chip";
+import { InsetPanel, ListHeader } from "./EditorCard";
+import { FieldHint } from "./Field";
+import { TextArea } from "./inputs";
+import { KeyValueRows, type KeyValueChange } from "./KeyValueRows";
 
-interface Row {
+/** How the overrides are edited: as key/value rows, or as one JSON object. */
+type Mode = "gui" | "json";
+const MODE = { fields: "gui", json: "json" } as const;
+
+/** Shown in the empty JSON view. */
+const JSON_PLACEHOLDER = '{"topP": 0.9, "topK": 40, "maxTokens": 4096, "thinking": "high"}';
+
+/** A row keeps an id of its own, so React state stays with it when rows above it go. */
+interface Row extends KeyValueRow {
   id: number;
-  key: string;
-  value: string;
 }
 
 let rowUid = 1;
+const newRow = (row: KeyValueRow = { key: "", value: "" }): Row => ({ id: rowUid++, ...row });
 
-function parsesAsJson(s: string): boolean {
-  try {
-    JSON.parse(s);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Render a stored value for the text input. Strings that would not survive
- * the plain-text round trip — JSON-parseable, edge whitespace (coerceValue
- * trims), or embedded newlines (a single-line input strips CR/LF) — are shown
- * JSON-quoted so coerceValue restores them exactly. */
-function valToString(val: unknown): string {
-  if (val === undefined) return "";
-  if (typeof val === "string") {
-    const fragile = val !== val.trim() || /[\r\n]/.test(val) || parsesAsJson(val);
-    return fragile ? JSON.stringify(val) : val;
-  }
-  return JSON.stringify(val);
-}
-
-/** JSON when it parses, plain text otherwise. Quote a value to force a string. */
-function coerceValue(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return undefined;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
-  }
-}
-
+/** The overrides the rows spell: values trimmed and read as JSON when they parse; a row missing either half says nothing. */
 function rowsToOverrides(rows: Row[]): Overrides | undefined {
-  const out: Record<string, unknown> = {};
-  for (const r of rows) {
-    const key = r.key.trim();
-    if (!key) continue;
-    const v = coerceValue(r.value);
-    if (v !== undefined) out[key] = v;
-  }
+  const out = rowsToObject(rows, { trim: true, dropEmpty: true });
   return Object.keys(out).length ? (out as Overrides) : undefined;
 }
 
-function overridesToRows(ov: Overrides | undefined): Row[] {
-  if (!ov) return [];
-  return Object.entries(ov).map(([key, val]) => ({ id: rowUid++, key, value: valToString(val) }));
-}
+const overridesToRows = (ov: Overrides | undefined): Row[] => objectToRows(ov as Record<string, unknown> | undefined).map(newRow);
+const overridesToJson = (ov: Overrides | undefined): string => (ov ? formatJson(ov) : "");
 
 interface Props {
   overrides: Overrides | undefined;
@@ -67,7 +40,7 @@ interface Props {
 
 export function OverridesEditor({ overrides, onChange }: Props) {
   const { t } = useI18n();
-  const [mode, setMode] = useState<"gui" | "json">("gui");
+  const [mode, setMode] = useState<Mode>(MODE.fields);
   const [rows, setRows] = useState<Row[]>([]);
   const [jsonText, setJsonText] = useState("");
 
@@ -88,14 +61,14 @@ export function OverridesEditor({ overrides, onChange }: Props) {
     if (incoming === lastEmitted.current) return;
     lastEmitted.current = incoming;
     setRows(overridesToRows(overrides));
-    setJsonText(overrides ? JSON.stringify(overrides, null, 2) : "");
+    setJsonText(overridesToJson(overrides));
   }, [overrides]);
 
   // The inactive view goes stale while the other is edited, so rebuild it from
   // the (parent-synced) prop when switching.
-  const switchMode = (m: "gui" | "json") => {
+  const switchMode = (m: Mode) => {
     if (m === mode) return;
-    if (m === "json") setJsonText(overrides ? JSON.stringify(overrides, null, 2) : "");
+    if (m === MODE.json) setJsonText(overridesToJson(overrides));
     else setRows(overridesToRows(overrides));
     setMode(m);
   };
@@ -119,123 +92,60 @@ export function OverridesEditor({ overrides, onChange }: Props) {
     emit(parsed as Overrides);
   };
 
-  const updateRow = (i: number, patch: Partial<Row>) => {
-    const next = rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+  // A row just added is empty and says nothing yet, so only edits and removals are emitted.
+  const changeRows = (next: Row[], change: KeyValueChange) => {
     setRows(next);
-    emit(rowsToOverrides(next));
+    if (change !== "add") emit(rowsToOverrides(next));
   };
-
-  const addRow = () => {
-    setRows([...rows, { id: rowUid++, key: "", value: "" }]);
-  };
-
-  const removeRow = (i: number) => {
-    const next = rows.filter((_, idx) => idx !== i);
-    setRows(next);
-    emit(rowsToOverrides(next));
-  };
-
-  // Duplicate parameter names: the last row silently wins in rowsToOverrides,
-  // so mark every involved row instead of losing a value without warning.
-  const keyCounts = new Map<string, number>();
-  for (const r of rows) {
-    const k = r.key.trim();
-    if (k) keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
-  }
-  const hasDuplicates = [...keyCounts.values()].some((n) => n > 1);
 
   return (
-    <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="label mb-0">
-          {t("overrides.title")}
-          <span className="ml-2 normal-case text-ink-500">{t("overrides.titleHint")}</span>
-        </span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${mode === "gui" ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"}`}
-            onClick={() => switchMode("gui")}
-          >
-            <i className="bi bi-sliders mr-1" />
-            {t("overrides.fieldsMode")}
-          </button>
-          <button
-            type="button"
-            className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${mode === "json" ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"}`}
-            onClick={() => switchMode("json")}
-          >
-            <i className="bi bi-code-slash mr-1" />
-            {t("overrides.jsonMode")}
-          </button>
-        </div>
-      </div>
+    <InsetPanel>
+      <ListHeader
+        label={
+          <>
+            {t("overrides.title")}
+            <span className="ml-2 normal-case text-ink-500">{t("overrides.titleHint")}</span>
+          </>
+        }
+        action={
+          <SegmentedControl
+            value={mode}
+            onChange={switchMode}
+            size="fine"
+            options={[
+              { value: MODE.fields, label: t("overrides.fieldsMode"), icon: "bi-sliders" },
+              { value: MODE.json, label: t("overrides.jsonMode"), icon: "bi-code-slash" },
+            ]}
+          />
+        }
+      />
 
-      {mode === "gui" ? (
+      {mode === MODE.fields ? (
         <div className="space-y-2">
-          {rows.length === 0 && (
-            <p className="text-xs text-ink-500">{t("overrides.emptyHint")}</p>
-          )}
-
-          {rows.map((row, i) => {
-            const dup = (keyCounts.get(row.key.trim()) ?? 0) > 1;
-            return (
-              <div key={row.id} className="flex items-start gap-1.5">
-                <input
-                  className={`input h-8 w-40 py-0 font-mono text-xs ${dup ? "border-red-500/70" : ""}`}
-                  type="text"
-                  placeholder={t("overrides.paramPlaceholder")}
-                  title={dup ? t("overrides.duplicateKey") : undefined}
-                  value={row.key}
-                  onChange={(e) => updateRow(i, { key: e.target.value })}
-                />
-                <input
-                  className="input h-8 flex-1 py-0 font-mono text-xs"
-                  type="text"
-                  value={row.value}
-                  onChange={(e) => updateRow(i, { value: e.target.value })}
-                  onFocus={selectAll}
-                  placeholder={t("overrides.contentPlaceholder")}
-                />
-                <button
-                  type="button"
-                  className="btn-danger btn-xs shrink-0"
-                  onClick={() => removeRow(i)}
-                  title={t("overrides.removeOverrideTitle")}
-                >
-                  <i className="bi bi-x-lg" />
-                </button>
-              </div>
-            );
-          })}
-
-          {hasDuplicates && (
-            <p className="text-[11px] text-red-400">
-              <i className="bi bi-exclamation-triangle mr-1" />
-              {t("overrides.duplicateKey")}
-            </p>
-          )}
-
-          <button type="button" className="btn-ghost btn-xs" onClick={addRow}>
-            <i className="bi bi-plus-lg mr-1" />
-            {t("overrides.addField")}
-          </button>
-
+          {rows.length === 0 && <p className="text-xs text-ink-500">{t("overrides.emptyHint")}</p>}
+          {/* Duplicate parameter names: the last row silently wins, so every involved row is marked. */}
+          <KeyValueRows
+            dense
+            rows={rows}
+            onChange={changeRows}
+            createRow={newRow}
+            rowKey={(row) => row.id}
+            keyPlaceholder={t("overrides.paramPlaceholder")}
+            valuePlaceholder={t("overrides.contentPlaceholder")}
+            addLabel={t("overrides.addField")}
+            selectValueOnFocus
+            removeStyle="danger"
+            removeTitle={t("overrides.removeOverrideTitle")}
+            duplicateKeyWarning={t("overrides.duplicateKey")}
+          />
           <p className="text-[11px] text-ink-600">{t("overrides.coercionHint")}</p>
         </div>
       ) : (
         <div>
-          <textarea
-            className="input min-h-[160px] font-mono text-xs"
-            value={jsonText}
-            onChange={(e) => emitJson(e.target.value)}
-            placeholder='{"topP": 0.9, "topK": 40, "maxTokens": 4096, "thinking": "high"}'
-          />
-          <p className="mt-1 text-[11px] text-ink-600">
-            {t("overrides.jsonHint")}
-          </p>
+          <TextArea mono className="min-h-[160px]" value={jsonText} onChange={(e) => emitJson(e.target.value)} placeholder={JSON_PLACEHOLDER} />
+          <FieldHint tone="faint">{t("overrides.jsonHint")}</FieldHint>
         </div>
       )}
-    </div>
+    </InsetPanel>
   );
 }

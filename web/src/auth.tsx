@@ -1,6 +1,13 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
-import type { User } from "./types";
+import { API } from "./lib/endpoints";
+import type { Role, User } from "./types";
+
+/** The two roles, by name. */
+export const ROLE = { admin: "admin", manager: "manager" } as const satisfies Record<Role, Role>;
+
+/** Roles in the order the user form offers them. */
+export const ROLES: readonly Role[] = [ROLE.manager, ROLE.admin];
 
 interface AuthState {
   user: User | null;
@@ -18,19 +25,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     api
-      .get<{ user: User }>("/me")
+      .get<{ user: User }>(API.me)
       .then((r) => setUser(r.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (username: string, password: string) => {
-    const r = await api.post<{ user: User }>("/login", { username, password });
+    const r = await api.post<{ user: User }>(API.login, { username, password });
     setUser(r.user);
   };
 
   const logout = async () => {
-    await api.post("/logout");
+    await api.post(API.logout);
     setUser(null);
   };
 
@@ -43,4 +50,9 @@ export function useAuth(): AuthState {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
+}
+
+/** Whether the signed-in user is an admin (false while signed out). */
+export function useIsAdmin(): boolean {
+  return useAuth().user?.role === ROLE.admin;
 }

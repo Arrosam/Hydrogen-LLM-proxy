@@ -15,9 +15,29 @@
  */
 const REASONING_FIELDS = ["reasoning", "reasoning_content", "reasoning_text", "thinking"] as const;
 
+/** Content-part types that are the model's trace rather than its answer. */
+const THINKING_PART_TYPES: readonly unknown[] = ["thinking", "redacted_thinking", "reasoning", "reasoning_text"];
+
 /** Whether a content part is the model's trace rather than its answer. */
 function isThinkingPart(type: unknown): boolean {
-  return type === "thinking" || type === "redacted_thinking" || type === "reasoning" || type === "reasoning_text";
+  return THINKING_PART_TYPES.includes(type);
+}
+
+/** Top-level scalar fields worth showing as a badge, in display order. */
+const META_FIELDS = ["model", "max_tokens", "max_output_tokens", "stream", "temperature", "top_p", "stop_reason", "finish_reason", "streamed"] as const;
+
+/** Role names the transcript assigns itself. */
+const ROLE = { system: "system", user: "user", assistant: "assistant", thinking: "thinking" } as const;
+
+type Json = Record<string, unknown>;
+
+/** `value` as an object to read fields off; anything else reads as empty. */
+const asObject = (value: unknown): Json => (value ?? {}) as Json;
+
+/** The name of a tool or tool call, wherever its wire puts it: under `function`, or on the entry itself. */
+function functionOf(entry: Json): { fn: Json; name: unknown } {
+  const fn = asObject(entry.function);
+  return { fn, name: fn.name ?? entry.name };
 }
 
 export interface Turn {
@@ -39,7 +59,7 @@ function partsToText(content: unknown): string {
     .map((p) => {
       if (typeof p === "string") return p;
       if (!p || typeof p !== "object") return "";
-      const part = p as Record<string, unknown>;
+      const part = p as Json;
       if (isThinkingPart(part.type)) return ""; // shown as a separate "thinking" turn
       switch (part.type) {
         case "text":
@@ -66,14 +86,14 @@ function partsToText(content: unknown): string {
 function thinkingOfParts(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
-    .filter((b): b is Record<string, unknown> => Boolean(b) && typeof b === "object" && isThinkingPart((b as Record<string, unknown>).type))
+    .filter((b): b is Json => Boolean(b) && typeof b === "object" && isThinkingPart((b as Json).type))
     .map((b) => String(b.thinking ?? b.text ?? b.summary ?? ""))
     .filter(Boolean)
     .join("\n");
 }
 
 /** Reasoning attached to a message/response object, whatever the field style. */
-function reasoningOf(obj: Record<string, unknown>): string {
+function reasoningOf(obj: Json): string {
   for (const field of REASONING_FIELDS) {
     const value = obj[field];
     if (typeof value === "string" && value) return value;
@@ -86,9 +106,9 @@ function toolCallsText(calls: unknown): string {
   return calls
     .map((c) => {
       if (!c || typeof c !== "object") return "";
-      const call = c as Record<string, unknown>;
-      const fn = (call.function ?? {}) as Record<string, unknown>;
-      const name = String(fn.name ?? call.name ?? "");
+      const call = c as Json;
+      const { fn, name: rawName } = functionOf(call);
+      const name = String(rawName ?? "");
       const args = String(fn.arguments ?? call.args ?? "");
       return name ? `[tool_call ${name}(${args})]` : "";
     })
@@ -96,18 +116,30 @@ function toolCallsText(calls: unknown): string {
     .join("\n");
 }
 
+/**
+ * One message as transcript turns: its trace first (when it has one), then its
+ * text with any tool calls appended.
+ */
+function pushMessage(turns: Turn[], message: Json, role: string): void {
+  const thinking = reasoningOf(message);
+  if (thinking) turns.push({ role: ROLE.thinking, text: thinking });
+  const text = partsToText(message.content);
+  const calls = toolCallsText(message.tool_calls);
+  turns.push({ role, text: calls ? (text ? `${text}\n${calls}` : calls) : text });
+}
+
 export function parsePayload(json: string | null): PayloadMeta | null {
   if (!json) return null;
-  let obj: Record<string, unknown>;
+  let obj: Json;
   try {
-    obj = JSON.parse(json) as Record<string, unknown>;
+    obj = JSON.parse(json) as Json;
   } catch {
     return null;
   }
   if (!obj || typeof obj !== "object") return null;
 
   const meta: { label: string; value: string }[] = [];
-  for (const k of ["model", "max_tokens", "max_output_tokens", "stream", "temperature", "top_p", "stop_reason", "finish_reason", "streamed"]) {
+  for (const k of META_FIELDS) {
     if (obj[k] != null) meta.push({ label: k, value: String(obj[k]) });
   }
   if (obj.thinking != null) meta.push({ label: "thinking", value: JSON.stringify(obj.thinking) });
@@ -124,9 +156,7 @@ export function parsePayload(json: string | null): PayloadMeta | null {
   if (Array.isArray(obj.tools)) {
     for (const t of obj.tools) {
       if (!t || typeof t !== "object") continue;
-      const tool = t as Record<string, unknown>;
-      const fn = (tool.function ?? {}) as Record<string, unknown>;
-      const name = fn.name ?? tool.name;
+      const { name } = functionOf(t as Json);
       if (name) tools.push(String(name));
     }
   }
@@ -136,45 +166,28 @@ export function parsePayload(json: string | null): PayloadMeta | null {
   // System prompt (Anthropic-style top-level, or from message list below).
   if (obj.system != null) {
     const sys = partsToText(obj.system);
-    if (sys) turns.push({ role: "system", text: sys });
+    if (sys) turns.push({ role: ROLE.system, text: sys });
   }
 
   // Request messages.
   if (Array.isArray(obj.messages)) {
     for (const raw of obj.messages) {
       if (!raw || typeof raw !== "object") continue;
-      const m = raw as Record<string, unknown>;
-      const thinking = reasoningOf(m);
-      if (thinking) turns.push({ role: "thinking", text: thinking });
-      let text = partsToText(m.content);
-      const tc = toolCallsText(m.tool_calls);
-      if (tc) text = text ? `${text}\n${tc}` : tc;
-      turns.push({ role: String(m.role ?? "user"), text });
+      const m = raw as Json;
+      pushMessage(turns, m, String(m.role ?? ROLE.user));
     }
   }
 
   // OpenAI response choices.
   if (Array.isArray(obj.choices)) {
     for (const raw of obj.choices) {
-      const c = (raw ?? {}) as Record<string, unknown>;
-      const msg = (c.message ?? {}) as Record<string, unknown>;
-      const thinking = reasoningOf(msg);
-      if (thinking) turns.push({ role: "thinking", text: thinking });
-      let text = partsToText(msg.content);
-      const tc = toolCallsText(msg.tool_calls);
-      if (tc) text = text ? `${text}\n${tc}` : tc;
-      turns.push({ role: "assistant", text });
+      pushMessage(turns, asObject(asObject(raw).message), ROLE.assistant);
     }
   }
 
   // Anthropic response / Hydrogen streamed response: top-level content.
   if (obj.content != null && !Array.isArray(obj.messages) && !Array.isArray(obj.choices)) {
-    const thinking = reasoningOf(obj);
-    if (thinking) turns.push({ role: "thinking", text: thinking });
-    let text = partsToText(obj.content);
-    const tc = toolCallsText(obj.tool_calls);
-    if (tc) text = text ? `${text}\n${tc}` : tc;
-    turns.push({ role: String(obj.role ?? "assistant"), text });
+    pushMessage(turns, obj, String(obj.role ?? ROLE.assistant));
   }
 
   if (turns.length === 0 && meta.length === 0 && tools.length === 0) return null;

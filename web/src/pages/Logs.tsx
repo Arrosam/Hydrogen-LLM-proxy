@@ -1,13 +1,33 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "../api";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle, useConfirm } from "../components/common";
+import { Button, Icon } from "../components/Button";
+import { CodeBlock, MutedBox } from "../components/CodeBlock";
+import { EmptyState, ErrorNote, StatusBadge, useConfirm } from "../components/common";
+import { DataTable, type Column } from "../components/DataTable";
+import { Chevron, DisclosureHeading } from "../components/Disclosure";
+import { FilterBar, LiveToggle, Pagination, RefreshButton } from "../components/FilterBar";
+import { HttpInfoBlock } from "../components/HttpInfoBlock";
+import { CheckboxLabel, Select, type SelectOption } from "../components/inputs";
+import { MetaGrid, MetaTile } from "../components/Meta";
 import { Modal } from "../components/Modal";
+import { AsyncStatus, PageHeader } from "../components/Page";
 import { useToast } from "../components/Toast";
-import { useAuth } from "../auth";
+import { SegmentedControl } from "../components/Chip";
+import { useIsAdmin } from "../auth";
+import { nameById } from "../lib/collections";
+import { API } from "../lib/endpoints";
+import { errorMessage } from "../lib/errors";
+import { useAction } from "../lib/hooks";
+import { HTTP_OK, isSuccessStatus } from "../lib/http";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
+import { prettyJson } from "../lib/json";
+import { msLabel, tokenLabel } from "../lib/labels";
+import { fetchServices, fetchTokens } from "../lib/resources";
 import { formatNumber, relativeTime } from "../lib/format";
 import { parsePayload, type PayloadMeta } from "../lib/payload";
 import { useI18n } from "../lib/i18n";
+import { useLiveQuery } from "../lib/useLiveQuery";
+import { useToggleSet } from "../lib/useToggleSet";
 import type { LogSummary, ModelService, Token } from "../types";
 
 interface AttemptRecord {
@@ -39,14 +59,7 @@ interface ServiceCallEntry {
   kind: "service" | "agent" | "router";
   status: number;
   latencyMs: number;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    cachedInputTokens?: number;
-    cacheCreationInputTokens?: number;
-    reasoningTokens?: number;
-  };
+  usage?: TokenCounts;
   attempts: AttemptRecord[];
   request?: string;
   response?: string;
@@ -72,6 +85,24 @@ interface LogDetail extends LogSummary {
 }
 
 type PayloadView = "formatted" | "json";
+const PAYLOAD_VIEWS: readonly PayloadView[] = ["formatted", "json"];
+
+/** Rows per page of the log list. */
+const LOGS_PAGE_SIZE = 50;
+/** Interval of the list's silent auto-refresh. */
+const LOGS_REFRESH_MS = 5000;
+/** `kind` of an attempt that succeeded. */
+const ATTEMPT_OK = "ok";
+/** `kind` of a call that only picked a route and reached no model. */
+const CALL_ROUTER = "router";
+/** Shown where a log has no value for a field. */
+const NONE = "-";
+
+/** Badge of each transcript role; anything else is gray. */
+const ROLE_BADGE: Record<string, string> = { user: "badge-blue", assistant: "badge-green", thinking: "badge-purple" };
+
+/** Look of a row that opens when clicked. */
+const EXPANDABLE_ROW = "cursor-pointer hover:bg-ink-850/50";
 
 /** Micro Agent logs store an array of Model Service calls; Model Service logs
  * (and legacy agent logs) store a flat attempt list. */
@@ -86,9 +117,9 @@ function isCallLog(path: unknown): path is ServiceCallEntry[] {
 }
 
 /** Result cell for one upstream attempt ("ok" or its failure status/kind). */
-function attemptBadge(a: AttemptRecord) {
+function AttemptBadge({ a }: { a: AttemptRecord }) {
   const { t } = useI18n();
-  if (a.kind === "ok") return <StatusBadge status={200} label={t("logs.badge.ok")} />;
+  if (a.kind === ATTEMPT_OK) return <StatusBadge status={HTTP_OK} label={t("logs.badge.ok")} />;
   return <StatusBadge status={a.status} label={String(a.status || a.kind)} />;
 }
 
@@ -165,6 +196,16 @@ function errorLine(a: AttemptRecord): string {
   return a.upstreamError || a.error || "";
 }
 
+/** One titled part of an attempt's failure. */
+function ErrorPart({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="label m-0">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 /**
  * The full failure of one attempt. The provider's message and the proxy's are
  * both shown when they differ -- "upstream returned 400" and "this model does
@@ -177,113 +218,85 @@ function AttemptError({ a }: { a: AttemptRecord }) {
   return (
     <div className="space-y-2">
       {upstream && (
-        <div>
-          <div className="label m-0">{t("logs.error.upstream")}</div>
-          <p className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-red-900/50 bg-red-950/30 p-2 font-mono text-xs text-red-300">{upstream}</p>
-        </div>
+        <ErrorPart title={t("logs.error.upstream")}>
+          <CodeBlock as="p" className="mt-1" frame="error" padding="sm" tone="error">{upstream}</CodeBlock>
+        </ErrorPart>
       )}
       {a.error && (
-        <div>
-          <div className="label m-0">{t("logs.error.proxy")}</div>
-          <p className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-2 font-mono text-xs text-ink-300">{a.error}</p>
-        </div>
+        <ErrorPart title={t("logs.error.proxy")}>
+          <CodeBlock as="p" className="mt-1" padding="sm">{a.error}</CodeBlock>
+        </ErrorPart>
       )}
       {a.errorBody && (
-        <div>
-          <div className="label m-0">{t("logs.error.body")}</div>
-          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-2 font-mono text-xs leading-relaxed text-ink-400">{pretty(a.errorBody)}</pre>
-        </div>
+        <ErrorPart title={t("logs.error.body")}>
+          <CodeBlock className="mt-1" maxHeight="sm" padding="sm" tone="muted" relaxed>{pretty(a.errorBody)}</CodeBlock>
+        </ErrorPart>
       )}
     </div>
   );
 }
 
+/** A logged payload as text: re-indented when it is JSON, a dash when nothing was logged. */
 function pretty(json: string | null): string {
-  if (!json) return "-";
-  try {
-    return JSON.stringify(JSON.parse(json), null, 2);
-  } catch {
-    return json;
-  }
+  return json ? prettyJson(json) : NONE;
+}
+
+interface LogPage {
+  rows: LogSummary[];
+  total: number;
 }
 
 export function Logs() {
-  const PAGE = 50;
-  const [rows, setRows] = useState<LogSummary[]>([]);
-  const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [serviceId, setServiceId] = useState<number | "">("");
   const [services, setServices] = useState<ModelService[]>([]);
   const [tokenId, setTokenId] = useState<number | "">("");
   const [tokens, setTokens] = useState<Token[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<LogDetail | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [payloadView, setPayloadView] = useState<PayloadView>("formatted");
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
-  const [clearing, setClearing] = useState(false);
   const toast = useToast();
-  const { user } = useAuth();
+  const isAdmin = useIsAdmin();
   const { confirm, confirmEl } = useConfirm();
+  const clearing = useAction({ describe: errorMessage });
   const { t } = useI18n();
 
-  const toggleRow = (i: number) =>
-    setExpandedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
-      return next;
-    });
-
   useEffect(() => {
-    api.get<{ services: ModelService[] }>("/services").then((r) => setServices(r.services)).catch(() => {});
+    fetchServices().then(setServices).catch(() => {});
     // Only used to label and offer the filter; a caller who cannot list keys
     // simply gets the "all keys" option, same as the services fetch above.
-    api.get<{ tokens: Token[] }>("/tokens").then((r) => setTokens(r.tokens)).catch(() => {});
+    fetchTokens().then(setTokens).catch(() => {});
   }, []);
 
-  const load = useCallback(
-    (silent = false) => {
-      if (!silent) setLoading(true);
-      const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
-      if (errorsOnly) params.set("errorsOnly", "true");
-      if (serviceId !== "") params.set("serviceId", String(serviceId));
-      if (tokenId !== "") params.set("tokenId", String(tokenId));
-      api
-        .get<{ rows: LogSummary[]; total: number }>(`/logs?${params.toString()}`)
-        .then((r) => {
-          setRows(r.rows);
-          setTotal(r.total);
-          setError(null);
-        })
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => {
-          if (!silent) setLoading(false);
-        });
-    },
-    [offset, errorsOnly, serviceId, tokenId],
-  );
+  const query = useCallback(() => {
+    const params = new URLSearchParams({ limit: String(LOGS_PAGE_SIZE), offset: String(offset) });
+    if (errorsOnly) params.set("errorsOnly", "true");
+    if (serviceId !== "") params.set("serviceId", String(serviceId));
+    if (tokenId !== "") params.set("tokenId", String(tokenId));
+    return api.get<LogPage>(`${API.logs}?${params.toString()}`);
+  }, [offset, errorsOnly, serviceId, tokenId]);
+  // Auto-refresh is silent: no spinner flicker.
+  const list = useLiveQuery(query, { pollMs: LOGS_REFRESH_MS, live: autoRefresh });
+  const rows = list.data?.rows ?? [];
+  const total = list.data?.total ?? 0;
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Auto-refresh every 5s (silent - no spinner flicker) when enabled.
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const id = setInterval(() => load(true), 5000);
-    return () => clearInterval(id);
-  }, [autoRefresh, load]);
-
-  const openDetail = async (id: number) => {
-    const r = await api.get<{ log: LogDetail }>(`/logs/${id}`);
-    setExpandedRows(new Set());
-    setDetail(r.log);
+  /** Every filter change starts again from the first page. */
+  const filterBy = <V,>(apply: (value: V) => void) => (value: V): void => {
+    setOffset(0);
+    apply(value);
   };
 
-  const serviceName = (id: number | null) => (id == null ? "-" : services.find((m) => m.id === id)?.name ?? `#${id}`);
+  const openDetail = async (id: number) => {
+    try {
+      const r = await api.get<{ log: LogDetail }>(API.log(id));
+      setDetail(r.log);
+    } catch (e) {
+      list.setError(errorMessage(e, t("logs.error.loadDetailFailed")));
+    }
+  };
+
+  const serviceName = (id: number | null) => (id == null ? NONE : nameById(services, id));
 
   const clearAll = async () => {
     const ok = await confirm(
@@ -291,235 +304,211 @@ export function Logs() {
       t("logs.confirm.clearAllBody", { total: formatNumber(total) }),
     );
     if (!ok) return;
-    setClearing(true);
-    try {
-      const r = await api.del<{ deleted: number }>("/logs");
+    await clearing.run(async () => {
+      const r = await api.del<{ deleted: number }>(API.logs);
       toast.success(t("logs.toast.deleted", { count: formatNumber(r.deleted) }));
-      setOffset(0);
-      load();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : t("logs.toast.clearFailed"));
-    } finally {
-      setClearing(false);
-    }
+      // One request for the first page: from a later page the offset change
+      // itself reloads, and reloading here as well would ask for the page just
+      // left, whose answer could arrive last and win.
+      if (offset === 0) list.reload();
+      else setOffset(0);
+    }, t("logs.toast.clearFailed"));
   };
+
+  const columns: Column<LogSummary>[] = [
+    { header: t("logs.table.time"), className: "whitespace-nowrap text-xs text-ink-400", cell: (r) => relativeTime(r.createdAt) },
+    { header: t("logs.table.service"), className: "font-mono text-xs text-ink-200", cell: (r) => r.serviceName ?? serviceName(r.serviceId) },
+    {
+      header: t("logs.table.route"),
+      className: "text-xs",
+      cell: (r) => (
+        <>
+          <span className="text-ink-300">{r.ingressFormat}</span>
+          <Icon name="bi-arrow-right" className="mx-1 text-ink-600" />
+          <span className="text-ink-400">{r.egressFormat ?? NONE}</span>
+          {r.streaming && <i className={`bi ${ACTION_ICON.live} ml-2 text-brand-400`} title={t("logs.streamingTitle")} />}
+        </>
+      ),
+    },
+    { header: t("logs.table.status"), cell: (r) => <StatusBadge status={r.httpStatus} /> },
+    { header: t("logs.table.tokens"), cell: (r) => <TokenSplit usage={r} /> },
+    { header: t("logs.table.latency"), className: "text-xs text-ink-400", cell: (r) => msLabel(r.latencyMs, t) },
+    { header: t("logs.table.tries"), className: "text-xs text-ink-400", cell: (r) => r.attempts },
+    { className: "text-right", cell: () => <Icon name="bi-chevron-right" className="text-ink-600" /> },
+  ];
 
   return (
     <div>
-      <PageHeader title={t("logs.title")} subtitle={t("logs.subtitle")} icon="bi-journal-text" />
+      <PageHeader title={t("logs.title")} subtitle={t("logs.subtitle")} icon={ENTITY_ICON.log} />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <select
-          className="select w-auto"
+      <FilterBar
+        count={<>{formatNumber(total)} {t("logs.totalCount")}</>}
+        end={
+          isAdmin && (
+            <Button
+              variant="danger"
+              size="xs"
+              icon={ACTION_ICON.remove}
+              busy={clearing.busy}
+              spinWhenBusy
+              disabled={total === 0}
+              onClick={clearAll}
+              title={t("logs.action.clearAllTitle")}
+            >
+              {t("logs.action.clearAll")}
+            </Button>
+          )
+        }
+      >
+        <IdFilter
           value={serviceId}
-          onChange={(e) => {
-            setOffset(0);
-            setServiceId(e.target.value === "" ? "" : Number(e.target.value));
-          }}
-        >
-          <option value="">{t("logs.filter.allServices")}</option>
-          {services.map((m) => (
-            <option key={m.id} value={m.id}>{m.name}</option>
-          ))}
-        </select>
-        <select
-          className="select w-auto"
+          onChange={filterBy(setServiceId)}
+          allLabel={t("logs.filter.allServices")}
+          options={services.map((m) => ({ value: m.id, label: m.name }))}
+        />
+        <IdFilter
           value={tokenId}
-          onChange={(e) => {
-            setOffset(0);
-            setTokenId(e.target.value === "" ? "" : Number(e.target.value));
-          }}
-        >
-          <option value="">{t("logs.filter.allKeys")}</option>
-          {tokens.map((k) => (
-            <option key={k.id} value={k.id}>{k.name} · {k.keyPrefix}</option>
-          ))}
-        </select>
-        <label className="flex items-center gap-2 text-sm text-ink-300">
-          <input type="checkbox" checked={errorsOnly} onChange={(e) => { setOffset(0); setErrorsOnly(e.target.checked); }} />
+          onChange={filterBy(setTokenId)}
+          allLabel={t("logs.filter.allKeys")}
+          options={tokens.map((k) => ({ value: k.id, label: tokenLabel(k) }))}
+        />
+        <CheckboxLabel checked={errorsOnly} onChange={filterBy(setErrorsOnly)}>
           {t("logs.filter.errorsOnly")}
-        </label>
-        <button className="btn-ghost btn-xs" onClick={() => load()}>
-          <i className="bi bi-arrow-clockwise" />
-          {t("logs.action.refresh")}
-        </button>
-        <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("logs.autoRefreshLabel")} />
-        {autoRefresh && (
-          <span className="badge-green">
-            <i className="bi bi-broadcast" />
-            {t("logs.liveBadge")}
-          </span>
-        )}
-        <div className="flex-1" />
-        <span className="text-xs text-ink-500">{formatNumber(total)} {t("logs.totalCount")}</span>
-        {user?.role === "admin" && (
-          <button className="btn-danger btn-xs" onClick={clearAll} disabled={clearing || total === 0} title={t("logs.action.clearAllTitle")}>
-            <i className={`bi ${clearing ? "bi-arrow-repeat animate-spin" : "bi-trash3"}`} />
-            {t("logs.action.clearAll")}
-          </button>
-        )}
-      </div>
+        </CheckboxLabel>
+        <RefreshButton onClick={() => list.reload()}>{t("logs.action.refresh")}</RefreshButton>
+        <LiveToggle live={autoRefresh} onChange={setAutoRefresh} label={t("logs.autoRefreshLabel")} badge={t("logs.liveBadge")} />
+      </FilterBar>
 
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
-      {!loading && rows.length === 0 && <EmptyState icon="bi-journal-text" title={t("logs.empty.title")} hint={t("logs.empty.hint")} />}
+      <AsyncStatus state={list} />
+      {!list.loading && rows.length === 0 && <EmptyState icon={ENTITY_ICON.log} title={t("logs.empty.title")} hint={t("logs.empty.hint")} />}
 
       {rows.length > 0 && (
-        <div className="card overflow-hidden">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>{t("logs.table.time")}</th>
-                <th>{t("logs.table.service")}</th>
-                <th>{t("logs.table.route")}</th>
-                <th>{t("logs.table.status")}</th>
-                <th>{t("logs.table.tokens")}</th>
-                <th>{t("logs.table.latency")}</th>
-                <th>{t("logs.table.tries")}</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className="cursor-pointer" onClick={() => openDetail(r.id)}>
-                  <td className="whitespace-nowrap text-xs text-ink-400">{relativeTime(r.createdAt)}</td>
-                  <td className="font-mono text-xs text-ink-200">{r.serviceName ?? serviceName(r.serviceId)}</td>
-                  <td className="text-xs">
-                    <span className="text-ink-300">{r.ingressFormat}</span>
-                    <i className="bi bi-arrow-right mx-1 text-ink-600" />
-                    <span className="text-ink-400">{r.egressFormat ?? "-"}</span>
-                    {r.streaming && <i className="bi bi-broadcast ml-2 text-brand-400" title={t("logs.streamingTitle")} />}
-                  </td>
-                  <td><StatusBadge status={r.httpStatus} /></td>
-                  <td><TokenSplit usage={r} /></td>
-                  <td className="text-xs text-ink-400">{r.latencyMs} {t("common.ms")}</td>
-                  <td className="text-xs text-ink-400">{r.attempts}</td>
-                  <td className="text-right"><i className="bi bi-chevron-right text-ink-600" /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable rows={rows} rowKey={(r) => r.id} columns={columns} onRowClick={(r) => openDetail(r.id)} rowClassName="cursor-pointer" />
       )}
 
-      {total > PAGE && (
-        <div className="mt-4 flex items-center justify-between text-sm text-ink-400">
-          <button className="btn-ghost btn-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
-            <i className="bi bi-chevron-left" />{t("logs.pagination.prev")}
-          </button>
-          <span>{t("logs.pagination.summary", { start: offset + 1, end: Math.min(offset + PAGE, total), total: formatNumber(total) })}</span>
-          <button className="btn-ghost btn-xs" disabled={offset + PAGE >= total} onClick={() => setOffset(offset + PAGE)}>
-            {t("logs.pagination.next")}<i className="bi bi-chevron-right" />
-          </button>
-        </div>
-      )}
+      <Pagination
+        offset={offset}
+        pageSize={LOGS_PAGE_SIZE}
+        total={total}
+        onChange={setOffset}
+        labels={{
+          prev: t("logs.pagination.prev"),
+          next: t("logs.pagination.next"),
+          summary: (range) => t("logs.pagination.summary", { ...range, total: formatNumber(total) }),
+        }}
+      />
 
       <Modal
         open={detail !== null}
         size="xl"
         title={t("logs.modal.detailTitle", { id: detail?.id ?? "" })}
-        icon="bi-journal-text"
+        icon={ENTITY_ICON.log}
         onClose={() => setDetail(null)}
         headerExtra={<PayloadViewToggle view={payloadView} onChange={setPayloadView} />}
       >
-        {detail && (
-          <div className="space-y-4">
-            {detail.error && <ErrorNote message={detail.error} />}
-            <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label={t("logs.meta.service")} value={detail.serviceName ?? "-"} />
-              <Meta label={t("logs.meta.status")} value={String(detail.httpStatus)} />
-              <Meta label={t("logs.meta.latency")} value={`${detail.latencyMs} ${t("common.ms")}`} />
-              <Meta label={t("logs.meta.route")} value={`${detail.ingressFormat} -> ${detail.egressFormat ?? "-"}`} />
-              <Meta label={t("logs.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
-              {/* The cache and thinking shares are written inside the count
-                  they belong to: each is a subset of it, and a cell of its own
-                  invites adding them up. */}
-              <Meta label={t("logs.meta.input")} value={inputSummary(detail, t)} />
-              <Meta label={t("logs.meta.output")} value={outputSummary(detail, t)} />
-              <Meta label={t("logs.meta.totalTokens")} value={formatNumber(detail.totalTokens)} />
-              <Meta label={t("logs.meta.servedModel")} value={detail.servedModel ?? "-"} />
-              <Meta label={t("logs.meta.servedProvider")} value={detail.servedProvider ?? "-"} />
-              <Meta label={t("logs.meta.trace")} value={detail.traceId ?? "-"} />
-            </div>
-
-            <HttpInfoBlock
-              title={t("logs.http.clientRequest")}
-              method={detail.requestMethod}
-              path={detail.requestPath}
-              query={detail.requestQuery}
-              headers={detail.requestHeaders}
-            />
-            <HttpInfoBlock
-              title={t("logs.http.upstreamResponse")}
-              status={detail.httpStatus}
-              headers={detail.responseHeaders}
-            />
-
-            {isCallLog(detail.attemptPath) ? (
-              <div>
-                <h4 className="label">
-                  {t("logs.section.serviceCalls")}
-                  <span className="ml-2 normal-case text-ink-500">{t("logs.section.serviceCallsHint")}</span>
-                </h4>
-                <CallList calls={detail.attemptPath} view={payloadView} />
-              </div>
-            ) : (
-              <div>
-                <h4 className="label">
-                  {t("logs.section.attemptPath")}
-                  {legacyPath(detail.attemptPath).some((a) => a.request || a.response) && (
-                    <span className="ml-2 normal-case text-ink-500">{t("logs.section.attemptPathHint")}</span>
-                  )}
-                </h4>
-                <AttemptPathTable
-                  path={legacyPath(detail.attemptPath)}
-                  view={payloadView}
-                  expanded={expandedRows}
-                  onToggle={toggleRow}
-                />
-              </div>
-            )}
-
-            <PayloadBlock title={t("logs.payload.clientRequest")} raw={detail.requestPayload} view={payloadView} />
-            <PayloadBlock title={t("logs.payload.upstreamRequest")} raw={detail.upstreamRequestPayload} view={payloadView} />
-            <PayloadBlock title={t("logs.payload.response")} raw={detail.responsePayload} view={payloadView} />
-          </div>
-        )}
+        {detail && <LogDetailBody key={detail.id} detail={detail} view={payloadView} />}
       </Modal>
       {confirmEl}
     </div>
   );
 }
 
-function Meta({ label, value }: { label: string; value: string }) {
+/** A filter on a numeric id, with a leading "all" choice (the empty value). */
+function IdFilter({
+  value,
+  onChange,
+  allLabel,
+  options,
+}: {
+  value: number | "";
+  onChange: (value: number | "") => void;
+  allLabel: string;
+  options: SelectOption<number>[];
+}) {
+  // `Select` reports the "all" option as its empty value, typed like an id.
+  return <Select className="w-auto" value={value} onChange={(v) => onChange(v || "")} options={options} placeholder={allLabel} />;
+}
+
+/** A `label` heading inside the detail view, with an optional lower-case note. */
+function SectionTitle({ title, hint }: { title: string; hint?: string | false }) {
   return (
-    <div className="rounded-lg bg-ink-950/50 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
-      <div className="mt-0.5 text-ink-200">{value}</div>
+    <h4 className="label">
+      {title}
+      {hint && <span className="ml-2 normal-case text-ink-500">{hint}</span>}
+    </h4>
+  );
+}
+
+/** Everything the detail modal shows about one log. */
+function LogDetailBody({ detail, view }: { detail: LogDetail; view: PayloadView }) {
+  const { t } = useI18n();
+  const flat = legacyPath(detail.attemptPath);
+  return (
+    <div className="space-y-4">
+      {detail.error && <ErrorNote message={detail.error} />}
+      <MetaGrid>
+        <MetaTile label={t("logs.meta.service")} value={detail.serviceName ?? NONE} />
+        <MetaTile label={t("logs.meta.status")} value={String(detail.httpStatus)} />
+        <MetaTile label={t("logs.meta.latency")} value={msLabel(detail.latencyMs, t)} />
+        <MetaTile label={t("logs.meta.route")} value={`${detail.ingressFormat} -> ${detail.egressFormat ?? NONE}`} />
+        <MetaTile label={t("logs.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
+        {/* The cache and thinking shares are written inside the count
+            they belong to: each is a subset of it, and a cell of its own
+            invites adding them up. */}
+        <MetaTile label={t("logs.meta.input")} value={inputSummary(detail, t)} />
+        <MetaTile label={t("logs.meta.output")} value={outputSummary(detail, t)} />
+        <MetaTile label={t("logs.meta.totalTokens")} value={formatNumber(detail.totalTokens)} />
+        <MetaTile label={t("logs.meta.servedModel")} value={detail.servedModel ?? NONE} />
+        <MetaTile label={t("logs.meta.servedProvider")} value={detail.servedProvider ?? NONE} />
+        <MetaTile label={t("logs.meta.trace")} value={detail.traceId ?? NONE} />
+      </MetaGrid>
+
+      <HttpInfoBlock
+        title={t("logs.http.clientRequest")}
+        method={detail.requestMethod}
+        path={detail.requestPath}
+        query={detail.requestQuery}
+        headers={detail.requestHeaders}
+        emptyLabel={t("logs.notRecorded")}
+      />
+      <HttpInfoBlock
+        title={t("logs.http.upstreamResponse")}
+        status={detail.httpStatus}
+        headers={detail.responseHeaders}
+        emptyLabel={t("logs.notRecorded")}
+      />
+
+      {isCallLog(detail.attemptPath) ? (
+        <div>
+          <SectionTitle title={t("logs.section.serviceCalls")} hint={t("logs.section.serviceCallsHint")} />
+          <CallList calls={detail.attemptPath} view={view} />
+        </div>
+      ) : (
+        <div>
+          <SectionTitle
+            title={t("logs.section.attemptPath")}
+            hint={flat.some((a) => a.request || a.response) && t("logs.section.attemptPathHint")}
+          />
+          <AttemptTable attempts={flat} chevron="first" view={view} />
+        </div>
+      )}
+
+      <PayloadBlock title={t("logs.payload.clientRequest")} raw={detail.requestPayload} view={view} />
+      <PayloadBlock title={t("logs.payload.upstreamRequest")} raw={detail.upstreamRequestPayload} view={view} />
+      <PayloadBlock title={t("logs.payload.response")} raw={detail.responsePayload} view={view} />
     </div>
   );
 }
 
 function PayloadViewToggle({ view, onChange }: { view: PayloadView; onChange: (v: PayloadView) => void }) {
   const { t } = useI18n();
-  const labels: Record<PayloadView, string> = {
-    formatted: t("logs.payloadView.formatted"),
-    json: t("logs.payloadView.json"),
-  };
   return (
-    <div className="inline-flex rounded-lg border border-ink-700 p-0.5 text-xs">
-      {(["formatted", "json"] as const).map((v) => (
-        <button
-          key={v}
-          onClick={() => onChange(v)}
-          className={`rounded-md px-2.5 py-1 font-medium capitalize transition-colors ${
-            view === v ? "bg-brand-600 text-white" : "text-ink-400 hover:text-ink-200"
-          }`}
-        >
-          {labels[v]}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      variant="joined"
+      value={view}
+      onChange={onChange}
+      options={PAYLOAD_VIEWS.map((v) => ({ value: v, label: t(`logs.payloadView.${v}`) }))}
+    />
   );
 }
 
@@ -527,21 +516,21 @@ function legacyPath(path: unknown): AttemptRecord[] {
   return Array.isArray(path) ? (path as AttemptRecord[]) : [];
 }
 
-function callStatusBadge(call: ServiceCallEntry) {
+function CallStatusBadge({ call }: { call: ServiceCallEntry }) {
   const { t } = useI18n();
-  if (call.kind === "router") return <span className="badge-gray">{t("logs.badge.route")}</span>;
-  const ok = call.status >= 200 && call.status < 300;
+  if (call.kind === CALL_ROUTER) return <span className="badge-gray">{t("logs.badge.route")}</span>;
+  const ok = isSuccessStatus(call.status);
   return <StatusBadge status={call.status} label={ok ? t("logs.badge.ok") : undefined} />;
 }
 
 function callKindIcon(kind: ServiceCallEntry["kind"]): string {
   switch (kind) {
     case "agent":
-      return "bi-robot";
+      return ENTITY_ICON.microAgent;
     case "router":
       return "bi-signpost-split";
     default:
-      return "bi-diagram-3";
+      return ENTITY_ICON.service;
   }
 }
 
@@ -561,43 +550,42 @@ function CallList({ calls, view }: { calls: ServiceCallEntry[]; view: PayloadVie
 function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  const expandable =
-    call.attempts.length > 0 || Boolean(call.request) || Boolean(call.response) || (call.calls?.length ?? 0) > 0;
+  const nested = call.calls ?? [];
+  const expandable = call.attempts.length > 0 || Boolean(call.request) || Boolean(call.response) || nested.length > 0;
+  const isRouter = call.kind === CALL_ROUTER;
   return (
     <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
       <div
-        className={`flex items-center gap-2 px-3 py-2 ${expandable ? "cursor-pointer hover:bg-ink-850/50" : ""}`}
+        className={`flex items-center gap-2 px-3 py-2 ${expandable ? EXPANDABLE_ROW : ""}`}
         onClick={() => expandable && setOpen(!open)}
       >
-        <i
-          className={`bi ${expandable ? (open ? "bi-chevron-down" : "bi-chevron-right") : "bi-dot"} text-ink-500`}
-        />
+        {expandable ? <Chevron open={open} /> : <Icon name="bi-dot" className="text-ink-500" />}
         <span className="font-mono text-xs text-brand-400">{call.stage}</span>
         <span className="flex items-center gap-1.5 font-mono text-xs text-ink-300">
-          <i className={`bi ${callKindIcon(call.kind)} text-ink-500`} />
-          {call.kind === "router" ? t("logs.router.noModelCall") : call.service}
+          <Icon name={callKindIcon(call.kind)} className="text-ink-500" />
+          {isRouter ? t("logs.router.noModelCall") : call.service}
         </span>
-        {call.streamed && <i className="bi bi-broadcast text-brand-400" title={t("logs.streamedTitle")} />}
+        {call.streamed && <i className={`bi ${ACTION_ICON.live} text-brand-400`} title={t("logs.streamedTitle")} />}
         <div className="flex-1" />
         {call.usage && <TokenSplit usage={call.usage} />}
-        {call.kind !== "router" && <span className="text-xs text-ink-400">{call.latencyMs} {t("common.ms")}</span>}
-        {callStatusBadge(call)}
+        {!isRouter && <span className="text-xs text-ink-400">{msLabel(call.latencyMs, t)}</span>}
+        <CallStatusBadge call={call} />
       </div>
       {open && expandable && (
         <div className="space-y-3 border-t border-ink-800/70 bg-ink-950/40 p-3">
           {call.error && <ErrorNote message={call.error} />}
           {call.attempts.length > 0 && (
             <div>
-              <h4 className="label">{t("logs.section.attemptPath")}</h4>
-              <AttemptsTable attempts={call.attempts} />
+              <SectionTitle title={t("logs.section.attemptPath")} />
+              <AttemptTable attempts={call.attempts} chevron="error" />
             </div>
           )}
           <PayloadBlock title={t("logs.payload.request")} raw={call.request ?? null} view={view} />
           <PayloadBlock title={t("logs.payload.responseShort")} raw={call.response ?? null} view={view} />
-          {(call.calls?.length ?? 0) > 0 && (
+          {nested.length > 0 && (
             <div>
-              <h4 className="label">{t("logs.section.serviceCallsNested")}</h4>
-              <CallList calls={call.calls!} view={view} />
+              <SectionTitle title={t("logs.section.serviceCallsNested")} />
+              <CallList calls={nested} view={view} />
             </div>
           )}
         </div>
@@ -606,166 +594,89 @@ function CallItem({ call, view }: { call: ServiceCallEntry; view: PayloadView })
   );
 }
 
-function AttemptsTable({ attempts }: { attempts: AttemptRecord[] }) {
+/**
+ * The attempts behind one answer, one row each, opening into what went wrong.
+ *
+ * It is drawn in two places that differ on purpose:
+ * - under a Model Service call (`chevron="error"`, no `view`): a row opens only
+ *   when it failed, into its error; the arrow sits in the error cell.
+ * - as a log's own flat path (`chevron="first"`, with `view`): a row also opens
+ *   when it recorded a request or response, into the error and both payloads;
+ *   the arrow leads the row.
+ *
+ * The stage, service and error columns exist only when some attempt has one.
+ */
+function AttemptTable({ attempts, chevron, view }: { attempts: AttemptRecord[]; chevron: "first" | "error"; view?: PayloadView }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState<Set<number>>(new Set());
-  const anyError = attempts.some(hasError);
-  const toggle = (i: number): void =>
-    setOpen((s) => {
-      const next = new Set(s);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
-      return next;
-    });
-  return (
-    <div className="card overflow-hidden">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
-            {anyError && <th>{t("logs.attemptsTable.error")}</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {attempts.map((a, i) => {
-            const failed = hasError(a);
-            const isOpen = open.has(i);
-            return (
-              <Fragment key={i}>
-                <tr
-                  className={failed ? "cursor-pointer hover:bg-ink-850/50" : ""}
-                  onClick={() => failed && toggle(i)}
-                >
-                  <td>{a.step}</td>
-                  <td>{a.attempt}</td>
-                  <td className="font-mono text-xs">{a.model}</td>
-                  <td className="font-mono text-xs">{a.provider}</td>
-                  <td>{attemptBadge(a)}</td>
-                  <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
-                  {anyError && (
-                    <td className="max-w-md">
-                      {failed && (
-                        <span className="flex items-start gap-1 text-xs text-red-300" title={errorLine(a)}>
-                          <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mt-0.5 text-ink-500`} />
-                          <span className="line-clamp-2 break-words">{errorLine(a)}</span>
-                        </span>
-                      )}
-                    </td>
-                  )}
-                </tr>
-                {isOpen && failed && (
-                  <tr>
-                    <td colSpan={anyError ? 7 : 6} className="bg-ink-950/40 p-3"><AttemptError a={a} /></td>
-                  </tr>
-                )}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+  const [open, toggle] = useToggleSet<number>();
+  const hasStage = attempts.some((a) => a.stage);
+  const withPayloads = view !== undefined;
+  const hasPayload = (a: AttemptRecord): boolean => withPayloads && Boolean(a.request || a.response);
+  const canExpand = (a: AttemptRecord): boolean => hasError(a) || hasPayload(a);
+  /** The leading arrow, in whichever column comes first. */
+  const lead = (a: AttemptRecord, i: number) =>
+    chevron === "first" && canExpand(a) && <Chevron open={open.has(i)} className="mr-1 text-ink-500" />;
 
-function AttemptPathTable({
-  path,
-  view,
-  expanded,
-  onToggle,
-}: {
-  path: AttemptRecord[];
-  view: PayloadView;
-  expanded: Set<number>;
-  onToggle: (i: number) => void;
-}) {
-  const hasStage = path.some((a) => a.stage);
-  const hasService = path.some((a) => a.service);
-  const anyError = path.some(hasError);
-  const cols = 6 + (hasStage ? 1 : 0) + (hasService ? 1 : 0) + (anyError ? 1 : 0);
-  const { t } = useI18n();
-  return (
-    <div className="card overflow-hidden">
-      <table className="table">
-        <thead>
-          <tr>
-            {hasStage && <th>{t("logs.pathTable.stage")}</th>}
-            {hasService && <th>{t("logs.pathTable.service")}</th>}
-            <th>{t("logs.attemptsTable.step")}</th><th>{t("logs.attemptsTable.try")}</th><th>{t("logs.attemptsTable.model")}</th><th>{t("logs.attemptsTable.provider")}</th><th>{t("logs.attemptsTable.result")}</th><th>{t("logs.attemptsTable.latency")}</th>
-            {anyError && <th>{t("logs.attemptsTable.error")}</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {path.map((a, i) => {
-            const failed = hasError(a);
-            const canExpand = Boolean(a.request || a.response) || failed;
-            const isOpen = expanded.has(i);
-            return (
-              <Fragment key={i}>
-                <tr
-                  className={canExpand ? "cursor-pointer hover:bg-ink-850/50" : ""}
-                  onClick={() => canExpand && onToggle(i)}
-                >
-                  {hasStage && (
-                    <td className="font-mono text-xs text-brand-400">
-                      {canExpand && <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mr-1 text-ink-500`} />}
-                      {a.stage ?? "-"}
-                    </td>
-                  )}
-                  {hasService && <td className="font-mono text-xs text-ink-300">{a.service ?? "-"}</td>}
-                  <td>
-                    {!hasStage && canExpand && <i className={`bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"} mr-1 text-ink-500`} />}
-                    {a.step}
-                  </td>
-                  <td>{a.attempt}</td>
-                  <td className="font-mono text-xs">{a.model}</td>
-                  <td className="font-mono text-xs">{a.provider}</td>
-                  <td>{attemptBadge(a)}</td>
-                  <td className="text-xs text-ink-400">{a.latencyMs} {t("common.ms")}</td>
-                  {anyError && (
-                    <td className="max-w-md">
-                      {failed && (
-                        <span className="text-xs text-red-300" title={errorLine(a)}>
-                          <span className="line-clamp-2 break-words">{errorLine(a)}</span>
-                        </span>
-                      )}
-                    </td>
-                  )}
-                </tr>
-                {isOpen && canExpand && (
-                  <tr>
-                    <td colSpan={cols} className="bg-ink-950/40 p-3">
-                      <div className="space-y-3">
-                        {failed && <AttemptError a={a} />}
-                        {(a.request || a.response) && (
-                          <>
-                            <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} />
-                            <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+  const columns: Column<AttemptRecord>[] = [
+    {
+      header: t("logs.pathTable.stage"),
+      hidden: !hasStage,
+      className: "font-mono text-xs text-brand-400",
+      cell: (a, i) => <>{lead(a, i)}{a.stage ?? NONE}</>,
+    },
+    {
+      header: t("logs.pathTable.service"),
+      hidden: !attempts.some((a) => a.service),
+      className: "font-mono text-xs text-ink-300",
+      cell: (a) => a.service ?? NONE,
+    },
+    { header: t("logs.attemptsTable.step"), cell: (a, i) => <>{!hasStage && lead(a, i)}{a.step}</> },
+    { header: t("logs.attemptsTable.try"), cell: (a) => a.attempt },
+    { header: t("logs.attemptsTable.model"), className: "font-mono text-xs", cell: (a) => a.model },
+    { header: t("logs.attemptsTable.provider"), className: "font-mono text-xs", cell: (a) => a.provider },
+    { header: t("logs.attemptsTable.result"), cell: (a) => <AttemptBadge a={a} /> },
+    { header: t("logs.attemptsTable.latency"), className: "text-xs text-ink-400", cell: (a) => msLabel(a.latencyMs, t) },
+    {
+      header: t("logs.attemptsTable.error"),
+      hidden: !attempts.some(hasError),
+      className: "max-w-md",
+      cell: (a, i) =>
+        hasError(a) && (
+          <span className={`${chevron === "error" ? "flex items-start gap-1 " : ""}text-xs text-red-300`} title={errorLine(a)}>
+            {chevron === "error" && <Chevron open={open.has(i)} className="mt-0.5 text-ink-500" />}
+            <span className="line-clamp-2 break-words">{errorLine(a)}</span>
+          </span>
+        ),
+    },
+  ];
 
-function roleBadge(role: string): string {
-  switch (role) {
-    case "user":
-      return "badge-blue";
-    case "assistant":
-      return "badge-green";
-    case "thinking":
-      return "badge-purple";
-    default:
-      return "badge-gray";
-  }
+  const detail = (a: AttemptRecord, i: number) => {
+    if (!open.has(i) || !canExpand(a)) return null;
+    if (!withPayloads) return <AttemptError a={a} />;
+    return (
+      <div className="space-y-3">
+        {hasError(a) && <AttemptError a={a} />}
+        {hasPayload(a) && (
+          <>
+            <PayloadBlock title={t("logs.payload.stageRequest", { stage: a.stage ?? "" })} raw={a.request ?? null} view={view} />
+            <PayloadBlock title={t("logs.payload.stageResponse", { stage: a.stage ?? "" })} raw={a.response ?? null} view={view} />
+          </>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <DataTable
+      rows={attempts}
+      rowKey={(_, i) => i}
+      columns={columns}
+      onRowClick={(a, i) => canExpand(a) && toggle(i)}
+      rowClassName={(a) => (canExpand(a) ? EXPANDABLE_ROW : "")}
+      expanded={detail}
+      expandedClassName="bg-ink-950/40 p-3"
+    />
+  );
 }
 
 function Transcript({ data }: { data: PayloadMeta }) {
@@ -784,12 +695,12 @@ function Transcript({ data }: { data: PayloadMeta }) {
       {data.tools.length > 0 && (
         <details className="rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2">
           <summary className="cursor-pointer text-xs font-medium text-ink-300">
-            <i className="bi bi-tools mr-1 text-ink-500" />
+            <Icon name={ENTITY_ICON.tool} className="mr-1 text-ink-500" />
             {data.tools.length} {data.tools.length === 1 ? t("logs.transcript.tools") : t("logs.transcript.toolsPlural")}
           </summary>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {data.tools.map((t) => (
-              <span key={t} className="badge-gray font-mono">{t}</span>
+            {data.tools.map((tool) => (
+              <span key={tool} className="badge-gray font-mono">{tool}</span>
             ))}
           </div>
         </details>
@@ -798,65 +709,12 @@ function Transcript({ data }: { data: PayloadMeta }) {
         {data.turns.map((turn, i) => (
           <div key={i} className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
             <div className="flex items-center gap-2 border-b border-ink-800/70 px-3 py-1.5">
-              <span className={roleBadge(turn.role)}>{turn.role}</span>
-              <span className="text-[11px] text-ink-600">{turn.text.length.toLocaleString()} {t("common.chars")}</span>
+              <span className={ROLE_BADGE[turn.role] ?? "badge-gray"}>{turn.role}</span>
+              <span className="text-[11px] text-ink-600">{formatNumber(turn.text.length)} {t("common.chars")}</span>
             </div>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs leading-relaxed text-ink-200">{turn.text || t("logs.transcript.empty")}</pre>
+            <CodeBlock maxHeight="lg" frame="none" padding="row" tone="strong" relaxed>{turn.text || t("logs.transcript.empty")}</CodeBlock>
           </div>
         ))}
-      </div>
-    </div>
-  );
-}
-
-function HttpInfoBlock({
-  title,
-  method,
-  path,
-  query,
-  status,
-  headers,
-}: {
-  title: string;
-  method?: string | null;
-  path?: string | null;
-  query?: string | null;
-  status?: number;
-  headers?: Record<string, string> | null;
-}) {
-  const { t } = useI18n();
-  const hasAny = Boolean(method || path || query || status || (headers && Object.keys(headers).length > 0));
-  if (!hasAny) {
-    return (
-      <div>
-        <h4 className="label">{title}</h4>
-        <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("logs.notRecorded")}</div>
-      </div>
-    );
-  }
-  return (
-    <div>
-      <h4 className="label">{title}</h4>
-      <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950/40">
-        {(method || path || status) && (
-          <div className="flex items-center gap-2 border-b border-ink-800/70 px-3 py-1.5 font-mono text-xs">
-            {status != null && <StatusBadge status={status} />}
-            {method && <span className="text-brand-400">{method}</span>}
-            {path && <span className="text-ink-200">{path}{query ? `?${query}` : ""}</span>}
-          </div>
-        )}
-        {headers && Object.keys(headers).length > 0 && (
-          <table className="w-full text-xs">
-            <tbody>
-              {Object.entries(headers).map(([k, v]) => (
-                <tr key={k} className="border-b border-ink-800/40 last:border-0">
-                  <td className="whitespace-nowrap px-3 py-1 align-top font-mono text-ink-400">{k}</td>
-                  <td className="break-all px-3 py-1 font-mono text-ink-300">{v}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </div>
     </div>
   );
@@ -867,28 +725,18 @@ function HttpInfoBlock({
 function PayloadBlock({ title, raw, view }: { title: string; raw: string | null; view: PayloadView }) {
   const { t } = useI18n();
   const parsed = useMemo(() => parsePayload(raw), [raw]);
-  const showFormatted = view === "formatted" && parsed;
-  const [collapsed, setCollapsed] = useState(false);
+  const [open, setOpen] = useState(true);
   return (
     <div>
-      <button
-        type="button"
-        className="flex w-full items-center gap-1.5 text-left"
-        onClick={() => setCollapsed((c) => !c)}
-        aria-expanded={!collapsed}
-      >
-        <i className={`bi ${collapsed ? "bi-chevron-right" : "bi-chevron-down"} text-ink-500`} />
-        <h4 className="label m-0 cursor-pointer select-none">{title}</h4>
-      </button>
-      {!collapsed && (
-        raw == null ? (
-          <div className="mt-2 rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("logs.notRecorded")}</div>
-        ) : showFormatted ? (
+      <DisclosureHeading open={open} onToggle={() => setOpen((o) => !o)} title={title} fullWidth announce />
+      {open &&
+        (raw == null ? (
+          <MutedBox className="mt-2">{t("logs.notRecorded")}</MutedBox>
+        ) : view === "formatted" && parsed ? (
           <div className="mt-2"><Transcript data={parsed} /></div>
         ) : (
-          <pre className="mt-2 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-ink-800 bg-ink-950 p-3 font-mono text-xs leading-relaxed text-ink-300">{pretty(raw)}</pre>
-        )
-      )}
+          <CodeBlock className="mt-2" maxHeight="screen" relaxed>{pretty(raw)}</CodeBlock>
+        ))}
     </div>
   );
 }

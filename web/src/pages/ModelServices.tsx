@@ -1,152 +1,163 @@
 import { useState } from "react";
-import { api, ApiError } from "../api";
 import { useAsync } from "../lib/hooks";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, useConfirm } from "../components/common";
+import { useDeleteAction } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
+import { fetchMappings, fetchModels, fetchProviders, fetchServices, loadAll } from "../lib/resources";
+import { DEFAULT_CATEGORY, SERVICE_KIND, type ServiceKind } from "../lib/serviceDef";
+import { EnabledBadge } from "../components/badges";
+import { Button } from "../components/Button";
+import { EmptyState, useConfirm } from "../components/common";
+import { EntityCard, RowActions } from "../components/EntityCard";
+import { ResourcePage } from "../components/Page";
 import { ServiceEditor } from "../components/ServiceEditor";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Mapping, Model, ModelService, ServiceSteps, Provider } from "../types";
+import type { ModelService, ServiceSteps } from "../types";
 import { isAgentDef, serviceCategoryOf } from "../types";
 
-interface Data {
-  services: ModelService[];
-  models: Model[];
-  providers: Provider[];
-  mappings: Mapping[];
-}
+/** Per kind: the entity's icon and the i18n keys of everything the page says about it. */
+const KIND_COPY: Record<
+  ServiceKind,
+  {
+    icon: string;
+    title: string;
+    subtitle: string;
+    newLabel: string;
+    emptyTitle: string;
+    emptyHint: string;
+    /** Empty-state hint while nothing can be created yet. */
+    emptyHintBlocked: string;
+    /** Toast when "new" is pressed before its prerequisite exists. */
+    prerequisiteMissing: string;
+    deleteTitle: string;
+  }
+> = {
+  resilience: {
+    icon: ENTITY_ICON.service,
+    title: "services.resilience.title",
+    subtitle: "services.resilience.subtitle",
+    newLabel: "services.resilience.action.new",
+    emptyTitle: "services.resilience.empty.title",
+    emptyHint: "services.resilience.empty.hint",
+    emptyHintBlocked: "services.resilience.empty.hintNoMapping",
+    prerequisiteMissing: "services.resilience.toast.needMappingFirst",
+    deleteTitle: "services.resilience.confirm.delete.title",
+  },
+  chain: {
+    icon: ENTITY_ICON.microAgent,
+    title: "services.chain.title",
+    subtitle: "services.chain.subtitle",
+    newLabel: "services.chain.action.new",
+    emptyTitle: "services.chain.empty.title",
+    emptyHint: "services.chain.empty.hint",
+    emptyHintBlocked: "services.chain.empty.hintNoService",
+    prerequisiteMissing: "services.chain.toast.needServiceFirst",
+    deleteTitle: "services.chain.confirm.delete.title",
+  },
+};
 
-type Kind = "resilience" | "chain";
-
-export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
+export function ModelServices({ kind = SERVICE_KIND.resilience }: { kind?: ServiceKind }) {
   const { t } = useI18n();
-  const COPY: Record<Kind, { title: string; subtitle: string; icon: string; newLabel: string; emptyTitle: string; emptyHint: string }> = {
-    resilience: {
-      title: t("services.resilience.title"),
-      subtitle: t("services.resilience.subtitle"),
-      icon: "bi-diagram-3",
-      newLabel: t("services.resilience.action.new"),
-      emptyTitle: t("services.resilience.empty.title"),
-      emptyHint: t("services.resilience.empty.hint"),
-    },
-    chain: {
-      title: t("services.chain.title"),
-      subtitle: t("services.chain.subtitle"),
-      icon: "bi-robot",
-      newLabel: t("services.chain.action.new"),
-      emptyTitle: t("services.chain.empty.title"),
-      emptyHint: t("services.chain.empty.hint"),
-    },
-  };
-  const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [services, models, providers, mappings] = await Promise.all([
-      api.get<{ services: ModelService[] }>("/services"),
-      api.get<{ models: Model[] }>("/models"),
-      api.get<{ providers: Provider[] }>("/providers"),
-      api.get<{ mappings: Mapping[] }>("/mappings"),
-    ]);
-    return { services: services.services, models: models.models, providers: providers.providers, mappings: mappings.mappings };
-  });
+  const state = useAsync(() =>
+    loadAll({ services: fetchServices, models: fetchModels, providers: fetchProviders, mappings: fetchMappings }),
+  );
+  const { data, reload } = state;
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
   const [editing, setEditing] = useState<ModelService | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const copy = COPY[kind];
-  const isKind = (m: ModelService) => (kind === "chain" ? isAgentDef(m.steps) : !isAgentDef(m.steps));
+  const copy = KIND_COPY[kind];
+  const isChain = kind === SERVICE_KIND.chain;
+  const isKind = (m: ModelService) => (isChain ? isAgentDef(m.steps) : !isAgentDef(m.steps));
   const visible = data?.services.filter(isKind) ?? [];
   // A Micro Agent needs at least one Model Service to run; a Model Service needs a mapping.
-  const canCreate =
-    kind === "chain"
-      ? (data?.services.some((m) => !isAgentDef(m.steps)) ?? false)
-      : (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
+  const canCreate = isChain
+    ? (data?.services.some((m) => !isAgentDef(m.steps)) ?? false)
+    : (data?.models.length ?? 0) > 0 && (data?.mappings.length ?? 0) > 0;
 
-  const remove = async (m: ModelService) => {
-    if (!(await confirm(kind === "chain" ? t("services.chain.confirm.delete.title") : t("services.resilience.confirm.delete.title"), t("services.confirm.delete.body", { name: m.name })))) return;
-    try {
-      await api.del(`/services/${m.id}`);
-      toast.success(t("services.toast.deleted"));
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("services.toast.deleteFailed"));
-    }
-  };
+  const del = useDeleteAction(confirm, reload);
+  const remove = (m: ModelService) =>
+    del({
+      title: t(copy.deleteTitle),
+      body: t("services.confirm.delete.body", { name: m.name }),
+      path: API.service(m.id),
+      success: t("services.toast.deleted"),
+      fallback: t("services.toast.deleteFailed"),
+    });
 
   const startNew = () => {
     if (!canCreate) {
-      toast.error(
-        kind === "chain"
-          ? t("services.chain.toast.needServiceFirst")
-          : t("services.resilience.toast.needMappingFirst"),
-      );
+      toast.error(t(copy.prerequisiteMissing));
       return;
     }
     setCreating(true);
   };
 
-  return (
-    <div>
-      <PageHeader
-        title={copy.title}
-        subtitle={copy.subtitle}
-        icon={copy.icon}
-        action={
-          <button className="btn-primary" onClick={startNew}>
-            <i className="bi bi-plus-lg" />
-            {copy.newLabel}
-          </button>
-        }
-      />
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
+  const newButton = (
+    <Button variant="primary" icon={ACTION_ICON.add} onClick={startNew}>
+      {t(copy.newLabel)}
+    </Button>
+  );
 
-      {data && visible.length === 0 && (
+  return (
+    <ResourcePage
+      title={t(copy.title)}
+      subtitle={t(copy.subtitle)}
+      icon={copy.icon}
+      action={newButton}
+      state={state}
+      isEmpty={() => visible.length === 0}
+      empty={
         <EmptyState
           icon={copy.icon}
-          title={copy.emptyTitle}
-          hint={canCreate ? copy.emptyHint : kind === "chain" ? t("services.chain.empty.hintNoService") : t("services.resilience.empty.hintNoMapping")}
-          action={canCreate ? <button className="btn-primary" onClick={startNew}><i className="bi bi-plus-lg" />{copy.newLabel}</button> : undefined}
+          title={t(copy.emptyTitle)}
+          hint={t(canCreate ? copy.emptyHint : copy.emptyHintBlocked)}
+          action={canCreate ? newButton : undefined}
         />
-      )}
-
+      }
+    >
       <div className="grid gap-4 md:grid-cols-2">
-        {visible.map((m) => (
-          <div key={m.id} className="card card-pad">
-            <div className="flex items-start justify-between">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <i className={`bi ${copy.icon} text-brand-400`} />
-                  <span className="truncate font-mono text-sm font-semibold text-ink-100">{m.name}</span>
-                  {m.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
-                  {serviceCategoryOf(m.steps) !== "chat" && (
-                    <span className="badge-blue">{t(`serviceEditor.category.${serviceCategoryOf(m.steps)}`)}</span>
-                  )}
-                </div>
-                {m.description && <p className="mt-1 text-xs text-ink-400">{m.description}</p>}
+        {visible.map((m) => {
+          const category = serviceCategoryOf(m.steps);
+          return (
+            <EntityCard
+              key={m.id}
+              icon={copy.icon}
+              title={m.name}
+              titleStyle="mono"
+              badges={
+                <>
+                  <EnabledBadge enabled={m.enabled} />
+                  {category !== DEFAULT_CATEGORY && <span className="badge-blue">{t(`serviceEditor.category.${category}`)}</span>}
+                </>
+              }
+              description={m.description}
+              descriptionSize="xs"
+              shrinkText
+              aside={
+                <span className="badge-gray shrink-0">
+                  {isAgentDef(m.steps)
+                    ? t("services.chain.stagesCount", { count: m.steps.stages?.length ?? 0 })
+                    : t("services.resilience.stepsCount", { count: (m.steps as ServiceSteps)?.steps?.length ?? 0 })}
+                </span>
+              }
+            >
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-ink-950/50 px-3 py-2 text-xs text-ink-300">
+                <i className="bi bi-signpost-split mt-0.5 text-ink-500" />
+                <span>{m.summary}</span>
               </div>
-              <span className="badge-gray shrink-0">
-                {isAgentDef(m.steps)
-                  ? t("services.chain.stagesCount", { count: m.steps.stages?.length ?? 0 })
-                  : t("services.resilience.stepsCount", { count: (m.steps as ServiceSteps)?.steps?.length ?? 0 })}
-              </span>
-            </div>
 
-            <div className="mt-3 flex items-start gap-2 rounded-lg bg-ink-950/50 px-3 py-2 text-xs text-ink-300">
-              <i className="bi bi-signpost-split mt-0.5 text-ink-500" />
-              <span>{m.summary}</span>
-            </div>
-
-            <div className="mt-3 flex justify-end gap-1.5">
-              <button className="btn-ghost btn-xs" onClick={() => setEditing(m)}>
-                <i className="bi bi-pencil" />
-                {t("services.action.edit")}
-              </button>
-              <button className="btn-danger btn-xs" onClick={() => remove(m)}>
-                <i className="bi bi-trash3" />
-              </button>
-            </div>
-          </div>
-        ))}
+              <RowActions
+                className="mt-3 justify-end"
+                onEdit={() => setEditing(m)}
+                editLabel={t("services.action.edit")}
+                onDelete={() => remove(m)}
+              />
+            </EntityCard>
+          );
+        })}
       </div>
 
       {data && (
@@ -166,6 +177,6 @@ export function ModelServices({ kind = "resilience" }: { kind?: Kind }) {
         />
       )}
       {confirmEl}
-    </div>
+    </ResourcePage>
   );
 }

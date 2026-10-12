@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { API } from "./endpoints";
 
 export type Language = "en" | "zh";
 
@@ -15,6 +16,57 @@ const en: Dict = {
   "nav.providers": "Providers",
   "nav.proxies": "Proxies",
   "common.optional": "optional",
+  "tools.confirm.deleteTitle": "Delete tool",
+  "tools.confirm.deleteBody": "Delete {name} and remove its service bindings?",
+  "tools.title": "Server tools",
+  "tools.subtitle": "Define tool parameters and HTTP forwarding, then bind tools to a Model Service or Micro Agent.",
+  "tools.action.register": "Register tool",
+  "tools.state.enabled": "Enabled",
+  "tools.state.disabled": "Disabled",
+  "tools.empty.title": "Make an HTTP API available to your model",
+  "tools.empty.hint": "Hydrogen manages the tool loop, sessions and responses. Your configured adapter implements the tool logic.",
+  "tools.error.serverToolName": "The server-tool contract needs the name a client declares",
+  "tools.toast.saved": "Tool saved",
+  "tools.toast.deleted": "Tool deleted",
+  "tools.modal.editTitle": "Edit {name}",
+  "tools.modal.createTitle": "Register server tool",
+  "tools.form.name": "Tool name",
+  "tools.form.description": "Description (shown to the model)",
+  "tools.form.headers": "Authentication and headers (JSON)",
+  "tools.form.headers.hint": "Leave blank to keep saved headers; enter {} to clear. Headers are stored encrypted.",
+  "tools.form.schema": "Parameter JSON Schema (draft 7)",
+  "tools.form.template": "POST JSON request template",
+  "tools.form.template.hint": "Use {{arguments}}, {{arguments.query}}, {{tool.name}}, {{session.id}} and {{call.id}}. Whole placeholders preserve JSON types; string interpolation accepts scalars.",
+  "tools.form.resultPath": "Result JSON Pointer",
+  "tools.form.resultPath.hint": "Empty returns the full JSON",
+  "tools.form.timeoutMs": "Timeout (ms)",
+  "tools.form.maxResultBytes": "Maximum response bytes",
+  "tools.serverTool.summary": "Server-side tool round trip (client protocol)",
+  "tools.serverTool.hint": "Enabled, a client that declares this name as a server tool receives both the call and its result. What an entry contains is your adapter's decision; this only says where the entry array lives in its JSON.",
+  "tools.serverTool.toggle": "Round-trip as a server tool",
+  "tools.serverTool.name": "Name the client declares",
+  "tools.serverTool.resultType": "Result block type",
+  "tools.serverTool.resultPath": "Result entries JSON Pointer",
+  "tools.serverTool.resultPath.hint": "Empty when the adapter returns the entry array directly",
+  "tools.serverTool.example": "Example: for an Anthropic client declaring web_search_20250305, set the declared name to web_search and the result block type to web_search_result to receive server_tool_use and web_search_tool_result.",
+  "tools.preview.summary": "Preview mapping (no HTTP request is sent)",
+  "tools.preview.arguments": "Sample tool arguments",
+  "tools.preview.result": "Sample API response",
+  "tools.preview.run": "Preview",
+  "tools.preview.failed": "Preview failed",
+  "tools.form.enabled": "Enable tool",
+  "tools.action.save": "Save tool",
+  "hostedTools.stream.all": "Full process: model rounds and tool events",
+  "hostedTools.stream.progress": "Tool progress and final answer",
+  "hostedTools.stream.final": "Stream final answer only",
+  "hostedTools.title": "Hosted server tools",
+  "hostedTools.hint": "Bound tools are supplied automatically. Hydrogen forwards arguments to the tool API and saves continuation context.",
+  "hostedTools.disabled": "disabled",
+  "hostedTools.register": "Register a tool on the Tools page",
+  "hostedTools.stream": "Streaming delivery",
+  "hostedTools.stream.hint": "Process events use Hydrogen SSE extensions; the final answer uses the client protocol. Micro Agent stages retain their existing buffering and routing rules.",
+  "hostedTools.maxRounds": "Maximum model rounds",
+  "hostedTools.maxCalls": "Maximum tool calls",
 
   "proxies.title": "Proxies",
   "proxies.subtitle": "Outbound network hops. A provider can send its upstream traffic through one instead of connecting directly.",
@@ -67,6 +119,7 @@ const en: Dict = {
   "bench.idle": "Pick a target and send a request. Nothing is sent until you press Send.",
   "bench.loading": "Loading targets…",
   "bench.copied": "Copied to clipboard",
+  "bench.copyFailed": "Copy failed - select the text and copy it manually",
 
   "bench.section.target": "Target",
   "bench.section.request": "Request",
@@ -182,6 +235,10 @@ const en: Dict = {
   "settings.logRetention.toast.disabled": "Auto-prune disabled — logs are kept forever",
   "settings.logRetention.toast.saved": "Keeping the last {days} days",
   "settings.logRetention.toast.savedPruned": "Keeping the last {days} days — removed {pruned} old entries",
+  "settings.responseRetention": "Responses and tool session history",
+  "settings.responseRetention.hint": "Retain idle history for this many days. Continuation refreshes expiry; 0 keeps history indefinitely. Reducing retention immediately clears expired history while preserving active jobs.",
+  "settings.responseRetention.toast.saved": "Response retention saved",
+  "settings.responseRetention.days": "Retention days",
 
   "settings.imageCache": "OCR image cache",
   "settings.imageCache.hint":
@@ -262,6 +319,7 @@ const en: Dict = {
   "settings.env.toast.invalidLogPayloadMaxChars": "Log payload max chars must be a whole number between 0 and 10000000",
   "settings.env.toast.invalidTokenRate": "Simulated streaming token rate must be a positive integer",
   "settings.env.toast.invalidSessionTtl": "Session TTL must be at least 60000 ms",
+  "settings.env.toast.invalidPromptCacheTtl": "Auto cache TTL must be a whole number between {min} and {max} minutes",
   "settings.env.toast.saved": "Runtime settings saved",
 
   "common.cancel": "Cancel",
@@ -309,6 +367,7 @@ const en: Dict = {
   "brand.subtitle": "LLM Proxy",
   "layout.passwordButton": "Password",
   "layout.signOut": "Sign out",
+  "layout.toast.signOutFailed": "Sign out failed",
   "layout.changePasswordTitle": "Change password",
   "layout.currentPassword": "Current password",
   "layout.newPassword": "New password",
@@ -528,6 +587,8 @@ const en: Dict = {
   "tokens.toast.copyFailed": "Copy failed - select the key and copy it manually",
   "tokens.toast.updated": "API key updated",
   "tokens.toast.updateFailed": "Update failed",
+  "tokens.toast.scopeEmpty": "Select at least one Model Service, or allow all",
+  "tokens.toast.invalidExpiry": "Expiry is not a valid date and time",
   "tokens.action.edit": "Edit",
   "tokens.action.duplicate": "Duplicate",
   "tokens.copyOfName": "{name} (copy)",
@@ -679,6 +740,7 @@ const en: Dict = {
   "logs.confirm.clearAllBody": "This permanently deletes all {total} request log entries and reclaims the disk space. This cannot be undone.",
   "logs.toast.deleted": "Deleted {count} log entries",
   "logs.toast.clearFailed": "Failed to clear logs",
+  "logs.error.loadDetailFailed": "Failed to load detail",
 
   "activeRequests.title": "Active Requests",
   "activeRequests.subtitle": "Real-time monitoring of in-flight requests. Blocked requests (>30s) are highlighted.",
@@ -803,6 +865,7 @@ const en: Dict = {
   "serviceEditor.toast.stepsJsonInvalid": "Steps JSON is invalid",
   "serviceEditor.toast.workflowValid": "Workflow is valid",
   "serviceEditor.toast.workflowInvalid": "Invalid workflow",
+  "serviceEditor.toast.validateFailed": "Validation failed",
   "serviceEditor.toast.dryRunFailed": "Dry-run failed",
   "serviceEditor.toast.nameRequired": "Name is required",
   "serviceEditor.toast.saveFailed": "Save failed",
@@ -925,6 +988,57 @@ const zh: Dict = {
   "nav.providers": "提供商",
   "nav.proxies": "代理",
   "common.optional": "可选",
+  "tools.confirm.deleteTitle": "删除工具",
+  "tools.confirm.deleteBody": "删除 {name} 并解除所有服务绑定？",
+  "tools.title": "服务器工具",
+  "tools.subtitle": "定义工具参数与 HTTP 转发方式，再到 Model Service 或 Micro Agent 中绑定。",
+  "tools.action.register": "注册工具",
+  "tools.state.enabled": "启用",
+  "tools.state.disabled": "停用",
+  "tools.empty.title": "把任意 HTTP API 提供给模型",
+  "tools.empty.hint": "Hydrogen 负责工具循环、会话和结果返回。工具逻辑由你配置的转接服务执行。",
+  "tools.error.serverToolName": "服务端工具契约需要一个客户端声明的名称",
+  "tools.toast.saved": "工具已保存",
+  "tools.toast.deleted": "工具已删除",
+  "tools.modal.editTitle": "编辑 {name}",
+  "tools.modal.createTitle": "注册服务器工具",
+  "tools.form.name": "工具名称",
+  "tools.form.description": "描述（提供给模型）",
+  "tools.form.headers": "认证与请求头（JSON）",
+  "tools.form.headers.hint": "留空保留已保存的头；输入 {} 清空。认证头加密保存。",
+  "tools.form.schema": "工具参数 JSON Schema（draft 7）",
+  "tools.form.template": "POST JSON 请求模板",
+  "tools.form.template.hint": "可引用 {{arguments}}、{{arguments.query}}、{{tool.name}}、{{session.id}} 和 {{call.id}}。完整占位符保留 JSON 类型；嵌入字符串只接受标量。",
+  "tools.form.resultPath": "结果 JSON Pointer",
+  "tools.form.resultPath.hint": "留空返回完整 JSON",
+  "tools.form.timeoutMs": "超时（毫秒）",
+  "tools.form.maxResultBytes": "最大响应字节",
+  "tools.serverTool.summary": "服务端工具往返（客户端协议）",
+  "tools.serverTool.hint": "开启后，以服务端工具形式声明此名称的客户端会收到调用与结果两块。工具返回什么由你的适配器决定；这里只说明结果条目数组在适配器 JSON 中的位置。",
+  "tools.serverTool.toggle": "以服务端工具形式往返",
+  "tools.serverTool.name": "客户端声明的名称",
+  "tools.serverTool.resultType": "结果块类型",
+  "tools.serverTool.resultPath": "结果条目 JSON Pointer",
+  "tools.serverTool.resultPath.hint": "留空表示适配器直接返回条目数组",
+  "tools.serverTool.example": "示例：Anthropic 客户端声明 web_search_20250305 时，把客户端名称填 web_search、结果块类型填 web_search_result，即可收到 server_tool_use 与 web_search_tool_result。",
+  "tools.preview.summary": "预览参数映射（不会发送 HTTP 请求）",
+  "tools.preview.arguments": "示例工具参数",
+  "tools.preview.result": "示例 API 响应",
+  "tools.preview.run": "预览",
+  "tools.preview.failed": "预览失败",
+  "tools.form.enabled": "启用工具",
+  "tools.action.save": "保存工具",
+  "hostedTools.stream.all": "完整过程：各轮模型内容与工具事件",
+  "hostedTools.stream.progress": "工具进度与最终答案",
+  "hostedTools.stream.final": "仅流式返回最终答案",
+  "hostedTools.title": "服务器托管工具",
+  "hostedTools.hint": "绑定后自动向模型提供工具。Hydrogen 将参数转发至工具 API，并保存续接上下文。",
+  "hostedTools.disabled": "停用",
+  "hostedTools.register": "前往工具页面注册工具",
+  "hostedTools.stream": "流式呈现",
+  "hostedTools.stream.hint": "过程使用 Hydrogen SSE 扩展；最终答案使用客户端原有协议。Micro Agent 的阶段仍按既有的缓冲与路由规则执行。",
+  "hostedTools.maxRounds": "最大模型轮数",
+  "hostedTools.maxCalls": "最大工具调用数",
 
   "proxies.title": "代理",
   "proxies.subtitle": "出站网络跳板。可以让某个提供商的上游流量走代理，而不是直连。",
@@ -977,6 +1091,7 @@ const zh: Dict = {
   "bench.idle": "选一个目标并发送请求。不点「发送」就不会发出任何东西。",
   "bench.loading": "正在加载目标…",
   "bench.copied": "已复制到剪贴板",
+  "bench.copyFailed": "复制失败——请手动选中文本复制",
 
   "bench.section.target": "目标",
   "bench.section.request": "请求",
@@ -1092,6 +1207,10 @@ const zh: Dict = {
   "settings.logRetention.toast.disabled": "已关闭自动清理 —— 日志将永久保留",
   "settings.logRetention.toast.saved": "仅保留最近 {days} 天",
   "settings.logRetention.toast.savedPruned": "仅保留最近 {days} 天 —— 已删除 {pruned} 条旧日志",
+  "settings.responseRetention": "Responses 与工具会话历史",
+  "settings.responseRetention.hint": "设置闲置历史的保留天数。续接会刷新期限；0 表示永久保留。缩短期限会立即清理已过期的历史，正在运行的任务会保留。",
+  "settings.responseRetention.toast.saved": "会话保留期已保存",
+  "settings.responseRetention.days": "保留天数",
 
   "settings.imageCache": "OCR 图片缓存",
   "settings.imageCache.hint":
@@ -1172,6 +1291,7 @@ const zh: Dict = {
   "settings.env.toast.invalidLogPayloadMaxChars": "日志负载最大字符数必须是 0 到 10000000 之间的整数",
   "settings.env.toast.invalidTokenRate": "模拟流式传输速率必须是正整数",
   "settings.env.toast.invalidSessionTtl": "会话有效期至少为 60000 毫秒",
+  "settings.env.toast.invalidPromptCacheTtl": "自动缓存有效期必须是 {min} 到 {max} 分钟之间的整数",
   "settings.env.toast.saved": "运行时设置已保存",
 
   "common.cancel": "取消",
@@ -1219,6 +1339,7 @@ const zh: Dict = {
   "brand.subtitle": "LLM 代理",
   "layout.passwordButton": "密码",
   "layout.signOut": "退出登录",
+  "layout.toast.signOutFailed": "退出登录失败",
   "layout.changePasswordTitle": "修改密码",
   "layout.currentPassword": "当前密码",
   "layout.newPassword": "新密码",
@@ -1438,6 +1559,8 @@ const zh: Dict = {
   "tokens.toast.copyFailed": "复制失败——请手动选中密钥复制",
   "tokens.toast.updated": "API 密钥已更新",
   "tokens.toast.updateFailed": "更新失败",
+  "tokens.toast.scopeEmpty": "请至少选择一个模型服务，或允许全部",
+  "tokens.toast.invalidExpiry": "过期时间不是有效的日期和时间",
   "tokens.action.edit": "编辑",
   "tokens.action.duplicate": "复制",
   "tokens.copyOfName": "{name}（副本）",
@@ -1589,6 +1712,7 @@ const zh: Dict = {
   "logs.confirm.clearAllBody": "这将永久删除全部 {total} 条请求日志并回收磁盘空间。此操作不可撤销。",
   "logs.toast.deleted": "已删除 {count} 条日志",
   "logs.toast.clearFailed": "清空日志失败",
+  "logs.error.loadDetailFailed": "加载详情失败",
 
   "activeRequests.title": "活动请求",
   "activeRequests.subtitle": "实时监控在途请求。被阻塞的请求（>30 秒）会高亮显示。",
@@ -1713,6 +1837,7 @@ const zh: Dict = {
   "serviceEditor.toast.stepsJsonInvalid": "步骤 JSON 无效",
   "serviceEditor.toast.workflowValid": "工作流有效",
   "serviceEditor.toast.workflowInvalid": "工作流无效",
+  "serviceEditor.toast.validateFailed": "校验失败",
   "serviceEditor.toast.dryRunFailed": "试运行失败",
   "serviceEditor.toast.nameRequired": "名称为必填项",
   "serviceEditor.toast.saveFailed": "保存失败",
@@ -1855,7 +1980,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // to the stored/local value on error.
   useEffect(() => {
     api
-      .get<{ language: Language }>("/settings/ui-language")
+      .get<{ language: Language }>(API.settingsUiLanguage)
       .then((r) => {
         const lang = r.language === "zh" ? "zh" : "en";
         setLanguageState(lang);
@@ -1883,7 +2008,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     // Best-effort persist server-side; non-admins get a 403 and we keep the
     // local preference anyway.
     try {
-      await api.put("/settings/ui-language", { language: lang });
+      await api.put(API.settingsUiLanguage, { language: lang });
     } catch {
       /* ignore — local preference stands */
     }

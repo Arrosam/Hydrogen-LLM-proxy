@@ -1,12 +1,19 @@
-import { useState } from "react";
-import { api, ApiError } from "../api";
-import { useAuth } from "../auth";
+import { ROLE, ROLES, useAuth } from "../auth";
 import { useAsync } from "../lib/hooks";
+import { useDeleteAction, useFormState, useSave } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { ENTITY_ICON } from "../lib/icons";
 import { useI18n } from "../lib/i18n";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
-import { Modal } from "../components/Modal";
-import { useToast } from "../components/Toast";
+import { fetchUsers } from "../lib/resources";
+import { EnabledBadge, RoleBadge } from "../components/badges";
+import { Button } from "../components/Button";
+import { EmptyState, Toggle, useConfirm } from "../components/common";
+import { DataTable, type Column } from "../components/DataTable";
+import { RowActions } from "../components/EntityCard";
+import { Field, FieldHint } from "../components/Field";
+import { FormModal } from "../components/FormModal";
+import { Select, TextInput } from "../components/inputs";
+import { ResourcePage } from "../components/Page";
 import { formatDate } from "../lib/format";
 import type { Role, User } from "../types";
 
@@ -18,57 +25,51 @@ interface FormState {
   enabled: boolean;
 }
 
+const EMPTY: FormState = { username: "", password: "", role: ROLE.manager, enabled: true };
+
 // The route and the API are both admin-only, so this page never renders for a
 // manager and needs no per-role degradation.
 export function Users() {
   const { t } = useI18n();
   const { user: me } = useAuth();
-  const { data, loading, error, reload } = useAsync(() => api.get<{ users: User[] }>("/users"));
-  const toast = useToast();
+  const state = useAsync(fetchUsers);
+  const { data, reload } = state;
   const { confirm, confirmEl } = useConfirm();
-  const [form, setForm] = useState<FormState | null>(null);
-  const [saving, setSaving] = useState(false);
+  const fc = useFormState<FormState>();
+  const { form } = fc;
 
-  const save = async () => {
-    if (!form) return;
-    setSaving(true);
-    try {
-      if (form.id) {
-        const payload: Record<string, unknown> = { role: form.role, enabled: form.enabled };
-        if (form.password) payload.password = form.password;
-        await api.patch(`/users/${form.id}`, payload);
-        toast.success(t("users.toast.updated"));
-      } else {
-        await api.post("/users", { username: form.username, password: form.password, role: form.role, enabled: form.enabled });
-        toast.success(t("users.toast.created"));
-      }
-      setForm(null);
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("users.toast.saveFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { save, saving } = useSave(fc, {
+    collection: API.users,
+    member: API.user,
+    // An edit never renames, and only resets the password when one was typed.
+    toPayload: (f) =>
+      f.id
+        ? { role: f.role, enabled: f.enabled, ...(f.password ? { password: f.password } : {}) }
+        : { username: f.username, password: f.password, role: f.role, enabled: f.enabled },
+    messages: (editing) => ({
+      success: t(editing ? "users.toast.updated" : "users.toast.created"),
+      failed: t("users.toast.saveFailed"),
+    }),
+    onSaved: reload,
+  });
 
-  const remove = async (u: User) => {
-    if (!(await confirm(t("users.confirm.deleteTitle"), t("users.confirm.deleteBody", { name: u.username })))) return;
-    try {
-      await api.del(`/users/${u.id}`);
-      toast.success(t("users.toast.deleted"));
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("users.toast.deleteFailed"));
-    }
-  };
+  const del = useDeleteAction(confirm, reload);
+  const remove = (u: User) =>
+    del({
+      title: t("users.confirm.deleteTitle"),
+      body: t("users.confirm.deleteBody", { name: u.username }),
+      path: API.user(u.id),
+      success: t("users.toast.deleted"),
+      fallback: t("users.toast.deleteFailed"),
+    });
 
   // Guards for the edit modal's Enabled toggle.
-  const users = data?.users ?? [];
+  const users = data ?? [];
   const editTarget = form?.id ? users.find((u) => u.id === form.id) : undefined;
-  const enabledAdmins = users.filter((u) => u.role === "admin" && u.enabled);
+  const enabledAdmins = users.filter((u) => u.role === ROLE.admin && u.enabled);
   const isSelfEdit = !!form?.id && form.id === me?.id;
   const isLastEnabledAdmin =
-    !!editTarget && editTarget.role === "admin" && enabledAdmins.length <= 1 && enabledAdmins[0]?.id === form?.id;
+    !!editTarget && editTarget.role === ROLE.admin && enabledAdmins.length <= 1 && enabledAdmins[0]?.id === form?.id;
   const lockEnabled = isSelfEdit || isLastEnabledAdmin;
   const lockReason = isSelfEdit
     ? t("users.lockReason.self")
@@ -76,116 +77,88 @@ export function Users() {
       ? t("users.lockReason.lastAdmin")
       : "";
 
+  const columns: Column<User>[] = [
+    {
+      header: t("users.table.username"),
+      className: "font-medium text-ink-100",
+      cell: (u) => (
+        <>
+          {u.username}
+          {u.id === me?.id && <span className="ml-2 badge-gray">{t("users.youBadge")}</span>}
+        </>
+      ),
+    },
+    { header: t("users.table.role"), cell: (u) => <RoleBadge role={u.role} /> },
+    {
+      header: t("users.table.status"),
+      cell: (u) => <EnabledBadge enabled={u.enabled} labels={{ on: t("users.status.active"), off: t("users.status.disabled") }} />,
+    },
+    { header: t("users.table.created"), className: "text-xs text-ink-400", cell: (u) => formatDate(u.createdAt) },
+    {
+      header: t("users.table.actions"),
+      headerClassName: "text-right",
+      cell: (u) => (
+        <RowActions
+          className="justify-end"
+          onEdit={() => fc.open({ id: u.id, username: u.username, password: "", role: u.role, enabled: u.enabled })}
+          onDelete={() => remove(u)}
+          deleteDisabled={u.id === me?.id}
+        />
+      ),
+    },
+  ];
+
   return (
-    <div>
-      <PageHeader
-        title={t("users.title")}
-        subtitle={t("users.subtitle")}
-        icon="bi-people"
-        action={
-          <button className="btn-primary" onClick={() => setForm({ username: "", password: "", role: "manager", enabled: true })}>
-            <i className="bi bi-person-plus" />
-            {t("users.action.new")}
-          </button>
-        }
-      />
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
-      {data && data.users.length === 0 && <EmptyState icon="bi-people" title={t("users.empty.title")} />}
+    <ResourcePage
+      title={t("users.title")}
+      subtitle={t("users.subtitle")}
+      icon={ENTITY_ICON.user}
+      action={
+        <Button variant="primary" icon="bi-person-plus" onClick={() => fc.open({ ...EMPTY })}>
+          {t("users.action.new")}
+        </Button>
+      }
+      state={state}
+      isEmpty={(list) => list.length === 0}
+      empty={<EmptyState icon={ENTITY_ICON.user} title={t("users.empty.title")} />}
+    >
+      {data && data.length > 0 && <DataTable rows={data} rowKey={(u) => u.id} columns={columns} />}
 
-      {data && data.users.length > 0 && (
-        <div className="card overflow-hidden">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>{t("users.table.username")}</th>
-                <th>{t("users.table.role")}</th>
-                <th>{t("users.table.status")}</th>
-                <th>{t("users.table.created")}</th>
-                <th className="text-right">{t("users.table.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.users.map((u) => (
-                <tr key={u.id}>
-                  <td className="font-medium text-ink-100">
-                    {u.username}
-                    {u.id === me?.id && <span className="ml-2 badge-gray">{t("users.youBadge")}</span>}
-                  </td>
-                  <td>
-                    <span className={u.role === "admin" ? "badge-blue" : "badge-gray"}>
-                      <i className={`bi ${u.role === "admin" ? "bi-shield-lock" : "bi-person-gear"}`} />
-                      {t(`users.role.${u.role}`)}
-                    </span>
-                  </td>
-                  <td>{u.enabled ? <span className="badge-green">{t("users.status.active")}</span> : <span className="badge-red">{t("users.status.disabled")}</span>}</td>
-                  <td className="text-xs text-ink-400">{formatDate(u.createdAt)}</td>
-                  <td>
-                    <div className="flex justify-end gap-1.5">
-                      <button
-                        className="btn-ghost btn-xs"
-                        onClick={() => setForm({ id: u.id, username: u.username, password: "", role: u.role, enabled: u.enabled })}
-                      >
-                        <i className="bi bi-pencil" />
-                      </button>
-                      <button className="btn-danger btn-xs" disabled={u.id === me?.id} onClick={() => remove(u)}>
-                        <i className="bi bi-trash3" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <Modal
+      <FormModal
         open={form !== null}
         title={form?.id ? t("users.modal.editTitle") : t("users.modal.createTitle")}
         icon="bi-person"
-        onClose={() => setForm(null)}
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>{t("users.action.cancel")}</button>
-            <button className="btn-primary" onClick={save} disabled={saving}>
-              <i className="bi bi-check-lg" />{t("users.action.save")}
-            </button>
-          </>
-        }
+        onClose={fc.close}
+        onSubmit={save}
+        submitLabel={t("users.action.save")}
+        cancelLabel={t("users.action.cancel")}
+        busy={saving}
       >
         {form && (
           <div className="space-y-4">
             {!form.id && (
-              <div>
-                <label className="label">{t("users.form.username")}</label>
-                <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-              </div>
+              <Field label={t("users.form.username")}>
+                <TextInput {...fc.bind("username")} />
+              </Field>
             )}
-            <div>
-              <label className="label">{form.id ? t("users.form.resetPassword") : t("users.form.password")}</label>
-              <input className="input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={t("users.form.passwordPlaceholder")} />
-            </div>
-            <div>
-              <label className="label">{t("users.form.role")}</label>
-              <select className="select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
-                <option value="manager">{t("users.role.manager")}</option>
-                <option value="admin">{t("users.role.admin")}</option>
-              </select>
-            </div>
-            <div>
-              <Toggle
-                checked={form.enabled}
-                onChange={(v) => setForm({ ...form, enabled: v })}
-                label={t("users.form.enabled")}
-                disabled={lockEnabled}
+            <Field label={form.id ? t("users.form.resetPassword") : t("users.form.password")}>
+              <TextInput type="password" {...fc.bind("password")} placeholder={t("users.form.passwordPlaceholder")} />
+            </Field>
+            <Field label={t("users.form.role")}>
+              <Select
+                value={form.role}
+                onChange={(role) => fc.set("role", role)}
+                options={ROLES.map((role) => ({ value: role, label: t(`users.role.${role}`) }))}
               />
-              {lockReason && <p className="mt-1 text-xs text-ink-500">{lockReason}</p>}
+            </Field>
+            <div>
+              <Toggle checked={form.enabled} onChange={(v) => fc.set("enabled", v)} label={t("users.form.enabled")} disabled={lockEnabled} />
+              {lockReason && <FieldHint>{lockReason}</FieldHint>}
             </div>
           </div>
         )}
-      </Modal>
+      </FormModal>
       {confirmEl}
-    </div>
+    </ResourcePage>
   );
 }

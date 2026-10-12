@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { useAuth } from "../auth";
+import { AuthCard } from "../components/AuthCard";
+import { Button } from "../components/Button";
+import { Field } from "../components/Field";
+import { TextInput } from "../components/inputs";
 import { HydrogenLogo } from "../components/Logo";
+import { errorMessage } from "../lib/errors";
+import { useAction } from "../lib/hooks";
 import { useI18n } from "../lib/i18n";
 
 export function Login() {
@@ -9,64 +15,32 @@ export function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const action = useAction({ onError: setError, describe: errorMessage });
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true);
     setError(null);
-    try {
-      await login(username, password);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("login.error.fallback"));
-    } finally {
-      setBusy(false);
-    }
+    await action.run(() => login(username, password), t("login.error.fallback"));
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 flex flex-col items-center gap-3">
-          <HydrogenLogo className="h-14 w-14" />
-          <div className="text-center">
-            <h1 className="text-xl font-semibold text-ink-100">{t("login.brand")}</h1>
-            <p className="text-sm text-ink-500">{t("login.subtitle")}</p>
-          </div>
-        </div>
-
-        <form onSubmit={submit} className="card card-pad space-y-4">
-          <div>
-            <label className="label">{t("login.form.username")}</label>
-            <input
-              className="input"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoFocus
-              autoComplete="username"
-            />
-          </div>
-          <div>
-            <label className="label">{t("login.form.password")}</label>
-            <input
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-          </div>
-          {error && (
-            <div className="flex items-center gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-sm text-red-300">
-              <i className="bi bi-exclamation-circle" />
-              {error}
-            </div>
-          )}
-          <button className="btn-primary w-full" disabled={busy}>
-            {busy ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-box-arrow-in-right" />}
-            {t("login.form.submit")}
-          </button>
-        </form>
-      </div>
-    </div>
+    <AuthCard
+      mark={<HydrogenLogo className="h-14 w-14" />}
+      title={t("login.brand")}
+      subtitle={t("login.subtitle")}
+      onSubmit={submit}
+      error={error}
+      actions={
+        <Button variant="primary" className="w-full" icon="bi-box-arrow-in-right" busy={action.busy} spinWhenBusy>
+          {t("login.form.submit")}
+        </Button>
+      }
+    >
+      <Field label={t("login.form.username")}>
+        <TextInput value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
+      </Field>
+      <Field label={t("login.form.password")}>
+        <TextInput type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+      </Field>
+    </AuthCard>
   );
 }

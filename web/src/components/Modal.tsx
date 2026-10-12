@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { CloseButton } from "./Button";
 
 /** "md" for a short form, "lg" for a form with paired fields or an embedded
  * list, "xl" for editors and detail views. */
@@ -37,9 +38,7 @@ export function Modal({ open, title, icon, onClose, children, footer, headerExtr
           </h2>
           <div className="flex items-center gap-3">
             {headerExtra}
-            <button className="text-ink-500 hover:text-ink-200" onClick={onClose}>
-              <i className="bi bi-x-lg" />
-            </button>
+            <CloseButton onClick={onClose} />
           </div>
         </div>
         <div className="card-pad min-h-0 flex-1 overflow-y-auto">{children}</div>

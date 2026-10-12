@@ -9,14 +9,125 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../api";
-import { useAsync } from "../lib/hooks";
+import { useAsync, useCopy } from "../lib/hooks";
 import { useI18n } from "../lib/i18n";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner } from "../components/common";
-import { useToast } from "../components/Toast";
-import { copyToClipboard } from "../lib/clipboard";
+import { Bar } from "../components/Bar";
+import { Button, Icon } from "../components/Button";
+import { EmptyState } from "../components/common";
+import { AsyncStatus, PageHeader } from "../components/Page";
+import { CardHeading } from "../components/Section";
 import { formatCompact, formatNumber } from "../lib/format";
+import { PERCENT } from "../lib/constants";
+import { API } from "../lib/endpoints";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
+import { INK, METRIC_TONE } from "../lib/theme";
 import type { GroupCount, StatsSummary, TimePoint } from "../types";
+
+/** Between an endpoint's own hint and the note every endpoint shares. */
+const HINT_SEPARATOR = " · ";
+
+/** Rows a "top ..." card shows. */
+const TOP_LIST_LIMIT = 6;
+
+/** Geometry of the traffic chart. */
+const CHART = {
+  height: 260,
+  margin: { top: 4, right: 8, bottom: 0 },
+  /** A hidden axis takes no width: pull the plot over when none is labelled,
+   * give the ticks room when one is. */
+  leftMargin: { labelled: 4, bare: -12 },
+  gridDash: "3 3",
+  tickFontSize: 11,
+  tooltipFontSize: 12,
+  tooltipRadius: 8,
+  strokeWidth: 2,
+  /** Opacity at the top of a filled curve's gradient (it fades to 0). */
+  gradientTopOpacity: 0.5,
+  /** A legend dot whose series is not the focused one. */
+  dimmedOpacity: 0.3,
+} as const;
+
+type SeriesKey = "requests" | "totalTokens" | "errors" | "avgLatencyMs";
+
+/** A latency as the page writes it. */
+const formatLatency = (ms: number): string => `${formatNumber(ms)} ms`;
+
+/** The cached share as a percentage of prompt tokens. Cached tokens are counted
+ * INSIDE promptTokens, so this is a ratio, never a second addend. */
+function cacheHitHint(s: StatsSummary): string | undefined {
+  if (!s.promptTokens) return undefined;
+  return `${Math.round((s.cachedInputTokens / s.promptTokens) * PERCENT)}% of input`;
+}
+
+/**
+ * The numbers of the page, in stat-card order. Each is one card; the ones
+ * with a `series` are also a curve of the traffic chart, drawn in the colour
+ * of the card's icon and formatted the same way -- one metric, one colour,
+ * whether you read it as a number or as a shape.
+ */
+interface Metric {
+  key: "requests" | "totalTokens" | "cachedInputTokens" | "errors" | "avgLatencyMs";
+  icon: string;
+  /** The metric's colour: its card icon's, and its curve's when it has one. */
+  tone: keyof typeof METRIC_TONE;
+  /** i18n key of the card's caption. */
+  label: string;
+  format: (n: number) => string;
+  hint?: (s: StatsSummary) => string | undefined;
+  series?: { key: SeriesKey; label: string };
+}
+
+const METRICS: readonly Metric[] = [
+  {
+    key: "requests",
+    icon: "bi-arrow-left-right",
+    tone: "brand",
+    label: "overview.stats.requests",
+    format: formatNumber,
+    series: { key: "requests", label: "overview.chart.series.requests" },
+  },
+  {
+    key: "totalTokens",
+    icon: "bi-coin",
+    tone: "amber",
+    label: "overview.stats.totalTokens",
+    format: formatCompact,
+    series: { key: "totalTokens", label: "overview.chart.series.tokens" },
+  },
+  // The cached share of the prompt tokens -- what a prompt-caching setup is
+  // actually judged on, and billed at a fraction of a miss.
+  {
+    key: "cachedInputTokens",
+    icon: "bi-database-check",
+    tone: "sky",
+    label: "overview.stats.cachedTokens",
+    format: formatCompact,
+    hint: cacheHitHint,
+  },
+  {
+    key: "errors",
+    icon: "bi-exclamation-triangle",
+    tone: "red",
+    label: "overview.stats.errors",
+    format: formatNumber,
+    series: { key: "errors", label: "overview.chart.series.errors" },
+  },
+  {
+    key: "avgLatencyMs",
+    icon: "bi-stopwatch",
+    tone: "emerald",
+    label: "overview.stats.avgLatency",
+    format: formatLatency,
+    series: { key: "avgLatencyMs", label: "overview.chart.series.latency" },
+  },
+];
+
+/** The three rankings under the chart: which list of the loaded data, under which title and icon. */
+const TOP_LISTS = [
+  { groups: "services", title: "overview.topList.topServices", icon: ENTITY_ICON.service },
+  { groups: "models", title: "overview.topList.topModels", icon: ENTITY_ICON.model },
+  { groups: "providers", title: "overview.topList.topProviders", icon: ENTITY_ICON.provider },
+] as const;
 
 interface OverviewData {
   summary: StatsSummary;
@@ -27,8 +138,8 @@ interface OverviewData {
 }
 
 function EndpointsCard() {
-  const toast = useToast();
   const { t } = useI18n();
+  const copy = useCopy({ ok: t("overview.endpoints.copiedToClipboard"), fail: t("overview.endpoints.copyFailed") });
   const origin = window.location.origin;
   const rows = [
     // One row per SDK base URL. The Responses endpoint hangs off the same
@@ -40,17 +151,11 @@ function EndpointsCard() {
     },
     { label: t("overview.endpoints.anthropicBaseUrl"), value: origin, hint: t("overview.endpoints.anthropicBaseUrlHint") },
   ];
-  const copy = async (v: string) => {
-    const ok = await copyToClipboard(v);
-    if (ok) toast.success(t("overview.endpoints.copiedToClipboard"));
-    else toast.error(t("overview.endpoints.copyFailed"));
-  };
   return (
     <div className="card card-pad">
-      <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-200">
-        <i className="bi bi-link-45deg text-brand-400" />
+      <CardHeading icon="bi-link-45deg" className="mb-3">
         {t("overview.endpoints.title")}
-      </h3>
+      </CardHeading>
       <div className="grid gap-3 sm:grid-cols-2">
         {rows.map((r) => (
           <div key={r.label} className="rounded-lg border border-ink-800 bg-ink-950/40 p-3">
@@ -59,11 +164,9 @@ function EndpointsCard() {
               <code className="flex-1 overflow-x-auto whitespace-nowrap rounded bg-ink-950 px-2 py-1 font-mono text-xs text-brand-400">
                 {r.value}
               </code>
-              <button className="btn-ghost btn-xs shrink-0" onClick={() => copy(r.value)} title={t("overview.endpoints.copyButton")}>
-                <i className="bi bi-clipboard" />
-              </button>
+              <Button variant="ghost" size="xs" className="shrink-0" icon={ACTION_ICON.copy} onClick={() => void copy(r.value)} title={t("overview.endpoints.copyButton")} />
             </div>
-            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}{t("overview.endpoints.useModelServiceHint")}</div>
+            <div className="mt-1.5 text-[11px] text-ink-500">{r.hint}{HINT_SEPARATOR}{t("overview.endpoints.useModelServiceHint")}</div>
           </div>
         ))}
       </div>
@@ -76,7 +179,7 @@ function StatCard({ icon, label, value, tone, hint }: { icon: string; label: str
     <div className="card card-pad">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium uppercase tracking-wide text-ink-400">{label}</span>
-        <i className={`bi ${icon} ${tone}`} />
+        <Icon name={icon} className={tone} />
       </div>
       <div className="mt-2 text-2xl font-semibold text-ink-100">{value}</div>
       {hint && <div className="mt-1 text-xs text-ink-500">{hint}</div>}
@@ -84,35 +187,25 @@ function StatCard({ icon, label, value, tone, hint }: { icon: string; label: str
   );
 }
 
-/** The cached share as a percentage of prompt tokens. Cached tokens are counted
- * INSIDE promptTokens, so this is a ratio, never a second addend. */
-function cacheHitHint(s: StatsSummary): string | undefined {
-  if (!s.promptTokens) return undefined;
-  return `${Math.round((s.cachedInputTokens / s.promptTokens) * 100)}% of input`;
-}
-
 function TopList({ title, icon, groups }: { title: string; icon: string; groups: GroupCount[] }) {
   const { t } = useI18n();
   const max = Math.max(1, ...groups.map((g) => g.requests));
   return (
     <div className="card card-pad">
-      <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-200">
-        <i className={`bi ${icon} text-brand-400`} />
+      <CardHeading icon={icon} className="mb-3">
         {title}
-      </h3>
+      </CardHeading>
       {groups.length === 0 ? (
         <p className="py-4 text-center text-xs text-ink-500">{t("overview.topList.empty")}</p>
       ) : (
         <ul className="space-y-2.5">
-          {groups.slice(0, 6).map((g) => (
+          {groups.slice(0, TOP_LIST_LIMIT).map((g) => (
             <li key={g.key}>
               <div className="mb-1 flex justify-between text-xs">
                 <span className="truncate text-ink-200">{g.key}</span>
                 <span className="text-ink-500">{formatNumber(g.requests)} {t("overview.topList.reqUnit")}</span>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-ink-800">
-                <div className="h-full rounded-full bg-brand-600" style={{ width: `${(g.requests / max) * 100}%` }} />
-              </div>
+              <Bar percent={(g.requests / max) * PERCENT} tone="bg-brand-600" />
             </li>
           ))}
         </ul>
@@ -120,8 +213,6 @@ function TopList({ title, icon, groups }: { title: string; icon: string; groups:
     </div>
   );
 }
-
-type SeriesKey = "requests" | "totalTokens" | "errors" | "avgLatencyMs";
 
 /**
  * The four metrics share an X axis and nothing else: requests are tens, tokens
@@ -138,42 +229,35 @@ function TrafficChart({ points }: { points: TimePoint[] }) {
   const { t } = useI18n();
   const [locked, setLocked] = useState<SeriesKey | null>(null);
 
-  // Colours match the stat cards above: one metric, one colour, whether you read
-  // it as a number or as a shape.
-  const series: { key: SeriesKey; color: string; label: string; format: (n: number) => string }[] = [
-    { key: "requests", color: "#22d3ee", label: t("overview.chart.series.requests"), format: formatNumber },
-    { key: "totalTokens", color: "#fbbf24", label: t("overview.chart.series.tokens"), format: formatCompact },
-    { key: "errors", color: "#f87171", label: t("overview.chart.series.errors"), format: formatNumber },
-    { key: "avgLatencyMs", color: "#34d399", label: t("overview.chart.series.latency"), format: (n: number) => `${formatNumber(n)} ms` },
-  ];
+  const series = METRICS.flatMap((m) =>
+    m.series ? [{ ...m.series, color: METRIC_TONE[m.tone].color, label: t(m.series.label), format: m.format }] : [],
+  );
   const shown = locked ? series.filter((x) => x.key === locked) : series;
 
   return (
     <div className="card card-pad">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-200">
-          <i className="bi bi-graph-up text-brand-400" />
-          {t("overview.chart.title")}
-        </h3>
+        <CardHeading icon="bi-graph-up">{t("overview.chart.title")}</CardHeading>
         <div className="flex flex-wrap items-center gap-1">
           {series.map((x) => {
-            const dimmed = locked !== null && locked !== x.key;
+            const focused = locked === x.key;
+            const dimmed = locked !== null && !focused;
             return (
               <button
                 key={x.key}
                 type="button"
                 title={t("overview.chart.focusHint")}
-                aria-pressed={locked === x.key}
-                onClick={() => setLocked(locked === x.key ? null : x.key)}
+                aria-pressed={focused}
+                onClick={() => setLocked(focused ? null : x.key)}
                 className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition ${
-                  locked === x.key
+                  focused
                     ? "bg-ink-800 font-medium text-ink-100"
                     : "text-ink-400 hover:bg-ink-800/60 hover:text-ink-200"
                 }`}
               >
                 <span
                   className="h-2 w-2 rounded-full transition-opacity"
-                  style={{ background: x.color, opacity: dimmed ? 0.3 : 1 }}
+                  style={{ background: x.color, opacity: dimmed ? CHART.dimmedOpacity : 1 }}
                 />
                 {x.label}
               </button>
@@ -184,27 +268,27 @@ function TrafficChart({ points }: { points: TimePoint[] }) {
       {points.length === 0 ? (
         <EmptyState icon="bi-bar-chart-line" title={t("overview.empty.noRequestsTitle")} hint={t("overview.empty.noRequestsHint")} />
       ) : (
-        <ResponsiveContainer width="100%" height={260}>
+        <ResponsiveContainer width="100%" height={CHART.height}>
           {/* left margin: a hidden axis takes no width, so pull the plot over
               when none is labelled and give the ticks room when one is. */}
-          <AreaChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: locked ? 4 : -12 }}>
+          <AreaChart data={points} margin={{ ...CHART.margin, left: locked ? CHART.leftMargin.labelled : CHART.leftMargin.bare }}>
             <defs>
               {series.map((x) => (
                 <linearGradient key={x.key} id={`grad-${x.key}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={x.color} stopOpacity={0.5} />
+                  <stop offset="0%" stopColor={x.color} stopOpacity={CHART.gradientTopOpacity} />
                   <stop offset="100%" stopColor={x.color} stopOpacity={0} />
                 </linearGradient>
               ))}
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1b222d" />
-            <XAxis dataKey="day" stroke="#5b6b80" fontSize={11} tickLine={false} />
+            <CartesianGrid strokeDasharray={CHART.gridDash} stroke={INK[800]} />
+            <XAxis dataKey="day" stroke={INK[500]} fontSize={CHART.tickFontSize} tickLine={false} />
             {series.map((x) => (
               <YAxis
                 key={x.key}
                 yAxisId={x.key}
                 hide={locked !== x.key}
                 stroke={x.color}
-                fontSize={11}
+                fontSize={CHART.tickFontSize}
                 tickLine={false}
                 axisLine={false}
                 allowDecimals={false}
@@ -212,8 +296,8 @@ function TrafficChart({ points }: { points: TimePoint[] }) {
               />
             ))}
             <Tooltip
-              contentStyle={{ background: "#151b24", border: "1px solid #273140", borderRadius: 8, fontSize: 12 }}
-              labelStyle={{ color: "#aab6c6" }}
+              contentStyle={{ background: INK[850], border: `1px solid ${INK[700]}`, borderRadius: CHART.tooltipRadius, fontSize: CHART.tooltipFontSize }}
+              labelStyle={{ color: INK[300] }}
               formatter={(value: number | string, name: string) => {
                 const x = series.find((c) => c.label === name);
                 return [x ? x.format(Number(value)) : String(value), name];
@@ -227,7 +311,7 @@ function TrafficChart({ points }: { points: TimePoint[] }) {
                 type="monotone"
                 dataKey={x.key}
                 stroke={x.color}
-                strokeWidth={2}
+                strokeWidth={CHART.strokeWidth}
                 // Filled only when it is the single curve on screen: four
                 // translucent areas stacked on top of each other read as mud.
                 fill={locked === x.key ? `url(#grad-${x.key})` : "none"}
@@ -243,48 +327,38 @@ function TrafficChart({ points }: { points: TimePoint[] }) {
 
 export function Overview() {
   const { t } = useI18n();
-  const { data, loading, error } = useAsync<OverviewData>(async () => {
+  const state = useAsync<OverviewData>(async () => {
     const [summary, ts, svc, mp] = await Promise.all([
-      api.get<StatsSummary>("/stats/summary"),
-      api.get<{ points: TimePoint[] }>("/stats/timeseries"),
-      api.get<{ groups: GroupCount[] }>("/stats/by-service"),
-      api.get<{ models: GroupCount[]; providers: GroupCount[] }>("/stats/by-model-provider"),
+      api.get<StatsSummary>(API.statsSummary),
+      api.get<{ points: TimePoint[] }>(API.statsTimeseries),
+      api.get<{ groups: GroupCount[] }>(API.statsByService),
+      api.get<{ models: GroupCount[]; providers: GroupCount[] }>(API.statsByModelProvider),
     ]);
     return { summary, points: ts.points, services: svc.groups, models: mp.models, providers: mp.providers };
   });
+  const { data } = state;
 
   return (
     <div>
-      <PageHeader title={t("overview.page.title")} subtitle={t("overview.page.subtitle")} icon="bi-speedometer2" />
+      <PageHeader title={t("overview.page.title")} subtitle={t("overview.page.subtitle")} icon={ENTITY_ICON.overview} />
       <div className="mb-6">
         <EndpointsCard />
       </div>
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
+      <AsyncStatus state={state} />
       {data && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-            <StatCard icon="bi-arrow-left-right" tone="text-brand-400" label={t("overview.stats.requests")} value={formatNumber(data.summary.requests)} />
-            <StatCard icon="bi-coin" tone="text-amber-400" label={t("overview.stats.totalTokens")} value={formatCompact(data.summary.totalTokens)} />
-            {/* The cached share of the prompt tokens -- what a prompt-caching
-                setup is actually judged on, and billed at a fraction of a miss. */}
-            <StatCard
-              icon="bi-database-check"
-              tone="text-sky-400"
-              label={t("overview.stats.cachedTokens")}
-              value={formatCompact(data.summary.cachedInputTokens)}
-              hint={cacheHitHint(data.summary)}
-            />
-            <StatCard icon="bi-exclamation-triangle" tone="text-red-400" label={t("overview.stats.errors")} value={formatNumber(data.summary.errors)} />
-            <StatCard icon="bi-stopwatch" tone="text-emerald-400" label={t("overview.stats.avgLatency")} value={`${formatNumber(data.summary.avgLatencyMs)} ms`} />
+            {METRICS.map((m) => (
+              <StatCard key={m.key} icon={m.icon} tone={METRIC_TONE[m.tone].text} label={t(m.label)} value={m.format(data.summary[m.key])} hint={m.hint?.(data.summary)} />
+            ))}
           </div>
 
           <TrafficChart points={data.points} />
 
           <div className="grid gap-4 md:grid-cols-3">
-            <TopList title={t("overview.topList.topServices")} icon="bi-diagram-3" groups={data.services} />
-            <TopList title={t("overview.topList.topModels")} icon="bi-box" groups={data.models} />
-            <TopList title={t("overview.topList.topProviders")} icon="bi-hdd-network" groups={data.providers} />
+            {TOP_LISTS.map((l) => (
+              <TopList key={l.groups} title={t(l.title)} icon={l.icon} groups={data[l.groups]} />
+            ))}
           </div>
         </div>
       )}

@@ -1,6 +1,10 @@
+import type { ReactElement } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { useAuth } from "./auth";
+import { useAuth, useIsAdmin } from "./auth";
+import { Spinner } from "./components/common";
 import { Layout } from "./components/Layout";
+import { CHECK_PATH, HOME_PATH, LEGACY_MODELS_SEGMENT, MODELS_PATH, ROUTES, routeSegment, routeVisible, type RouteId } from "./lib/routes";
+import { SERVICE_KIND } from "./lib/serviceDef";
 import { Login } from "./pages/Login";
 import { SetPassword } from "./pages/SetPassword";
 import { Overview } from "./pages/Overview";
@@ -17,55 +21,54 @@ import { Settings } from "./pages/Settings";
 import { Check } from "./pages/Check";
 import { Tools } from "./pages/Tools";
 
-function FullSpinner() {
-  return (
-    <div className="flex h-screen items-center justify-center text-brand-400">
-      <i className="bi bi-arrow-repeat animate-spin text-3xl" />
-    </div>
-  );
-}
+/** What each entry of the route table renders. */
+const PAGES: Record<RouteId, ReactElement> = {
+  overview: <Overview />,
+  services: <ModelServices kind={SERVICE_KIND.resilience} />,
+  microAgents: <ModelServices kind={SERVICE_KIND.chain} />,
+  tools: <Tools />,
+  models: <Models />,
+  providers: <Providers />,
+  proxies: <Proxies />,
+  tokens: <Tokens />,
+  bench: <ModelBench />,
+  logs: <Logs />,
+  activeRequests: <ActiveRequests />,
+  users: <Users />,
+  check: <Check />,
+  settings: <Settings />,
+};
 
 export default function App() {
   const { user, loading } = useAuth();
+  const isAdmin = useIsAdmin();
 
   return (
     <Routes>
       {/* Public route: API key check, no login required */}
-      <Route path="/check" element={<Check />} />
+      <Route path={CHECK_PATH} element={PAGES.check} />
 
       {/* Authenticated routes */}
       <Route
         element={
-          loading ? <FullSpinner /> : !user ? <Login /> : user.mustChangePassword ? <SetPassword /> : <Layout />
+          loading ? <Spinner fullScreen /> : !user ? <Login /> : user.mustChangePassword ? <SetPassword /> : <Layout />
         }
       >
-        <Route index element={<Overview />} />
-        <Route path="providers" element={<Providers />} />
-        <Route path="proxies" element={<Proxies />} />
-        {/* Singular, and it must stay singular: the fuzzy endpoint adapter rewrites
-            any path ending "/models" onto the proxy's /v1/models, so a SPA route
-            spelled "/models" never survives a hard load (refresh, bookmark, pasted
-            URL). "/model" is not in that suffix table. See server/src/transport/fuzzyUrl.ts. */}
-        <Route path="model" element={<Models />} />
+        {/* Admin-only entries are left out for everyone else: that, not the
+            hidden nav link, is what makes typing the URL not work. */}
+        {ROUTES.filter((r) => !r.external && routeVisible(r, isAdmin)).map((r) =>
+          r.path === HOME_PATH ? (
+            <Route key={r.id} index element={PAGES[r.id]} />
+          ) : (
+            <Route key={r.id} path={routeSegment(r)} element={PAGES[r.id]} />
+          ),
+        )}
         {/* Anything still aimed at the old path from inside the app -- browser
             Back onto a pre-rename history entry, a stale link -- lands here
             instead of on the catch-all's silent bounce to Overview. A hard
             GET /models never reaches the SPA at all: the rewriter takes it. */}
-        <Route path="models" element={<Navigate to="/model" replace />} />
-        <Route path="services" element={<ModelServices kind="resilience" />} />
-        <Route path="micro-agents" element={<ModelServices kind="chain" />} />
-        <Route path="tokens" element={<Tokens />} />
-        <Route path="bench" element={<ModelBench />} />
-        <Route path="active-requests" element={<ActiveRequests />} />
-        {/* Users, Settings, and Logs are admin-only. Hiding the nav link is
-            presentation; this is what makes typing the URL not work. The server
-            enforces it too. (Logs carry every caller's full conversation
-            payload, so reading them is an admin capability.) */}
-        {user?.role === "admin" && <Route path="logs" element={<Logs />} />}
-        {user?.role === "admin" && <Route path="users" element={<Users />} />}
-        {user?.role === "admin" && <Route path="settings" element={<Settings />} />}
-        {user?.role === "admin" && <Route path="tools" element={<Tools />} />}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path={LEGACY_MODELS_SEGMENT} element={<Navigate to={MODELS_PATH} replace />} />
+        <Route path="*" element={<Navigate to={HOME_PATH} replace />} />
       </Route>
     </Routes>
   );

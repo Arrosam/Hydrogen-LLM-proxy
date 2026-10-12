@@ -3,6 +3,11 @@ export type Role = "admin" | "manager";
 export type Family = "openai_completion" | "anthropic" | "openai_responses";
 export type ProviderType = "openai_completion" | "openai_responses" | "anthropic";
 
+/** The wire families, in the order the bench offers them. */
+export const FAMILIES: readonly Family[] = ["openai_completion", "anthropic", "openai_responses"];
+/** The provider types, in the order the provider form offers them. */
+export const PROVIDER_TYPES: readonly ProviderType[] = ["openai_completion", "openai_responses", "anthropic"];
+
 export interface User {
   id: number;
   username: string;

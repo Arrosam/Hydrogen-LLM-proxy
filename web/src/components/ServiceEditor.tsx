@@ -1,84 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError } from "../api";
-import { Modal } from "./Modal";
-import { Toggle } from "./common";
-import { useToast } from "./Toast";
-import { AsrEditor, OcrEditor, StageEditor } from "./StageEditor";
-import { OverridesEditor } from "./OverridesEditor";
+import { api } from "../api";
+import { useIsAdmin } from "../auth";
+import { useFields } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { useAction } from "../lib/hooks";
 import { useI18n } from "../lib/i18n";
-import { intInput, selectAll } from "../lib/input";
-import { useListKeys } from "../lib/useListKeys";
-import { useAuth } from "../auth";
+import { ENTITY_ICON } from "../lib/icons";
+import { formatJson, parseJsonObject } from "../lib/json";
+import { fetchTools } from "../lib/resources";
+import { MEDIA_ENDPOINTS, SERVICE_CATEGORIES, SERVICE_KIND, type ServiceKind } from "../lib/serviceDef";
+import { EMPTY_SERVICE_FORM, attachmentMiBEdit, blankStep, defToForm, formToDef, isChatPipelineForm, newServiceForm, serviceToForm, type ServiceForm } from "../lib/serviceForm";
+import { otherServices } from "../lib/services";
+import type { HostedTool, Mapping, Model, ModelService, Provider, ServiceDef } from "../types";
+import { THINKING_FORMATS, isAgentDef, isChatPipelineCategory, serviceCategoryOf } from "../types";
+import { Button, Icon } from "./Button";
+import { Toggle } from "./common";
+import { Field, FieldHint } from "./Field";
+import { FormModal } from "./FormModal";
 import { HostedToolBinding } from "./HostedToolBinding";
-import type { HostedTool, HostedToolOptions } from "../types";
-import type {
-  AdvanceTrigger,
-  AgentDef,
-  AgentAsr,
-  AgentOcr,
-  AgentStage,
-  Mapping,
-  Model,
-  ModelService,
-  Overrides,
-  ServiceCategory,
-  ServiceDef,
-  ServiceStep,
-  ServiceSteps,
-  Provider,
-  Trigger,
-} from "../types";
-import {
-  THINKING_FORMATS,
-  type ThinkingFormat,
-  isAgentDef,
-  isChatPipelineCategory,
-} from "../types";
+import { Select, TextArea, TextInput } from "./inputs";
+import { IntInput } from "./numeric";
+import { AsrEditor, OcrEditor } from "./PrePassEditors";
+import { StageEditor } from "./StageEditor";
+import { StepList } from "./ServiceSteps";
+import { useToast } from "./Toast";
 
-const CODE_PRESETS: Trigger[] = [429, 499, 500, 502, 503, 529];
-
-/** The server's default retry trigger set, applied when a step omits `retry`
- * (mirrors DEFAULT_RETRY_ON in server/src/execution/definition.ts). Shown in
- * the editor when no explicit retry policy is set. */
-const DEFAULT_RETRY_ON: Trigger[] = [429, 499, 502, 503, "timeout", "network"];
-
-/** The client-facing endpoint each media passthrough category is served on.
- * (chat and ocr both run the chat pipeline on /v1/chat/completions.) */
-const CATEGORY_ENDPOINTS: Record<Exclude<ServiceCategory, "chat" | "ocr">, string> = {
-  image: "/v1/images/generations",
-  video: "/v1/videos",
-  tts: "/v1/audio/speech",
-  stt: "/v1/audio/transcriptions",
-  embedding: "/v1/embeddings",
-  rerank: "/v1/rerank",
-};
-
-/**
- * One selectable trigger: `value` is the wire enum the server validates against,
- * `label` is only what the user reads. They must stay separate — a label is
- * translated, and a translated value is not a trigger the server accepts.
- */
-interface TriggerOption {
-  value: AdvanceTrigger;
-  label: string;
-}
-
-/** The non-numeric triggers, each with the i18n key for its label. */
-const SYMBOLIC_TRIGGERS = {
-  timeout: "trigger.timeout",
-  network: "trigger.network",
-  error: "trigger.error",
-  exhausted: "trigger.exhausted",
-} as const;
-
-type SymbolicTrigger = keyof typeof SYMBOLIC_TRIGGERS;
-
-const CODE_OPTIONS: TriggerOption[] = CODE_PRESETS.map((c) => ({ value: c, label: String(c) }));
-
-/** Build the symbolic options in `names` order, labelled in the current language. */
-function symbolicOptions(t: (key: string) => string, names: readonly SymbolicTrigger[]): TriggerOption[] {
-  return names.map((name) => ({ value: name, label: t(SYMBOLIC_TRIGGERS[name]) }));
-}
+/** The prompt a dry-run sends through the definition. */
+const DRY_RUN_PROMPT = "ping";
 
 interface Props {
   open: boolean;
@@ -87,778 +35,249 @@ interface Props {
   models: Model[];
   providers: Provider[];
   mappings: Mapping[];
-  defaultKind?: "resilience" | "chain"; // kind for a NEW service (fixed by the page)
+  defaultKind?: ServiceKind; // kind for a NEW service (fixed by the page)
   onClose: () => void;
   onSaved: () => void;
 }
 
-function blankStep(model: string, provider: string): ServiceStep {
-  // Omit `retry` entirely: the server then applies its defaults (retry on
-  // [429, 499, 502, 503, timeout, network], 3 attempts). Writing an explicit
-  // `retry: { on: [], maxAttempts: 1 }` here would silently disable retries.
-  return { model, provider };
-}
+interface ValidateResponse { valid: boolean; summary?: string; error?: string }
+interface DryRunResponse { ok: boolean; served?: { model: string; provider: string }; message?: string; output?: string }
 
-/**
- * The editor only renders `overrides` (parameter/content pairs), so legacy flat
- * fields are folded into it whenever a definition enters the editor (load AND
- * raw-JSON sync) — otherwise they would keep applying while being invisible.
- * Existing `overrides` keys win, matching the server's merge precedence in
- * stepOverrides/stageOverrides.
- */
-function foldLegacy<T extends { overrides?: Overrides }>(obj: T, keys: readonly (string & keyof T)[]): T {
-  const flat: Record<string, unknown> = {};
-  const rest: Record<string, unknown> = { ...obj };
-  for (const k of keys) {
-    if (rest[k] !== undefined) {
-      flat[k] = rest[k];
-      delete rest[k];
-    }
-  }
-  if (!Object.keys(flat).length) return obj;
-  return { ...rest, overrides: { ...flat, ...(obj.overrides ?? {}) } } as T;
-}
-
-const foldStage = (s: AgentStage): AgentStage => foldLegacy(s, ["system", "temperature", "maxTokens", "thinking"]);
-const foldOcr = (o: AgentOcr | undefined): AgentOcr | undefined => (o ? foldLegacy(o, ["temperature", "maxTokens"]) : o);
-const foldStep = (s: ServiceStep): ServiceStep => foldLegacy(s, ["thinking"]);
-
-function toggle<T>(arr: T[] | undefined, val: T): T[] {
-  const a = arr ?? [];
-  return a.includes(val) ? a.filter((x) => x !== val) : [...a, val];
-}
-
-export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = "resilience", onClose, onSaved }: Props) {
-  const { user } = useAuth();
-  const [hostedTools, setHostedTools] = useState<HostedTool[]>([]);
-  const [toolIds, setToolIds] = useState<number[]>([]);
-  const [toolConfig, setToolConfig] = useState<HostedToolOptions>({ streamMode: "progress", maxRounds: 8, maxCalls: 16 });
-  useEffect(() => {
-    if (!open) return;
-    setToolIds(service?.toolIds ?? []);
-    setToolConfig(service?.steps.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
-    if (user?.role === "admin") api.get<{ tools: HostedTool[] }>("/tools").then(r => setHostedTools(r.tools)).catch(() => setHostedTools([]));
-  }, [open, service, user?.role]);
+export function ServiceEditor({ open, service, services, models, providers, mappings, defaultKind = SERVICE_KIND.resilience, onClose, onSaved }: Props) {
+  const isAdmin = useIsAdmin();
   const toast = useToast();
   const { t } = useI18n();
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [enabled, setEnabled] = useState(true);
-  const [timeoutMs, setTimeoutMs] = useState(60000);
-  const [steps, setSteps] = useState<ServiceStep[]>([]);
-  const stepKeys = useListKeys(steps.length);
-  const [category, setCategory] = useState<ServiceCategory>("chat");
-  const [kind, setKind] = useState<"resilience" | "chain">("resilience");
-  const [listRevision, setListRevision] = useState(0);
-  const [stages, setStages] = useState<AgentStage[]>([]);
-  const [output, setOutput] = useState("");
-  const [ocr, setOcr] = useState<AgentOcr | undefined>(undefined);
-  const [asr, setAsr] = useState<AgentAsr | undefined>(undefined);
-  const [reliableStreaming, setReliableStreaming] = useState(false);
-  const [thinkingFormat, setThinkingFormat] = useState<ThinkingFormat>("original");
-  const [thinkingOpen, setThinkingOpen] = useState("");
-  const [thinkingClose, setThinkingClose] = useState("");
-  const [maxAttachmentMiB, setMaxAttachmentMiB] = useState(0);
+  const form = useFields<ServiceForm>(EMPTY_SERVICE_FORM);
+  const f = form.values;
+  const [hostedTools, setHostedTools] = useState<HostedTool[]>([]);
+  /** The raw-JSON view: while on, `rawText` is the definition and the form is not consulted. */
   const [raw, setRaw] = useState(false);
   const [rawText, setRawText] = useState("");
-  const [summary, setSummary] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [summary, setSummary] = useState("");
+  const action = useAction();
 
-  const providerNameById = useMemo(() => new Map(providers.map((p) => [p.id, p.name])), [providers]);
-  const modelIdByName = useMemo(() => new Map(models.map((m) => [m.name, m.id])), [models]);
+  const providersForModel = useMemo(() => {
+    const providerNameById = new Map(providers.map((p) => [p.id, p.name]));
+    const modelIdByName = new Map(models.map((m) => [m.name, m.id]));
+    return (modelName: string): string[] => {
+      const id = modelIdByName.get(modelName);
+      if (id == null) return [];
+      return mappings
+        .filter((m) => m.modelId === id)
+        .map((m) => providerNameById.get(m.providerId))
+        .filter((n): n is string => Boolean(n));
+    };
+  }, [models, providers, mappings]);
 
-  const providersForModel = (modelName: string): string[] => {
-    const id = modelIdByName.get(modelName);
-    if (id == null) return [];
-    return mappings
-      .filter((m) => m.modelId === id)
-      .map((m) => providerNameById.get(m.providerId))
-      .filter((n): n is string => Boolean(n));
-  };
+  useEffect(() => {
+    if (open && isAdmin) fetchTools().then(setHostedTools).catch(() => setHostedTools([]));
+  }, [open, service, isAdmin]);
 
   useEffect(() => {
     if (!open) return;
-    if (service) {
-      setName(service.name);
-      setDescription(service.description ?? "");
-      setEnabled(service.enabled);
-      setTimeoutMs(service.steps?.timeoutMs ?? 60000);
-      if (isAgentDef(service.steps)) {
-        setKind("chain");
-        setStages((service.steps.stages ?? []).map(foldStage));
-        setOutput(service.steps.output ?? "");
-        setOcr(foldOcr(service.steps.ocr));
-        setAsr(service.steps.asr);
-        setSteps([]);
-        setCategory("chat");
-        setReliableStreaming(false);
-      } else {
-        setKind("resilience");
-        setSteps((service.steps as ServiceSteps)?.steps.map(foldStep) ?? []);
-        setStages([]);
-        setOutput("");
-        setOcr(undefined);
-        setCategory((service.steps as ServiceSteps)?.category ?? "chat");
-        setReliableStreaming(Boolean(service.steps?.reliableStreaming));
-      }
-      setThinkingFormat(service.steps?.thinkingFormat ?? "original");
-      setThinkingOpen(service.steps?.thinkingDelimiters?.open ?? "");
-      setThinkingClose(service.steps?.thinkingDelimiters?.close ?? "");
-      setMaxAttachmentMiB(Math.round((service.steps?.maxAttachmentBytes ?? 0) / (1024 * 1024)));
-    } else {
-      const firstModel = models[0]?.name ?? "";
-      const firstProvider = providersForModel(firstModel)[0] ?? "";
-      setName("");
-      setDescription("");
-      setEnabled(true);
-      setTimeoutMs(60000);
-      setKind(defaultKind);
-      setSteps(defaultKind === "resilience" && firstModel && firstProvider ? [blankStep(firstModel, firstProvider)] : []);
-      setStages([]);
-      setOutput("");
-      setOcr(undefined);
-      setCategory("chat");
-      setReliableStreaming(false);
-      setThinkingFormat("original");
-      setThinkingOpen("");
-      setThinkingClose("");
-      setMaxAttachmentMiB(0);
+    if (service) form.patch(serviceToForm(service));
+    else {
+      const model = models[0]?.name ?? "";
+      const provider = providersForModel(model)[0] ?? "";
+      form.patch(newServiceForm(defaultKind, defaultKind === SERVICE_KIND.resilience && model && provider ? blankStep(model, provider) : null));
     }
     setRaw(false);
     setSummary("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, service]);
 
-  // "original" is the server's default, so it is left out entirely rather than
-  // persisted -- a definition nobody configured stays as short as it was.
-  const thinkingFormatField = () => {
-    if (!isChatPipelineCategory(kind === "chain" ? "chat" : category)) return {};
-    // Both halves or neither: half a pair is a declaration the scanner cannot
-    // use, and persisting it would read as configured when it is not.
-    const delimiters = thinkingOpen && thinkingClose ? { thinkingDelimiters: { open: thinkingOpen, close: thinkingClose } } : {};
-    if (thinkingFormat === "original") return delimiters;
-    return { thinkingFormat, ...delimiters };
-  };
+  const isChain = f.kind === SERVICE_KIND.chain;
+  const chatPipeline = isChatPipelineForm(f);
+  const reliableStreamingOffered = !isChain && isChatPipelineCategory(f.category);
+  const referable = useMemo(() => otherServices(services, service), [services, service]);
 
-  const buildDef = (): ServiceDef =>
-    kind === "chain"
-      ? ({
-          kind: "micro_agent",
-          timeoutMs,
-          stages,
-          ...(output ? { output } : {}),
-          ...(ocr ? { ocr } : {}),
-          ...(asr ? { asr } : {}),
-          ...(maxAttachmentMiB > 0 ? { maxAttachmentBytes: maxAttachmentMiB * 1024 * 1024 } : {}),
-          ...thinkingFormatField(),
-          hostedTools: toolConfig,
-        } as AgentDef)
-      : ({
-          timeoutMs,
-          steps,
-          ...(category !== "chat" ? { category } : {}),
-          ...(isChatPipelineCategory(category) && reliableStreaming ? { reliableStreaming: true } : {}),
-          ...(maxAttachmentMiB > 0 ? { maxAttachmentBytes: maxAttachmentMiB * 1024 * 1024 } : {}),
-          ...thinkingFormatField(),
-          ...(isChatPipelineCategory(category) ? { hostedTools: toolConfig } : {}),
-        } as ServiceSteps);
-
-  const patchStep = (i: number, patch: Partial<ServiceStep>) =>
-    setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
-
-  const patchRetry = (i: number, patch: Partial<NonNullable<ServiceStep["retry"]>>) =>
-    setSteps((s) =>
-      s.map((st, idx) => {
-        if (idx !== i) return st;
-        // An all-defaults retry is exactly what the server does when `retry` is
-        // omitted (3 attempts, on [429, 499, 502, 503, timeout, network]). Keep
-        // it explicit only once the user changes something; otherwise drop the
-        // field so the server's defaults keep applying.
-        const merged = { on: [], maxAttempts: 3, intervalMs: 0, ...st.retry, ...patch };
-        const isDefault = merged.on.length === 0 && merged.maxAttempts === 3 && merged.intervalMs === 0;
-        if (isDefault) {
-          const { retry: _retry, ...rest } = st;
-          return rest as ServiceStep;
-        }
-        return { ...st, retry: merged };
-      }),
-    );
-
-  const addStep = () => {
-    const model = models[0]?.name ?? "";
-    const provider = providersForModel(model)[0] ?? "";
-    stepKeys.insert(steps.length);
-    setSteps((s) => [...s, blankStep(model, provider)]);
-  };
-
-  const duplicateStep = (i: number) => {
-    stepKeys.insert(i + 1);
-    setSteps((s) => {
-      const copy = JSON.parse(JSON.stringify(s[i])) as ServiceStep;
-      const alt = providersForModel(copy.model).filter((p) => p !== copy.provider);
-      if (alt[0]) copy.provider = alt[0]; // shortcut for provider-fallback
-      return [...s.slice(0, i + 1), copy, ...s.slice(i + 1)];
-    });
-  };
-
-  const removeStep = (i: number) => {
-    stepKeys.remove(i);
-    setSteps((s) => s.filter((_, idx) => idx !== i));
-  };
-
-  const onDrop = (i: number) => {
-    if (dragIndex === null || dragIndex === i) return;
-    stepKeys.move(dragIndex, i);
-    setSteps((s) => {
-      const next = [...s];
-      const [moved] = next.splice(dragIndex, 1);
-      next.splice(i, 0, moved);
-      return next;
-    });
-    setDragIndex(null);
-  };
-
-  const syncFromRaw = (): ServiceDef | null => {
+  /** The definition to send: the typed JSON verbatim in the raw view, else the form's. Null (and a toast) when the JSON does not parse. */
+  const readDef = (): ServiceDef | null => {
+    if (!raw) return formToDef(f);
     try {
-      const parsed = JSON.parse(rawText) as ServiceDef;
-      stepKeys.reset();
-      setListRevision(v => v + 1);
-      setTimeoutMs(parsed.timeoutMs ?? 60000);
-      if (isAgentDef(parsed)) {
-        setKind("chain");
-        setStages((parsed.stages ?? []).map(foldStage));
-        setOutput(parsed.output ?? "");
-        setOcr(foldOcr(parsed.ocr));
-        setAsr(parsed.asr);
-        setCategory("chat");
-        setReliableStreaming(false);
-      } else {
-        setKind("resilience");
-        setSteps(((parsed as ServiceSteps).steps ?? []).map(foldStep));
-        setCategory((parsed as ServiceSteps).category ?? "chat");
-        setReliableStreaming(Boolean(parsed.reliableStreaming));
-      }
-      setThinkingFormat(parsed.thinkingFormat ?? "original");
-      setThinkingOpen(parsed.thinkingDelimiters?.open ?? "");
-      setThinkingClose(parsed.thinkingDelimiters?.close ?? "");
-      setMaxAttachmentMiB(Math.round((parsed.maxAttachmentBytes ?? 0) / (1024 * 1024)));
-      setToolConfig(parsed.hostedTools ?? { streamMode: "progress", maxRounds: 8, maxCalls: 16 });
-      return parsed;
+      return JSON.parse(rawText || "{}") as ServiceDef;
     } catch {
       toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
       return null;
     }
   };
 
-  const currentDef = (): ServiceDef => (raw ? (JSON.parse(rawText || "{}") as ServiceDef) : buildDef());
-
   const validate = async () => {
-    let s: ServiceDef;
-    try {
-      s = currentDef();
-    } catch {
-      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
-      return;
-    }
-    const r = await api.post<{ valid: boolean; summary?: string; error?: string }>("/services/validate", { steps: s });
-    if (r.valid) {
-      setSummary(r.summary ?? "");
-      toast.success(t("serviceEditor.toast.workflowValid"));
-    } else {
-      setSummary("");
-      toast.error(r.error ?? t("serviceEditor.toast.workflowInvalid"));
-    }
+    const steps = readDef();
+    if (!steps) return;
+    await action.run(async () => {
+      const r = await api.post<ValidateResponse>(API.servicesValidate, { steps });
+      setSummary(r.valid ? (r.summary ?? "") : "");
+      if (r.valid) toast.success(t("serviceEditor.toast.workflowValid"));
+      else toast.error(r.error ?? t("serviceEditor.toast.workflowInvalid"));
+    }, t("serviceEditor.toast.validateFailed"));
   };
 
   const dryRun = async () => {
-    let s: ServiceDef;
-    try {
-      s = currentDef();
-    } catch {
-      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
-      return;
-    }
-    setBusy(true);
-    try {
-      const r = await api.post<{ ok: boolean; served?: { model: string; provider: string }; message?: string; output?: string }>(
-        "/services/test",
-        { steps: s, prompt: "ping" },
-      );
+    const steps = readDef();
+    if (!steps) return;
+    await action.run(async () => {
+      const r = await api.post<DryRunResponse>(API.servicesTest, { steps, prompt: DRY_RUN_PROMPT });
       if (r.ok) toast.success(t("serviceEditor.toast.servedBy", { model: r.served?.model ?? "", provider: r.served?.provider ?? "", output: r.output ?? "" }));
       else toast.error(t("serviceEditor.toast.dryRunFailedWithMessage", { message: r.message ?? "" }));
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("serviceEditor.toast.dryRunFailed"));
-    } finally {
-      setBusy(false);
-    }
+    }, t("serviceEditor.toast.dryRunFailed"));
   };
 
   const save = async () => {
-    let s: ServiceDef;
-    try {
-      s = currentDef();
-    } catch {
-      toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
-      return;
-    }
-    if (!name.trim()) {
+    const steps = readDef();
+    if (!steps) return;
+    if (!f.name.trim()) {
       toast.error(t("serviceEditor.toast.nameRequired"));
       return;
     }
-    setBusy(true);
-    try {
-      const payload = { name, description: description || null, steps: s, enabled, ...(user?.role === "admin" ? { toolIds: isChatPipelineCategory(kind === "chain" ? "chat" : category) ? toolIds : [] } : {}) };
-      if (service) await api.patch(`/services/${service.id}`, payload);
-      else await api.post("/services", payload);
-      const kindLabel = kind === "chain" ? t("common.microAgent") : t("common.modelService");
-      const action = service ? t("common.updated") : t("common.created");
-      toast.success(t("serviceEditor.toast.serviceSaved", { kindLabel, action }));
+    await action.run(async () => {
+      // Tools can only be bound to what runs the chat pipeline; anything else is saved unbound.
+      // Judged by the definition being sent, which in the raw view is not the form's.
+      const bindable = isChatPipelineCategory(serviceCategoryOf(steps));
+      const payload = { name: f.name, description: f.description || null, steps, enabled: f.enabled, ...(isAdmin ? { toolIds: bindable ? f.toolIds : [] } : {}) };
+      if (service) await api.patch(API.service(service.id), payload);
+      else await api.post(API.services, payload);
+      const kindLabel = isAgentDef(steps) ? t("common.microAgent") : t("common.modelService");
+      const verb = service ? t("common.updated") : t("common.created");
+      toast.success(t("serviceEditor.toast.serviceSaved", { kindLabel, action: verb }));
       onSaved();
       onClose();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("serviceEditor.toast.saveFailed"));
-    } finally {
-      setBusy(false);
-    }
+    }, t("serviceEditor.toast.saveFailed"));
   };
 
+  /**
+   * Entering the raw view prints the form's definition. Leaving it loads the
+   * typed JSON back over the form: only what the definition determines (see
+   * `defToForm`), so name, description, enabled and the bound tools stay.
+   * Text that is not a JSON object cannot be loaded: it toasts and the raw
+   * view stays open with the text as typed, rather than discarding it.
+   */
   const toggleRaw = () => {
-    if (!raw) setRawText(JSON.stringify(buildDef(), null, 2));
-    else syncFromRaw();
+    if (!raw) setRawText(formatJson(formToDef(f)));
+    else {
+      const def = parseJsonObject(rawText);
+      if (!def) {
+        toast.error(t("serviceEditor.toast.stepsJsonInvalid"));
+        return;
+      }
+      form.patch(defToForm(def as unknown as ServiceDef));
+    }
     setRaw(!raw);
   };
 
   return (
-    <Modal
+    <FormModal
       open={open}
       size="xl"
-      title={service ? t("serviceEditor.editTitle", { name: service.name }) : kind === "chain" ? t("serviceEditor.newMicroAgentTitle") : t("serviceEditor.newModelServiceTitle")}
-      icon={kind === "chain" ? "bi-robot" : "bi-diagram-3"}
+      title={service ? t("serviceEditor.editTitle", { name: service.name }) : isChain ? t("serviceEditor.newMicroAgentTitle") : t("serviceEditor.newModelServiceTitle")}
+      icon={isChain ? ENTITY_ICON.microAgent : ENTITY_ICON.service}
       onClose={onClose}
-      footer={
+      onSubmit={save}
+      submitLabel={t("common.save")}
+      busy={action.busy}
+      footerLead={
         <>
-          <button className="btn-ghost" onClick={toggleRaw}>
-            <i className="bi bi-code-slash" />
+          <Button variant="ghost" icon="bi-code-slash" onClick={toggleRaw}>
             {raw ? t("serviceEditor.visualEditor") : t("serviceEditor.rawJson")}
-          </button>
-          <button className="btn-ghost" onClick={validate}>
-            <i className="bi bi-check2-circle" />
+          </Button>
+          <Button variant="ghost" icon="bi-check2-circle" busy={action.busy} onClick={validate}>
             {t("serviceEditor.validate")}
-          </button>
-          <button className="btn-ghost" onClick={dryRun} disabled={busy}>
-            <i className="bi bi-play-circle" />
+          </Button>
+          <Button variant="ghost" icon="bi-play-circle" busy={action.busy} onClick={dryRun}>
             {t("serviceEditor.dryRun")}
-          </button>
-          <div className="flex-1" />
-          <button className="btn-ghost" onClick={onClose}>{t("common.cancel")}</button>
-          <button className="btn-primary" onClick={save} disabled={busy}>
-            <i className="bi bi-check-lg" />
-            {t("common.save")}
-          </button>
+          </Button>
         </>
       }
     >
       <div className="space-y-5">
         <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="label">{t("serviceEditor.nameLabel")}</label>
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("serviceEditor.namePlaceholder")} />
-          </div>
-          <div>
-            <label className="label">{t("serviceEditor.timeoutLabel")}</label>
-            <input className="input" type="text" inputMode="numeric" value={timeoutMs} onFocus={selectAll} onClick={selectAll} onChange={(e) => setTimeoutMs(intInput(e.target.value, 0))} />
-          </div>
+          <Field label={t("serviceEditor.nameLabel")}>
+            <TextInput {...form.bind("name")} placeholder={t("serviceEditor.namePlaceholder")} />
+          </Field>
+          <Field label={t("serviceEditor.timeoutLabel")}>
+            <IntInput value={f.timeoutMs} fallback={0} onChange={(v) => form.set("timeoutMs", v)} />
+          </Field>
         </div>
-        <div>
-          <label className="label">{t("serviceEditor.descriptionLabel")}</label>
-          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
-        </div>
-        {kind === "resilience" && (
-          <div>
-            <label className="label">{t("serviceEditor.categoryLabel")}</label>
-            <select className="select w-auto" value={category} onChange={(e) => setCategory(e.target.value as ServiceCategory)}>
-              {(["chat", "ocr", "image", "video", "tts", "stt", "embedding", "rerank"] as const).map((c) => (
-                <option key={c} value={c}>{t(`serviceEditor.category.${c}`)}</option>
-              ))}
-            </select>
-            {category === "ocr" && (
-              <p className="mt-1 text-[11px] text-ink-600">
-                {t("serviceEditor.categoryHintOcr")}
-              </p>
+        <Field label={t("serviceEditor.descriptionLabel")}>
+          <TextInput {...form.bind("description")} />
+        </Field>
+        {!isChain && (
+          <Field label={t("serviceEditor.categoryLabel")}>
+            <Select
+              className="w-auto"
+              value={f.category}
+              onChange={(v) => form.set("category", v)}
+              options={SERVICE_CATEGORIES.map((c) => ({ value: c, label: t(`serviceEditor.category.${c}`) }))}
+            />
+            {f.category === "ocr" && <FieldHint tone="faint">{t("serviceEditor.categoryHintOcr")}</FieldHint>}
+            {f.category !== "chat" && f.category !== "ocr" && (
+              <FieldHint tone="faint">{t("serviceEditor.categoryHint", { endpoint: MEDIA_ENDPOINTS[f.category] })}</FieldHint>
             )}
-            {category !== "chat" && category !== "ocr" && (
-              <p className="mt-1 text-[11px] text-ink-600">
-                {t("serviceEditor.categoryHint", { endpoint: CATEGORY_ENDPOINTS[category] })}
-              </p>
-            )}
-          </div>
+          </Field>
         )}
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          <Toggle checked={enabled} onChange={setEnabled} label={t("serviceEditor.enabled")} />
-          {kind === "resilience" && isChatPipelineCategory(category) && (
-            <Toggle checked={reliableStreaming} onChange={setReliableStreaming} label={t("serviceEditor.reliableStreaming")} />
+          <Toggle checked={f.enabled} onChange={(v) => form.set("enabled", v)} label={t("serviceEditor.enabled")} />
+          {reliableStreamingOffered && (
+            <Toggle checked={f.reliableStreaming} onChange={(v) => form.set("reliableStreaming", v)} label={t("serviceEditor.reliableStreaming")} />
           )}
         </div>
-        {user?.role === "admin" && !raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && <HostedToolBinding tools={hostedTools} ids={toolIds} config={toolConfig} onIds={setToolIds} onConfig={setToolConfig} />}
-        {kind === "resilience" && isChatPipelineCategory(category) && reliableStreaming && (
-          <p className="-mt-2 text-xs text-ink-500">
-            {t("serviceEditor.reliableStreamingDescription")}
-          </p>
+        {isAdmin && !raw && chatPipeline && (
+          <HostedToolBinding tools={hostedTools} ids={f.toolIds} config={f.toolConfig} onIds={(v) => form.set("toolIds", v)} onConfig={(v) => form.set("toolConfig", v)} />
+        )}
+        {reliableStreamingOffered && f.reliableStreaming && (
+          <p className="-mt-2 text-xs text-ink-500">{t("serviceEditor.reliableStreamingDescription")}</p>
         )}
 
-        {isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
-          <div>
-            <label className="label">{t("serviceEditor.thinkingFormat")}</label>
-            <select
-              className="select w-auto"
-              value={thinkingFormat}
-              onChange={(e) => setThinkingFormat(e.target.value as ThinkingFormat)}
-            >
-              {THINKING_FORMATS.map((f) => (
-                <option key={f} value={f}>{t(`serviceEditor.thinkingFormat.${f}`)}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-ink-500">{t(`serviceEditor.thinkingFormatHint.${thinkingFormat}`)}</p>
+        {chatPipeline && (
+          <Field label={t("serviceEditor.thinkingFormat")}>
+            <Select
+              className="w-auto"
+              value={f.thinkingFormat}
+              onChange={(v) => form.set("thinkingFormat", v)}
+              options={THINKING_FORMATS.map((v) => ({ value: v, label: t(`serviceEditor.thinkingFormat.${v}`) }))}
+            />
+            <FieldHint>{t(`serviceEditor.thinkingFormatHint.${f.thinkingFormat}`)}</FieldHint>
             <div className="mt-3 grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">{t("serviceEditor.thinkingOpen")}</label>
-                <input
-                  className="input"
-                  value={thinkingOpen}
-                  onChange={(e) => setThinkingOpen(e.target.value)}
-                  placeholder={t("serviceEditor.thinkingOpenPlaceholder")}
-                />
-              </div>
-              <div>
-                <label className="label">{t("serviceEditor.thinkingClose")}</label>
-                <input
-                  className="input"
-                  value={thinkingClose}
-                  onChange={(e) => setThinkingClose(e.target.value)}
-                  placeholder={t("serviceEditor.thinkingClosePlaceholder")}
-                />
-              </div>
+              <Field label={t("serviceEditor.thinkingOpen")}>
+                <TextInput {...form.bind("thinkingOpen")} placeholder={t("serviceEditor.thinkingOpenPlaceholder")} />
+              </Field>
+              <Field label={t("serviceEditor.thinkingClose")}>
+                <TextInput {...form.bind("thinkingClose")} placeholder={t("serviceEditor.thinkingClosePlaceholder")} />
+              </Field>
             </div>
-            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.thinkingDelimitersHint")}</p>
-          </div>
+            <FieldHint>{t("serviceEditor.thinkingDelimitersHint")}</FieldHint>
+          </Field>
         )}
 
-        {!raw && isChatPipelineCategory(kind === "chain" ? "chat" : category) && (
-          <div>
-            <label className="label">{t("serviceEditor.maxAttachmentLabel")}</label>
-            <input className="input" type="text" inputMode="numeric" value={maxAttachmentMiB} onFocus={selectAll} onClick={selectAll} onChange={(e) => setMaxAttachmentMiB(intInput(e.target.value, 0))} />
-            <p className="mt-1 text-xs text-ink-500">{t("serviceEditor.maxAttachmentHint")}</p>
-          </div>
+        {!raw && chatPipeline && (
+          <Field label={t("serviceEditor.maxAttachmentLabel")} hint={t("serviceEditor.maxAttachmentHint")}>
+            <IntInput value={f.maxAttachmentMiB} fallback={0} onChange={(v) => form.patch(attachmentMiBEdit(v))} />
+          </Field>
         )}
 
-        {!raw && (
-          <p className="text-xs text-ink-500">
-            {kind === "resilience"
-              ? t("serviceEditor.modelServiceDescription")
-              : t("serviceEditor.microAgentDescription")}
-          </p>
-        )}
+        {!raw && <p className="text-xs text-ink-500">{isChain ? t("serviceEditor.microAgentDescription") : t("serviceEditor.modelServiceDescription")}</p>}
 
         {summary && (
           <div className="flex items-start gap-2 rounded-lg border border-brand-700/40 bg-brand-700/10 px-3 py-2 text-sm text-brand-400">
-            <i className="bi bi-signpost-split mt-0.5" />
+            <Icon name="bi-signpost-split" className="mt-0.5" />
             <span className="text-ink-200">{summary}</span>
           </div>
         )}
 
         {raw ? (
-          <div>
-            <label className="label">{kind === "chain" ? t("serviceEditor.chainJsonLabel") : t("serviceEditor.stepsJsonLabel")}</label>
-            <textarea className="input min-h-[320px] font-mono text-xs" value={rawText} onChange={(e) => setRawText(e.target.value)} />
-          </div>
-        ) : kind === "chain" ? (
+          <Field label={isChain ? t("serviceEditor.chainJsonLabel") : t("serviceEditor.stepsJsonLabel")}>
+            <TextArea mono className="min-h-[320px]" value={rawText} onChange={(e) => setRawText(e.target.value)} />
+          </Field>
+        ) : isChain ? (
           <div className="space-y-4">
-            <OcrEditor ocr={ocr} onChange={setOcr} services={services.filter((m) => m.id !== service?.id)} />
-            <AsrEditor asr={asr} onChange={setAsr} services={services.filter((m) => m.id !== service?.id)} />
-            <StageEditor key={listRevision}
-              stages={stages}
-              output={output}
-              onChange={(s, o) => {
-                setStages(s);
-                setOutput(o);
-              }}
-              services={services.filter((m) => m.id !== service?.id)}
-            />
+            <OcrEditor ocr={f.ocr} onChange={(v) => form.set("ocr", v)} services={referable} />
+            <AsrEditor asr={f.asr} onChange={(v) => form.set("asr", v)} services={referable} />
+            <StageEditor stages={f.stages} output={f.output} onChange={(stages, output) => form.patch({ stages, output })} services={referable} />
           </div>
         ) : (
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="label mb-0">{t("serviceEditor.failureChain")}</span>
-              <button className="btn-ghost btn-xs" onClick={addStep}>
-                <i className="bi bi-plus-lg" />
-                {t("serviceEditor.addStep")}
-              </button>
-            </div>
-
-            {steps.length === 0 && (
-              <p className="rounded-lg border border-dashed border-ink-700 px-4 py-6 text-center text-xs text-ink-500">
-                {t("serviceEditor.noStepsHint")}
-              </p>
-            )}
-
-            <div className="space-y-1">
-              {steps.map((step, i) => {
-                const provOptions = providersForModel(step.model);
-                return (
-                  <div key={stepKeys.keys[i]}>
-                    <div
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={() => onDrop(i)}
-                      className="rounded-xl border border-ink-700 bg-ink-850/70 p-3"
-                    >
-                      <div className="mb-2.5 flex items-center gap-2">
-                        <span
-                          draggable
-                          onDragStart={() => setDragIndex(i)}
-                          onDragEnd={() => setDragIndex(null)}
-                          title={t("serviceEditor.dragToReorder")}
-                          className="cursor-grab text-ink-600 hover:text-ink-300"
-                        >
-                          <i className="bi bi-grip-vertical" />
-                        </span>
-                        <span className="badge-blue">{t("serviceEditor.stepNumber", { n: i + 1 })}</span>
-                        <div className="flex-1" />
-                        <button className="btn-ghost btn-xs" title={t("serviceEditor.duplicateStepTitle")} onClick={() => duplicateStep(i)}>
-                          <i className="bi bi-files" />
-                        </button>
-                        <button className="btn-danger btn-xs" onClick={() => removeStep(i)}>
-                          <i className="bi bi-trash3" />
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="label">{t("serviceEditor.model")}</label>
-                          <select
-                            className="select"
-                            value={step.model}
-                            onChange={(e) => {
-                              const model = e.target.value;
-                              const provs = providersForModel(model);
-                              patchStep(i, { model, provider: provs.includes(step.provider) ? step.provider : provs[0] ?? "" });
-                            }}
-                          >
-                            {models.map((m) => (
-                              <option key={m.id} value={m.name}>{m.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="label">{t("serviceEditor.provider")}</label>
-                          <select className="select" value={step.provider} onChange={(e) => patchStep(i, { provider: e.target.value })}>
-                            {provOptions.length === 0 && <option value="">{t("serviceEditor.noProvidersMapped")}</option>}
-                            {provOptions.map((p) => (
-                              <option key={p} value={p}>{p}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="label">{t("serviceEditor.retryAttempts")}</label>
-                          <input className="input" type="text" inputMode="numeric" value={step.retry?.maxAttempts ?? 3} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { maxAttempts: intInput(e.target.value, 1, 1) })} />
-                        </div>
-                        <div>
-                          <label className="label">{t("serviceEditor.retryInterval")}</label>
-                          <input className="input" type="text" inputMode="numeric" value={step.retry?.intervalMs ?? 0} onFocus={selectAll} onClick={selectAll} onChange={(e) => patchRetry(i, { intervalMs: intInput(e.target.value, 0) })} />
-                        </div>
-                      </div>
-
-                      <div className="mt-3">
-                        <label className="label">{t("serviceEditor.retryOn")}</label>
-                        <TriggerChips
-                          options={[...CODE_OPTIONS, ...symbolicOptions(t, ["timeout", "network", "error"])]}
-                          selected={step.retry?.on ?? DEFAULT_RETRY_ON}
-                          onToggle={(v) => patchRetry(i, { on: toggle(step.retry?.on ?? DEFAULT_RETRY_ON, v as Trigger) })}
-                          allowCustomCodes
-                        />
-                      </div>
-
-                      <StepAdvanced step={step} onPatch={(p) => patchStep(i, p)} />
-
-                      {i < steps.length - 1 && (
-                        <div className="mt-3">
-                          <label className="label">{t("serviceEditor.advanceOnLabel")} <span className="normal-case text-ink-500">{t("serviceEditor.advanceOnHint")}</span></label>
-                          <TriggerChips
-                            options={[...CODE_OPTIONS, ...symbolicOptions(t, ["timeout", "network", "error", "exhausted"])]}
-                            selected={step.advanceOn ?? []}
-                            onToggle={(v) => patchStep(i, { advanceOn: toggle(step.advanceOn, v as AdvanceTrigger) })}
-                            allowCustomCodes
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    {i < steps.length - 1 && (
-                      <div className="flex items-center gap-2 py-1 pl-4 text-xs text-ink-500">
-                        <i className="bi bi-arrow-down" />
-                        {t("serviceEditor.onFailure")}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            {steps.length > 0 && (
-              <div className="flex items-center gap-2 pl-4 pt-1 text-xs text-ink-500">
-                <i className="bi bi-x-octagon" />
-                {t("serviceEditor.lastStepFailsHint")}
-              </div>
-            )}
-          </div>
+          <StepList steps={f.steps} onChange={(v) => form.set("steps", v)} models={models} providersForModel={providersForModel} />
         )}
       </div>
-    </Modal>
-  );
-}
-
-/**
- * Trigger chip editor with custom error code input. Renders quick-select preset
- * chips (click to toggle) plus a free-form input where the user types any HTTP
- * status code and presses Enter to add it to the selected list. Selected items
- * appear as removable chips above the input.
- *
- * Used for both `retry.on` (Trigger[]) and `advanceOn` (AdvanceTrigger[], which
- * also includes "exhausted").
- */
-function TriggerChips({
-  options,
-  selected,
-  onToggle,
-  allowCustomCodes = false,
-}: {
-  options: TriggerOption[];
-  selected: (Trigger | "exhausted")[];
-  onToggle: (v: Trigger | "exhausted") => void;
-  /** When true, shows a text input for adding arbitrary HTTP status codes. */
-  allowCustomCodes?: boolean;
-}) {
-  const { t } = useI18n();
-  const [input, setInput] = useState("");
-
-  const addCustomCode = () => {
-    const raw = input.trim();
-    if (!raw) return;
-    // Parse as integer HTTP status code (100-599)
-    const code = Number(raw);
-    if (Number.isInteger(code) && code >= 100 && code <= 599) {
-      if (!selected.includes(code)) {
-        onToggle(code);
-      }
-      setInput("");
-    } else if (raw === "timeout" || raw === "network" || raw === "error" || raw === "exhausted") {
-      // Also allow symbolic triggers via the input (compared by fixed enum value).
-      if (!selected.includes(raw)) {
-        onToggle(raw);
-      }
-      setInput("");
-    }
-  };
-
-  // Determine which selected values are NOT in the preset options (custom adds).
-  // These render as their raw value, which also surfaces any bad value a service
-  // was saved with so it can be clicked away.
-  const optionValues = options.map((o) => o.value);
-  const customSelected = selected.filter((s) => !optionValues.includes(s));
-
-  return (
-    <div className="space-y-2">
-      {/* Quick-select preset chips */}
-      <div className="flex flex-wrap gap-1.5">
-        {options.map((o) => {
-          const active = selected.includes(o.value);
-          return (
-            <button
-              key={String(o.value)}
-              type="button"
-              onClick={() => onToggle(o.value)}
-              className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
-                active ? "bg-brand-600 text-white" : "border border-ink-700 bg-ink-900 text-ink-400 hover:text-ink-200"
-              }`}
-            >
-              {o.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Custom error code input */}
-      {allowCustomCodes && (
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            inputMode="numeric"
-            className="input w-32 text-xs"
-            placeholder={t("serviceEditor.httpCodePlaceholder")}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                addCustomCode();
-              }
-            }}
-          />
-          <button
-            type="button"
-            className="btn-ghost btn-xs"
-            onClick={addCustomCode}
-            disabled={!input.trim()}
-          >
-            <i className="bi bi-plus-lg" />
-            {t("serviceEditor.add")}
-          </button>
-          <span className="text-[11px] text-ink-500">{t("serviceEditor.httpCodeHint")}</span>
-        </div>
-      )}
-
-      {/* Custom-added triggers shown as removable chips */}
-      {customSelected.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {customSelected.map((c) => (
-            <button
-              key={String(c)}
-              type="button"
-              onClick={() => onToggle(c)}
-              className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-2 py-0.5 text-xs font-medium text-white transition-colors hover:bg-brand-500"
-              title={t("serviceEditor.clickToRemove")}
-            >
-              {String(c)}
-              <i className="bi bi-x-lg text-[10px]" />
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StepAdvanced({ step, onPatch }: { step: ServiceStep; onPatch: (p: Partial<ServiceStep>) => void }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const hasOverrides = !!step.overrides && Object.keys(step.overrides).length > 0;
-  return (
-    <div className="mt-3">
-      <button type="button" className="text-xs text-ink-500 hover:text-ink-300" onClick={() => setOpen((a) => !a)}>
-        <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"} mr-1`} />
-        {t("serviceEditor.advancedOverrides")}
-        {hasOverrides && <span className="ml-1 text-brand-400">●</span>}
-      </button>
-      {open && (
-        <div className="mt-2">
-          <OverridesEditor
-            overrides={step.overrides}
-            onChange={(ov) => onPatch({ overrides: ov })}
-          />
-        </div>
-      )}
-    </div>
+    </FormModal>
   );
 }

@@ -1,94 +1,103 @@
-import { useState } from "react";
-import { api, ApiError } from "../api";
-import { useAsync } from "../lib/hooks";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
-import { Modal } from "../components/Modal";
+import { api } from "../api";
+import { useAction, useAsync, useAttempt } from "../lib/hooks";
+import { nameById, setMember } from "../lib/collections";
+import { useDeleteAction, useFormState, useSave } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
+import { fetchMappings, fetchModels, fetchProviderModels, fetchProviders, loadAll } from "../lib/resources";
+import { EnabledBadge } from "../components/badges";
+import { Button, Icon } from "../components/Button";
+import { RemovableChip } from "../components/Chip";
+import { EmptyState, Toggle, useConfirm } from "../components/common";
+import { EntityCard, RowActions } from "../components/EntityCard";
+import { Field, FieldHint } from "../components/Field";
+import { FormModal } from "../components/FormModal";
+import { CheckboxLabel, Select, TextInput } from "../components/inputs";
 import { ModelList } from "../components/ModelList";
+import { ResourcePage } from "../components/Page";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Mapping, Model, Provider, ProviderModels } from "../types";
+import type { Mapping, Model } from "../types";
 
-interface Data {
-  models: Model[];
-  providers: Provider[];
-  mappings: Mapping[];
-  providerModels: ProviderModels[];
+interface ModelForm {
+  id?: number;
+  name: string;
+  description: string;
+  enabled: boolean;
 }
+
+interface MappingForm {
+  /** Never set: a mapping is only ever created, not edited. */
+  id?: undefined;
+  modelId: number;
+  providerId: number;
+  upstreamModel: string;
+  families: string[];
+}
+
+const EMPTY_MODEL: ModelForm = { name: "", description: "", enabled: true };
+
+/** A provider needs at least this many wire families before the mapping form
+ * offers a choice between them. */
+const MIN_FAMILIES_FOR_CHOICE = 2;
 
 export function Models() {
   const { t } = useI18n();
-  const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [m, p, map, pm] = await Promise.all([
-      api.get<{ models: Model[] }>("/models"),
-      api.get<{ providers: Provider[] }>("/providers"),
-      api.get<{ mappings: Mapping[] }>("/mappings"),
-      api.get<{ providerModels: ProviderModels[] }>("/provider-models"),
-    ]);
-    return { models: m.models, providers: p.providers, mappings: map.mappings, providerModels: pm.providerModels };
-  });
+  const state = useAsync(() =>
+    loadAll({ models: fetchModels, providers: fetchProviders, mappings: fetchMappings, providerModels: fetchProviderModels }),
+  );
+  const { data, reload } = state;
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
+  const attempt = useAttempt();
 
-  const [modelForm, setModelForm] = useState<{ id?: number; name: string; description: string; enabled: boolean } | null>(null);
-  const [mapForm, setMapForm] = useState<{ modelId: number; providerId: number; upstreamModel: string; families: string[] } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const modelFc = useFormState<ModelForm>();
+  const mapFc = useFormState<MappingForm>();
+  const modelForm = modelFc.form;
+  const mapForm = mapFc.form;
+  // One flag for both modals, as only one of them can be open.
+  const action = useAction();
 
-  const providerName = (id: number) => data?.providers.find((p) => p.id === id)?.name ?? `#${id}`;
+  const providerName = (id: number) => nameById(data?.providers, id);
   /** What the selected provider reported the last time it was tested. */
   const offeredBy = (id: number) => data?.providerModels.find((x) => x.providerId === id)?.models ?? [];
 
-  const saveModel = async () => {
-    if (!modelForm) return;
-    setSaving(true);
-    try {
-      const payload = { name: modelForm.name, description: modelForm.description || null, enabled: modelForm.enabled };
-      if (modelForm.id) await api.patch(`/models/${modelForm.id}`, payload);
-      else await api.post("/models", payload);
-      toast.success(modelForm.id ? t("models.toast.updated") : t("models.toast.created"));
-      setModelForm(null);
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { save: saveModel, saving } = useSave(modelFc, {
+    collection: API.models,
+    member: API.model,
+    toPayload: (f) => ({ name: f.name, description: f.description || null, enabled: f.enabled }),
+    messages: (editing) => ({
+      success: t(editing ? "models.toast.updated" : "models.toast.created"),
+      failed: t("common.saveFailed"),
+    }),
+    onSaved: reload,
+    action,
+  });
 
-  const removeModel = async (m: Model) => {
-    if (!(await confirm(t("models.confirm.delete.title"), t("models.confirm.delete.body", { name: m.name })))) return;
-    try {
-      await api.del(`/models/${m.id}`);
-      toast.success(t("models.toast.deleted"));
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("models.toast.deleteFailed"));
-    }
-  };
+  const del = useDeleteAction(confirm, reload);
+  const removeModel = (m: Model) =>
+    del({
+      title: t("models.confirm.delete.title"),
+      body: t("models.confirm.delete.body", { name: m.name }),
+      path: API.model(m.id),
+      success: t("models.toast.deleted"),
+      fallback: t("models.toast.deleteFailed"),
+    });
 
-  const saveMapping = async () => {
-    if (!mapForm) return;
-    setSaving(true);
-    try {
-      await api.post("/mappings", { ...mapForm, families: mapForm.families.length ? mapForm.families : null });
-      toast.success(t("models.toast.mappingCreated"));
-      setMapForm(null);
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("models.toast.mappingFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { save: saveMapping } = useSave(mapFc, {
+    collection: API.mappings,
+    toPayload: (f) => ({ ...f, families: f.families.length ? f.families : null }),
+    messages: () => ({ success: t("models.toast.mappingCreated"), failed: t("models.toast.mappingFailed") }),
+    onSaved: reload,
+    action,
+  });
 
-  const removeMapping = async (mp: Mapping) => {
-    try {
-      await api.del(`/mappings/${mp.id}`);
+  // Unlike a model, a mapping is removed on the spot: no confirm, no toast.
+  const removeMapping = (mp: Mapping) =>
+    attempt(async () => {
+      await api.del(API.mapping(mp.id));
       reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("models.toast.mappingDeleteFailed"));
-    }
-  };
+    }, t("models.toast.mappingDeleteFailed"));
 
   const openNewMapping = (modelId: number) => {
     const firstProvider = data?.providers[0]?.id;
@@ -96,169 +105,137 @@ export function Models() {
       toast.error(t("models.toast.createProviderFirst"));
       return;
     }
-    setMapForm({ modelId, providerId: firstProvider, upstreamModel: "", families: [] });
+    mapFc.open({ modelId, providerId: firstProvider, upstreamModel: "", families: [] });
+  };
+
+  /** The wire families the mapping form's provider can speak, without repeats. */
+  const familiesOf = (providerId: number): string[] => {
+    const prov = data?.providers.find((p) => p.id === providerId);
+    return prov ? [...new Set([prov.type, ...(prov.altEndpoints ?? []).map((e) => e.type)])] : [];
   };
 
   return (
-    <div>
-      <PageHeader
-        title={t("models.title")}
-        subtitle={t("models.subtitle")}
-        icon="bi-box"
-        action={
-          <button className="btn-primary" onClick={() => setModelForm({ name: "", description: "", enabled: true })}>
-            <i className="bi bi-plus-lg" />
-            {t("models.action.new")}
-          </button>
-        }
-      />
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
-      {data && data.models.length === 0 && (
-        <EmptyState icon="bi-box" title={t("models.empty.title")} hint={t("models.empty.hint")} />
-      )}
-
+    <ResourcePage
+      title={t("models.title")}
+      subtitle={t("models.subtitle")}
+      icon={ENTITY_ICON.model}
+      action={
+        <Button variant="primary" icon={ACTION_ICON.add} onClick={() => modelFc.open({ ...EMPTY_MODEL })}>
+          {t("models.action.new")}
+        </Button>
+      }
+      state={state}
+      isEmpty={(d) => d.models.length === 0}
+      empty={<EmptyState icon={ENTITY_ICON.model} title={t("models.empty.title")} hint={t("models.empty.hint")} />}
+    >
       <div className="space-y-4">
         {data?.models.map((m) => {
           const maps = data.mappings.filter((x) => x.modelId === m.id);
           return (
-            <div key={m.id} className="card card-pad">
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-ink-100">{m.name}</span>
-                    {m.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
-                  </div>
-                  {m.description && <p className="mt-0.5 text-sm text-ink-400">{m.description}</p>}
-                </div>
-                <div className="flex gap-1.5">
-                  <button className="btn-ghost btn-xs" onClick={() => setModelForm({ id: m.id, name: m.name, description: m.description ?? "", enabled: m.enabled })}>
-                    <i className="bi bi-pencil" />
-                  </button>
-                  <button className="btn-danger btn-xs" onClick={() => removeModel(m)}>
-                    <i className="bi bi-trash3" />
-                  </button>
-                </div>
-              </div>
-
+            <EntityCard
+              key={m.id}
+              title={m.name}
+              badges={<EnabledBadge enabled={m.enabled} />}
+              description={m.description}
+              aside={
+                <RowActions
+                  onEdit={() => modelFc.open({ id: m.id, name: m.name, description: m.description ?? "", enabled: m.enabled })}
+                  onDelete={() => removeModel(m)}
+                />
+              }
+            >
               <div className="mt-3 border-t border-ink-800 pt-3">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-xs font-semibold uppercase tracking-wide text-ink-400">{t("models.section.providers")}</span>
-                  <button className="btn-ghost btn-xs" onClick={() => openNewMapping(m.id)}>
-                    <i className="bi bi-plus-lg" />
+                  <Button variant="ghost" size="xs" icon={ACTION_ICON.add} onClick={() => openNewMapping(m.id)}>
                     {t("models.action.mapProvider")}
-                  </button>
+                  </Button>
                 </div>
                 {maps.length === 0 ? (
                   <p className="text-xs text-ink-500">{t("models.mapping.empty")}</p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {maps.map((mp) => (
-                      <span key={mp.id} className="inline-flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 text-xs">
-                        <i className="bi bi-hdd-network text-brand-400" />
+                      <RemovableChip key={mp.id} onRemove={() => removeMapping(mp)}>
+                        <Icon name={ENTITY_ICON.provider} className="text-brand-400" />
                         <span className="text-ink-200">{providerName(mp.providerId)}</span>
-                        <i className="bi bi-arrow-right text-ink-600" />
+                        <Icon name="bi-arrow-right" className="text-ink-600" />
                         <span className="font-mono text-ink-400">{mp.upstreamModel}</span>
-                        <button className="text-ink-600 hover:text-red-400" onClick={() => removeMapping(mp)}>
-                          <i className="bi bi-x-lg" />
-                        </button>
-                      </span>
+                      </RemovableChip>
                     ))}
                   </div>
                 )}
               </div>
-            </div>
+            </EntityCard>
           );
         })}
       </div>
 
-      <Modal
+      <FormModal
         open={modelForm !== null}
         title={modelForm?.id ? t("models.modal.edit.title") : t("models.modal.new.title")}
-        icon="bi-box"
-        onClose={() => setModelForm(null)}
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setModelForm(null)}>{t("common.cancel")}</button>
-            <button className="btn-primary" onClick={saveModel} disabled={saving}>
-              <i className="bi bi-check-lg" />{t("common.save")}
-            </button>
-          </>
-        }
+        icon={ENTITY_ICON.model}
+        onClose={modelFc.close}
+        onSubmit={saveModel}
+        submitLabel={t("common.save")}
+        busy={saving}
       >
         {modelForm && (
           <div className="space-y-4">
-            <div>
-              <label className="label">{t("models.field.name.label")}</label>
-              <input className="input" value={modelForm.name} onChange={(e) => setModelForm({ ...modelForm, name: e.target.value })} placeholder={t("models.field.name.placeholder")} />
-            </div>
-            <div>
-              <label className="label">{t("models.field.description.label")}</label>
-              <input className="input" value={modelForm.description} onChange={(e) => setModelForm({ ...modelForm, description: e.target.value })} />
-            </div>
-            <Toggle checked={modelForm.enabled} onChange={(v) => setModelForm({ ...modelForm, enabled: v })} label={t("models.field.enabled.label")} />
+            <Field label={t("models.field.name.label")}>
+              <TextInput {...modelFc.bind("name")} placeholder={t("models.field.name.placeholder")} />
+            </Field>
+            <Field label={t("models.field.description.label")}>
+              <TextInput {...modelFc.bind("description")} />
+            </Field>
+            <Toggle checked={modelForm.enabled} onChange={(v) => modelFc.set("enabled", v)} label={t("models.field.enabled.label")} />
           </div>
         )}
-      </Modal>
+      </FormModal>
 
-      <Modal
+      <FormModal
         open={mapForm !== null}
         size="lg"
         title={t("models.mappingModal.title")}
-        icon="bi-diagram-2"
-        onClose={() => setMapForm(null)}
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setMapForm(null)}>{t("common.cancel")}</button>
-            <button className="btn-primary" onClick={saveMapping} disabled={saving || !mapForm?.upstreamModel}>
-              <i className="bi bi-check-lg" />{t("common.add")}
-            </button>
-          </>
-        }
+        icon={ENTITY_ICON.mapping}
+        onClose={mapFc.close}
+        onSubmit={saveMapping}
+        submitLabel={t("common.add")}
+        busy={saving}
+        disabled={!mapForm?.upstreamModel}
       >
         {mapForm && (
           <div className="space-y-4">
-            <div>
-              <label className="label">{t("models.mappingModal.field.provider.label")}</label>
-              <select className="select" value={mapForm.providerId} onChange={(e) => setMapForm({ ...mapForm, providerId: Number(e.target.value) })}>
-                {data?.providers.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.type})</option>
-                ))}
-              </select>
-            </div>
-            {(() => {
-              const prov = data?.providers.find((p) => p.id === mapForm.providerId);
-              const fams = prov ? [prov.type, ...(prov.altEndpoints ?? []).map((e) => e.type)] : [];
-              const uniq = [...new Set(fams)];
-              if (uniq.length < 2) return null;
-              return (
-                <div>
-                  <label className="label">{t("models.mappingModal.field.families.label")}</label>
-                  <p className="mb-1 text-xs text-ink-500">{t("models.mappingModal.field.families.hint")}</p>
-                  <div className="flex flex-wrap gap-3">
-                    {uniq.map((f) => (
-                      <label key={f} className="flex items-center gap-1.5 text-xs text-ink-300">
-                        <input
-                          type="checkbox"
-                          checked={mapForm.families.includes(f)}
-                          onChange={(e) =>
-                            setMapForm({
-                              ...mapForm,
-                              families: e.target.checked ? [...mapForm.families, f] : mapForm.families.filter((x) => x !== f),
-                            })
-                          }
-                        />
-                        <code>{f}</code>
-                      </label>
-                    ))}
-                  </div>
+            <Field label={t("models.mappingModal.field.provider.label")}>
+              <Select
+                value={mapForm.providerId}
+                onChange={(providerId) => mapFc.set("providerId", providerId)}
+                options={(data?.providers ?? []).map((p) => ({ value: p.id, label: `${p.name} (${p.type})` }))}
+              />
+            </Field>
+            {familiesOf(mapForm.providerId).length >= MIN_FAMILIES_FOR_CHOICE && (
+              <Field
+                label={t("models.mappingModal.field.families.label")}
+                hint={t("models.mappingModal.field.families.hint")}
+                hintPosition="above"
+              >
+                <div className="flex flex-wrap gap-3">
+                  {familiesOf(mapForm.providerId).map((f) => (
+                    <CheckboxLabel
+                      key={f}
+                      size="xs"
+                      checked={mapForm.families.includes(f)}
+                      onChange={(on) => mapFc.set("families", setMember(mapForm.families, f, on))}
+                    >
+                      <code>{f}</code>
+                    </CheckboxLabel>
+                  ))}
                 </div>
-              );
-            })()}
-            <div>
-              <label className="label">{t("models.mappingModal.field.upstreamModel.label")}</label>
-              <input className="input font-mono text-xs" value={mapForm.upstreamModel} onChange={(e) => setMapForm({ ...mapForm, upstreamModel: e.target.value })} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
-              <p className="mt-1 text-xs text-ink-500">{t("models.mappingModal.field.upstreamModel.hint")}</p>
+              </Field>
+            )}
+            <Field label={t("models.mappingModal.field.upstreamModel.label")}>
+              <TextInput mono {...mapFc.bind("upstreamModel")} placeholder={t("models.mappingModal.field.upstreamModel.placeholder")} />
+              <FieldHint>{t("models.mappingModal.field.upstreamModel.hint")}</FieldHint>
               {/* The field above doubles as the search box: type to narrow the
                   provider's own list, click to fill it in, or ignore the list
                   entirely and type an id it didn't report. */}
@@ -275,15 +252,15 @@ export function Models() {
                   models={offeredBy(mapForm.providerId)}
                   filter={mapForm.upstreamModel}
                   selected={mapForm.upstreamModel}
-                  onPick={(m) => setMapForm({ ...mapForm, upstreamModel: m })}
+                  onPick={(m) => mapFc.set("upstreamModel", m)}
                   emptyText={t("models.mappingModal.picker.empty")}
                 />
               </div>
-            </div>
+            </Field>
           </div>
         )}
-      </Modal>
+      </FormModal>
       {confirmEl}
-    </div>
+    </ResourcePage>
   );
 }

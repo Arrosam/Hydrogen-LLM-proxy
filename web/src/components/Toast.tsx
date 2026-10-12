@@ -1,4 +1,8 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { CloseButton } from "./Button";
+
+/** How long a toast stays before it dismisses itself. */
+const TOAST_DURATION_MS = 4500;
 
 type ToastKind = "success" | "error" | "info";
 interface Toast {
@@ -35,7 +39,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (kind: ToastKind, message: string) => {
       const id = counter++;
       setToasts((t) => [...t, { id, kind, message }]);
-      setTimeout(() => remove(id), 4500);
+      setTimeout(() => remove(id), TOAST_DURATION_MS);
     },
     [remove],
   );
@@ -58,9 +62,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           >
             <i className={`bi ${ICONS[t.kind]} mt-0.5`} />
             <span className="flex-1 text-ink-100">{t.message}</span>
-            <button className="text-ink-500 hover:text-ink-200" onClick={() => remove(t.id)}>
-              <i className="bi bi-x-lg" />
-            </button>
+            <CloseButton onClick={() => remove(t.id)} />
           </div>
         ))}
       </div>

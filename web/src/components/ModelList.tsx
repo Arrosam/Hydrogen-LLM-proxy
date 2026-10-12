@@ -1,9 +1,16 @@
 import { useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
+import { ACTION_ICON } from "../lib/icons";
+import { Icon } from "./Button";
+import { TextInput } from "./inputs";
+import { DashedHint } from "./Notice";
 
 /** Rows rendered at once. A gateway can report thousands of models; the search
  * box is the way through them, not a scrollbar the length of a novel. */
 const RENDER_LIMIT = 200;
+
+/** The bullet before a row that is not the selected one. */
+const UNSELECTED_ICON = "bi-dot";
 
 interface ModelListProps {
   models: string[];
@@ -26,7 +33,9 @@ export function ModelList({ models, filter, selected, onPick, emptyText }: Model
   const { t } = useI18n();
   const [ownQuery, setOwnQuery] = useState("");
   const controlled = filter !== undefined;
-  const query = (controlled ? filter : ownQuery).trim().toLowerCase();
+  /** The search as typed: what the "no match" line quotes back. */
+  const typed = (controlled ? filter : ownQuery).trim();
+  const query = typed.toLowerCase();
 
   const matches = useMemo(
     () => (query ? models.filter((m) => m.toLowerCase().includes(query)) : models),
@@ -36,23 +45,18 @@ export function ModelList({ models, filter, selected, onPick, emptyText }: Model
   const hidden = matches.length - shown.length;
 
   if (models.length === 0) {
-    return <p className="rounded-lg border border-dashed border-ink-700 px-3 py-2.5 text-xs text-ink-500">{emptyText}</p>;
+    return <DashedHint>{emptyText}</DashedHint>;
   }
 
   return (
     <div className="overflow-hidden rounded-lg border border-ink-700 bg-ink-950/40">
       {!controlled && (
         <div className="border-b border-ink-800 p-2">
-          <input
-            className="input py-1.5 text-xs"
-            value={ownQuery}
-            onChange={(e) => setOwnQuery(e.target.value)}
-            placeholder={t("modelList.search")}
-          />
+          <TextInput className="py-1.5 text-xs" value={ownQuery} onChange={(e) => setOwnQuery(e.target.value)} placeholder={t("modelList.search")} />
         </div>
       )}
       {matches.length === 0 ? (
-        <p className="px-3 py-2.5 text-xs text-ink-500">{t("modelList.noMatch", { query: query })}</p>
+        <p className="px-3 py-2.5 text-xs text-ink-500">{t("modelList.noMatch", { query: typed })}</p>
       ) : (
         <ul className="max-h-48 overflow-y-auto">
           {shown.map((m) => {
@@ -64,12 +68,12 @@ export function ModelList({ models, filter, selected, onPick, emptyText }: Model
               <li key={m}>
                 {onPick ? (
                   <button type="button" className={`${cls} hover:bg-ink-800`} onClick={() => onPick(m)}>
-                    <i className={`bi ${isSelected ? "bi-check-lg" : "bi-dot"} shrink-0`} />
+                    <Icon name={isSelected ? ACTION_ICON.save : UNSELECTED_ICON} className="shrink-0" />
                     <span className="truncate">{m}</span>
                   </button>
                 ) : (
                   <span className={cls}>
-                    <i className="bi bi-dot shrink-0" />
+                    <Icon name={UNSELECTED_ICON} className="shrink-0" />
                     <span className="truncate">{m}</span>
                   </span>
                 )}

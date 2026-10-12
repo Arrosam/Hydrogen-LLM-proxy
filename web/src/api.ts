@@ -1,3 +1,5 @@
+import { API_PREFIX } from "./lib/endpoints";
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -18,12 +20,24 @@ async function request<T>(path: string, method: string, body?: unknown): Promise
   // ignore it.
   const mutating = method === "POST" || method === "PUT" || method === "PATCH";
   const payload: unknown = body !== undefined ? body : mutating ? {} : undefined;
-  const res = await fetch(`/admin/api${path}`, {
+  const res = await fetch(`${API_PREFIX}${path}`, {
     method,
     credentials: "same-origin",
     headers: payload !== undefined ? { "content-type": "application/json" } : {},
     body: payload !== undefined ? JSON.stringify(payload) : undefined,
   });
+  return readResponse<T>(res);
+}
+
+/**
+ * The body of an admin-API answer: parsed JSON (the raw text when it is not
+ * JSON, undefined when empty). A non-2xx answer is thrown as an `ApiError`
+ * carrying the server's `error` text when it sent one.
+ *
+ * Exported for the few callers that must issue the `fetch` themselves (the
+ * public key check, which sends no credentials) yet read the answer the same way.
+ */
+export async function readResponse<T>(res: Response): Promise<T> {
   const text = await res.text();
   let data: unknown = undefined;
   try {

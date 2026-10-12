@@ -1,19 +1,26 @@
 import { useEffect, useState } from "react";
-import { api, ApiError } from "../api";
-import { useAsync } from "../lib/hooks";
-import { useAuth } from "../auth";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
-import { Modal } from "../components/Modal";
+import { api } from "../api";
+import { useAction, useAsync } from "../lib/hooks";
+import { useIsAdmin } from "../auth";
+import { patchAt, removeAt } from "../lib/collections";
+import { useDeleteAction, useFormState, useSave } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
+import { formatJson } from "../lib/json";
+import { fetchProviderModels, fetchProviders, fetchProxies, loadAll } from "../lib/resources";
+import { EnabledBadge, ReadOnlyNote } from "../components/badges";
+import { Button, Icon } from "../components/Button";
+import { EmptyState, Toggle, useConfirm } from "../components/common";
+import { DataTable, type Column } from "../components/DataTable";
+import { RowActions } from "../components/EntityCard";
+import { Field } from "../components/Field";
+import { FormModal } from "../components/FormModal";
+import { Select, TextArea, TextInput } from "../components/inputs";
 import { ModelList } from "../components/ModelList";
+import { ResourcePage } from "../components/Page";
 import { useToast } from "../components/Toast";
 import { useI18n } from "../lib/i18n";
-import type { Provider, ProviderModels, ProviderTestResult, ProviderType, Proxy } from "../types";
-
-interface Data {
-  providers: Provider[];
-  providerModels: ProviderModels[];
-}
+import { PROVIDER_TYPES, type Provider, type ProviderTestResult, type ProviderType, type Proxy } from "../types";
 
 /** The outcome of the last test run inside the modal. */
 interface TestState {
@@ -23,7 +30,7 @@ interface TestState {
   models: string[];
 }
 
-interface AltEndpoint { type: ProviderType; baseUrl: string }
+type AltEndpoint = NonNullable<Provider["altEndpoints"]>[number];
 
 interface FormState {
   id?: number;
@@ -59,53 +66,53 @@ const EMPTY: FormState = {
   test: null,
 };
 
+/** A provider answers on its own endpoint plus at most this many alternates. */
+const MAX_ALT_ENDPOINTS = 3;
+/** A positive integer with no leading zero. */
+const POSITIVE_INTEGER = /^[1-9]\d*$/;
+const ALT_ENDPOINT_PLACEHOLDER = "https://…/v1";
+const EXTRA_HEADERS_PLACEHOLDER = '{"x-custom": "value"}';
+const EXTRA_HEADERS_ROWS = 3;
+
+/** The type a new alternate endpoint starts on: not the one the provider already speaks. */
+const otherType = (type: ProviderType): ProviderType => (type === "openai_completion" ? "openai_responses" : "openai_completion");
+
 export function Providers() {
   const { t } = useI18n();
-  const { user } = useAuth();
   // Provider rows carry upstream credentials; every mutation (including
   // "test with the stored key") is admin-only on the server. Managers get the
   // read-only view the catalog and service editors need.
-  const isAdmin = user?.role === "admin";
-  const TYPE_LABELS: Record<ProviderType, string> = {
-    openai_completion: t("providers.type.openai_completion"),
-    openai_responses: t("providers.type.openai_responses"),
-    anthropic: t("providers.type.anthropic"),
-  };
-  const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [p, pm] = await Promise.all([
-      api.get<{ providers: Provider[] }>("/providers"),
-      api.get<{ providerModels: ProviderModels[] }>("/provider-models"),
-    ]);
-    return { providers: p.providers, providerModels: pm.providerModels };
-  });
+  const isAdmin = useIsAdmin();
+  const typeOptions = PROVIDER_TYPES.map((type) => ({ value: type, label: t(`providers.type.${type}`) }));
+  const state = useAsync(() => loadAll({ providers: fetchProviders, providerModels: fetchProviderModels }));
+  const { data, reload } = state;
   const toast = useToast();
   const { confirm, confirmEl } = useConfirm();
-  const [form, setForm] = useState<FormState | null>(null);
-  const [saving, setSaving] = useState(false);
+  const fc = useFormState<FormState>();
+  const { form } = fc;
   // Only for the egress-proxy dropdown. Never gates anything: a provider with
   // no proxy is the default and every existing provider stays that way.
   const [proxies, setProxies] = useState<Proxy[]>([]);
 
   useEffect(() => {
-    api
-      .get<{ proxies: Proxy[] }>("/proxies")
-      .then((r) => setProxies(r.proxies))
+    fetchProxies()
+      .then(setProxies)
       .catch(() => setProxies([]));
   }, []);
-  const [testing, setTesting] = useState(false);
+  const testing = useAction();
 
   const storedFor = (providerId: number) => data?.providerModels.find((x) => x.providerId === providerId)?.models ?? [];
 
-  const openNew = () => setForm({ ...EMPTY });
+  const openNew = () => fc.open({ ...EMPTY });
   const openEdit = (p: Provider) =>
-    setForm({
+    fc.open({
       id: p.id,
       name: p.name,
       type: p.type,
       baseUrl: p.baseUrl,
-      altEndpoints: (p as unknown as { altEndpoints?: AltEndpoint[] | null }).altEndpoints ?? [],
+      altEndpoints: p.altEndpoints ?? [],
       apiKey: "",
-      extraHeaders: p.extraHeaders ? JSON.stringify(p.extraHeaders, null, 2) : "",
+      extraHeaders: p.extraHeaders ? formatJson(p.extraHeaders) : "",
       maxOutputTokens: p.maxOutputTokens != null ? String(p.maxOutputTokens) : "",
       proxyId: p.proxyId != null ? String(p.proxyId) : "",
       enabled: p.enabled,
@@ -133,296 +140,234 @@ export function Providers() {
     }
     const extraHeaders = parseHeaders(form.extraHeaders);
     if (extraHeaders === "invalid") return;
-    setTesting(true);
-    try {
-      const payload: Record<string, unknown> = { type: form.type, baseUrl: form.baseUrl, extraHeaders };
-      // A blank key field on an existing provider means "keep the stored one",
-      // so let the server use it rather than testing with no key at all.
-      if (form.apiKey) payload.apiKey = form.apiKey;
-      else if (form.id) payload.id = form.id;
-      else payload.apiKey = null;
-      // The proxy selected in the form, so a test proves the route a real
-      // request would take -- including a proxy chosen but not yet saved.
-      payload.proxyId = form.proxyId ? Number(form.proxyId) : null;
-      const r = await api.post<ProviderTestResult>("/providers/test", payload);
-      setForm((f) => (f ? { ...f, test: { ok: r.ok, message: r.message, models: r.models } } : f));
-      if (!r.ok) toast.error(r.message);
-      else if (r.models.length === 0) toast.error(t("providers.toast.testNoModels"));
-      else toast.success(t("providers.toast.testFetched", { count: r.models.length }));
-    } catch (e) {
-      const message = e instanceof ApiError ? e.message : t("providers.toast.testFailed");
-      setForm((f) => (f ? { ...f, test: { ok: false, message, models: [] } } : f));
-      toast.error(message);
-    } finally {
-      setTesting(false);
-    }
+    await testing.run(
+      async () => {
+        const payload: Record<string, unknown> = { type: form.type, baseUrl: form.baseUrl, extraHeaders };
+        // A blank key field on an existing provider means "keep the stored one",
+        // so let the server use it rather than testing with no key at all.
+        if (form.apiKey) payload.apiKey = form.apiKey;
+        else if (form.id) payload.id = form.id;
+        else payload.apiKey = null;
+        // The proxy selected in the form, so a test proves the route a real
+        // request would take -- including a proxy chosen but not yet saved.
+        payload.proxyId = form.proxyId ? Number(form.proxyId) : null;
+        const r = await api.post<ProviderTestResult>(API.providersTest, payload);
+        fc.patch({ test: { ok: r.ok, message: r.message, models: r.models } });
+        if (!r.ok) toast.error(r.message);
+        else if (r.models.length === 0) toast.error(t("providers.toast.testNoModels"));
+        else toast.success(t("providers.toast.testFetched", { count: r.models.length }));
+      },
+      t("providers.toast.testFailed"),
+      (message) => {
+        fc.patch({ test: { ok: false, message, models: [] } });
+        toast.error(message);
+      },
+    );
   };
 
-  const save = async () => {
-    if (!form) return;
-    const extraHeaders = parseHeaders(form.extraHeaders);
-    if (extraHeaders === "invalid") return;
-    const motRaw = form.maxOutputTokens.trim();
-    if (motRaw && !/^[1-9]\d*$/.test(motRaw)) {
-      toast.error(t("providers.toast.maxOutputTokensNotPositive"));
-      return;
-    }
-    setSaving(true);
-    try {
+  const { save, saving } = useSave(fc, {
+    collection: API.providers,
+    member: API.provider,
+    toPayload: (f) => {
+      const extraHeaders = parseHeaders(f.extraHeaders);
+      if (extraHeaders === "invalid") return null;
+      const motRaw = f.maxOutputTokens.trim();
+      if (motRaw && !POSITIVE_INTEGER.test(motRaw)) {
+        toast.error(t("providers.toast.maxOutputTokensNotPositive"));
+        return null;
+      }
+      const altEndpoints = f.altEndpoints.filter((e) => e.baseUrl.trim());
       const payload: Record<string, unknown> = {
-        name: form.name,
-        type: form.type,
-        baseUrl: form.baseUrl,
+        name: f.name,
+        type: f.type,
+        baseUrl: f.baseUrl,
         extraHeaders,
         maxOutputTokens: motRaw ? Number(motRaw) : null,
-        proxyId: form.proxyId ? Number(form.proxyId) : null,
-        altEndpoints: form.altEndpoints.filter((e) => e.baseUrl.trim()).length
-          ? form.altEndpoints.filter((e) => e.baseUrl.trim())
-          : null,
-        enabled: form.enabled,
+        proxyId: f.proxyId ? Number(f.proxyId) : null,
+        altEndpoints: altEndpoints.length ? altEndpoints : null,
+        enabled: f.enabled,
       };
-      if (form.apiKey) payload.apiKey = form.apiKey;
+      // A blank key on an existing provider keeps the stored one: the field is left out.
+      if (f.apiKey) payload.apiKey = f.apiKey;
       // Only a successful test writes the model list; omitting the field leaves
       // whatever is stored untouched.
-      if (form.test?.ok) payload.availableModels = form.test.models;
-      if (form.id) {
-        if (!form.apiKey) delete payload.apiKey; // keep existing key
-        await api.patch(`/providers/${form.id}`, payload);
-      } else {
-        await api.post("/providers", payload);
-      }
-      toast.success(form.id ? t("providers.toast.updated") : t("providers.toast.created"));
-      setForm(null);
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("common.saveFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+      if (f.test?.ok) payload.availableModels = f.test.models;
+      return payload;
+    },
+    messages: (editing) => ({
+      success: t(editing ? "providers.toast.updated" : "providers.toast.created"),
+      failed: t("common.saveFailed"),
+    }),
+    onSaved: reload,
+  });
 
-  const remove = async (p: Provider) => {
-    if (!(await confirm(t("providers.confirm.delete.title"), t("providers.confirm.delete.body", { name: p.name })))) return;
-    try {
-      await api.del(`/providers/${p.id}`);
-      toast.success(t("providers.toast.deleted"));
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("providers.toast.deleteFailed"));
-    }
-  };
+  const del = useDeleteAction(confirm, reload);
+  const remove = (p: Provider) =>
+    del({
+      title: t("providers.confirm.delete.title"),
+      body: t("providers.confirm.delete.body", { name: p.name }),
+      path: API.provider(p.id),
+      success: t("providers.toast.deleted"),
+      fallback: t("providers.toast.deleteFailed"),
+    });
 
   // The list shown in the dialog: the fresh one once tested, else what's stored.
   const shownModels = form?.test?.ok ? form.test.models : (form?.storedModels ?? []);
 
-  return (
-    <div>
-      <PageHeader
-        title={t("providers.title")}
-        subtitle={t("providers.subtitle")}
-        icon="bi-hdd-network"
-        action={
-          isAdmin ? (
-            <button className="btn-primary" onClick={openNew}>
-              <i className="bi bi-plus-lg" />
-              {t("providers.action.new")}
-            </button>
-          ) : undefined
-        }
-      />
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
-      {data && data.providers.length === 0 && (
-        <EmptyState
-          icon="bi-hdd-network"
-          title={t("providers.empty.title")}
-          hint={t("providers.empty.hint")}
-          action={
-            isAdmin ? (
-              <button className="btn-primary" onClick={openNew}>
-                <i className="bi bi-plus-lg" />
-                {t("providers.action.new")}
-              </button>
-            ) : undefined
-          }
-        />
-      )}
-      {data && data.providers.length > 0 && (
-        <div className="card overflow-hidden">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>{t("providers.table.name")}</th>
-                <th>{t("providers.table.type")}</th>
-                <th>{t("providers.table.baseUrl")}</th>
-                <th>{t("providers.table.key")}</th>
-                <th>{t("providers.table.models")}</th>
-                <th>{t("providers.table.status")}</th>
-                <th className="text-right">{t("providers.table.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.providers.map((p) => {
-                const count = storedFor(p.id).length;
-                return (
-                  <tr key={p.id}>
-                    <td className="font-medium text-ink-100">{p.name}</td>
-                    <td><span className="badge-gray">{TYPE_LABELS[p.type]}</span></td>
-                    <td className="font-mono text-xs text-ink-400 max-w-[240px] truncate" title={p.baseUrl}>{p.baseUrl}</td>
-                    <td>
-                      {p.hasKey ? (
-                        <span className="badge-green"><i className="bi bi-key-fill" />{t("common.set")}</span>
-                      ) : (
-                        <span className="badge-gray"><i className="bi bi-dash" />{t("common.none")}</span>
-                      )}
-                    </td>
-                    <td>
-                      {count > 0 ? (
-                        <span className="badge-blue"><i className="bi bi-box" />{count}</span>
-                      ) : (
-                        <span className="badge-gray"><i className="bi bi-dash" />{t("common.none")}</span>
-                      )}
-                    </td>
-                    <td>
-                      {p.enabled ? <span className="badge-green">{t("common.enabled")}</span> : <span className="badge-red">{t("common.disabled")}</span>}
-                    </td>
-                    <td>
-                      {isAdmin ? (
-                        <div className="flex justify-end gap-1.5">
-                          <button className="btn-ghost btn-xs" onClick={() => openEdit(p)}>
-                            <i className="bi bi-pencil" />
-                          </button>
-                          <button className="btn-danger btn-xs" onClick={() => remove(p)}>
-                            <i className="bi bi-trash3" />
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-ink-500">{t("common.readOnly")}</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+  const newButton = isAdmin ? (
+    <Button variant="primary" icon={ACTION_ICON.add} onClick={openNew}>
+      {t("providers.action.new")}
+    </Button>
+  ) : undefined;
 
-      <Modal
+  const noneBadge = (
+    <span className="badge-gray"><Icon name="bi-dash" />{t("common.none")}</span>
+  );
+
+  const columns: Column<Provider>[] = [
+    { header: t("providers.table.name"), className: "font-medium text-ink-100", cell: (p) => p.name },
+    { header: t("providers.table.type"), cell: (p) => <span className="badge-gray">{t(`providers.type.${p.type}`)}</span> },
+    {
+      header: t("providers.table.baseUrl"),
+      className: "font-mono text-xs text-ink-400 max-w-[240px] truncate",
+      title: (p) => p.baseUrl,
+      cell: (p) => p.baseUrl,
+    },
+    {
+      header: t("providers.table.key"),
+      cell: (p) => (p.hasKey ? <span className="badge-green"><Icon name="bi-key-fill" />{t("common.set")}</span> : noneBadge),
+    },
+    {
+      header: t("providers.table.models"),
+      cell: (p) => {
+        const count = storedFor(p.id).length;
+        return count > 0 ? <span className="badge-blue"><Icon name={ENTITY_ICON.model} />{count}</span> : noneBadge;
+      },
+    },
+    { header: t("providers.table.status"), cell: (p) => <EnabledBadge enabled={p.enabled} /> },
+    {
+      header: t("providers.table.actions"),
+      headerClassName: "text-right",
+      cell: (p) =>
+        isAdmin ? <RowActions className="justify-end" onEdit={() => openEdit(p)} onDelete={() => remove(p)} /> : <ReadOnlyNote />,
+    },
+  ];
+
+  return (
+    <ResourcePage
+      title={t("providers.title")}
+      subtitle={t("providers.subtitle")}
+      icon={ENTITY_ICON.provider}
+      action={newButton}
+      state={state}
+      isEmpty={(d) => d.providers.length === 0}
+      empty={
+        <EmptyState icon={ENTITY_ICON.provider} title={t("providers.empty.title")} hint={t("providers.empty.hint")} action={newButton} />
+      }
+    >
+      {data && data.providers.length > 0 && <DataTable rows={data.providers} rowKey={(p) => p.id} columns={columns} />}
+
+      <FormModal
         open={form !== null}
         size="lg"
         title={form?.id ? t("providers.modal.edit.title") : t("providers.modal.new.title")}
-        icon="bi-hdd-network"
-        onClose={() => setForm(null)}
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setForm(null)}>{t("common.cancel")}</button>
-            <button className="btn-primary" onClick={save} disabled={saving}>
-              {saving ? <i className="bi bi-arrow-repeat animate-spin" /> : <i className="bi bi-check-lg" />}
-              {t("common.save")}
-            </button>
-          </>
-        }
+        icon={ENTITY_ICON.provider}
+        onClose={fc.close}
+        onSubmit={save}
+        submitLabel={t("common.save")}
+        busy={saving}
+        spinWhenBusy
       >
         {form && (
           <div className="space-y-4">
             {/* The short fields pair up; anything that holds a URL, a JSON blob
                 or a list keeps the full width. */}
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="label">{t("providers.field.name.label")}</label>
-                <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t("providers.field.name.placeholder")} />
-              </div>
-              <div>
-                <label className="label">{t("providers.field.type.label")}</label>
-                <select className="select" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as ProviderType })}>
-                  <option value="openai_completion">{t("providers.type.openai_completion")}</option>
-                  <option value="openai_responses">{t("providers.type.openai_responses")}</option>
-                  <option value="anthropic">{t("providers.type.anthropic")}</option>
-                </select>
-              </div>
+              <Field label={t("providers.field.name.label")}>
+                <TextInput {...fc.bind("name")} placeholder={t("providers.field.name.placeholder")} />
+              </Field>
+              <Field label={t("providers.field.type.label")}>
+                <Select value={form.type} onChange={(type) => fc.set("type", type)} options={typeOptions} />
+              </Field>
             </div>
-            <div>
-              <label className="label">{t("providers.field.baseUrl.label")}</label>
-              <input className="input font-mono text-xs" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder={form.type === "anthropic" ? t("providers.field.baseUrl.placeholder.anthropic") : t("providers.field.baseUrl.placeholder.openai")} />
-              <p className="mt-1 text-xs text-ink-500">
-                {form.type === "anthropic"
+            <Field
+              label={t("providers.field.baseUrl.label")}
+              hint={
+                form.type === "anthropic"
                   ? t("providers.field.baseUrl.hint.anthropic")
                   : form.type === "openai_responses"
                     ? t("providers.field.baseUrl.hint.openai_responses")
-                    : t("providers.field.baseUrl.hint.openai_completion")}
-              </p>
-            </div>
-            <div>
-              <label className="label">{t("providers.field.altEndpoints.label")} <span className="normal-case text-ink-500">{t("providers.field.altEndpoints.optional")}</span></label>
-              <p className="mb-2 text-xs text-ink-500">{t("providers.field.altEndpoints.hint")}</p>
+                    : t("providers.field.baseUrl.hint.openai_completion")
+              }
+            >
+              <TextInput
+                mono
+                {...fc.bind("baseUrl")}
+                placeholder={
+                  form.type === "anthropic" ? t("providers.field.baseUrl.placeholder.anthropic") : t("providers.field.baseUrl.placeholder.openai")
+                }
+              />
+            </Field>
+            <Field
+              label={t("providers.field.altEndpoints.label")}
+              suffix={t("providers.field.altEndpoints.optional")}
+              hint={t("providers.field.altEndpoints.hint")}
+              hintPosition="above-loose"
+            >
               {form.altEndpoints.map((ep, i) => (
                 <div key={i} className="mb-2 flex gap-2">
-                  <select
-                    className="select w-48"
+                  <Select
+                    className="w-48"
                     value={ep.type}
-                    onChange={(e) => setForm({ ...form, altEndpoints: form.altEndpoints.map((x, j) => (j === i ? { ...x, type: e.target.value as ProviderType } : x)) })}
-                  >
-                    {(Object.keys(TYPE_LABELS) as ProviderType[]).map((tp) => (
-                      <option key={tp} value={tp}>{TYPE_LABELS[tp]}</option>
-                    ))}
-                  </select>
-                  <input
-                    className="input font-mono text-xs"
-                    value={ep.baseUrl}
-                    onChange={(e) => setForm({ ...form, altEndpoints: form.altEndpoints.map((x, j) => (j === i ? { ...x, baseUrl: e.target.value } : x)) })}
-                    placeholder="https://…/v1"
+                    onChange={(type) => fc.set("altEndpoints", patchAt(form.altEndpoints, i, { type }))}
+                    options={typeOptions}
                   />
-                  <button className="btn-ghost btn-xs" onClick={() => setForm({ ...form, altEndpoints: form.altEndpoints.filter((_, j) => j !== i) })}>
-                    <i className="bi bi-x-lg" />
-                  </button>
+                  <TextInput
+                    mono
+                    value={ep.baseUrl}
+                    onChange={(e) => fc.set("altEndpoints", patchAt(form.altEndpoints, i, { baseUrl: e.target.value }))}
+                    placeholder={ALT_ENDPOINT_PLACEHOLDER}
+                  />
+                  <Button variant="ghost" size="xs" icon={ACTION_ICON.close} onClick={() => fc.set("altEndpoints", removeAt(form.altEndpoints, i))} />
                 </div>
               ))}
-              {form.altEndpoints.length < 3 && (
-                <button className="btn-ghost btn-xs" onClick={() => setForm({ ...form, altEndpoints: [...form.altEndpoints, { type: form.type === "openai_completion" ? "openai_responses" : "openai_completion", baseUrl: "" }] })}>
-                  <i className="bi bi-plus-lg" />
+              {form.altEndpoints.length < MAX_ALT_ENDPOINTS && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  icon={ACTION_ICON.add}
+                  onClick={() => fc.set("altEndpoints", [...form.altEndpoints, { type: otherType(form.type), baseUrl: "" }])}
+                >
                   {t("providers.field.altEndpoints.add")}
-                </button>
+                </Button>
               )}
-            </div>
+            </Field>
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="label">{t("providers.field.apiKey.label")} {form.id && <span className="normal-case text-ink-500">{t("providers.field.apiKey.keepCurrentHint")}</span>}</label>
-                <input className="input font-mono text-xs" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder={t("providers.field.apiKey.placeholder")} />
-              </div>
-              <div>
-                <label className="label">{t("providers.field.maxOutputTokens.label")} <span className="normal-case text-ink-500">{t("providers.field.maxOutputTokens.optionalCap")}</span></label>
-                <input
-                  className="input font-mono text-xs"
-                  inputMode="numeric"
-                  value={form.maxOutputTokens}
-                  onChange={(e) => setForm({ ...form, maxOutputTokens: e.target.value })}
-                  placeholder={t("providers.field.maxOutputTokens.placeholder")}
-                />
-                <p className="mt-1 text-xs text-ink-500">{t("providers.field.maxOutputTokens.hint")}</p>
-              </div>
-            </div>
-            <div>
-              <label className="label">{t("providers.field.proxy.label")}</label>
-              <select
-                className="select"
-                value={form.proxyId}
-                onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
+              <Field label={t("providers.field.apiKey.label")} suffix={form.id ? t("providers.field.apiKey.keepCurrentHint") : false}>
+                <TextInput mono type="password" {...fc.bind("apiKey")} placeholder={t("providers.field.apiKey.placeholder")} />
+              </Field>
+              <Field
+                label={t("providers.field.maxOutputTokens.label")}
+                suffix={t("providers.field.maxOutputTokens.optionalCap")}
+                hint={t("providers.field.maxOutputTokens.hint")}
               >
-                <option value="">{t("providers.field.proxy.direct")}</option>
-                {proxies.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} — {p.scheme}://{p.host}:{p.port}
-                    {p.enabled ? "" : ` (${t("common.disabled")})`}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-ink-500">{t("providers.field.proxy.hint")}</p>
+                <TextInput mono inputMode="numeric" {...fc.bind("maxOutputTokens")} placeholder={t("providers.field.maxOutputTokens.placeholder")} />
+              </Field>
             </div>
-            <div>
-              <label className="label">{t("providers.field.extraHeaders.label")}</label>
-              <textarea className="input font-mono text-xs" rows={3} value={form.extraHeaders} onChange={(e) => setForm({ ...form, extraHeaders: e.target.value })} placeholder='{"x-custom": "value"}' />
-            </div>
+            <Field label={t("providers.field.proxy.label")} hint={t("providers.field.proxy.hint")}>
+              <Select
+                value={form.proxyId}
+                onChange={(proxyId) => fc.set("proxyId", proxyId)}
+                placeholder={t("providers.field.proxy.direct")}
+                options={proxies.map((p) => ({
+                  value: String(p.id),
+                  label: `${p.name} — ${p.scheme}://${p.host}:${p.port}${p.enabled ? "" : ` (${t("common.disabled")})`}`,
+                }))}
+              />
+            </Field>
+            <Field label={t("providers.field.extraHeaders.label")}>
+              <TextArea mono rows={EXTRA_HEADERS_ROWS} {...fc.bind("extraHeaders")} placeholder={EXTRA_HEADERS_PLACEHOLDER} />
+            </Field>
 
             <div className="rounded-lg border border-ink-800 bg-ink-950/30 p-3">
               <div className="flex items-center justify-between gap-3">
@@ -430,15 +375,14 @@ export function Providers() {
                   <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">{t("providers.test.title")}</div>
                   <p className="mt-1 text-xs text-ink-500">{t("providers.test.hint")}</p>
                 </div>
-                <button className="btn-ghost btn-xs shrink-0" onClick={test} disabled={testing}>
-                  <i className={`bi ${testing ? "bi-arrow-repeat animate-spin" : "bi-plug"}`} />
+                <Button variant="ghost" size="xs" className="shrink-0" icon={ACTION_ICON.test} busy={testing.busy} spinWhenBusy onClick={test}>
                   {t("providers.action.test")}
-                </button>
+                </Button>
               </div>
 
               {form.test && !form.test.ok && (
                 <p className="mt-3 flex items-start gap-2 text-xs text-red-300">
-                  <i className="bi bi-exclamation-octagon-fill mt-px shrink-0" />
+                  <Icon name="bi-exclamation-octagon-fill" className="mt-px shrink-0" />
                   <span className="break-words">{form.test.message}</span>
                 </p>
               )}
@@ -447,9 +391,9 @@ export function Providers() {
                 <div className="mt-3 space-y-2">
                   <div className="flex items-center gap-2 text-xs">
                     {form.test?.ok ? (
-                      <span className="badge-green"><i className="bi bi-check-lg" />{t("providers.test.fetched", { count: form.test.models.length })}</span>
+                      <span className="badge-green"><Icon name={ACTION_ICON.save} />{t("providers.test.fetched", { count: form.test.models.length })}</span>
                     ) : (
-                      <span className="badge-gray"><i className="bi bi-clock-history" />{t("providers.test.stored", { count: shownModels.length })}</span>
+                      <span className="badge-gray"><Icon name="bi-clock-history" />{t("providers.test.stored", { count: shownModels.length })}</span>
                     )}
                     {form.test?.ok && <span className="text-ink-500">{t("providers.test.savedOnSave")}</span>}
                   </div>
@@ -458,11 +402,11 @@ export function Providers() {
               )}
             </div>
 
-            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label={t("providers.field.enabled.label")} />
+            <Toggle checked={form.enabled} onChange={(v) => fc.set("enabled", v)} label={t("providers.field.enabled.label")} />
           </div>
         )}
-      </Modal>
+      </FormModal>
       {confirmEl}
-    </div>
+    </ResourcePage>
   );
 }

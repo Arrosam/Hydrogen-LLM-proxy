@@ -19,8 +19,8 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 }
 
 function legacyCopy(text: string): boolean {
+  const ta = document.createElement("textarea");
   try {
-    const ta = document.createElement("textarea");
     ta.value = text;
     ta.setAttribute("readonly", "");
     ta.style.position = "fixed";
@@ -30,10 +30,11 @@ function legacyCopy(text: string): boolean {
     ta.focus();
     ta.select();
     ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
+    return document.execCommand("copy");
   } catch {
     return false;
+  } finally {
+    // The text may be an API key: it must not outlive the attempt, whatever happened.
+    ta.remove();
   }
 }

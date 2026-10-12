@@ -1,9 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { api } from "../api";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, StatusBadge, Toggle } from "../components/common";
+import { Icon } from "../components/Button";
+import { MutedBox } from "../components/CodeBlock";
+import { DataTable, type Column } from "../components/DataTable";
+import { FilterBar, LiveToggle, RefreshButton } from "../components/FilterBar";
+import { CheckboxLabel, TextInput } from "../components/inputs";
+import { MetaGrid, MetaTile } from "../components/Meta";
+import { AsyncStatus, PageHeader } from "../components/Page";
+import { EmptyState, ErrorNote, StatusBadge } from "../components/common";
 import { Modal } from "../components/Modal";
+import { MS_PER_MINUTE, MS_PER_SECOND } from "../lib/constants";
+import { API } from "../lib/endpoints";
+import { errorMessage } from "../lib/errors";
+import { formatNumber } from "../lib/format";
+import { ENTITY_ICON } from "../lib/icons";
 import { useI18n } from "../lib/i18n";
+import { useLiveQuery } from "../lib/useLiveQuery";
 
 /** One progress event in a request's lifecycle. */
 interface ProgressEvent {
@@ -58,79 +70,60 @@ const PHASE_COLORS: Record<string, string> = {
   error: "badge-red",
 };
 
+/** Poll interval while live: short, because this page is for watching requests move. */
+const REFRESH_MS = 500;
+
+/** Decimals of an elapsed time shown in seconds. */
+const ELAPSED_SECONDS_DECIMALS = 1;
+
+/** A trace id up to `fullUpTo` characters is shown whole; a longer one as its head and tail. */
+const TRACE_ID = { fullUpTo: 20, head: 10, tail: 6 } as const;
+
+/** The HH:MM:SS.mmm part of an ISO timestamp. */
+const ISO_CLOCK = { start: 11, end: 23 } as const;
+
+/** The row look of a request that stopped making progress. */
+const BLOCKED_ROW = "border-l-4 border-l-red-500 bg-red-950/20";
+
 function phaseBadge(phase: string): string {
   return PHASE_COLORS[phase] ?? "badge-gray";
 }
 
 function formatElapsed(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.floor((ms % 60_000) / 1000);
+  if (ms < MS_PER_SECOND) return `${ms}ms`;
+  if (ms < MS_PER_MINUTE) return `${(ms / MS_PER_SECOND).toFixed(ELAPSED_SECONDS_DECIMALS)}s`;
+  const m = Math.floor(ms / MS_PER_MINUTE);
+  const s = Math.floor((ms % MS_PER_MINUTE) / MS_PER_SECOND);
   return `${m}m${s}s`;
 }
 
 function shortTrace(traceId: string): string {
-  if (traceId.length <= 20) return traceId;
-  return `${traceId.slice(0, 10)}...${traceId.slice(-6)}`;
+  if (traceId.length <= TRACE_ID.fullUpTo) return traceId;
+  return `${traceId.slice(0, TRACE_ID.head)}...${traceId.slice(-TRACE_ID.tail)}`;
 }
 
 export function ActiveRequests() {
-  const REFRESH_MS = 500;
-  const [data, setData] = useState<ActiveRequestsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<ActiveRequestView | null>(null);
   const [filterTraceId, setFilterTraceId] = useState("");
   const [viewCompleted, setViewCompleted] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { t } = useI18n();
 
-  const load = useCallback(
-    (silent = false) => {
-      const params = new URLSearchParams();
-      if (filterTraceId) params.set("traceId", filterTraceId);
-      const qs = params.toString();
-      const url = `/active-requests${qs ? `?${qs}` : ""}`;
-      if (!silent) setLoading(true);
-      api
-        .get<ActiveRequestsResponse>(url)
-        .then((r) => {
-          setData(r);
-          setError(null);
-        })
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => {
-          if (!silent) setLoading(false);
-        });
-    },
-    [filterTraceId],
-  );
-
-  // Initial load + reload on filter change.
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Auto-refresh at <= 500ms interval (real-time monitoring).
-  useEffect(() => {
-    if (!autoRefresh) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      return;
-    }
-    intervalRef.current = setInterval(() => load(true), REFRESH_MS);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [autoRefresh, load]);
+  const query = useCallback(() => {
+    const params = new URLSearchParams();
+    if (filterTraceId) params.set("traceId", filterTraceId);
+    const qs = params.toString();
+    return api.get<ActiveRequestsResponse>(`${API.activeRequests}${qs ? `?${qs}` : ""}`);
+  }, [filterTraceId]);
+  const list = useLiveQuery(query, { pollMs: REFRESH_MS, live: autoRefresh });
+  const { data, loading } = list;
 
   const openDetail = async (traceId: string) => {
     try {
-      const r = await api.get<ActiveRequestDetail>(`/active-requests/${traceId}`);
+      const r = await api.get<ActiveRequestDetail>(API.activeRequest(traceId));
       setDetail(r.request);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("activeRequests.error.loadDetailFailed"));
+      list.setError(errorMessage(e, t("activeRequests.error.loadDetailFailed")));
     }
   };
 
@@ -143,52 +136,51 @@ export function ActiveRequests() {
       <PageHeader
         title={t("activeRequests.title")}
         subtitle={t("activeRequests.subtitle")}
-        icon="bi-activity"
+        icon={ENTITY_ICON.activeRequest}
         action={
           <div className="flex items-center gap-3">
             {blockedCount > 0 && (
               <span className="badge-red animate-pulse">
-                <i className="bi bi-exclamation-triangle" />
+                <Icon name="bi-exclamation-triangle" />
                 {t("activeRequests.blockedCount", { count: blockedCount })}
               </span>
             )}
-            <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("activeRequests.autoRefreshLabel", { ms: REFRESH_MS })} />
-            {autoRefresh && (
-              <span className="badge-green">
-                <i className="bi bi-broadcast" />
-                {t("activeRequests.liveBadge")}
-              </span>
-            )}
+            <LiveToggle
+              live={autoRefresh}
+              onChange={setAutoRefresh}
+              label={t("activeRequests.autoRefreshLabel", { ms: REFRESH_MS })}
+              badge={t("activeRequests.liveBadge")}
+            />
           </div>
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <input
-          className="input w-auto font-mono text-xs"
+      <FilterBar
+        count={
+          data
+            ? t("activeRequests.countStatus", { active: activeRows.length, completed: completedRows.length })
+            : loading
+              ? t("activeRequests.loadingStatus")
+              : ""
+        }
+      >
+        <TextInput
+          mono
+          className="w-auto"
           placeholder={t("activeRequests.filterPlaceholder")}
           value={filterTraceId}
           onChange={(e) => setFilterTraceId(e.target.value)}
         />
-        <button className="btn-ghost btn-xs" onClick={() => load()}>
-          <i className="bi bi-arrow-clockwise" />
-          {t("activeRequests.action.refresh")}
-        </button>
-        <label className="flex items-center gap-2 text-sm text-ink-300">
-          <input type="checkbox" checked={viewCompleted} onChange={(e) => setViewCompleted(e.target.checked)} />
+        <RefreshButton onClick={() => list.reload()}>{t("activeRequests.action.refresh")}</RefreshButton>
+        <CheckboxLabel checked={viewCompleted} onChange={setViewCompleted}>
           {t("activeRequests.showCompleted")}
-        </label>
-        <div className="flex-1" />
-        <span className="text-xs text-ink-500">
-          {data ? t("activeRequests.countStatus", { active: activeRows.length, completed: completedRows.length }) : t("activeRequests.loadingStatus")}
-        </span>
-      </div>
+        </CheckboxLabel>
+      </FilterBar>
 
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
+      <AsyncStatus state={list} />
       {!loading && activeRows.length === 0 && !viewCompleted && (
         <EmptyState
-          icon="bi-activity"
+          icon={ENTITY_ICON.activeRequest}
           title={t("activeRequests.empty.activeTitle")}
           hint={t("activeRequests.empty.activeHint")}
         />
@@ -219,7 +211,7 @@ export function ActiveRequests() {
         open={detail !== null}
         size="xl"
         title={detail ? t("activeRequests.modal.detailTitle", { traceId: shortTrace(detail.traceId) }) : ""}
-        icon="bi-activity"
+        icon={ENTITY_ICON.activeRequest}
         onClose={() => setDetail(null)}
       >
         {detail && (
@@ -227,7 +219,7 @@ export function ActiveRequests() {
             {detail.blocked && !detail.done && (
               <div className="rounded-lg border border-red-800 bg-red-950/30 px-4 py-3">
                 <div className="flex items-center gap-2 text-red-400">
-                  <i className="bi bi-exclamation-triangle-fill" />
+                  <Icon name="bi-exclamation-triangle-fill" />
                   <span className="font-semibold">{t("activeRequests.blockedWarning", { elapsed: formatElapsed(detail.elapsedMs) })}</span>
                 </div>
                 <div className="mt-1 text-xs text-red-300">
@@ -237,28 +229,26 @@ export function ActiveRequests() {
             )}
             {detail.error && <ErrorNote message={detail.error} />}
 
-            <div className="grid grid-cols-3 gap-3 text-sm">
-              <Meta label={t("activeRequests.meta.service")} value={detail.serviceName ?? "-"} />
-              <Meta label={t("activeRequests.meta.ingress")} value={detail.ingress} />
-              <Meta label={t("activeRequests.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
-              <Meta label={t("activeRequests.meta.elapsed")} value={formatElapsed(detail.elapsedMs)} />
-              <Meta label={t("activeRequests.meta.events")} value={String(detail.eventCount)} />
-              <Meta label={t("activeRequests.meta.status")} value={detail.done ? String(detail.httpStatus) : t("activeRequests.value.inFlight")} />
-            </div>
+            <MetaGrid>
+              <MetaTile label={t("activeRequests.meta.service")} value={detail.serviceName ?? "-"} />
+              <MetaTile label={t("activeRequests.meta.ingress")} value={detail.ingress} />
+              <MetaTile label={t("activeRequests.meta.streaming")} value={detail.streaming ? t("common.yes") : t("common.no")} />
+              <MetaTile label={t("activeRequests.meta.elapsed")} value={formatElapsed(detail.elapsedMs)} />
+              <MetaTile label={t("activeRequests.meta.events")} value={String(detail.eventCount)} />
+              <MetaTile label={t("activeRequests.meta.status")} value={detail.done ? String(detail.httpStatus ?? "-") : t("activeRequests.value.inFlight")} />
+            </MetaGrid>
 
             <div>
               <h4 className="label">{t("activeRequests.timelineTitle", { count: detail.events.length })}</h4>
               <div className="max-h-[50vh] space-y-1 overflow-y-auto">
-                {detail.events.length === 0 && (
-                  <div className="rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-xs text-ink-500">{t("activeRequests.noEvents")}</div>
-                )}
+                {detail.events.length === 0 && <MutedBox>{t("activeRequests.noEvents")}</MutedBox>}
                 {detail.events.map((ev, i) => (
                   <div
                     key={i}
                     className="flex items-start gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
                   >
                     <span className="mt-0.5 text-[11px] font-mono text-ink-500">
-                      {new Date(ev.ts).toISOString().slice(11, 23)}
+                      {new Date(ev.ts).toISOString().slice(ISO_CLOCK.start, ISO_CLOCK.end)}
                     </span>
                     <span className={`mt-0.5 shrink-0 ${phaseBadge(ev.phase)}`}>{ev.phase}</span>
                     <div className="min-w-0 flex-1">
@@ -270,7 +260,7 @@ export function ActiveRequests() {
                         </pre>
                       )}
                     </div>
-                    <span className="text-[10px] text-ink-600">+{(ev.ts - detail.startedAt).toLocaleString()}ms</span>
+                    <span className="text-[10px] text-ink-600">+{formatNumber(ev.ts - detail.startedAt)}ms</span>
                   </div>
                 ))}
               </div>
@@ -278,15 +268,6 @@ export function ActiveRequests() {
           </div>
         )}
       </Modal>
-    </div>
-  );
-}
-
-function Meta({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-ink-950/50 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
-      <div className="mt-0.5 text-ink-200">{value}</div>
     </div>
   );
 }
@@ -299,57 +280,47 @@ function RequestTable({
   onRowClick: (traceId: string) => void;
 }) {
   const { t } = useI18n();
+  const columns: Column<ActiveRequestView>[] = [
+    {
+      header: t("activeRequests.table.traceId"),
+      className: "font-mono text-xs text-ink-200",
+      title: (r) => r.traceId,
+      cell: (r) => shortTrace(r.traceId),
+    },
+    { header: t("activeRequests.table.service"), className: "font-mono text-xs text-ink-300", cell: (r) => r.serviceName ?? "-" },
+    { header: t("activeRequests.table.phase"), cell: (r) => r.lastPhase && <span className={phaseBadge(r.lastPhase)}>{r.lastPhase}</span> },
+    { header: t("activeRequests.table.lastNode"), className: "font-mono text-xs text-ink-400", cell: (r) => r.lastNode ?? "-" },
+    {
+      header: t("activeRequests.table.elapsed"),
+      className: (r) => `text-xs font-medium ${r.blocked ? "text-red-400" : "text-ink-300"}`,
+      cell: (r) => (
+        <>
+          {formatElapsed(r.elapsedMs)}
+          {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title={t("activeRequests.blockedTitle")} />}
+        </>
+      ),
+    },
+    { header: t("activeRequests.table.events"), className: "text-xs text-ink-400", cell: (r) => r.eventCount },
+    {
+      header: t("activeRequests.table.status"),
+      cell: (r) =>
+        r.done ? (
+          <StatusBadge status={r.httpStatus ?? 0} />
+        ) : r.blocked ? (
+          <span className="badge-red">{t("activeRequests.status.blocked")}</span>
+        ) : (
+          <span className="badge-green">{t("activeRequests.status.serving")}</span>
+        ),
+    },
+    { className: "text-right", cell: () => <Icon name="bi-chevron-right" className="text-ink-600" /> },
+  ];
   return (
-    <div className="card overflow-hidden">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>{t("activeRequests.table.traceId")}</th>
-            <th>{t("activeRequests.table.service")}</th>
-            <th>{t("activeRequests.table.phase")}</th>
-            <th>{t("activeRequests.table.lastNode")}</th>
-            <th>{t("activeRequests.table.elapsed")}</th>
-            <th>{t("activeRequests.table.events")}</th>
-            <th>{t("activeRequests.table.status")}</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr
-              key={r.traceId}
-              className={`cursor-pointer ${r.blocked ? "border-l-4 border-l-red-500 bg-red-950/20" : ""} hover:bg-ink-850/50`}
-              onClick={() => onRowClick(r.traceId)}
-            >
-              <td className="font-mono text-xs text-ink-200" title={r.traceId}>
-                {shortTrace(r.traceId)}
-              </td>
-              <td className="font-mono text-xs text-ink-300">{r.serviceName ?? "-"}</td>
-              <td>
-                {r.lastPhase && <span className={phaseBadge(r.lastPhase)}>{r.lastPhase}</span>}
-              </td>
-              <td className="font-mono text-xs text-ink-400">{r.lastNode ?? "-"}</td>
-              <td className={`text-xs font-medium ${r.blocked ? "text-red-400" : "text-ink-300"}`}>
-                {formatElapsed(r.elapsedMs)}
-                {r.blocked && <i className="bi bi-exclamation-triangle ml-1 text-red-400" title={t("activeRequests.blockedTitle")} />}
-              </td>
-              <td className="text-xs text-ink-400">{r.eventCount}</td>
-              <td>
-                {r.done ? (
-                  <StatusBadge status={r.httpStatus ?? 0} />
-                ) : r.blocked ? (
-                  <span className="badge-red">{t("activeRequests.status.blocked")}</span>
-                ) : (
-                  <span className="badge-green">{t("activeRequests.status.serving")}</span>
-                )}
-              </td>
-              <td className="text-right">
-                <i className="bi bi-chevron-right text-ink-600" />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      rows={rows}
+      rowKey={(r) => r.traceId}
+      columns={columns}
+      onRowClick={(r) => onRowClick(r.traceId)}
+      rowClassName={(r) => `cursor-pointer ${r.blocked ? BLOCKED_ROW : ""} hover:bg-ink-850/50`}
+    />
   );
 }

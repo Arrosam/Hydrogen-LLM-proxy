@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { moveItem } from "./collections";
 
 /**
  * Stable React keys for a positional list whose items carry no natural id
@@ -33,10 +34,7 @@ export function useListKeys(length: number): {
       ids.current = ids.current.filter((_, i) => i !== at);
     },
     move(from: number, to: number) {
-      const next = [...ids.current];
-      const [m] = next.splice(from, 1);
-      next.splice(to, 0, m);
-      ids.current = next;
+      ids.current = moveItem(ids.current, from, to);
     },
   };
 }

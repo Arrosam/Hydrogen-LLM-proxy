@@ -1,23 +1,32 @@
 import { msToLocalInput, editedExpiry } from "../lib/tokenForm";
 import { useState } from "react";
-import { api, ApiError } from "../api";
-import { useAuth } from "../auth";
-import { useAsync } from "../lib/hooks";
+import { api } from "../api";
+import { useIsAdmin } from "../auth";
+import { useAsync, useAttempt, useCopy } from "../lib/hooks";
+import { nameById, setMember } from "../lib/collections";
+import { useDeleteAction, useFormState, useSave } from "../lib/crud";
+import { API } from "../lib/endpoints";
+import { ACTION_ICON, ENTITY_ICON } from "../lib/icons";
 import { useI18n } from "../lib/i18n";
-import { PageHeader } from "../components/Layout";
-import { EmptyState, ErrorNote, Spinner, Toggle, useConfirm } from "../components/common";
+import { fetchServices, fetchTokens, loadAll } from "../lib/resources";
+import { EnabledBadge, ReadOnlyNote } from "../components/badges";
+import { Button, Icon } from "../components/Button";
+import { EmptyState, Toggle, useConfirm } from "../components/common";
+import { DataTable, type Column } from "../components/DataTable";
+import { RowActions } from "../components/EntityCard";
+import { Field } from "../components/Field";
+import { FormModal } from "../components/FormModal";
+import { CheckboxLabel, TextInput } from "../components/inputs";
 import { Modal } from "../components/Modal";
+import { Notice } from "../components/Notice";
+import { ResourcePage } from "../components/Page";
 import { useToast } from "../components/Toast";
-import { copyToClipboard } from "../lib/clipboard";
-import { formatDate, formatNumber } from "../lib/format";
-import type { ModelService, Token } from "../types";
-
-interface Data {
-  tokens: Token[];
-  services: ModelService[];
-}
+import { formatDate, formatQuota } from "../lib/format";
+import type { Token } from "../types";
 
 interface FormState {
+  /** Set when editing an existing key; absent when issuing a new one. */
+  id?: number;
   name: string;
   scopeServices: number[];
   scopeAll: boolean;
@@ -37,12 +46,14 @@ const EMPTY: FormState = {
   enabled: true,
 };
 
+/** A key with no service list may call every service. */
+const isUnscoped = (t: Token): boolean => !t.scopeServices || t.scopeServices.length === 0;
 
 function formFromToken(t: Token): FormState {
   return {
     name: t.name,
     scopeServices: t.scopeServices ?? [],
-    scopeAll: !t.scopeServices || t.scopeServices.length === 0,
+    scopeAll: isUnscoped(t),
     maxRequests: t.maxRequests != null ? String(t.maxRequests) : "",
     maxTokens: t.maxTokens != null ? String(t.maxTokens) : "",
     expiresAt: msToLocalInput(t.expiresAt),
@@ -52,303 +63,225 @@ function formFromToken(t: Token): FormState {
 
 export function Tokens() {
   const { t: i18n } = useI18n();
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
-  const { data, loading, error, reload } = useAsync<Data>(async () => {
-    const [t, s] = await Promise.all([
-      api.get<{ tokens: Token[] }>("/tokens"),
-      api.get<{ services: ModelService[] }>("/services"),
-    ]);
-    return { tokens: t.tokens, services: s.services };
-  });
+  const isAdmin = useIsAdmin();
   const toast = useToast();
+  const state = useAsync(() => loadAll({ tokens: fetchTokens, services: fetchServices }));
+  const { data, reload } = state;
   const { confirm, confirmEl } = useConfirm();
-  const [form, setForm] = useState<FormState | null>(null);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [saving, setSaving] = useState(false);
+  const attempt = useAttempt();
+  const fc = useFormState<FormState>();
+  const { form } = fc;
+  const editing = form?.id != null;
   const [secret, setSecret] = useState<string | null>(null);
+  const copy = useCopy({ ok: i18n("tokens.toast.copied"), fail: i18n("tokens.toast.copyFailed") });
 
-  const serviceName = (id: number) => data?.services.find((m) => m.id === id)?.name ?? `#${id}`;
+  const serviceName = (id: number) => nameById(data?.services, id);
 
-  const create = async () => {
-    if (!form) return;
-    setSaving(true);
-    try {
-      const payload: Record<string, unknown> = {
-        name: form.name,
-        scopeServices: form.scopeAll ? null : form.scopeServices,
-        maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
-        maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
-        expiresAt: editedExpiry(form.expiresAt),
-        enabled: form.enabled,
+  // Issuing answers with the new key's secret (shown once, no toast); an edit
+  // just confirms.
+  const { save, saving } = useSave<FormState, { secret: string }>(fc, {
+    collection: API.tokens,
+    member: API.token,
+    toPayload: (f) => {
+      // "Not all" with nothing ticked is not a choice: the server reads an
+      // empty list as unscoped, the opposite of what the form shows.
+      if (!f.scopeAll && f.scopeServices.length === 0) {
+        toast.error(i18n("tokens.toast.scopeEmpty"));
+        return null;
+      }
+      const expiresAt =
+        f.id != null ? editedExpiry(f.expiresAt, data?.tokens.find((token) => token.id === f.id)?.expiresAt) : editedExpiry(f.expiresAt);
+      if (expiresAt === undefined) {
+        toast.error(i18n("tokens.toast.invalidExpiry"));
+        return null;
+      }
+      return {
+        name: f.name,
+        scopeServices: f.scopeAll ? null : f.scopeServices,
+        maxRequests: f.maxRequests ? Number(f.maxRequests) : null,
+        maxTokens: f.maxTokens ? Number(f.maxTokens) : null,
+        expiresAt,
+        enabled: f.enabled,
       };
-      const r = await api.post<{ secret: string }>("/tokens", payload);
-      setForm(null);
-      setSecret(r.secret);
+    },
+    messages: (isEdit) =>
+      isEdit
+        ? { success: i18n("tokens.toast.updated"), failed: i18n("tokens.toast.updateFailed") }
+        : { failed: i18n("tokens.toast.createFailed") },
+    onSaved: (r, f) => {
+      if (f.id == null) setSecret(r.secret);
       reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : i18n("tokens.toast.createFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+    },
+  });
 
-  const saveEdit = async () => {
-    if (!form || editingId == null) return;
-    setSaving(true);
-    try {
-      const payload: Record<string, unknown> = {
-        name: form.name,
-        scopeServices: form.scopeAll ? null : form.scopeServices,
-        maxRequests: form.maxRequests ? Number(form.maxRequests) : null,
-        maxTokens: form.maxTokens ? Number(form.maxTokens) : null,
-        expiresAt: editedExpiry(form.expiresAt, data?.tokens.find(token => token.id === editingId)?.expiresAt),
-        enabled: form.enabled,
-      };
-      await api.patch(`/tokens/${editingId}`, payload);
-      setForm(null);
-      setEditingId(null);
-      toast.success(i18n("tokens.toast.updated"));
+  const toggleEnabled = (t: Token) =>
+    attempt(async () => {
+      await api.patch(API.token(t.id), { enabled: !t.enabled });
       reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : i18n("tokens.toast.updateFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
+    }, i18n("common.failed"));
 
-  const toggleEnabled = async (t: Token) => {
-    try {
-      await api.patch(`/tokens/${t.id}`, { enabled: !t.enabled });
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
-    }
-  };
+  const del = useDeleteAction(confirm, reload);
+  const remove = (t: Token) =>
+    del({
+      title: i18n("tokens.confirm.revokeTitle"),
+      body: i18n("tokens.confirm.revokeBody", { name: t.name }),
+      path: API.token(t.id),
+      success: i18n("tokens.toast.revoked"),
+      fallback: i18n("common.failed"),
+    });
 
-  const remove = async (t: Token) => {
-    if (!(await confirm(i18n("tokens.confirm.revokeTitle"), i18n("tokens.confirm.revokeBody", { name: t.name })))) return;
-    try {
-      await api.del(`/tokens/${t.id}`);
-      toast.success(i18n("tokens.toast.revoked"));
-      reload();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
-    }
-  };
-
-  const copySecret = async () => {
-    if (!secret) return;
-    const ok = await copyToClipboard(secret);
-    if (ok) toast.success(i18n("tokens.toast.copied"));
-    else toast.error(i18n("tokens.toast.copyFailed"));
-  };
-
-  const copyKey = async (t: Token) => {
-    try {
-      const r = await api.post<{ secret: string }>(`/tokens/${t.id}/secret`);
-      const ok = await copyToClipboard(r.secret);
-      if (ok) toast.success(i18n("tokens.toast.copied"));
-      else toast.error(i18n("tokens.toast.copyFailed"));
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : i18n("common.failed"));
-    }
-  };
-
-  const openEdit = (t: Token) => {
-    setEditingId(t.id);
-    setForm(formFromToken(t));
-  };
+  const copyKey = (t: Token) =>
+    attempt(async () => {
+      const r = await api.post<{ secret: string }>(API.tokenSecret(t.id));
+      await copy(r.secret);
+    }, i18n("common.failed"));
 
   /** Open the create form pre-filled from an existing key. Everything carries
-   * over except the identity: `editingId` stays null so saving issues a NEW key
-   * with its own secret, and the name is suffixed so the two are tellable apart
-   * in a list where scope and limits now look identical. */
-  const openDuplicate = (t: Token) => {
-    setEditingId(null);
-    setForm({ ...formFromToken(t), name: i18n("tokens.copyOfName", { name: t.name }) });
-  };
+   * over except the identity: no `id`, so saving issues a NEW key with its own
+   * secret, and the name is suffixed so the two are tellable apart in a list
+   * where scope and limits now look identical. */
+  const openDuplicate = (t: Token) => fc.open({ ...formFromToken(t), name: i18n("tokens.copyOfName", { name: t.name }) });
 
-  const closeForm = () => {
-    setForm(null);
-    setEditingId(null);
-  };
+  const columns: Column<Token>[] = [
+    { header: i18n("tokens.table.name"), className: "font-medium text-ink-100", cell: (t) => t.name },
+    { header: i18n("tokens.table.prefix"), className: "font-mono text-xs text-ink-400", cell: (t) => <>{t.keyPrefix}...</> },
+    {
+      header: i18n("tokens.table.scope"),
+      className: "text-xs",
+      cell: (t) =>
+        isUnscoped(t) ? (
+          <span className="badge-gray">{i18n("tokens.scope.all")}</span>
+        ) : (
+          <span className="text-ink-300">{(t.scopeServices ?? []).map(serviceName).join(", ")}</span>
+        ),
+    },
+    { header: i18n("tokens.table.requests"), className: "text-xs text-ink-300", cell: (t) => formatQuota(t.usedRequests, t.maxRequests) },
+    { header: i18n("tokens.table.tokens"), className: "text-xs text-ink-300", cell: (t) => formatQuota(t.usedTokens, t.maxTokens) },
+    {
+      header: i18n("tokens.table.expires"),
+      className: "text-xs text-ink-400",
+      cell: (t) => (t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")),
+    },
+    {
+      header: i18n("tokens.table.status"),
+      cell: (t) => (isAdmin ? <Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} /> : <EnabledBadge enabled={t.enabled} />),
+    },
+    {
+      header: i18n("tokens.table.actions"),
+      headerClassName: "text-right",
+      cell: (t) =>
+        isAdmin ? (
+          <RowActions
+            className="justify-end"
+            lead={
+              <>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  icon={ACTION_ICON.copy}
+                  disabled={!t.hasStoredKey}
+                  title={t.hasStoredKey ? undefined : i18n("tokens.copyKey.unavailable")}
+                  onClick={() => copyKey(t)}
+                >
+                  {i18n("tokens.action.copyKey")}
+                </Button>
+                <Button variant="ghost" size="xs" icon={ACTION_ICON.duplicate} onClick={() => openDuplicate(t)}>
+                  {i18n("tokens.action.duplicate")}
+                </Button>
+              </>
+            }
+            onEdit={() => fc.open({ ...formFromToken(t), id: t.id })}
+            editLabel={i18n("tokens.action.edit")}
+            onDelete={() => remove(t)}
+            deleteIcon={ACTION_ICON.revoke}
+            deleteLabel={i18n("tokens.action.revoke")}
+          />
+        ) : (
+          <RowActions className="justify-end">
+            <ReadOnlyNote />
+          </RowActions>
+        ),
+    },
+  ];
 
   return (
-    <div>
-      <PageHeader
-        title={i18n("tokens.title")}
-        subtitle={i18n("tokens.subtitle")}
-        icon="bi-key"
-        action={
-          isAdmin ? (
-            <button className="btn-primary" onClick={() => { setEditingId(null); setForm({ ...EMPTY }); }}>
-              <i className="bi bi-plus-lg" />
-              {i18n("tokens.action.issue")}
-            </button>
-          ) : (
-            <span className="badge-gray"><i className="bi bi-shield-lock" />{i18n("tokens.adminOnlyHint")}</span>
-          )
-        }
-      />
-      {loading && <Spinner />}
-      {error && <ErrorNote message={error} />}
-      {data && data.tokens.length === 0 && (
-        <EmptyState icon="bi-key" title={i18n("tokens.empty.title")} hint={isAdmin ? i18n("tokens.empty.hintAdmin") : i18n("tokens.empty.hintUser")} />
-      )}
-
-      {data && data.tokens.length > 0 && (
-        <div className="card overflow-hidden">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>{i18n("tokens.table.name")}</th>
-                <th>{i18n("tokens.table.prefix")}</th>
-                <th>{i18n("tokens.table.scope")}</th>
-                <th>{i18n("tokens.table.requests")}</th>
-                <th>{i18n("tokens.table.tokens")}</th>
-                <th>{i18n("tokens.table.expires")}</th>
-                <th>{i18n("tokens.table.status")}</th>
-                <th className="text-right">{i18n("tokens.table.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.tokens.map((t) => (
-                <tr key={t.id}>
-                  <td className="font-medium text-ink-100">{t.name}</td>
-                  <td className="font-mono text-xs text-ink-400">{t.keyPrefix}...</td>
-                  <td className="text-xs">
-                    {!t.scopeServices || t.scopeServices.length === 0 ? (
-                      <span className="badge-gray">{i18n("tokens.scope.all")}</span>
-                    ) : (
-                      <span className="text-ink-300">{t.scopeServices.map(serviceName).join(", ")}</span>
-                    )}
-                  </td>
-                  <td className="text-xs text-ink-300">
-                    {formatNumber(t.usedRequests)}{t.maxRequests != null ? ` / ${formatNumber(t.maxRequests)}` : ""}
-                  </td>
-                  <td className="text-xs text-ink-300">
-                    {formatNumber(t.usedTokens)}{t.maxTokens != null ? ` / ${formatNumber(t.maxTokens)}` : ""}
-                  </td>
-                  <td className="text-xs text-ink-400">{t.expiresAt ? formatDate(t.expiresAt) : i18n("common.never")}</td>
-                  <td>
-                    {isAdmin ? (
-                      <Toggle checked={t.enabled} onChange={() => toggleEnabled(t)} />
-                    ) : t.enabled ? (
-                      <span className="badge-green">{i18n("common.enabled")}</span>
-                    ) : (
-                      <span className="badge-red">{i18n("common.disabled")}</span>
-                    )}
-                  </td>
-                  <td>
-                    <div className="flex justify-end gap-1.5">
-                      {isAdmin && (
-                        <button
-                          className="btn-ghost btn-xs"
-                          disabled={!t.hasStoredKey}
-                          title={t.hasStoredKey ? undefined : i18n("tokens.copyKey.unavailable")}
-                          onClick={() => copyKey(t)}
-                        >
-                          <i className="bi bi-clipboard" />
-                          {i18n("tokens.action.copyKey")}
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button className="btn-ghost btn-xs" onClick={() => openDuplicate(t)}>
-                          <i className="bi bi-files" />
-                          {i18n("tokens.action.duplicate")}
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button className="btn-ghost btn-xs" onClick={() => openEdit(t)}>
-                          <i className="bi bi-pencil" />
-                          {i18n("tokens.action.edit")}
-                        </button>
-                      )}
-                      {isAdmin ? (
-                        <button className="btn-danger btn-xs" onClick={() => remove(t)}>
-                          <i className="bi bi-x-circle" />
-                          {i18n("tokens.action.revoke")}
-                        </button>
-                      ) : (
-                        <span className="text-xs text-ink-500">{i18n("common.readOnly")}</span>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+    <ResourcePage
+      title={i18n("tokens.title")}
+      subtitle={i18n("tokens.subtitle")}
+      icon={ENTITY_ICON.token}
+      action={
+        isAdmin ? (
+          <Button variant="primary" icon={ACTION_ICON.add} onClick={() => fc.open({ ...EMPTY })}>
+            {i18n("tokens.action.issue")}
+          </Button>
+        ) : (
+          <span className="badge-gray"><Icon name="bi-shield-lock" />{i18n("tokens.adminOnlyHint")}</span>
+        )
+      }
+      state={state}
+      isEmpty={(d) => d.tokens.length === 0}
+      empty={
+        <EmptyState
+          icon={ENTITY_ICON.token}
+          title={i18n("tokens.empty.title")}
+          hint={isAdmin ? i18n("tokens.empty.hintAdmin") : i18n("tokens.empty.hintUser")}
+        />
+      }
+    >
+      {data && data.tokens.length > 0 && <DataTable rows={data.tokens} rowKey={(t) => t.id} columns={columns} />}
 
       {/* Create / Edit form */}
-      <Modal
+      <FormModal
         open={form !== null}
-        title={editingId != null ? i18n("tokens.modal.editTitle") : i18n("tokens.modal.createTitle")}
-        icon="bi-key"
-        onClose={closeForm}
+        title={editing ? i18n("tokens.modal.editTitle") : i18n("tokens.modal.createTitle")}
+        icon={ENTITY_ICON.token}
+        onClose={fc.close}
         size="lg"
-        footer={
-          <>
-            <button className="btn-ghost" onClick={closeForm}>{i18n("tokens.action.cancel")}</button>
-            <button className="btn-primary" onClick={editingId != null ? saveEdit : create} disabled={saving || !form?.name}>
-              <i className="bi bi-check-lg" />{editingId != null ? i18n("tokens.action.save") : i18n("tokens.action.issueConfirm")}
-            </button>
-          </>
-        }
+        onSubmit={save}
+        submitLabel={editing ? i18n("tokens.action.save") : i18n("tokens.action.issueConfirm")}
+        cancelLabel={i18n("tokens.action.cancel")}
+        busy={saving}
+        disabled={!form?.name}
       >
         {form && (
           <div className="space-y-4">
-            <div>
-              <label className="label">{i18n("tokens.form.name")}</label>
-              <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={i18n("tokens.form.namePlaceholder")} />
-            </div>
-            <div>
-              <label className="label">{i18n("tokens.form.scope")}</label>
-              <label className="mb-2 flex items-center gap-2 text-sm text-ink-300">
-                <input type="checkbox" checked={form.scopeAll} onChange={(e) => setForm({ ...form, scopeAll: e.target.checked })} />
+            <Field label={i18n("tokens.form.name")}>
+              <TextInput {...fc.bind("name")} placeholder={i18n("tokens.form.namePlaceholder")} />
+            </Field>
+            <Field label={i18n("tokens.form.scope")}>
+              <CheckboxLabel className="mb-2" checked={form.scopeAll} onChange={(on) => fc.set("scopeAll", on)}>
                 {i18n("tokens.form.scopeAll")}
-              </label>
+              </CheckboxLabel>
               {!form.scopeAll && (
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-ink-800 p-2">
                   {data?.services.map((m) => (
-                    <label key={m.id} className="flex items-center gap-2 text-sm text-ink-300">
-                      <input
-                        type="checkbox"
-                        checked={form.scopeServices.includes(m.id)}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            scopeServices: e.target.checked ? [...form.scopeServices, m.id] : form.scopeServices.filter((x) => x !== m.id),
-                          })
-                        }
-                      />
+                    <CheckboxLabel
+                      key={m.id}
+                      checked={form.scopeServices.includes(m.id)}
+                      onChange={(on) => fc.set("scopeServices", setMember(form.scopeServices, m.id, on))}
+                    >
                       <span className="font-mono text-xs">{m.name}</span>
-                    </label>
+                    </CheckboxLabel>
                   ))}
                   {data?.services.length === 0 && <p className="text-xs text-ink-500">{i18n("tokens.form.noServices")}</p>}
                 </div>
               )}
-            </div>
+            </Field>
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">{i18n("tokens.form.maxRequests")}</label>
-                <input className="input" type="number" value={form.maxRequests} onChange={(e) => setForm({ ...form, maxRequests: e.target.value })} />
-              </div>
-              <div>
-                <label className="label">{i18n("tokens.form.maxTokens")}</label>
-                <input className="input" type="number" value={form.maxTokens} onChange={(e) => setForm({ ...form, maxTokens: e.target.value })} />
-              </div>
+              <Field label={i18n("tokens.form.maxRequests")}>
+                <TextInput type="number" {...fc.bind("maxRequests")} />
+              </Field>
+              <Field label={i18n("tokens.form.maxTokens")}>
+                <TextInput type="number" {...fc.bind("maxTokens")} />
+              </Field>
             </div>
-            <div>
-              <label className="label">{i18n("tokens.form.expiresAt")}</label>
-              <input className="input" type="datetime-local" value={form.expiresAt} onChange={(e) => setForm({ ...form, expiresAt: e.target.value })} />
-            </div>
-            <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label={i18n("tokens.form.enabled")} />
+            <Field label={i18n("tokens.form.expiresAt")}>
+              <TextInput type="datetime-local" {...fc.bind("expiresAt")} />
+            </Field>
+            <Toggle checked={form.enabled} onChange={(v) => fc.set("enabled", v)} label={i18n("tokens.form.enabled")} />
           </div>
         )}
-      </Modal>
+      </FormModal>
 
       {/* Reveal-once secret */}
       <Modal
@@ -356,13 +289,12 @@ export function Tokens() {
         title={i18n("tokens.modal.createdTitle")}
         icon="bi-clipboard-check"
         onClose={() => setSecret(null)}
-        footer={<button className="btn-primary" onClick={() => setSecret(null)}>{i18n("tokens.action.done")}</button>}
+        footer={<Button variant="primary" onClick={() => setSecret(null)}>{i18n("tokens.action.done")}</Button>}
       >
         <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-300">
-            <i className="bi bi-exclamation-triangle-fill" />
+          <Notice tone="warning" size="sm">
             {i18n("tokens.secret.warning")}
-          </div>
+          </Notice>
           <div className="flex items-center gap-2">
             <code
               title={i18n("tokens.secret.clickToSelect")}
@@ -377,13 +309,11 @@ export function Tokens() {
             >
               {secret}
             </code>
-            <button className="btn-ghost" onClick={copySecret}>
-              <i className="bi bi-clipboard" />
-            </button>
+            <Button variant="ghost" icon={ACTION_ICON.copy} onClick={() => secret && void copy(secret)} />
           </div>
         </div>
       </Modal>
       {confirmEl}
-    </div>
+    </ResourcePage>
   );
 }
