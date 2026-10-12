@@ -1,9 +1,12 @@
 import { boot } from "./composition/container";
 import { buildApp } from "./app";
-import { closeWithDeadline } from "./util/shutdown";
+import { LOG_RETENTION_DAYS_KEY } from "./persistence/settingsRepo";
+import { shutdownGracefully, SIGNAL } from "./util/shutdown";
 import { ensureHeapSized } from "./util/heap";
+import { MS_PER_DAY } from "./util/time";
 
 const SHUTDOWN_GRACE_MS = 30_000;
+const LOG_PRUNE_INTERVAL_MS = MS_PER_DAY;
 
 async function main(): Promise<void> {
   const container = await boot();
@@ -16,7 +19,7 @@ async function main(): Promise<void> {
   // keep forever) is re-read on every tick, so changing it in the dashboard
   // takes effect without a restart.
   const pruneTick = (): void => {
-    const days = Number(container.settings.get("log_retention_days") ?? 0);
+    const days = Number(container.settings.get(LOG_RETENTION_DAYS_KEY) ?? 0);
     if (!Number.isFinite(days) || days <= 0) return;
     try {
       const n = container.pruner.pruneOlderThan(days);
@@ -26,7 +29,7 @@ async function main(): Promise<void> {
     }
   };
   pruneTick();
-  const pruneTimer = setInterval(pruneTick, 24 * 60 * 60 * 1000);
+  const pruneTimer = setInterval(pruneTick, LOG_PRUNE_INTERVAL_MS);
   pruneTimer.unref?.();
 
   let shuttingDown = false;
@@ -36,18 +39,13 @@ async function main(): Promise<void> {
     app.log.info(`received ${signal}, shutting down`);
     if (pruneTimer) clearInterval(pruneTimer);
     try {
-      await closeWithDeadline(app, SHUTDOWN_GRACE_MS);
-      container.statsCache.flush();
+      await shutdownGracefully(app, container, SHUTDOWN_GRACE_MS);
     } finally {
-      try {
-        container.sqlite.close();
-      } finally {
-        process.exit(0);
-      }
+      process.exit(0);
     }
   };
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on(SIGNAL.TERM, () => void shutdown(SIGNAL.TERM));
+  process.on(SIGNAL.INT, () => void shutdown(SIGNAL.INT));
 }
 
 // Size V8's heap to the container BEFORE the app allocates anything. When the

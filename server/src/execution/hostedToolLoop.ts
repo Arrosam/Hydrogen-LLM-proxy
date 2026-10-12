@@ -6,19 +6,34 @@ import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
 import type { Transport } from "../core/upstream/transport";
 import { missingAnswerReason } from "../core/ir/answer";
 import { failureMessage, failureStatus } from "../core/proxy/errors";
-import { callService, type ServiceCall } from "./serviceCall";
+import { callService, invocationCall, type ServiceCall } from "./serviceCall";
 import type { ModelService, InvokeOptions } from "./modelService";
 import type { InvokeValue } from "./outcome";
-import { HostedToolOptionsSchema, type HostedToolOptions } from "./definition";
-import { callHttpTool, type HttpTool } from "./toolHttp";
+import { HostedToolOptionsSchema, MAX_HOSTED_CALLS, MAX_SHARED_TOOL_ROUNDS, type HostedToolOptions } from "./definition";
+import { BUDGET_REFUSED_TOOL_CODE, callHttpTool, toolErrorOutput, type HttpTool } from "./toolHttp";
 import { pendingHostedResults } from "./serverTools";
 import { toolValidator } from "./toolSchema";
 import { withThinkingFormat, type ThinkingFormat } from "../core/ir/thinkingFormat";
-import { genId } from "../util/ids";
+import { genId, ID_PREFIX } from "../util/ids";
 import { serializeForLog } from "../util/logPayload";
-import type { AttemptRecord } from "./steps";
+import { HTTP_STATUS, STATUS_CLIENT_CLOSED, STATUS_UPSTREAM_FAILURE } from "../util/httpStatus";
+import { MAX_CONTEXT_BYTES } from "../config/limits";
+import { DEFAULT_LOG_PAYLOAD_MAX_CHARS } from "../config/defaults";
 
-export type HostedEvent = { type: string; round: number; [key: string]: unknown };
+/** Types of the events the loop emits to its observer and keeps as traces. */
+export const HOSTED_EVENT = {
+  TOOL_STARTED: "hydrogen.tool.started",
+  TOOL_COMPLETED: "hydrogen.tool.completed",
+  MODEL_DELTA: "hydrogen.model.delta",
+} as const;
+
+/** Live-progress node ids recorded around a hosted tool call. */
+const PROGRESS_NODE = { TOOL_START: "tool.start", TOOL_COMPLETE: "tool.complete" } as const;
+
+/** Stage label of a model round in the call log; the round number follows. */
+const TOOL_ROUND_STAGE_PREFIX = "tool round ";
+
+export type HostedEvent = { type: (typeof HOSTED_EVENT)[keyof typeof HOSTED_EVENT]; round: number; [key: string]: unknown };
 export interface HostedContext {
   logMaxChars?: () => number;
   thinkingFormat?: ThinkingFormat;
@@ -66,13 +81,13 @@ export async function runHostedTools(
 ): Promise<HostedRun> {
   const config = options.config ?? HostedToolOptionsSchema.parse({});
   const named = new Map(tools.filter(t => t.enabled).map(t => [t.name, t]));
-  const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: 128, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
-  const logMaxChars = context.logMaxChars ?? (() => 100_000);
+  const context = options.hosted ?? { sessionId: options.sessionId, remainingCalls: config.maxCalls, remainingRounds: MAX_SHARED_TOOL_ROUNDS, traces: [], emit: options.emit, thinkingFormat: options.thinkingFormat, logMaxChars: options.logMaxChars };
+  const logMaxChars = context.logMaxChars ?? (() => DEFAULT_LOG_PAYLOAD_MAX_CHARS);
   const invokeOptions = { ...options, hosted: context };
   const calls: ServiceCall[] = [], traces: HostedEvent[] = context.traces;
   let usage: Usage = { ...ZERO_USAGE }, attempts = 0;
-  const fail = (message: string, status = 502): never => { throw new HostedRunError(message, status, usage, calls); };
-  for (const tool of request.tools ?? []) if (named.has(tool.name) && !tool.hosted) fail(`Client tool name '${tool.name}' conflicts with a hosted tool`, 400);
+  const fail = (message: string, status = STATUS_UPSTREAM_FAILURE): never => { throw new HostedRunError(message, status, usage, calls); };
+  for (const tool of request.tools ?? []) if (named.has(tool.name) && !tool.hosted) fail(`Client tool name '${tool.name}' conflicts with a hosted tool`, HTTP_STATUS.BAD_REQUEST);
   const definitions = [...(request.tools ?? []).filter(t => !named.has(t.name)), ...[...named.values()].map(t => ({ name: t.name, description: t.description, parameters: t.parameters, hosted: true }))];
   // A paused run ends with an assistant turn whose hosted calls were never run —
   // that shape IS the resume signal, so a client continuing from a saved
@@ -123,21 +138,21 @@ export async function runHostedTools(
       if (seen.has(call.id)) fail("Model repeated a tool call ID; refusing to replay the operation");
       seen.add(call.id);
       const tool = named.get(call.name)!;
-      const callId = genId("toolcall");
-      await emit({ type: "hydrogen.tool.started", round, call_id: callId, model_call_id: call.id, name: call.name, arguments: call.input });
-      options.progress?.record("llm", "tool.start", `hosted tool ${call.name} started`);
+      const callId = genId(ID_PREFIX.TOOL_CALL);
+      await emit({ type: HOSTED_EVENT.TOOL_STARTED, round, call_id: callId, model_call_id: call.id, name: call.name, arguments: call.input });
+      options.progress?.record("llm", PROGRESS_NODE.TOOL_START, `hosted tool ${call.name} started`);
       const validate = toolValidator(tool.parameters);
       // A call the budget refuses is reported AS a call, with the reason. The
       // model can then adjust instead of the whole turn ending.
       const result = context.remainingCalls <= 0
-        ? { output: JSON.stringify({ error: { code: "tool_call_limit", message: "Hosted tool call budget exhausted" } }), isError: true, durationMs: 0 }
+        ? { output: toolErrorOutput(BUDGET_REFUSED_TOOL_CODE, "Hosted tool call budget exhausted"), isError: true, durationMs: 0 }
         : !validate(call.input)
-          ? { output: JSON.stringify({ error: { code: "invalid_tool_arguments", message: "Arguments do not match the tool parameter schema" } }), isError: true, durationMs: 0 }
+          ? { output: toolErrorOutput("invalid_tool_arguments", "Arguments do not match the tool parameter schema"), isError: true, durationMs: 0 }
           : await callHttpTool(tool, { arguments: call.input as Record<string, unknown>, tool: { name: tool.name }, call: { id: callId }, session: { id: options.sessionId } }, transport, options.signal);
       context.remainingCalls--;
       results.push({ type: "tool_result", toolUseId: call.id, content: [{ type: "text", text: result.output }], isError: result.isError });
-      await emit({ type: "hydrogen.tool.completed", round, call_id: callId, model_call_id: call.id, name: call.name, ...result });
-      options.progress?.record("llm", "tool.complete", `hosted tool ${call.name} ${result.isError ? "returned an error" : "completed"}`);
+      await emit({ type: HOSTED_EVENT.TOOL_COMPLETED, round, call_id: callId, model_call_id: call.id, name: call.name, ...result });
+      options.progress?.record("llm", PROGRESS_NODE.TOOL_COMPLETE, `hosted tool ${call.name} ${result.isError ? "returned an error" : "completed"}`);
     }
     history.push({ role: "user", content: results });
     return results;
@@ -151,7 +166,7 @@ export async function runHostedTools(
   if (pending.length) {
     const pendingCalls = request.messages.flatMap(message => message.content).filter((part): part is ToolUsePart => part.type === "tool_use" && pending.some(result => result.type === "tool_result" && result.toolUseId === part.id));
     // Still spent: stay paused rather than half-running a batch.
-    if (await runBatch(pendingCalls, 0) === null) fail("Hosted tool call budget is exhausted; raise it before resuming", 402);
+    if (await runBatch(pendingCalls, 0) === null) fail("Hosted tool call budget is exhausted; raise it before resuming", HTTP_STATUS.PAYMENT_REQUIRED);
   }
   for (let round = 1; round <= config.maxRounds; round++) {
     options.signal?.throwIfAborted();
@@ -159,7 +174,7 @@ export async function runHostedTools(
     // budget, so a real exhaustion is still a hard failure; a request that merely
     // ran out of its OWN ceiling pauses below instead.
     if (--context.remainingRounds < 0) fail("Nested hosted tool loops reached the shared model-round limit");
-    if (Buffer.byteLength(JSON.stringify(history)) > 25 * 1024 * 1024) fail("Tool-loop context exceeds 25 MiB", 413);
+    if (Buffer.byteLength(JSON.stringify(history)) > MAX_CONTEXT_BYTES) fail("Tool-loop context exceeds 25 MiB", HTTP_STATUS.PAYLOAD_TOO_LARGE);
     const next = buildRequest(request.family, { ...request.data(), messages: [...history], tools: definitions,
       // A forced tool choice applies to the first turn, not forever.
       toolChoice: round === 1 ? request.toolChoice : { type: "auto" } });
@@ -168,12 +183,12 @@ export async function runHostedTools(
       const started = Date.now();
       const inv = await executor.stream(next.withStream(true), undefined, invokeOptions);
       attempts += inv.attempts;
-      const path = Array.isArray(inv.attemptPath) ? inv.attemptPath : [];
-      const nested = path.some(entry => entry && typeof entry === "object" && "stage" in entry);
-      const call: ServiceCall = { stage: `tool round ${round}`, service: request.requestedService, kind: nested ? "agent" : "service", status: inv.result.ok ? 200 : failureStatus(inv.result),
-        latencyMs: Date.now() - started, attempts: nested ? [] : path as AttemptRecord[], ...(nested ? { calls: path as ServiceCall[] } : {}), streamed: true };
+      const call = invocationCall(inv, { stage: `${TOOL_ROUND_STAGE_PREFIX}${round}`, service: request.requestedService }, started);
+      call.streamed = true;
       calls.push(call);
-      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, call.status); }
+      // Logged with the status as reported, like a buffered round (callService);
+      // only the run's own error maps it to what the client is answered with.
+      if (!inv.result.ok) { call.error = failureMessage(inv.result); return fail(call.error, failureStatus(inv.result)); }
       const stream = inv.result.value;
       call.request = serializeForLog(stream.upstreamRequest, logMaxChars());
       let roundUsage: Usage = { ...ZERO_USAGE };
@@ -186,7 +201,7 @@ export async function runHostedTools(
           if (event.type === "usage" || event.type === "finish" && event.usage) roundUsage = event.usage!;
           if (event.type === "finish" && (event.incomplete || event.error)) throw new Error(event.error ?? "Upstream stream was interrupted");
           pendingBytes += Buffer.byteLength(JSON.stringify(event));
-          if (pendingBytes > 25 * 1024 * 1024) throw new Error("Model presentation buffer exceeds 25 MiB");
+          if (pendingBytes > MAX_CONTEXT_BYTES) throw new Error("Model presentation buffer exceeds 25 MiB");
           pending.push(event);
           yield event;
         }
@@ -194,7 +209,7 @@ export async function runHostedTools(
       async function* observe(): AsyncGenerator<StreamEvent> {
         for await (const event of withThinkingFormat(raw(), options.onModelEvent ? "original" : context.thinkingFormat)) {
           if (options.onModelEvent) await options.onModelEvent(event);
-          else await emit({ type: "hydrogen.model.delta", round, event }, false);
+          else await emit({ type: HOSTED_EVENT.MODEL_DELTA, round, event }, false);
           // Presentation may hide thinking; the model's continuation still needs its signed original.
           yield* pending.splice(0); pendingBytes = 0;
         }
@@ -203,7 +218,7 @@ export async function runHostedTools(
       let collected;
       try { collected = await collectStream(observe()); }
       catch (error) {
-        usage = addUsage(usage, roundUsage); call.usage = roundUsage; call.status = options.signal?.aborted ? 499 : 502;
+        usage = addUsage(usage, roundUsage); call.usage = roundUsage; call.status = options.signal?.aborted ? STATUS_CLIENT_CLOSED : STATUS_UPSTREAM_FAILURE;
         call.latencyMs = Date.now() - started; call.error = error instanceof Error ? error.message : "Model stream failed";
         fail(call.error, call.status);
       }
@@ -212,7 +227,7 @@ export async function runHostedTools(
       call.response = serializeForLog(value.response.toLogPayload(), logMaxChars());
     } else {
       const invoked = await callService(executor, next.withStream(false), undefined,
-        { stage: `tool round ${round}`, service: request.requestedService }, invokeOptions, logMaxChars);
+        { stage: `${TOOL_ROUND_STAGE_PREFIX}${round}`, service: request.requestedService }, invokeOptions, logMaxChars);
       calls.push(invoked.call);
       attempts += invoked.attempts;
       if (!invoked.result.ok) {
@@ -238,7 +253,7 @@ export async function runHostedTools(
     const hosted = requested.filter(t => named.has(t.name));
     if (hosted.length && request.toolChoice?.type === "none") fail("Model called a hosted tool despite tool_choice:none");
     const client = requested.filter(t => !named.has(t.name));
-    if (hosted.length > 128) fail("Model requested too many hosted tools in one round");
+    if (hosted.length > MAX_HOSTED_CALLS) fail("Model requested too many hosted tools in one round");
 
     // The budget is spent BEFORE a call is sent, never during one. A run that
     // paused left its calls unexecuted, so resuming replays them; a run that
@@ -267,6 +282,6 @@ export async function runHostedTools(
   return fail("Hosted tool loop reached its model-round limit");
   } catch (error) {
     if (error instanceof HostedRunError) throw error;
-    throw new HostedRunError(options.signal?.aborted ? "Response execution cancelled" : "Hosted tool execution failed", options.signal?.aborted ? 499 : 502, usage, calls);
+    throw new HostedRunError(options.signal?.aborted ? "Response execution cancelled" : "Hosted tool execution failed", options.signal?.aborted ? STATUS_CLIENT_CLOSED : STATUS_UPSTREAM_FAILURE, usage, calls);
   }
 }

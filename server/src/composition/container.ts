@@ -1,5 +1,7 @@
 import type Database from "better-sqlite3";
 import { loadConfig, type AppConfig } from "../config";
+import { DEFAULT_PROMPT_CACHE_TTL_MINUTES } from "../config/defaults";
+import { MS_PER_DAY } from "../util/time";
 import { setConfig } from "../context";
 import { openDatabase, type DB } from "../db";
 import { seedAdminIfEmpty, type SeedResult } from "../db/bootstrap";
@@ -102,11 +104,11 @@ export async function boot(): Promise<Container> {
     simulatedStreamingTokenRate: config.simulatedStreamingTokenRate,
     sessionTtlMs: config.sessionTtlMs,
     imageCacheMaxBytes: config.imageCacheMaxBytes,
-    promptCacheTtlMinutes: 30,
+    promptCacheTtlMinutes: DEFAULT_PROMPT_CACHE_TTL_MINUTES,
   });
   const stats = new StatsQueries(db);
   const hostedTools = new HostedToolRepo(db, config.masterKey);
-  const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * 86_400_000);
+  const responses = new ResponseRepo(db, () => settings.responseRetentionDays() * MS_PER_DAY);
   responses.failInterrupted();
   responses.prune();
   // Seed the incremental stats counters: full aggregation on first boot, then
@@ -140,9 +142,12 @@ export async function boot(): Promise<Container> {
   };
 }
 
+/** Width, in characters, of the rule around the first-boot credentials banner. */
+const BANNER_WIDTH = 64;
+
 /** Print the initial admin credentials prominently so the user can log in. */
 function printInitialAdmin(seed: SeedResult): void {
-  const line = "=".repeat(64);
+  const line = "=".repeat(BANNER_WIDTH);
   const rows = [
     "",
     line,

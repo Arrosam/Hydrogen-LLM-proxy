@@ -2,6 +2,7 @@ import { asc, eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { providerAvailableModels, type ProviderAvailableModel } from "../db/schema";
 import { asMillis } from "../util/time";
+import { chunked } from "./sqlChunk";
 
 /** One provider's discovered model list, as the dashboard consumes it. */
 export interface ProviderModelList {
@@ -85,17 +86,10 @@ export class ProviderModelRepo {
     this.db.transaction((tx) => {
       tx.delete(providerAvailableModels).where(eq(providerAvailableModels.providerId, providerId)).run();
       // Chunked: SQLite caps the number of bound variables in one statement.
-      for (let i = 0; i < clean.length; i += 200) {
-        tx.insert(providerAvailableModels)
-          .values(clean.slice(i, i + 200).map((modelId) => ({ providerId, modelId })))
-          .run();
+      for (const batch of chunked(clean)) {
+        tx.insert(providerAvailableModels).values(batch.map((modelId) => ({ providerId, modelId }))).run();
       }
     });
     return clean.length;
-  }
-
-  /** Drop a provider's list without touching the provider itself. */
-  clearForProvider(providerId: number): void {
-    this.db.delete(providerAvailableModels).where(eq(providerAvailableModels.providerId, providerId)).run();
   }
 }

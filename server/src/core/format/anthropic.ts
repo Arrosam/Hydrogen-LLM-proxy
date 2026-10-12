@@ -1,5 +1,5 @@
-import { decodeReasoning, encodeReasoning } from "./reasoningBridge";
-import { Request, type RenderTarget } from "../ir/request";
+import { clientSignature, decodeReasoning, isOwnOrigin, nativeSignature } from "./reasoningBridge";
+import type { RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
@@ -10,36 +10,129 @@ import {
   type Message,
   type StopReason,
   type TextPart,
-  type Tool,
   type ToolChoice,
   type ToolUsePart,
+  DEFAULT_FILE_MEDIA_TYPE,
+  DEFAULT_IMAGE_MEDIA_TYPE,
+  SYSTEM_SEPARATOR,
 } from "../ir/content";
-import type { GenerationParams, ThinkingLevel } from "../ir/params";
+import { isEffortLevel, type GenerationParams, type ThinkingLevel } from "../ir/params";
 import { ThinkingPolicy } from "../ir/thinking";
-import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
-import { genId, nowSeconds } from "../../util/ids";
-import { applyNonCanonical, collectPassthrough, num, numOrUndef, safeJsonParse } from "./wire";
+import { parseSSE, parseSseJson, sseFrame, type StreamContext, type StreamEvent } from "../ir/stream";
+import { ID_PREFIX, genId, nowSeconds } from "../../util/ids";
+import { DEFAULT_PROMPT_CACHE_TTL_MINUTES } from "../../config/defaults";
+import { applyNonCanonical, collectPassthrough, foreignFileIdError, objectsIn, paramSetter, stringContentParts } from "./wire";
+import { num, numOrUndef, parseToolArguments } from "../ir/coerce";
+import { parseToolList, renderToolList, type ToolWire } from "./tools";
 import { FormatConversionError } from "./errors";
-import { foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage";
+import { cacheCounters, foldCacheIntoPrompt, uncachedPromptTokens, type Usage } from "../ir/usage";
 import { registerFormat } from "./registry";
-import type { SendTarget, Transport } from "../upstream/transport";
-import type { RelayResult, SendResult } from "../upstream/outcome";
-import { relayStream, sendBuffered } from "../upstream/roundtrip";
+import { WireRequest } from "./wireRequest";
+
+// --- wire identifiers ----------------------------------------------------
+
+/** SSE event types of a Messages stream. */
+const EVENT = {
+  MESSAGE_START: "message_start",
+  CONTENT_BLOCK_START: "content_block_start",
+  CONTENT_BLOCK_DELTA: "content_block_delta",
+  CONTENT_BLOCK_STOP: "content_block_stop",
+  MESSAGE_DELTA: "message_delta",
+  MESSAGE_STOP: "message_stop",
+} as const;
+
+/** `delta.type` values of a content_block_delta. */
+const DELTA = {
+  TEXT: "text_delta",
+  THINKING: "thinking_delta",
+  SIGNATURE: "signature_delta",
+  INPUT_JSON: "input_json_delta",
+} as const;
+
+/** Content block types. */
+const BLOCK = {
+  TEXT: "text",
+  IMAGE: "image",
+  DOCUMENT: "document",
+  THINKING: "thinking",
+  REDACTED_THINKING: "redacted_thinking",
+  TOOL_USE: "tool_use",
+  TOOL_RESULT: "tool_result",
+  SERVER_TOOL_USE: "server_tool_use",
+  SERVER_TOOL_RESULT: "server_tool_result",
+  WEB_SEARCH_RESULT: "web_search_result",
+  WEB_SEARCH_TOOL_RESULT: "web_search_tool_result",
+} as const;
+
+/** `source.type` values of an image / document block. */
+const SOURCE = {
+  URL: "url",
+  BASE64: "base64",
+  TEXT: "text",
+  FILE: "file",
+} as const;
+
+/** `stop_reason` values. */
+const STOP_REASON = {
+  END_TURN: "end_turn",
+  STOP_SEQUENCE: "stop_sequence",
+  MAX_TOKENS: "max_tokens",
+  TOOL_USE: "tool_use",
+  REFUSAL: "refusal",
+  PAUSE_TURN: "pause_turn",
+} as const;
+
+/** `tool_choice.type` values. */
+const TOOL_CHOICE = {
+  AUTO: "auto",
+  ANY: "any",
+  NONE: "none",
+  TOOL: "tool",
+} as const;
+
+const MESSAGE_OBJECT = "message";
+const ROLE_ASSISTANT = "assistant";
+/** `caller.type` of a call the provider made itself. */
+const CALLER_DIRECT = "direct";
+
+/** Every provider-executed result block type ends in this (web_search_tool_result, ...). */
+const SERVER_TOOL_RESULT_SUFFIX = "_tool_result";
+/** Parts of a result block type its error object's type is derived from. */
+const SERVER_TOOL_INFIX = "_tool_";
+const RESULT_SUFFIX_RE = /_result$/;
+const ERROR_TYPE_SUFFIX = "_error";
+/** Name given to a server-tool result whose call was never seen. */
+const UNKNOWN_SERVER_TOOL_NAME = "server_tool";
+
+/** cache_control: the wire accepts only the 5m default and a 1h TTL. */
+const CACHE_CONTROL_EPHEMERAL = "ephemeral";
+const SHORT_CACHE_TTL_MINUTES = 5;
+const LONG_CACHE_TTL = "1h";
+
+/** Anthropic's sampling range for temperature and top_p. */
+const SAMPLING_MIN = 0;
+const SAMPLING_MAX = 1;
+/** Anthropic's sampling ranges are narrower than OpenAI's (temperature 0..1 vs
+ * 0..2); clamp instead of letting the upstream 400 the whole request. */
+const clampSampling = (value: number): number => Math.min(Math.max(value, SAMPLING_MIN), SAMPLING_MAX);
+
+/** The provider name a conversion refusal reports. */
+const PROVIDER_LABEL = "an Anthropic";
 
 // --- stop reason mapping -------------------------------------------------
 
 function stopReasonToStop(reason: string | null | undefined): StopReason {
   switch (reason) {
-    case "end_turn":
-    case "stop_sequence":
+    case STOP_REASON.END_TURN:
+    case STOP_REASON.STOP_SEQUENCE:
       return "stop";
-    case "max_tokens":
+    case STOP_REASON.MAX_TOKENS:
       return "length";
-    case "tool_use":
+    case STOP_REASON.TOOL_USE:
       return "tool_use";
-    case "refusal":
+    case STOP_REASON.REFUSAL:
       return "content_filter";
-    case "pause_turn":
+    case STOP_REASON.PAUSE_TURN:
       return "pause_turn";
     default:
       return reason ? "stop" : null;
@@ -49,15 +142,15 @@ function stopReasonToStop(reason: string | null | undefined): StopReason {
 function stopToAnthropic(reason: StopReason): string {
   switch (reason) {
     case "length":
-      return "max_tokens";
+      return STOP_REASON.MAX_TOKENS;
     case "tool_use":
-      return "tool_use";
+      return STOP_REASON.TOOL_USE;
     case "content_filter":
-      return "refusal";
+      return STOP_REASON.REFUSAL;
     case "pause_turn":
-      return "pause_turn";
+      return STOP_REASON.PAUSE_TURN;
     default:
-      return "end_turn";
+      return STOP_REASON.END_TURN;
   }
 }
 
@@ -68,9 +161,9 @@ function systemToText(system: unknown): string | undefined {
   if (typeof system === "string") return system || undefined;
   if (Array.isArray(system)) {
     const text = system
-      .filter((b) => b && typeof b === "object" && (b as Record<string, unknown>).type === "text")
+      .filter((b) => b && typeof b === "object" && (b as Record<string, unknown>).type === BLOCK.TEXT)
       .map((b) => String((b as Record<string, unknown>).text ?? ""))
-      .join("\n\n");
+      .join(SYSTEM_SEPARATOR);
     return text || undefined;
   }
   return undefined;
@@ -78,58 +171,181 @@ function systemToText(system: unknown): string | undefined {
 
 function parseImageSource(source: unknown): ImagePart["source"] {
   const s = (source ?? {}) as Record<string, unknown>;
-  if (s.type === "url") return { kind: "url", url: String(s.url ?? "") };
-  return { kind: "base64", mediaType: String(s.media_type ?? "image/png"), data: String(s.data ?? "") };
+  if (s.type === SOURCE.URL) return { kind: "url", url: String(s.url ?? "") };
+  return { kind: "base64", mediaType: String(s.media_type ?? DEFAULT_IMAGE_MEDIA_TYPE), data: String(s.data ?? "") };
 }
 
 function imageSourceToBlock(source: ImagePart["source"]): unknown {
-  if (source.kind === "url") return { type: "url", url: source.url };
-  return { type: "base64", media_type: source.mediaType, data: source.data };
+  if (source.kind === "url") return { type: SOURCE.URL, url: source.url };
+  return { type: SOURCE.BASE64, media_type: source.mediaType, data: source.data };
 }
 
+// --- provider-executed (server) tool blocks ------------------------------
+
+/**
+ * Whether a block type is a provider-executed result. Its own `type` is the
+ * contract: every such block ends in `_tool_result`, plus the two fixed names.
+ */
+function isServerResultBlockType(type: unknown): type is string {
+  return typeof type === "string" &&
+    (type.endsWith(SERVER_TOOL_RESULT_SUFFIX) || type === BLOCK.WEB_SEARCH_RESULT || type === BLOCK.SERVER_TOOL_RESULT);
+}
+
+/**
+ * The `content` of a result block. This wire models failure as its own content
+ * object, not as an array: an error can therefore never be mistaken for an
+ * empty result set. The object's type is derived from the block's.
+ */
+function serverResultContent(blockType: string, content: unknown[], errorCode: string | undefined): unknown {
+  if (errorCode === undefined) return content;
+  const base = blockType.includes(SERVER_TOOL_INFIX) ? blockType : blockType.replace(RESULT_SUFFIX_RE, SERVER_TOOL_RESULT_SUFFIX);
+  return { type: `${base}${ERROR_TYPE_SUFFIX}`, error_code: errorCode };
+}
+
+/** The failure code of a result block, which this wire reports as an object in place of the entry array. */
+function serverResultErrorCode(content: unknown): string | undefined {
+  const code = (content as { error_code?: unknown } | null | undefined)?.error_code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** The call block a CLIENT is shown for a provider-executed tool. */
+function serverToolUseBlock(id: string, name: string, input: unknown): Record<string, unknown> {
+  return { type: BLOCK.SERVER_TOOL_USE, id, name, input: input ?? {}, caller: { type: CALLER_DIRECT } };
+}
+
+/** The result block a CLIENT is shown, paired with its call by tool_use_id. `blockType` comes from the
+ * tool's own contract, so any result shape an adapter and operator agree on is carried. */
+function serverToolResultBlock(part: { blockType: string; id: string; content: unknown[]; errorCode?: string }): Record<string, unknown> {
+  return { type: part.blockType, tool_use_id: part.id, caller: { type: CALLER_DIRECT }, content: serverResultContent(part.blockType, part.content, part.errorCode) };
+}
+
+// --- usage ---------------------------------------------------------------
+
+function thinkingTokens(usage: Record<string, unknown>): number | undefined {
+  return numOrUndef((usage.output_tokens_details as Record<string, unknown> | undefined)?.thinking_tokens);
+}
+
+/** Canonical usage from this wire's exclusive split. */
+function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Usage {
+  const promptTokens = foldCacheIntoPrompt(uncached, cachedRead, cacheWrite);
+  return {
+    promptTokens,
+    completionTokens: output,
+    totalTokens: promptTokens + output,
+    ...(reasoningTokens != null ? { reasoningTokens } : {}),
+    ...cacheCounters(cachedRead, cacheWrite),
+  };
+}
+
+/** A `usage` object in this wire's exclusive split, buffered or streamed. */
+function usageToWire(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Record<string, unknown> {
+  return {
+    input_tokens: uncached,
+    output_tokens: output,
+    ...(reasoningTokens != null ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}),
+    ...(cachedRead != null ? { cache_read_input_tokens: cachedRead } : {}),
+    ...(cacheWrite != null ? { cache_creation_input_tokens: cacheWrite } : {}),
+  };
+}
+
+/**
+ * When a reported `input_tokens` / `output_tokens` replaces the running count:
+ * always (a non-number reads as 0), whenever the field is present (same
+ * reading), or only when it is a number. Each place a `usage` object arrives
+ * has its own rule, and they are kept as they were.
+ */
+type CountRule = "always" | "present" | "numeric";
+
+function counted(current: number, value: unknown, rule: CountRule): number {
+  const replace = rule === "always" || (rule === "present" ? value != null : numOrUndef(value) != null);
+  return replace ? num(value) : current;
+}
+
+/**
+ * The running usage of one response, in this wire's own exclusive form
+ * (`input` is the uncached remainder) and folded into the canonical inclusive
+ * count at every point it leaves. Counters arrive in up to three `usage`
+ * objects on a stream and in one on a buffered body; the detail counters
+ * (thinking, cache read, cache write) are taken whenever they are numbers.
+ */
+class UsageCounters {
+  input = 0;
+  output = 0;
+  reasoning: number | undefined;
+  cacheRead: number | undefined;
+  // Cache WRITES are reported here too, and were the one usage field the
+  // streaming path dropped while the buffered path kept it -- so the same
+  // request billed a cache write invisibly when it streamed.
+  cacheWrite: number | undefined;
+
+  absorb(usage: Record<string, unknown>, rule: { input: CountRule; output: CountRule }): void {
+    this.input = counted(this.input, usage.input_tokens, rule.input);
+    this.output = counted(this.output, usage.output_tokens, rule.output);
+    this.reasoning = thinkingTokens(usage) ?? this.reasoning;
+    this.cacheRead = numOrUndef(usage.cache_read_input_tokens) ?? this.cacheRead;
+    this.cacheWrite = numOrUndef(usage.cache_creation_input_tokens) ?? this.cacheWrite;
+  }
+
+  /** The canonical inclusive prompt count so far. */
+  promptTokens(): number {
+    return foldCacheIntoPrompt(this.input, this.cacheRead, this.cacheWrite);
+  }
+
+  toUsage(): Usage {
+    return usageOf(this.input, this.output, this.cacheRead, this.cacheWrite, this.reasoning);
+  }
+}
+
+/** message_start (and a buffered body): the first report, taken as it stands. */
+const COUNT_FIRST = { input: "always", output: "always" } as const;
+/** message_delta: output whenever present; some providers report the real prompt count only here, at the end. */
+const COUNT_DELTA = { input: "numeric", output: "present" } as const;
+/** message_stop: a last correction, numbers only. */
+const COUNT_STOP = { input: "numeric", output: "numeric" } as const;
+
 function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> = new Map()): ContentPart[] {
-  if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
-  if (!Array.isArray(content)) return [];
+  const text = stringContentParts(content);
+  if (text) return text;
   const parts: ContentPart[] = [];
-  for (const raw of content) {
-    if (!raw || typeof raw !== "object") continue;
-    const b = raw as Record<string, unknown>;
+  for (const b of objectsIn(content)) {
     const cc = b.cache_control != null ? { cacheControl: b.cache_control } : {};
-    switch (typeof b.type === "string" && b.type.endsWith("_tool_result") ? "server_tool_result" : b.type) {
-      case "thinking":
-        parts.push((typeof b.signature === "string" ? decodeReasoning(b.signature) : null) ?? { type: "reasoning", origin: "anthropic", text: String(b.thinking ?? ""), signature: b.signature != null ? String(b.signature) : undefined });
+    switch (isServerResultBlockType(b.type) ? BLOCK.SERVER_TOOL_RESULT : b.type) {
+      case BLOCK.THINKING:
+        // An envelope this proxy issued is unwrapped; one it cannot read is not a
+        // signature Anthropic issued either, so it is dropped rather than sent on.
+        parts.push((typeof b.signature === "string" ? decodeReasoning(b.signature) : null) ?? { type: "reasoning", origin: "anthropic", text: String(b.thinking ?? ""), signature: b.signature != null ? nativeSignature(String(b.signature)) : undefined });
         break;
-      case "redacted_thinking":
+      case BLOCK.REDACTED_THINKING:
         // Opaque bytes; only a same-family replay can restore them. Never
         // rewrite the text -- a signature over altered text can never verify.
         parts.push({ type: "reasoning", origin: "anthropic", text: "", redacted: true, signature: b.data != null ? String(b.data) : undefined });
         break;
-      case "text":
+      case BLOCK.TEXT:
         parts.push({ type: "text", text: String(b.text ?? ""), ...cc });
         break;
-      case "image":
+      case BLOCK.IMAGE:
         parts.push({ type: "image", source: parseImageSource(b.source), ...cc });
         break;
-      case "document": {
+      case BLOCK.DOCUMENT: {
         const src = (b.source ?? {}) as Record<string, unknown>;
         const title = b.title != null ? String(b.title) : undefined;
-        if (src.type === "url") parts.push({ type: "file", source: { kind: "url", url: String(src.url ?? "") }, name: title, ...cc });
-        else if (src.type === "text") parts.push({ type: "text", text: String(src.data ?? ""), ...cc });
+        if (src.type === SOURCE.URL) parts.push({ type: "file", source: { kind: "url", url: String(src.url ?? "") }, name: title, ...cc });
+        else if (src.type === SOURCE.TEXT) parts.push({ type: "text", text: String(src.data ?? ""), ...cc });
         // A handle into Anthropic's own Files API. Kept like the other families'
         // ids: replayed verbatim here, and refused loudly elsewhere rather than
         // dropped, which would send the prompt on without its attachment.
-        else if (src.type === "file" && typeof src.file_id === "string" && src.file_id) {
+        else if (src.type === SOURCE.FILE && typeof src.file_id === "string" && src.file_id) {
           parts.push({ type: "file", source: { kind: "file_id", id: src.file_id, family: "anthropic" }, name: title, ...cc });
         }
-        else if (src.type !== "base64") throw new FormatConversionError(`unsupported Anthropic document source: ${String(src.type)}`);
-        else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? "application/pdf"), data: String(src.data) }, name: title, ...cc });
+        else if (src.type !== SOURCE.BASE64) throw new FormatConversionError(`unsupported Anthropic document source: ${String(src.type)}`);
+        else if (src.data != null) parts.push({ type: "file", source: { kind: "base64", mediaType: String(src.media_type ?? DEFAULT_FILE_MEDIA_TYPE), data: String(src.data) }, name: title, ...cc });
         else throw new FormatConversionError("Anthropic base64 document source is missing data");
         break;
       }
-      case "tool_use":
-        parts.push({ type: "tool_use", id: String(b.id ?? genId("toolu")), name: String(b.name ?? ""), input: b.input ?? {}, ...cc });
+      case BLOCK.TOOL_USE:
+        parts.push({ type: "tool_use", id: String(b.id ?? genId(ID_PREFIX.TOOL_USE)), name: String(b.name ?? ""), input: b.input ?? {}, ...cc });
         break;
-      case "tool_result":
+      case BLOCK.TOOL_RESULT:
         parts.push({
           type: "tool_result",
           toolUseId: String(b.tool_use_id ?? ""),
@@ -141,11 +357,11 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
       // A provider-executed pair replayed by a client that received it from us.
       // Kept so a continuation (previous_response_id / full-history resend) does
       // not lose, or silently reduce to text, what the client is showing.
-      case "server_tool_use": {
+      case BLOCK.SERVER_TOOL_USE: {
         // Back from a client as a pending call: the proxy executes it. It pairs
         // with the result block below when one is present, and is a plain
         // provider-executed call when the turn paused before any result existed.
-        const call: ToolUsePart = { type: "tool_use", id: String(b.id ?? genId("srv")), name: String(b.name ?? ""), input: b.input ?? {}, serverTool: true };
+        const call: ToolUsePart = { type: "tool_use", id: String(b.id ?? genId(ID_PREFIX.SERVER_TOOL)), name: String(b.name ?? ""), input: b.input ?? {}, serverTool: true };
         pendingUses.set(call.id, call);
         parts.push(call);
         break;
@@ -153,14 +369,11 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
       // Any provider-executed result block. Its own `type` is the contract, so a
       // tool configured for another result shape replays without this wire
       // needing to know that shape in advance.
-      case "web_search_result":
-      case "web_search_tool_result":
-      case "server_tool_result": {
+      case BLOCK.SERVER_TOOL_RESULT: {
         const id = String(b.tool_use_id ?? "");
         // This wire reports failure as its own object rather than an entry
         // array, so the code survives a replay as a code, not as empty results.
-        const error = b.content !== null && typeof b.content === "object" && !Array.isArray(b.content)
-          ? (b.content as { error_code?: unknown }).error_code : undefined;
+        const errorCode = serverResultErrorCode(b.content);
         const content = Array.isArray(b.content) ? b.content : [];
         const call = pendingUses.get(id);
         const callIndex = parts.findIndex(p => p.type === "tool_use" && p.serverTool && p.id === id);
@@ -170,12 +383,12 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
         parts.push({
           type: "server_tool_result",
           family: "anthropic",
-          id: id || genId("srvtoolu"),
-          name: call?.name ?? "server_tool",
+          id: id || genId(ID_PREFIX.SERVER_TOOL_USE),
+          name: call?.name ?? UNKNOWN_SERVER_TOOL_NAME,
           input: call?.input ?? {},
           blockType: String(b.type),
           content,
-          ...(typeof error === "string" ? { errorCode: error } : {}),
+          ...(errorCode !== undefined ? { errorCode } : {}),
         });
         break;
       }
@@ -194,15 +407,12 @@ function blocksToParts(content: unknown, pendingUses: Map<string, ToolUsePart> =
 function documentSource(source: FileSource): unknown {
   switch (source.kind) {
     case "url":
-      return { type: "url", url: source.url };
+      return { type: SOURCE.URL, url: source.url };
     case "base64":
-      return { type: "base64", media_type: source.mediaType, data: source.data };
+      return { type: SOURCE.BASE64, media_type: source.mediaType, data: source.data };
     case "file_id":
-      if (source.family === "anthropic") return { type: "file", file_id: source.id };
-      throw new FormatConversionError(
-        `cannot send a ${source.family} file_id ("${source.id}") to an Anthropic provider: ` +
-          `a file id only resolves in the API that issued it`,
-      );
+      if (source.family === "anthropic") return { type: SOURCE.FILE, file_id: source.id };
+      throw foreignFileIdError(source, PROVIDER_LABEL);
   }
 }
 
@@ -213,23 +423,23 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
   for (const p of parts) {
     switch (p.type) {
       case "text":
-        blocks.push({ type: "text", text: p.text, ...cc(p) });
+        blocks.push({ type: BLOCK.TEXT, text: p.text, ...cc(p) });
         break;
       case "reasoning":
         // Foreign opaque data cannot verify on this upstream. Keep readable text only.
-        if (p.signature && p.origin && p.origin !== "anthropic") {
-          if (p.text) blocks.push({ type: "text", text: p.text });
+        if (p.signature && !isOwnOrigin(p, "anthropic")) {
+          if (p.text) blocks.push({ type: BLOCK.TEXT, text: p.text });
           break;
         }
-        if (p.redacted) blocks.push({ type: "redacted_thinking", data: p.signature ?? "" });
-        else blocks.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.signature } : {}) });
+        if (p.redacted) blocks.push({ type: BLOCK.REDACTED_THINKING, data: p.signature ?? "" });
+        else blocks.push({ type: BLOCK.THINKING, thinking: p.text, ...(p.signature ? { signature: p.signature } : {}) });
         break;
       case "image":
-        blocks.push({ type: "image", source: imageSourceToBlock(p.source), ...cc(p) });
+        blocks.push({ type: BLOCK.IMAGE, source: imageSourceToBlock(p.source), ...cc(p) });
         break;
       case "file":
         blocks.push({
-          type: "document",
+          type: BLOCK.DOCUMENT,
           source: documentSource(p.source),
           ...(p.name ? { title: p.name } : {}),
           ...cc(p),
@@ -237,18 +447,19 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
         break;
       case "server_tool_result":
         if (p.family === "anthropic") {
-          blocks.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input });
-          if (!p.notExecuted) blocks.push({ type: p.blockType, tool_use_id: p.id, content: p.errorCode !== undefined ? { type: `${p.blockType.includes("_tool_") ? p.blockType : p.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: p.errorCode } : p.content });
+          blocks.push({ type: BLOCK.SERVER_TOOL_USE, id: p.id, name: p.name, input: p.input });
+          // Bound for the upstream, so without the `caller` a client is shown.
+          if (!p.notExecuted) blocks.push({ type: p.blockType, tool_use_id: p.id, content: serverResultContent(p.blockType, p.content, p.errorCode) });
         }
         break;
       case "opaque":
         if (p.family === "anthropic") blocks.push(p.value);
         break; // another family's private part; nothing Anthropic can carry
       case "tool_use":
-        blocks.push({ type: p.serverTool ? "server_tool_use" : "tool_use", id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
+        blocks.push({ type: p.serverTool ? BLOCK.SERVER_TOOL_USE : BLOCK.TOOL_USE, id: p.id, name: p.name, input: p.input ?? {}, ...cc(p) });
         break;
       case "tool_result":
-        blocks.push({ type: "tool_result", tool_use_id: p.toolUseId, content: partsToBlocks(p.content), ...(p.isError ? { is_error: true } : {}), ...cc(p) });
+        blocks.push({ type: BLOCK.TOOL_RESULT, tool_use_id: p.toolUseId, content: partsToBlocks(p.content), ...(p.isError ? { is_error: true } : {}), ...cc(p) });
         break;
     }
   }
@@ -257,29 +468,21 @@ function partsToBlocks(parts: ContentPart[]): unknown[] {
 
 // --- tools ---------------------------------------------------------------
 
-function parseTools(raw: unknown): Tool[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const tools: Tool[] = [];
-  for (const t of raw) {
-    if (!t || typeof t !== "object") continue;
-    const tool = t as Record<string, unknown>;
-    // A server-side tool (web_search_20250305, bash, computer use, ...) has a
-    // `type` and no input_schema: keep it verbatim for same-family replay
-    // instead of mangling it into an empty-schema client tool.
-    if (tool.type && tool.input_schema == null) {
-      tools.push({ name: String(tool.name ?? tool.type), parameters: {}, raw: { family: "anthropic", value: t } });
-      continue;
-    }
-    if (!tool.name) continue;
-    tools.push({
-      name: String(tool.name),
-      description: tool.description ? String(tool.description) : undefined,
-      parameters: (tool.input_schema as Record<string, unknown>) ?? { type: "object", properties: {} },
-      ...(tool.cache_control != null ? { cacheControl: tool.cache_control } : {}),
-    });
-  }
-  return tools.length ? tools : undefined;
-}
+/**
+ * A server-side tool (web_search_20250305, bash, computer use, ...) has a
+ * `type` and no input_schema: kept verbatim for same-family replay instead of
+ * mangled into an empty-schema client tool. Anything else is a client tool when
+ * it has a name, and is dropped when it has none.
+ */
+const isServerTool = (tool: Record<string, unknown>): boolean => Boolean(tool.type) && tool.input_schema == null;
+const TOOL_WIRE: ToolWire = {
+  family: "anthropic",
+  functionFields: (tool) => (!isServerTool(tool) && tool.name ? tool : undefined),
+  schemaKey: "input_schema",
+  extras: (tool) => (tool.cache_control != null ? { cacheControl: tool.cache_control } : {}),
+  nativeName: (tool) => (isServerTool(tool) ? String(tool.name ?? tool.type) : undefined),
+  render: (t) => ({ name: t.name, description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }),
+};
 
 /** Anthropic's parallel-tools switch lives inside tool_choice. */
 function parseDisableParallel(raw: unknown): boolean | undefined {
@@ -292,13 +495,13 @@ function parseToolChoice(raw: unknown): ToolChoice | undefined {
   if (raw == null || typeof raw !== "object") return undefined;
   const c = raw as Record<string, unknown>;
   switch (c.type) {
-    case "auto":
+    case TOOL_CHOICE.AUTO:
       return { type: "auto" };
-    case "any":
+    case TOOL_CHOICE.ANY:
       return { type: "required" };
-    case "none":
+    case TOOL_CHOICE.NONE:
       return { type: "none" };
-    case "tool":
+    case TOOL_CHOICE.TOOL:
       return c.name ? { type: "tool", name: String(c.name) } : { type: "required" };
     default:
       return undefined;
@@ -308,13 +511,13 @@ function parseToolChoice(raw: unknown): ToolChoice | undefined {
 function toolChoiceToAnthropic(choice: ToolChoice): unknown {
   switch (choice.type) {
     case "auto":
-      return { type: "auto" };
+      return { type: TOOL_CHOICE.AUTO };
     case "none":
-      return { type: "none" };
+      return { type: TOOL_CHOICE.NONE };
     case "required":
-      return { type: "any" };
+      return { type: TOOL_CHOICE.ANY };
     case "tool":
-      return { type: "tool", name: choice.name };
+      return { type: TOOL_CHOICE.TOOL, name: choice.name };
   }
 }
 
@@ -330,8 +533,7 @@ function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined
   }
   if (cfg.type === "adaptive") {
     const effort = (body.output_config as Record<string, unknown> | undefined)?.effort;
-    if (effort === "minimal" || effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") return effort;
-    return "enabled";
+    return isEffortLevel(effort) ? effort : "enabled";
   }
   return undefined;
 }
@@ -354,10 +556,11 @@ const RESERVED = new Set([
 
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
-  if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
-  if (numOrUndef(body.top_p) != null) params.topP = numOrUndef(body.top_p);
-  if (numOrUndef(body.top_k) != null) params.topK = numOrUndef(body.top_k);
-  if (numOrUndef(body.max_tokens) != null) params.maxTokens = numOrUndef(body.max_tokens);
+  const set = paramSetter(params);
+  set("temperature", numOrUndef(body.temperature));
+  set("topP", numOrUndef(body.top_p));
+  set("topK", numOrUndef(body.top_k));
+  set("maxTokens", numOrUndef(body.max_tokens));
   if (Array.isArray(body.stop_sequences)) params.stop = body.stop_sequences.map(String);
   const disableParallel = parseDisableParallel(body.tool_choice);
   if (disableParallel != null) params.parallelToolCalls = !disableParallel;
@@ -365,31 +568,26 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   // it survives a cross-family hop (same-family metadata still rides passthrough).
   const meta = body.metadata as Record<string, unknown> | undefined;
   if (meta && typeof meta.user_id === "string" && meta.user_id) params.user = meta.user_id;
-  const thinking = parseThinking(body);
-  if (thinking) params.thinking = thinking;
+  set("thinking", parseThinking(body));
   if (body.thinking && typeof body.thinking === "object" && !Array.isArray(body.thinking)) {
     params.anthropicThinking = { ...body.thinking as Record<string, unknown> };
   }
   // `metadata` (and any other unmodeled key) rides the family-scoped passthrough,
   // not `extra`: it is an Anthropic-shaped field, so it must reach only Anthropic
   // providers -- `extra` applies to every family and would leak it to OpenAI.
-  const passthrough = collectPassthrough(body, RESERVED, "anthropic");
-  if (passthrough) params.passthrough = passthrough;
+  set("passthrough", collectPassthrough(body, RESERVED, "anthropic"));
   return params;
 }
 
-export class AnthropicRequest extends Request {
+export class AnthropicRequest extends WireRequest {
   readonly family = "anthropic" as const;
 
   static parse(body: Record<string, unknown>): AnthropicRequest {
-    const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const messages: Message[] = [];
     // Server-tool uses and their results are separate messages, so pairing them
     // needs the whole request, not one message's block list.
     const pendingServerTools = new Map<string, ToolUsePart>();
-    for (const raw of rawMessages) {
-      if (!raw || typeof raw !== "object") continue;
-      const m = raw as Record<string, unknown>;
+    for (const m of objectsIn(body.messages)) {
       const role = m.role === "assistant" ? "assistant" : "user";
       messages.push({ role, content: blocksToParts(m.content, pendingServerTools) });
     }
@@ -403,7 +601,7 @@ export class AnthropicRequest extends Request {
       // Reasoning is NOT stripped here: what a target may be sent back is the
       // egress family's rule, applied in render().
       messages: normalizeMessages(messages),
-      tools: parseTools(body.tools),
+      tools: parseToolList(body.tools, TOOL_WIRE),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),
       stream: Boolean(body.stream),
@@ -429,8 +627,8 @@ export class AnthropicRequest extends Request {
       const hasOwn = blocks.some((b) => b.cache_control != null);
       for (let i = blocks.length - 1; i >= 0 && !hasOwn; i--) {
         const b = blocks[i];
-        if (b.type === "thinking" || b.type === "redacted_thinking") continue;
-        b.cache_control = { type: "ephemeral", ...((p.cacheTtlMinutes ?? 30) > 5 ? { ttl: "1h" } : {}) };
+        if (b.type === BLOCK.THINKING || b.type === BLOCK.REDACTED_THINKING) continue;
+        b.cache_control = { type: CACHE_CONTROL_EPHEMERAL, ...((p.cacheTtlMinutes ?? DEFAULT_PROMPT_CACHE_TTL_MINUTES) > SHORT_CACHE_TTL_MINUTES ? { ttl: LONG_CACHE_TTL } : {}) };
         break;
       }
     }
@@ -449,25 +647,17 @@ export class AnthropicRequest extends Request {
     const replayable = this.systemBlocks && systemToText(this.systemBlocks) === this.system;
     if (replayable) out.system = this.systemBlocks;
     else if (this.system) out.system = this.system;
-    if (this.tools) {
-      // Same-family server tools replay verbatim; another family's are dropped
-      // (they cannot be expressed here) rather than sent as empty client tools.
-      const rendered = this.tools
-        .filter((t) => !t.raw || t.raw.family === "anthropic")
-        .map((t) => (t.raw ? t.raw.value : { name: t.name, description: t.description, input_schema: t.parameters, ...(t.cacheControl != null ? { cache_control: t.cacheControl } : {}) }));
-      if (rendered.length) out.tools = rendered;
-    }
+    const tools = renderToolList(this.tools, TOOL_WIRE);
+    if (tools) out.tools = tools;
     if (this.toolChoice) out.tool_choice = toolChoiceToAnthropic(this.toolChoice);
     // OpenAI's parallel_tool_calls=false translates to this wire's
     // tool_choice.disable_parallel_tool_use (tool_choice defaults to auto).
     if (p.parallelToolCalls === false) {
-      const tc = (out.tool_choice ?? { type: "auto" }) as Record<string, unknown>;
-      if (tc.type === "auto" || tc.type === "any" || tc.type === "tool") out.tool_choice = { ...tc, disable_parallel_tool_use: true };
+      const tc = (out.tool_choice ?? { type: TOOL_CHOICE.AUTO }) as Record<string, unknown>;
+      if (tc.type === TOOL_CHOICE.AUTO || tc.type === TOOL_CHOICE.ANY || tc.type === TOOL_CHOICE.TOOL) out.tool_choice = { ...tc, disable_parallel_tool_use: true };
     }
-    // Anthropic's sampling ranges are narrower than OpenAI's (temperature 0..1
-    // vs 0..2); clamp instead of letting the upstream 400 the whole request.
-    if (p.temperature != null) out.temperature = Math.min(Math.max(p.temperature, 0), 1);
-    if (p.topP != null) out.top_p = Math.min(Math.max(p.topP, 0), 1);
+    if (p.temperature != null) out.temperature = clampSampling(p.temperature);
+    if (p.topP != null) out.top_p = clampSampling(p.topP);
     if (p.topK != null) out.top_k = p.topK;
     if (p.stop && p.stop.length) out.stop_sequences = p.stop;
     if (this.stream) out.stream = true;
@@ -476,7 +666,7 @@ export class AnthropicRequest extends Request {
     if (p.responseFormat && p.responseFormat.type !== "text") {
       const schema = p.responseFormat.type === "json_schema" ? ` matching this JSON Schema: ${JSON.stringify(p.responseFormat.schema)}` : "";
       const jsonNote = `Respond ONLY with a valid JSON object${schema}. No prose, no markdown fences.`;
-      out.system = this.system ? `${this.system}\n\n${jsonNote}` : jsonNote;
+      out.system = this.system ? `${this.system}${SYSTEM_SEPARATOR}${jsonNote}` : jsonNote;
     }
 
     // `thinking` is emitted ONLY when a level was actually set -- by the client
@@ -529,48 +719,30 @@ export class AnthropicRequest extends Request {
     }
     return out;
   }
-
-  /** Rebuild any canonical Request as an Anthropic Messages request. */
-  static construct(base: Request): AnthropicRequest {
-    return new AnthropicRequest(base.data());
-  }
-
-  send(transport: Transport, target: SendTarget): Promise<SendResult> {
-    return sendBuffered(this, transport, target);
-  }
-
-  relay(transport: Transport, target: SendTarget): Promise<RelayResult> {
-    return relayStream(this, transport, target);
-  }
 }
 
 export class AnthropicResponse extends Response {
   readonly family = "anthropic" as const;
 
+  static isEnvelope(body: Record<string, unknown>): boolean {
+    return Array.isArray(body.content);
+  }
+
   static parse(body: Record<string, unknown>): AnthropicResponse {
     const content = blocksToParts(body.content).filter(
       (p) => p.type === "text" || p.type === "tool_use" || p.type === "reasoning" || p.type === "server_tool_result",
     );
-    const usage = (body.usage ?? {}) as Record<string, unknown>;
-    const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
-    const reasoningTokens = thinkingTokens(usage);
-    const cachedInputTokens = numOrUndef(usage.cache_read_input_tokens);
-    const cacheCreationInputTokens = numOrUndef(usage.cache_creation_input_tokens);
     // This wire reports `input_tokens` EXCLUSIVE of both cache counters; the
     // canonical prompt count includes them (ir/usage.ts).
-    const promptTokens = foldCacheIntoPrompt(numOrUndef(usage.input_tokens) ?? 0, cachedInputTokens, cacheCreationInputTokens);
+    const usage = new UsageCounters();
+    usage.absorb((body.usage ?? {}) as Record<string, unknown>, COUNT_FIRST);
     return new AnthropicResponse({
-      id: String(body.id ?? genId("msg")),
+      id: String(body.id ?? genId(ID_PREFIX.MESSAGE)),
       model: String(body.model ?? ""),
       created: nowSeconds(),
       content,
       stopReason: stopReasonToStop(body.stop_reason as string | null),
-      usage: {
-        promptTokens, completionTokens, totalTokens: promptTokens + completionTokens,
-        ...(reasoningTokens != null ? { reasoningTokens } : {}),
-        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
-        ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
-      },
+      usage: usage.toUsage(),
     });
   }
 
@@ -581,69 +753,43 @@ export class AnthropicResponse extends Response {
     const content: unknown[] = [];
     for (const p of this.content) {
       if (p.type === "reasoning") {
-        if (p.redacted) content.push({ type: "redacted_thinking", data: p.signature ?? "" });
-        else content.push({ type: "thinking", thinking: p.text, ...(p.signature ? { signature: p.origin && p.origin !== "anthropic" ? encodeReasoning(p) : p.signature } : {}) });
+        if (p.redacted) content.push({ type: BLOCK.REDACTED_THINKING, data: p.signature ?? "" });
+        else content.push({ type: BLOCK.THINKING, thinking: p.text, ...(p.signature ? { signature: clientSignature(p, "anthropic") } : {}) });
       }
-      else if (p.type === "text") content.push({ type: "text", text: p.text });
+      else if (p.type === "text") content.push({ type: BLOCK.TEXT, text: p.text });
       else if (p.type === "tool_use") content.push(p.serverTool
-        ? { type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } }
-        : { type: "tool_use", id: p.id, name: p.name, input: p.input ?? {} });
+        ? serverToolUseBlock(p.id, p.name, p.input)
+        : { type: BLOCK.TOOL_USE, id: p.id, name: p.name, input: p.input ?? {} });
       else if (p.type === "server_tool_result") {
         // Two blocks, in the order this wire defines: the call the provider made,
         // then its result in the SAME assistant turn, paired by tool_use_id.
-        // `blockType` comes from the tool's own contract, so this renderer
-        // carries any result shape an adapter and operator agree on.
-        content.push({ type: "server_tool_use", id: p.id, name: p.name, input: p.input ?? {}, caller: { type: "direct" } });
+        content.push(serverToolUseBlock(p.id, p.name, p.input));
         // A call a pause declined to run stays pending: the call block with no
         // result after it is the shape a client continues from, and inventing an
         // outcome would name a failure that never happened.
         if (p.notExecuted) continue;
-        // This wire models failure as its own content object, not as an array:
-        // an error can therefore never be mistaken for an empty result set. The
-        // code comes from the adapter when it named one.
-        content.push({
-          type: p.blockType,
-          tool_use_id: p.id,
-          caller: { type: "direct" },
-          content: p.errorCode !== undefined
-            ? { type: `${p.blockType.includes("_tool_") ? p.blockType : p.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: p.errorCode }
-            : p.content,
-        });
+        content.push(serverToolResultBlock(p));
       }
     }
-    if (content.length === 0) content.push({ type: "text", text: "" });
+    if (content.length === 0) content.push({ type: BLOCK.TEXT, text: "" });
     return {
       id: this.id,
-      type: "message",
-      role: "assistant",
+      type: MESSAGE_OBJECT,
+      role: ROLE_ASSISTANT,
       model,
       content,
       stop_reason: stopToAnthropic(this.stopReason),
       stop_sequence: null,
-      usage: {
-        // Back to this wire's exclusive convention: its clients add the three
-        // together, so leaving the cache share inside input_tokens would make
-        // every cached turn count twice.
-        input_tokens: uncachedPromptTokens(this.usage), output_tokens: this.usage.completionTokens,
-        ...(this.usage.reasoningTokens != null ? { output_tokens_details: { thinking_tokens: this.usage.reasoningTokens } } : {}),
-        ...(this.usage.cachedInputTokens != null ? { cache_read_input_tokens: this.usage.cachedInputTokens } : {}),
-        ...(this.usage.cacheCreationInputTokens != null ? { cache_creation_input_tokens: this.usage.cacheCreationInputTokens } : {}),
-      },
+      // Back to this wire's exclusive convention: its clients add the three
+      // together, so leaving the cache share inside input_tokens would make
+      // every cached turn count twice.
+      usage: usageToWire(uncachedPromptTokens(this.usage), this.usage.completionTokens, this.usage.cachedInputTokens, this.usage.cacheCreationInputTokens, this.usage.reasoningTokens),
     };
   }
 
   static async *parseStream(readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent> {
     let stopReason: StopReason = null;
-    // The uncached remainder as this wire reports it; folded into the
-    // canonical inclusive count at every point one leaves this parser.
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let reasoningTokens: number | undefined;
-    let cachedInputTokens: number | undefined;
-    // Cache WRITES are reported here too, and were the one usage field the
-    // streaming path dropped while the buffered path kept it -- so the same
-    // request billed a cache write invisibly when it streamed.
-    let cacheCreationInputTokens: number | undefined;
+    const usage = new UsageCounters();
     const toolBlocks = new Set<number>();
     const serverBlocks = new Map<number, { id: string; name: string; input: unknown; args: string }>();
     const serverNames = new Map<string, string>();
@@ -654,48 +800,42 @@ export class AnthropicResponse extends Response {
     const thinkingBlocks = new Map<number, { signature?: string; redacted?: boolean }>();
 
     for await (const frame of parseSSE(readable)) {
-      const data = safeParseJson(frame.data);
+      const data = parseSseJson(frame.data);
       if (!data) continue;
       const type = frame.event ?? String(data.type ?? "");
 
       switch (type) {
-        case "message_start": {
+        case EVENT.MESSAGE_START: {
           const message = (data.message ?? {}) as Record<string, unknown>;
-          const usage = (message.usage ?? {}) as Record<string, unknown>;
-          inputTokens = num(usage.input_tokens);
-          outputTokens = num(usage.output_tokens);
-          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
-          if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
-          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
+          usage.absorb((message.usage ?? {}) as Record<string, unknown>, COUNT_FIRST);
           yield {
             type: "start",
-            id: String(message.id ?? genId("msg")),
+            id: String(message.id ?? genId(ID_PREFIX.MESSAGE)),
             model: String(message.model ?? ""),
             created: nowSeconds(),
-            inputTokens: foldCacheIntoPrompt(inputTokens, cachedInputTokens, cacheCreationInputTokens),
-            ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
-            ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+            inputTokens: usage.promptTokens(),
+            ...cacheCounters(usage.cacheRead, usage.cacheWrite),
           };
           break;
         }
-        case "content_block_start": {
+        case EVENT.CONTENT_BLOCK_START: {
           const index = num(data.index);
           const block = (data.content_block ?? {}) as Record<string, unknown>;
-          if (block.type === "server_tool_use") {
-            const call = { id: String(block.id ?? genId("srv")), name: String(block.name ?? ""), input: block.input ?? {}, args: "" };
+          if (block.type === BLOCK.SERVER_TOOL_USE) {
+            const call = { id: String(block.id ?? genId(ID_PREFIX.SERVER_TOOL)), name: String(block.name ?? ""), input: block.input ?? {}, args: "" };
             serverBlocks.set(index, call);
             serverNames.set(call.id, call.name);
-          } else if (typeof block.type === "string" && (block.type.endsWith("_tool_result") || block.type === "web_search_result" || block.type === "server_tool_result")) {
+          } else if (isServerResultBlockType(block.type)) {
             const id = String(block.tool_use_id ?? "");
-            const errorCode = (block.content as { error_code?: unknown } | null)?.error_code;
-            yield { type: "server_tool_result", family: "anthropic", id, name: serverNames.get(id) ?? "server_tool", blockType: String(block.type), content: Array.isArray(block.content) ? block.content : [], ...(typeof errorCode === "string" ? { errorCode } : {}) };
-          } else if (block.type === "tool_use") {
+            const errorCode = serverResultErrorCode(block.content);
+            yield { type: "server_tool_result", family: "anthropic", id, name: serverNames.get(id) ?? UNKNOWN_SERVER_TOOL_NAME, blockType: block.type, content: Array.isArray(block.content) ? block.content : [], ...(errorCode !== undefined ? { errorCode } : {}) };
+          } else if (block.type === BLOCK.TOOL_USE) {
             toolBlocks.add(index);
-            yield { type: "tool_start", index, id: String(block.id ?? genId("toolu")), name: String(block.name ?? "") };
-          } else if (block.type === "text") {
+            yield { type: "tool_start", index, id: String(block.id ?? genId(ID_PREFIX.TOOL_USE)), name: String(block.name ?? "") };
+          } else if (block.type === BLOCK.TEXT) {
             if (typeof block.text === "string" && block.text) yield { type: "text_delta", text: block.text };
-          } else if (block.type === "thinking" || block.type === "redacted_thinking") {
-            const redacted = block.type === "redacted_thinking";
+          } else if (block.type === BLOCK.THINKING || block.type === BLOCK.REDACTED_THINKING) {
+            const redacted = block.type === BLOCK.REDACTED_THINKING;
             const data = redacted && typeof block.data === "string" && block.data ? block.data : undefined;
             thinkingBlocks.set(index, { signature: data ?? (typeof block.signature === "string" ? block.signature : undefined), redacted });
             yield { type: "reasoning_start", origin: "anthropic", ...(redacted ? { redacted: true, signature: data } : {}) };
@@ -703,28 +843,28 @@ export class AnthropicResponse extends Response {
           }
           break;
         }
-        case "content_block_delta": {
+        case EVENT.CONTENT_BLOCK_DELTA: {
           const index = num(data.index);
           const delta = (data.delta ?? {}) as Record<string, unknown>;
-          if (delta.type === "text_delta" && typeof delta.text === "string") yield { type: "text_delta", text: delta.text };
-          else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") yield { type: "reasoning_delta", text: delta.thinking };
-          else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+          if (delta.type === DELTA.TEXT && typeof delta.text === "string") yield { type: "text_delta", text: delta.text };
+          else if (delta.type === DELTA.THINKING && typeof delta.thinking === "string") yield { type: "reasoning_delta", text: delta.thinking };
+          else if (delta.type === DELTA.SIGNATURE && typeof delta.signature === "string") {
             const tb = thinkingBlocks.get(index);
             if (tb) tb.signature = (tb.signature ?? "") + delta.signature;
           }
-          else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+          else if (delta.type === DELTA.INPUT_JSON && typeof delta.partial_json === "string") {
             const call = serverBlocks.get(index);
             if (call) call.args += delta.partial_json;
             else yield { type: "tool_args_delta", index, delta: delta.partial_json };
           }
           break;
         }
-        case "content_block_stop": {
+        case EVENT.CONTENT_BLOCK_STOP: {
           const index = num(data.index);
           if (serverBlocks.has(index)) {
             const call = serverBlocks.get(index)!;
             serverBlocks.delete(index);
-            yield { type: "server_tool_start", family: "anthropic", id: call.id, name: call.name, input: call.args ? safeJsonParse(call.args) : call.input };
+            yield { type: "server_tool_start", family: "anthropic", id: call.id, name: call.name, input: call.args ? parseToolArguments(call.args) : call.input };
           } else if (toolBlocks.has(index)) {
             toolBlocks.delete(index);
             yield { type: "tool_stop", index };
@@ -736,32 +876,16 @@ export class AnthropicResponse extends Response {
           }
           break;
         }
-        case "message_delta": {
+        case EVENT.MESSAGE_DELTA: {
           const delta = (data.delta ?? {}) as Record<string, unknown>;
           if (delta.stop_reason) stopReason = stopReasonToStop(delta.stop_reason as string);
-          const usage = (data.usage ?? {}) as Record<string, unknown>;
-          if (usage.output_tokens != null) outputTokens = num(usage.output_tokens);
-          // Some providers report the real prompt count -- and the cache
-          // counters -- only here, at the end.
-          if (numOrUndef(usage.input_tokens) != null) inputTokens = num(usage.input_tokens);
-          if (thinkingTokens(usage) != null) reasoningTokens = thinkingTokens(usage);
-          if (numOrUndef(usage.cache_read_input_tokens) != null) cachedInputTokens = num(usage.cache_read_input_tokens);
-          if (numOrUndef(usage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(usage.cache_creation_input_tokens);
-          yield { type: "usage", usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens) };
+          usage.absorb((data.usage ?? {}) as Record<string, unknown>, COUNT_DELTA);
+          yield { type: "usage", usage: usage.toUsage() };
           break;
         }
-        case "message_stop": {
-          const stopUsage = (data.usage ?? {}) as Record<string, unknown>;
-          if (thinkingTokens(stopUsage) != null) reasoningTokens = thinkingTokens(stopUsage);
-          if (numOrUndef(stopUsage.cache_read_input_tokens) != null) cachedInputTokens = num(stopUsage.cache_read_input_tokens);
-          if (numOrUndef(stopUsage.cache_creation_input_tokens) != null) cacheCreationInputTokens = num(stopUsage.cache_creation_input_tokens);
-          if (numOrUndef(stopUsage.output_tokens) != null) outputTokens = num(stopUsage.output_tokens);
-          if (numOrUndef(stopUsage.input_tokens) != null) inputTokens = num(stopUsage.input_tokens);
-          yield {
-            type: "finish",
-            stopReason,
-            usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens),
-          };
+        case EVENT.MESSAGE_STOP: {
+          usage.absorb((data.usage ?? {}) as Record<string, unknown>, COUNT_STOP);
+          yield { type: "finish", stopReason, usage: usage.toUsage() };
           return;
         }
         default:
@@ -769,11 +893,11 @@ export class AnthropicResponse extends Response {
       }
     }
     // Reached only when the stream ended without a message_stop -- truncated.
-    yield { type: "finish", stopReason, usage: usageOf(inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens), incomplete: true };
+    yield { type: "finish", stopReason, usage: usage.toUsage(), incomplete: true };
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
-    let id = genId("msg");
+    let id = genId(ID_PREFIX.MESSAGE);
     const model = ctx.model;
     // Held in this wire's own exclusive form, so every frame that states them
     // states the split its clients expect.
@@ -797,18 +921,42 @@ export class AnthropicResponse extends Response {
     const serverToolIndexes = new Map<string, number>();
 
     const frame = (event: string, data: Record<string, unknown>): string =>
-      `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`;
+      sseFrame(JSON.stringify({ type: event, ...data }), event);
 
     function* closeText(): Generator<string> {
       if (!textOpen) return;
-      yield frame("content_block_stop", { index: textIndex });
+      yield frame(EVENT.CONTENT_BLOCK_STOP, { index: textIndex });
       textOpen = false;
     }
     function* closeReasoning(): Generator<string> {
       if (!reasoningOpen) return;
-      yield frame("content_block_stop", { index: reasoningIndex });
+      yield frame(EVENT.CONTENT_BLOCK_STOP, { index: reasoningIndex });
       reasoningOpen = false;
       reasoningRedacted = false;
+    }
+    /** Open a thinking block unless one already is. `redactedData` set means a redacted block, which carries its bytes up front. */
+    function* openReasoning(redactedData?: string): Generator<string> {
+      if (reasoningOpen) return;
+      reasoningIndex = nextIndex++;
+      reasoningOpen = true;
+      reasoningText = "";
+      reasoningRedacted = redactedData !== undefined;
+      yield frame(EVENT.CONTENT_BLOCK_START, {
+        index: reasoningIndex,
+        content_block: redactedData !== undefined
+          ? { type: BLOCK.REDACTED_THINKING, data: redactedData }
+          : { type: BLOCK.THINKING, thinking: "" },
+      });
+    }
+    /** Open a block for a tool call. Any open thinking/text block is closed first: overlapping content
+     * blocks make a strict Anthropic client drop the unclosed one (e.g. the thinking block on a text-less,
+     * tool-only response). `onIndex` receives the new block's index before its start frame goes out. */
+    function* openToolBlock(block: Record<string, unknown>, onIndex: (index: number) => void): Generator<string> {
+      yield* closeReasoning();
+      yield* closeText();
+      const index = nextIndex++;
+      onIndex(index);
+      yield frame(EVENT.CONTENT_BLOCK_START, { index, content_block: block });
     }
 
     for await (const ev of events) {
@@ -824,8 +972,8 @@ export class AnthropicResponse extends Response {
             cachedInputTokens: cacheReadTokens,
             cacheCreationInputTokens: cacheWriteTokens,
           });
-          yield frame("message_start", {
-            message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: streamUsage(inputTokens, 0, cacheReadTokens, cacheWriteTokens) },
+          yield frame(EVENT.MESSAGE_START, {
+            message: { id, type: MESSAGE_OBJECT, role: ROLE_ASSISTANT, model, content: [], stop_reason: null, stop_sequence: null, usage: usageToWire(inputTokens, 0, cacheReadTokens, cacheWriteTokens) },
           });
           break;
         case "text_delta":
@@ -833,39 +981,22 @@ export class AnthropicResponse extends Response {
             yield* closeReasoning();
             textIndex = nextIndex++;
             textOpen = true;
-            yield frame("content_block_start", { index: textIndex, content_block: { type: "text", text: "" } });
+            yield frame(EVENT.CONTENT_BLOCK_START, { index: textIndex, content_block: { type: BLOCK.TEXT, text: "" } });
           }
-          yield frame("content_block_delta", { index: textIndex, delta: { type: "text_delta", text: ev.text } });
+          yield frame(EVENT.CONTENT_BLOCK_DELTA, { index: textIndex, delta: { type: DELTA.TEXT, text: ev.text } });
           break;
         case "reasoning_start":
           yield* closeText();
-          if (!reasoningOpen) {
-            reasoningIndex = nextIndex++;
-            reasoningOpen = true;
-            reasoningText = "";
-            reasoningRedacted = ev.redacted === true;
-            yield frame("content_block_start", {
-              index: reasoningIndex,
-              content_block: reasoningRedacted
-                ? { type: "redacted_thinking", data: ev.signature ?? "" }
-                : { type: "thinking", thinking: "" },
-            });
-          }
+          yield* openReasoning(ev.redacted === true ? ev.signature ?? "" : undefined);
           break;
         case "reasoning_delta":
           yield* closeText();
-          if (!reasoningOpen) {
-            reasoningIndex = nextIndex++;
-            reasoningOpen = true;
-            reasoningText = "";
-            reasoningRedacted = false;
-            yield frame("content_block_start", { index: reasoningIndex, content_block: { type: "thinking", thinking: "" } });
-          }
+          yield* openReasoning();
           // A redacted block has no readable thinking to delta; the wire form
           // carries everything it has on the block itself.
           if (!reasoningRedacted) {
             reasoningText += ev.text;
-            yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "thinking_delta", thinking: ev.text } });
+            yield frame(EVENT.CONTENT_BLOCK_DELTA, { index: reasoningIndex, delta: { type: DELTA.THINKING, thinking: ev.text } });
           }
           break;
         case "reasoning_stop":
@@ -873,58 +1004,39 @@ export class AnthropicResponse extends Response {
             // signature_delta belongs to a thinking block; a redacted block's
             // bytes already went out in its content_block_start.data.
             if (ev.signature && !reasoningRedacted) {
-              yield frame("content_block_delta", { index: reasoningIndex, delta: { type: "signature_delta", signature: ev.origin && ev.origin !== "anthropic" ? encodeReasoning({ type: "reasoning", text: reasoningText, signature: ev.signature, itemId: ev.id, origin: ev.origin }) : ev.signature } });
+              const signature = clientSignature({ type: "reasoning", text: reasoningText, signature: ev.signature, itemId: ev.id, origin: ev.origin }, "anthropic");
+              yield frame(EVENT.CONTENT_BLOCK_DELTA, { index: reasoningIndex, delta: { type: DELTA.SIGNATURE, signature } });
             }
-            yield frame("content_block_stop", { index: reasoningIndex });
-            reasoningOpen = false;
-            reasoningRedacted = false;
+            yield* closeReasoning();
           }
           break;
-        case "tool_start": {
-          // Close any open thinking/text block first; overlapping content blocks
-          // make a strict Anthropic client drop the unclosed one (e.g. the
-          // thinking block on a text-less, tool-only response).
-          yield* closeReasoning();
-          yield* closeText();
-          const idx = nextIndex++;
-          toolMap.set(ev.index, idx);
-          yield frame("content_block_start", { index: idx, content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} } });
+        case "tool_start":
+          yield* openToolBlock({ type: BLOCK.TOOL_USE, id: ev.id, name: ev.name, input: {} }, (idx) => toolMap.set(ev.index, idx));
           break;
-        }
         case "tool_args_delta": {
           const idx = toolMap.get(ev.index);
-          if (idx != null) yield frame("content_block_delta", { index: idx, delta: { type: "input_json_delta", partial_json: ev.delta } });
+          if (idx != null) yield frame(EVENT.CONTENT_BLOCK_DELTA, { index: idx, delta: { type: DELTA.INPUT_JSON, partial_json: ev.delta } });
           break;
         }
         case "tool_stop": {
           const idx = toolMap.get(ev.index);
           if (idx != null) {
-            yield frame("content_block_stop", { index: idx });
+            yield frame(EVENT.CONTENT_BLOCK_STOP, { index: idx });
             toolMap.delete(ev.index);
           }
           break;
         }
-        case "server_tool_start": {
-          yield* closeReasoning();
-          yield* closeText();
-          const idx = nextIndex++;
-          serverToolIndexes.set(ev.id, idx);
-          yield frame("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: ev.id, name: ev.name, input: ev.input ?? {}, caller: { type: "direct" } } });
+        case "server_tool_start":
+          yield* openToolBlock(serverToolUseBlock(ev.id, ev.name, ev.input), (idx) => serverToolIndexes.set(ev.id, idx));
           break;
-        }
         case "server_tool_result": {
           const idx = serverToolIndexes.get(ev.id) ?? nextIndex++;
-          if (serverToolIndexes.has(ev.id)) yield frame("content_block_stop", { index: idx });
+          if (serverToolIndexes.has(ev.id)) yield frame(EVENT.CONTENT_BLOCK_STOP, { index: idx });
           serverToolIndexes.delete(ev.id);
           if (ev.notExecuted) break;
           const resultIndex = nextIndex++;
-          yield frame("content_block_start", { index: resultIndex, content_block: {
-            type: ev.blockType,
-            tool_use_id: ev.id,
-            caller: { type: "direct" },
-            content: ev.errorCode !== undefined ? { type: `${ev.blockType.includes("_tool_") ? ev.blockType : ev.blockType.replace(/_result$/, "_tool_result")}_error`, error_code: ev.errorCode } : ev.content,
-          } });
-          yield frame("content_block_stop", { index: resultIndex });
+          yield frame(EVENT.CONTENT_BLOCK_START, { index: resultIndex, content_block: serverToolResultBlock(ev) });
+          yield frame(EVENT.CONTENT_BLOCK_STOP, { index: resultIndex });
           break;
         }
         case "finish":
@@ -933,9 +1045,9 @@ export class AnthropicResponse extends Response {
           if (ev.incomplete || ev.error) return;
           yield* closeReasoning();
           yield* closeText();
-          for (const idx of toolMap.values()) yield frame("content_block_stop", { index: idx });
+          for (const idx of toolMap.values()) yield frame(EVENT.CONTENT_BLOCK_STOP, { index: idx });
           toolMap.clear();
-          for (const idx of serverToolIndexes.values()) yield frame("content_block_stop", { index: idx });
+          for (const idx of serverToolIndexes.values()) yield frame(EVENT.CONTENT_BLOCK_STOP, { index: idx });
           serverToolIndexes.clear();
           if (ev.usage) {
             inputTokens = uncachedPromptTokens(ev.usage);
@@ -943,42 +1055,12 @@ export class AnthropicResponse extends Response {
             if (ev.usage.cachedInputTokens != null) cacheReadTokens = ev.usage.cachedInputTokens;
             if (ev.usage.cacheCreationInputTokens != null) cacheWriteTokens = ev.usage.cacheCreationInputTokens;
           }
-          yield frame("message_delta", { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: streamUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, ev.usage?.reasoningTokens) });
-          yield frame("message_stop", {});
+          yield frame(EVENT.MESSAGE_DELTA, { delta: { stop_reason: stopToAnthropic(ev.stopReason), stop_sequence: null }, usage: usageToWire(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, ev.usage?.reasoningTokens) });
+          yield frame(EVENT.MESSAGE_STOP, {});
           break;
       }
     }
   }
 }
 
-/** Canonical usage from this wire's exclusive split. */
-function usageOf(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Usage {
-  const promptTokens = foldCacheIntoPrompt(uncached, cachedRead, cacheWrite);
-  return {
-    promptTokens,
-    completionTokens: output,
-    totalTokens: promptTokens + output,
-    ...(reasoningTokens != null ? { reasoningTokens } : {}),
-    ...(cachedRead != null ? { cachedInputTokens: cachedRead } : {}),
-    ...(cacheWrite != null ? { cacheCreationInputTokens: cacheWrite } : {}),
-  };
-}
-
-/** A streamed `usage` object in this wire's exclusive split. */
-function streamUsage(uncached: number, output: number, cachedRead?: number, cacheWrite?: number, reasoningTokens?: number): Record<string, unknown> {
-  return {
-    input_tokens: uncached,
-    output_tokens: output,
-    ...(reasoningTokens != null ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}),
-    ...(cachedRead != null ? { cache_read_input_tokens: cachedRead } : {}),
-    ...(cacheWrite != null ? { cache_creation_input_tokens: cacheWrite } : {}),
-  };
-}
-
 registerFormat("anthropic", { request: AnthropicRequest, response: AnthropicResponse });
-
-export { stopReasonToStop, stopToAnthropic };
-
-function thinkingTokens(usage: Record<string, unknown>): number | undefined {
-  return numOrUndef((usage.output_tokens_details as Record<string, unknown> | undefined)?.thinking_tokens);
-}

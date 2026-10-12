@@ -16,3 +16,6 @@ export class FormatConversionError extends Error {
     this.name = "FormatConversionError";
   }
 }
+
+/** Why a file id from one family cannot be sent to another; closes each adapter's refusal message. */
+export const FILE_ID_SCOPE_NOTE = "a file id only resolves in the API that issued it";

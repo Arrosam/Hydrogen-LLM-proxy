@@ -1,9 +1,12 @@
 import { StringDecoder } from "node:string_decoder";
 import type { ContentPart, ReasoningPart, StopReason } from "./content";
-import type { Usage } from "./usage";
+import { cacheCounters, type Usage } from "./usage";
 import type { ThinkingFormat } from "./thinkingFormat";
-import { genId, nowSeconds } from "../../util/ids";
-import { num, safeJsonParse } from "../format/wire";
+import type { ServerToolFamily } from "./params";
+import { ID_PREFIX, genId, nowSeconds } from "../../util/ids";
+import { MS_PER_SECOND } from "../../util/time";
+import { DEFAULT_SIMULATED_STREAMING_TOKEN_RATE } from "../../config/defaults";
+import { parseToolArguments } from "./coerce";
 
 /**
  * Canonical streaming events. Every upstream SSE stream is parsed into this
@@ -47,11 +50,11 @@ export type StreamEvent =
   /** A provider-executed call the proxy ran itself. Distinct from `tool_start`:
    * the client is not being asked to run anything, so it must not appear in a
    * client's pending-tool bookkeeping. */
-  | { type: "server_tool_start"; family?: "anthropic" | "openai_responses"; id: string; name: string; input: unknown }
+  | { type: "server_tool_start"; family?: ServerToolFamily; id: string; name: string; input: unknown }
   /** The result half of a provider-executed round trip. `blockType` is the
    * client protocol's result block type (web_search_result, ...); `content` is
    * the adapter's entries, opaque here. */
-  | { type: "server_tool_result"; family?: "anthropic" | "openai_responses"; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean }
+  | { type: "server_tool_result"; family?: ServerToolFamily; id: string; name: string; blockType: string; content: unknown[]; errorCode?: string; notExecuted?: boolean }
   /** A cumulative accounting snapshot, retained even if the next read throws. */
   | { type: "usage"; usage: Usage }
   /** `incomplete` = the upstream stream ended without a proper terminal event
@@ -69,21 +72,36 @@ export interface StreamContext {
 
 // --- generic SSE frame parser -------------------------------------------
 
+/** Field prefixes of an SSE frame's lines. */
+const SSE_EVENT_FIELD = "event:";
+const SSE_DATA_FIELD = "data:";
+/** The `data` payload that ends a Chat Completions stream. */
+export const SSE_DONE = "[DONE]";
+
 export interface SSEFrame {
   event?: string;
   data: string;
 }
 
+/**
+ * A byte stream as text, decoded across chunk boundaries.
+ *
+ * Chunk boundaries fall wherever TCP/undici put them, which is routinely in
+ * the middle of a multi-byte character. `chunk.toString("utf8")` decodes each
+ * chunk in isolation and replaces the split character with U+FFFD; the
+ * StringDecoder carries the incomplete tail bytes into the next chunk instead.
+ */
+export async function* decodeUtf8(readable: AsyncIterable<Buffer | string>): AsyncGenerator<string> {
+  const decoder = new StringDecoder("utf8");
+  for await (const chunk of readable) yield typeof chunk === "string" ? chunk : decoder.write(chunk);
+  yield decoder.end();
+}
+
 export async function* parseSSE(readable: AsyncIterable<Buffer | string>): AsyncGenerator<SSEFrame> {
   const sep = /\r?\n\r?\n/;
-  // Chunk boundaries fall wherever TCP/undici put them, which is routinely in
-  // the middle of a multi-byte character. `chunk.toString("utf8")` decodes each
-  // chunk in isolation and replaces the split character with U+FFFD; the
-  // StringDecoder carries the incomplete tail bytes into the next chunk instead.
-  const decoder = new StringDecoder("utf8");
   let buffer = "";
-  for await (const chunk of readable) {
-    buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
+  for await (const text of decodeUtf8(readable)) {
+    buffer += text;
     let m: RegExpExecArray | null;
     while ((m = sep.exec(buffer))) {
       const raw = buffer.slice(0, m.index);
@@ -91,7 +109,6 @@ export async function* parseSSE(readable: AsyncIterable<Buffer | string>): Async
       if (raw.trim()) yield parseFrame(raw);
     }
   }
-  buffer += decoder.end();
   if (buffer.trim()) yield parseFrame(buffer);
 }
 
@@ -100,13 +117,19 @@ function parseFrame(raw: string): SSEFrame {
   const data: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
     if (line.startsWith(":")) continue;
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    if (line.startsWith(SSE_EVENT_FIELD)) event = line.slice(SSE_EVENT_FIELD.length).trim();
+    else if (line.startsWith(SSE_DATA_FIELD)) data.push(line.slice(SSE_DATA_FIELD.length).replace(/^ /, ""));
   }
   return { event, data: data.join("\n") };
 }
 
-export function safeParseJson(data: string): Record<string, unknown> | null {
+/** One SSE frame as it goes on the wire: an optional `event:` line, the `data:` line, a blank line. */
+export function sseFrame(data: string, event?: string): string {
+  return `${event !== undefined ? `${SSE_EVENT_FIELD} ${event}\n` : ""}${SSE_DATA_FIELD} ${data}\n\n`;
+}
+
+/** The JSON object an SSE frame's `data` carries, or null when it is not JSON (a keep-alive, a terminator). */
+export function parseSseJson(data: string): Record<string, unknown> | null {
   try {
     return JSON.parse(data) as Record<string, unknown>;
   } catch {
@@ -121,8 +144,32 @@ export function safeParseJson(data: string): Record<string, unknown> | null {
  * without leaving an empty metadata-only reasoning item in the client stream. */
 export async function* withoutReasoning(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
   for await (const ev of events) {
-    if (ev.type !== "reasoning_start" && ev.type !== "reasoning_delta" && ev.type !== "reasoning_stop") yield ev;
+    if (!isReasoningEvent(ev)) yield ev;
   }
+}
+
+/** Whether an event is one of the three that carry a reasoning block. */
+export function isReasoningEvent(ev: StreamEvent): ev is Extract<StreamEvent, { type: "reasoning_start" | "reasoning_delta" | "reasoning_stop" }> {
+  return ev.type === "reasoning_start" || ev.type === "reasoning_delta" || ev.type === "reasoning_stop";
+}
+
+/**
+ * The usage a `start` event already knows -- the prompt side, flagged
+ * incomplete until a terminal event supersedes it -- or undefined when the
+ * event carried no counter at all.
+ */
+function usageFromStart(ev: Extract<StreamEvent, { type: "start" }>): Usage | undefined {
+  if (ev.inputTokens == null && ev.cachedInputTokens == null && ev.cacheCreationInputTokens == null) return undefined;
+  return {
+    promptTokens: ev.inputTokens ?? 0, completionTokens: 0, totalTokens: ev.inputTokens ?? 0,
+    ...cacheCounters(ev.cachedInputTokens, ev.cacheCreationInputTokens),
+    incomplete: true,
+  };
+}
+
+/** Text already in hand, cut into replay-sized pieces. */
+export function* chunkText(text: string): Generator<string> {
+  for (let i = 0; i < text.length; i += REPLAY_CHUNK_CHARS) yield text.slice(i, i + REPLAY_CHUNK_CHARS);
 }
 
 // --- usage/text tap (for logging) ---------------------------------------
@@ -156,13 +203,7 @@ export async function* tapStream(
     switch (ev.type) {
       case "start":
         acc.upstreamModel = ev.model;
-        if (ev.inputTokens != null || ev.cachedInputTokens != null || ev.cacheCreationInputTokens != null) {
-          acc.usage = { promptTokens: ev.inputTokens ?? 0, completionTokens: 0, totalTokens: ev.inputTokens ?? 0,
-            ...(ev.cachedInputTokens != null ? { cachedInputTokens: ev.cachedInputTokens } : {}),
-            ...(ev.cacheCreationInputTokens != null ? { cacheCreationInputTokens: ev.cacheCreationInputTokens } : {}),
-            incomplete: true,
-          };
-        }
+        acc.usage = usageFromStart(ev) ?? acc.usage;
         break;
       case "text_delta":
         acc.text += ev.text;
@@ -217,7 +258,7 @@ export interface ResponseData {
 export async function collectStream(
   events: AsyncGenerator<StreamEvent>,
 ): Promise<{ data: ResponseData; incomplete: boolean }> {
-  let id = genId("msg");
+  let id = genId(ID_PREFIX.MESSAGE);
   let model = "";
   let created = nowSeconds();
   let text = "";
@@ -230,6 +271,12 @@ export async function collectStream(
   const serverContent: ContentPart[] = [];
   const toolByIndex = new Map<number, { id: string; name: string; args: string }>();
   const toolOrder: number[] = [];
+  /** A reasoning block opened by a boundary event, which names its item and origin. */
+  const openReasoning = (ev: Extract<StreamEvent, { type: "reasoning_start" | "reasoning_stop" }>): ReasoningPart => {
+    const part: ReasoningPart = { type: "reasoning", text: "", itemId: ev.id, ...(ev.origin ? { origin: ev.origin } : {}) };
+    reasoningParts.push(part);
+    return part;
+  };
 
   for await (const ev of events) {
     switch (ev.type) {
@@ -237,11 +284,7 @@ export async function collectStream(
         id = ev.id || id;
         model = ev.model || model;
         created = ev.created || created;
-        if (ev.inputTokens != null || ev.cachedInputTokens != null || ev.cacheCreationInputTokens != null) {
-          usage = { promptTokens: ev.inputTokens ?? 0, completionTokens: 0, totalTokens: ev.inputTokens ?? 0,
-            ...(ev.cachedInputTokens != null ? { cachedInputTokens: ev.cachedInputTokens } : {}),
-            ...(ev.cacheCreationInputTokens != null ? { cacheCreationInputTokens: ev.cacheCreationInputTokens } : {}), incomplete: true };
-        }
+        usage = usageFromStart(ev) ?? usage;
         break;
       case "server_tool_start":
         serverCalls.set(ev.id, ev);
@@ -258,12 +301,11 @@ export async function collectStream(
         text += ev.text;
         break;
       case "reasoning_start":
-        currentReasoning = { type: "reasoning", text: "", itemId: ev.id, ...(ev.origin ? { origin: ev.origin } : {}) };
+        currentReasoning = openReasoning(ev);
         // A redacted block carries its whole opaque payload here and streams no
         // deltas; recording it at `start` is the only chance to keep it.
         if (ev.redacted) currentReasoning.redacted = true;
         if (ev.signature) currentReasoning.signature = ev.signature;
-        reasoningParts.push(currentReasoning);
         break;
       case "reasoning_delta":
         if (!currentReasoning) {
@@ -273,10 +315,7 @@ export async function collectStream(
         currentReasoning.text += ev.text;
         break;
       case "reasoning_stop":
-        if (!currentReasoning) {
-          currentReasoning = { type: "reasoning", text: "", itemId: ev.id, ...(ev.origin ? { origin: ev.origin } : {}) };
-          reasoningParts.push(currentReasoning);
-        }
+        currentReasoning ??= openReasoning(ev);
         if (ev.id) currentReasoning.itemId = ev.id;
         if (ev.origin) currentReasoning.origin = ev.origin;
         if (ev.signature) currentReasoning.signature = ev.signature;
@@ -312,7 +351,7 @@ export async function collectStream(
   if (text) content.push({ type: "text", text });
   for (const index of toolOrder) {
     const tc = toolByIndex.get(index)!;
-    content.push({ type: "tool_use", id: tc.id, name: tc.name, input: safeJsonParse(tc.args || "{}") });
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input: parseToolArguments(tc.args || "{}") });
   }
 
   return {
@@ -331,8 +370,14 @@ export async function collectStream(
 // --- fabrication (complete response -> paced stream) --------------------
 
 /** Default token rate for fabricated streams when none is specified. */
-const DEFAULT_FABRICATE_TOKENS_PER_SEC = 2000;
-const FAKE_STREAM_CHUNK_CHARS = 24; // chars per delta (~6 tokens); smoothness, not rate
+export const DEFAULT_FABRICATE_TOKENS_PER_SEC = DEFAULT_SIMULATED_STREAMING_TOKEN_RATE;
+/** Chars per replayed delta (~6 tokens); smoothness, not rate. Shared by every
+ * path that replays text already in hand as a stream. */
+const REPLAY_CHUNK_CHARS = 24;
+/** Rough chars-per-token ratio the pacer converts emitted text with. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+/** Nominal char cost a server-tool block is paced as. */
+const SERVER_TOOL_PACE_CHARS = 2;
 
 /**
  * Synthesize a canonical event stream from an already-complete response. Chains
@@ -365,8 +410,7 @@ export async function* fabricateStream(
     model: data.model,
     created: data.created,
     inputTokens: data.usage.promptTokens,
-    ...(data.usage.cachedInputTokens != null ? { cachedInputTokens: data.usage.cachedInputTokens } : {}),
-    ...(data.usage.cacheCreationInputTokens != null ? { cacheCreationInputTokens: data.usage.cacheCreationInputTokens } : {}),
+    ...cacheCounters(data.usage.cachedInputTokens, data.usage.cacheCreationInputTokens),
   };
 
   const startedAt = budgetStartedAt ?? Date.now();
@@ -376,8 +420,8 @@ export async function* fabricateStream(
   // be negative), we skip the sleep entirely — the data is already buffered, so
   // there is no reason to artificially stall the client.
   const pace = async (chars: number): Promise<void> => {
-    emittedTokens += Math.max(1, Math.round(chars / 4));
-    const expectedElapsedMs = (emittedTokens * 1000) / tokensPerSec;
+    emittedTokens += Math.max(1, Math.round(chars / CHARS_PER_TOKEN_ESTIMATE));
+    const expectedElapsedMs = (emittedTokens * MS_PER_SECOND) / tokensPerSec;
     const actualElapsedMs = Date.now() - startedAt;
     const wait = expectedElapsedMs - actualElapsedMs;
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -387,8 +431,7 @@ export async function* fabricateStream(
   let toolIndex = 0;
   for (const p of data.content) {
     if (p.type === "text") {
-      for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
-        const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
+      for (const piece of chunkText(p.text)) {
         yield { type: "text_delta", text: piece };
         await pace(piece.length);
       }
@@ -399,8 +442,7 @@ export async function* fabricateStream(
       // back at either end.
       const redacted = p.redacted === true;
       yield { type: "reasoning_start", id: p.itemId, origin: p.origin, ...(redacted ? { redacted: true, signature: p.signature } : {}) };
-      for (let i = 0; i < p.text.length; i += FAKE_STREAM_CHUNK_CHARS) {
-        const piece = p.text.slice(i, i + FAKE_STREAM_CHUNK_CHARS);
+      for (const piece of chunkText(p.text)) {
         yield { type: "reasoning_delta", text: piece };
         await pace(piece.length);
       }
@@ -417,12 +459,10 @@ export async function* fabricateStream(
       // tool, so there is nothing to stream in between and no client-side
       // bookkeeping to open. Pace them so the two blocks never race.
       yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input ?? {} };
-      await pace(2);
+      await pace(SERVER_TOOL_PACE_CHARS);
       yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, ...(p.errorCode !== undefined ? { errorCode: p.errorCode } : {}), ...(p.notExecuted ? { notExecuted: true } : {}) };
-      await pace(2);
+      await pace(SERVER_TOOL_PACE_CHARS);
     }
   }
   yield { type: "finish", stopReason: data.stopReason, usage: data.usage };
 }
-
-export { num };

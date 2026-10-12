@@ -1,6 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../composition/container";
 import { BLOCK_THRESHOLD_MS } from "../../observability/activeRequests";
+import { badRequest, notFound } from "./replies";
+
+/** Recently completed requests returned beside the in-flight ones. */
+const RECENT_COMPLETED_LIMIT = 20;
 
 // --- active requests (real-time monitoring) ----------------------------------
 
@@ -38,7 +42,7 @@ export async function activeRequestRoutes(app: FastifyInstance, c: Container): P
     const now = Date.now();
     const active = c.activeRequests.listActive().map((r) => serializeActive(r, now));
     // Include recently completed (limit 20) so the UI can show what just finished.
-    const completed = c.activeRequests.listCompleted(20).map((r) => serializeActive(r, now));
+    const completed = c.activeRequests.listCompleted(RECENT_COMPLETED_LIMIT).map((r) => serializeActive(r, now));
 
     // Optional filter by traceId (for single-request tracing).
     const traceFilter = q.traceId;
@@ -63,9 +67,9 @@ export async function activeRequestRoutes(app: FastifyInstance, c: Container): P
   // Get a single request by traceId (active or completed) with full event stream.
   app.get("/active-requests/:traceId", async (req, reply) => {
     const traceId = (req.params as { traceId?: string }).traceId;
-    if (!traceId) return reply.code(400).send({ error: "missing traceId" });
+    if (!traceId) return badRequest(reply, "missing traceId");
     const r = c.activeRequests.get(traceId);
-    if (!r) return reply.code(404).send({ error: "trace not found (may have expired from the ring buffer)" });
+    if (!r) return notFound(reply, "trace not found (may have expired from the ring buffer)");
     return { request: serializeActive(r, Date.now()), blockThresholdMs: BLOCK_THRESHOLD_MS };
   });
 

@@ -4,12 +4,25 @@ import type { Request } from "../core/ir/request";
 import { inlineUrlFiles, needsUrlFileInlining } from "./fileFetch";
 import { fabricateStream } from "../core/ir/stream";
 import type { SendTarget, Transport } from "../core/upstream/transport";
-import type { Catalog } from "../catalog/catalog";
-import { runSteps } from "./steps";
+import { mappingErrorMessage, type Catalog } from "../catalog/catalog";
+import { runSteps, type AttemptFailure } from "./steps";
 import { stepOverrides, type ServiceStep, type ServiceSteps } from "./definition";
 import type { Invocation, InvokeValue, StreamInvocation, StreamValue } from "./outcome";
 import type { ProgressRecorder } from "../observability/progressRecorder";
 import type { ActiveRequestRegistry } from "../observability/activeRequests";
+import { DEFAULT_PROMPT_CACHE_TTL_MINUTES, DEFAULT_SIMULATED_STREAMING_TOKEN_RATE } from "../config/defaults";
+import { HTTP_STATUS } from "../util/httpStatus";
+
+/** Live-progress node ids recorded while a step runs. */
+const PROGRESS_NODE = {
+  STEP_START: "step.start",
+  STEP_RESOLVE: "step.resolve",
+  LLM_FILES: "llm.files",
+  LLM_SERIALIZE: "llm.serialize",
+  LLM_SEND: "llm.send",
+  LLM_RECEIVE: "llm.receive",
+  LLM_RESULT: "llm.result",
+} as const;
 
 /** Merge allowlisted client feature headers (e.g. anthropic-beta) into the
  * upstream headers — only for an upstream of the SAME wire family, and never
@@ -25,8 +38,43 @@ function mergeForwardHeaders(
 
 /** Resolve a possibly-live token rate (number | getter). Default 2000. */
 function resolveRate(r: number | (() => number) | undefined): number {
-  if (r == null) return 2000;
+  if (r == null) return DEFAULT_SIMULATED_STREAMING_TOKEN_RATE;
   return typeof r === "function" ? r() : r;
+}
+
+/** The progress wording that distinguishes a buffered attempt from a relayed one. */
+interface AttemptLabels {
+  step: string;
+  serializeSuffix: string;
+  send: string;
+}
+const BUFFERED_LABELS: AttemptLabels = { step: "step", serializeSuffix: "", send: "request initiated" };
+const STREAM_LABELS: AttemptLabels = { step: "stream step", serializeSuffix: " (streaming)", send: "stream request initiated" };
+
+type ResolvedTarget = Extract<ReturnType<Catalog["resolve"]>, { ok: true }>["target"];
+
+/** A step that resolved and serialised: ready to send or relay. */
+interface PreparedAttempt {
+  ok: true;
+  t: ResolvedTarget;
+  merged: Request;
+  egress: Request;
+  target: SendTarget;
+}
+
+/** Who served a value: the identity fields every success value carries. */
+type ServedBy = Pick<InvokeValue, "family" | "upstreamModel" | "providerName" | "modelName">;
+function servedBy(t: ServedBy): ServedBy {
+  return { family: t.family, upstreamModel: t.upstreamModel, providerName: t.providerName, modelName: t.modelName };
+}
+
+/** Record and return the failure of an upstream send/relay. */
+function upstreamFailure(
+  prog: ProgressRecorder | null,
+  sent: { status: number; kind: AttemptFailure["kind"]; message: string; body?: unknown },
+): AttemptFailure {
+  prog?.record("llm", PROGRESS_NODE.LLM_RECEIVE, `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
+  return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
 }
 
 /** Shared dependencies every executor needs. */
@@ -85,7 +133,7 @@ export class ModelService {
     // Anthropic renderer reads it, and only when the client hinted caching).
     if (merged.params.cacheHint && merged.params.cacheTtlMinutes == null) {
       const ttl = this.deps.promptCacheTtlMinutes;
-      merged = merged.withOverrides({ cacheTtlMinutes: typeof ttl === "function" ? ttl() : ttl ?? 30 });
+      merged = merged.withOverrides({ cacheTtlMinutes: typeof ttl === "function" ? ttl() : ttl ?? DEFAULT_PROMPT_CACHE_TTL_MINUTES });
     }
     return merged;
   }
@@ -100,63 +148,70 @@ export class ModelService {
     opts: { timeoutMs: number; signal?: AbortSignal; maxTotalBytes?: number },
   ): Promise<Request> {
     if (!needsUrlFileInlining(merged, family)) return merged;
-    prog?.record("llm", "llm.files", `downloading URL attachment(s) to inline for ${family}`, { family });
+    prog?.record("llm", PROGRESS_NODE.LLM_FILES, `downloading URL attachment(s) to inline for ${family}`, { family });
     return inlineUrlFiles(merged, family, this.deps.transport, opts);
+  }
+
+  /** Everything an attempt does before it reaches the upstream, identical for
+   * the buffered and the relayed path: resolve the step's mapping, layer the
+   * overrides, inline what the egress family cannot carry, and serialise.
+   * Only the progress wording differs (`labels`). */
+  private async prepareAttempt(
+    request: Request,
+    step: ServiceStep,
+    stepIndex: number,
+    overrides: RequestOverrides | undefined,
+    opts: InvokeOptions,
+    labels: AttemptLabels,
+  ): Promise<PreparedAttempt | AttemptFailure> {
+    const prog = opts.progress ?? null;
+    prog?.record("llm", PROGRESS_NODE.STEP_START, `${labels.step} ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
+    const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
+    if (!res.ok) {
+      const message = mappingErrorMessage(step.model, step.provider, res.error);
+      prog?.record("error", PROGRESS_NODE.STEP_RESOLVE, message);
+      return { ok: false, status: 0, kind: "error", message };
+    }
+    const t = res.target;
+    const merged = this.merge(request, step, overrides);
+    const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
+    // A URL attachment this family cannot carry is downloaded and inlined
+    // first (see fileFetch). Resolved per step, because the very same request
+    // needs no pre-pass at all on a family that takes URLs natively.
+    const ready = await this.inlineFiles(merged, t.family, prog, {
+      timeoutMs,
+      signal: opts.signal,
+      maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
+    });
+    const egress = buildRequest(t.family, ready.data());
+    prog?.record("llm", PROGRESS_NODE.LLM_SERIALIZE, `parameters serialized for ${t.family} -> ${t.upstreamModel}${labels.serializeSuffix}`, { family: t.family, model: t.upstreamModel });
+    prog?.record("llm", PROGRESS_NODE.LLM_SEND, `${labels.send} to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
+    const target: SendTarget = {
+      upstreamModel: t.upstreamModel,
+      url: t.url,
+      headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
+      providerMaxOutputTokens: t.providerMaxOutputTokens,
+      timeoutMs,
+      signal: opts.signal,
+      proxy: t.upstream.proxy,
+    };
+    return { ok: true, t, merged, egress, target };
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const prog = opts.progress ?? null;
     const { result, path } = await runSteps<InvokeValue>(this.def, async (step, stepIndex) => {
-      prog?.record("llm", "step.start", `step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
-      const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
-      if (!res.ok) {
-        prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
-        return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
-      }
-      const t = res.target;
-      const merged = this.merge(request, step, overrides);
-      const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
-      // A URL attachment this family cannot carry is downloaded and inlined
-      // first (see fileFetch). Resolved per step, because the very same request
-      // needs no pre-pass at all on a family that takes URLs natively.
-      const ready = await this.inlineFiles(merged, t.family, prog, {
-        timeoutMs,
-        signal: opts.signal,
-        maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
-      });
-      const egress = buildRequest(t.family, ready.data());
-      const target: SendTarget = {
-        upstreamModel: t.upstreamModel,
-        url: t.url,
-        headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
-        providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs,
-        signal: opts.signal,
-        proxy: t.upstream.proxy,
-      };
-      prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel}`, { family: t.family, model: t.upstreamModel });
-      prog?.record("llm", "llm.send", `request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
-      const sent = await egress.send(this.deps.transport, target);
-      if (!sent.ok) {
-        prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
-        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
-      }
-      prog?.record("llm", "llm.receive", `response generated and received from ${t.upstreamModel}`, { status: 200 });
-      prog?.record("llm", "llm.result", `result parsed and ready for return`, { model: t.upstreamModel });
+      const attempt = await this.prepareAttempt(request, step, stepIndex, overrides, opts, BUFFERED_LABELS);
+      if (!attempt.ok) return attempt;
+      const { t, merged } = attempt;
+      const sent = await attempt.egress.send(this.deps.transport, attempt.target);
+      if (!sent.ok) return upstreamFailure(prog, sent);
+      prog?.record("llm", PROGRESS_NODE.LLM_RECEIVE, `response generated and received from ${t.upstreamModel}`, { status: HTTP_STATUS.OK });
+      prog?.record("llm", PROGRESS_NODE.LLM_RESULT, `result parsed and ready for return`, { model: t.upstreamModel });
       // Honor a "disabled" thinking level end-to-end even if the upstream ignored it.
       let response = sent.response;
       if (merged.params.thinking === "disabled") response = response.withoutReasoning();
-      return {
-        ok: true,
-        value: {
-          response,
-          family: t.family,
-          upstreamModel: t.upstreamModel,
-          providerName: t.providerName,
-          modelName: t.modelName,
-          upstreamRequest: sent.sentBody,
-        },
-      };
+      return { ok: true, value: { response, ...servedBy(t), upstreamRequest: sent.sentBody } };
     }, { progress: prog, signal: opts.signal });
     return { result, attemptPath: path, attempts: path.length };
   }
@@ -175,10 +230,7 @@ export class ModelService {
         ok: true,
         value: {
           events: fabricateStream(v.response.data(), tokenRate, startedAt),
-          family: v.family,
-          upstreamModel: v.upstreamModel,
-          providerName: v.providerName,
-          modelName: v.modelName,
+          ...servedBy(v),
           upstreamRequest: v.upstreamRequest,
           // Reasoning was already stripped in invoke() if the level was disabled.
           dropReasoning: false,
@@ -189,9 +241,16 @@ export class ModelService {
     };
   }
 
+  /** Run buffered, then replay the complete result as a paced stream. The
+   * pacing budget starts before the run, so the run itself (retries, or an
+   * agent's many stages) counts against it rather than being added to it. */
+  protected async bufferedStream(request: Request, overrides: RequestOverrides | undefined, opts: InvokeOptions): Promise<StreamInvocation> {
+    const startedAt = Date.now();
+    return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
+  }
+
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
     const prog = opts.progress ?? null;
-    const startedAt = Date.now();
     // Reliable streaming: buffer the upstream (retrying a truncated stream) and
     // replay the complete result as a paced simulated stream — the client never
     // gets a partial/truncated stream, at the cost of first-token latency.
@@ -203,51 +262,20 @@ export class ModelService {
     // and enabling truncation detection); when stream=false a plain JSON
     // request is sent. Either way the full response is buffered locally before
     // fabrication, so the client always receives a complete, paced stream.
-    if (this.def.reliableStreaming) {
-      return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
-    }
+    if (this.def.reliableStreaming) return this.bufferedStream(request, overrides, opts);
     const { result, path } = await runSteps<StreamValue>(this.def, async (step, stepIndex) => {
-      prog?.record("llm", "step.start", `stream step ${stepIndex + 1}: ${step.model}@${step.provider} attempt starting`);
-      const res = this.deps.catalog.resolve(step.model, step.provider, request.family);
-      if (!res.ok) {
-        prog?.record("error", "step.resolve", `mapping ${step.model}@${step.provider}: ${res.error}`);
-        return { ok: false, status: 0, kind: "error", message: `mapping ${step.model}@${step.provider}: ${res.error}` };
-      }
-      const t = res.target;
-      const merged = this.merge(request, step, overrides);
-      const timeoutMs = opts.timeoutMs ?? this.def.timeoutMs;
-      const ready = await this.inlineFiles(merged, t.family, prog, {
-        timeoutMs,
-        signal: opts.signal,
-        maxTotalBytes: opts.maxAttachmentBytes ?? this.def.maxAttachmentBytes,
-      });
-      const egress = buildRequest(t.family, ready.data());
-      const target: SendTarget = {
-        upstreamModel: t.upstreamModel,
-        url: t.url,
-        headers: mergeForwardHeaders(t.headers, merged.params.forwardHeaders, t.family),
-        providerMaxOutputTokens: t.providerMaxOutputTokens,
-        timeoutMs,
-        signal: opts.signal,
-        proxy: t.upstream.proxy,
-      };
-      prog?.record("llm", "llm.serialize", `parameters serialized for ${t.family} -> ${t.upstreamModel} (streaming)`, { family: t.family, model: t.upstreamModel });
-      prog?.record("llm", "llm.send", `stream request initiated to ${t.upstreamModel} (${t.providerName})`, { model: t.upstreamModel, provider: t.providerName, url: t.url });
-      const sent = await egress.relay(this.deps.transport, target);
-      if (!sent.ok) {
-        prog?.record("llm", "llm.receive", `upstream returned ${sent.status}: ${sent.message}`, { status: sent.status });
-        return { ok: false, status: sent.status, kind: sent.kind, message: sent.message, errorBody: sent.body };
-      }
-      prog?.record("llm", "llm.receive", `stream committed from ${t.upstreamModel} (headers received)`, { status: sent.status });
-      prog?.record("llm", "llm.result", `stream events ready for relay`, { model: t.upstreamModel });
+      const attempt = await this.prepareAttempt(request, step, stepIndex, overrides, opts, STREAM_LABELS);
+      if (!attempt.ok) return attempt;
+      const { t, merged } = attempt;
+      const sent = await attempt.egress.relay(this.deps.transport, attempt.target);
+      if (!sent.ok) return upstreamFailure(prog, sent);
+      prog?.record("llm", PROGRESS_NODE.LLM_RECEIVE, `stream committed from ${t.upstreamModel} (headers received)`, { status: sent.status });
+      prog?.record("llm", PROGRESS_NODE.LLM_RESULT, `stream events ready for relay`, { model: t.upstreamModel });
       return {
         ok: true,
         value: {
           events: sent.events,
-          family: t.family,
-          upstreamModel: t.upstreamModel,
-          providerName: t.providerName,
-          modelName: t.modelName,
+          ...servedBy(t),
           upstreamRequest: sent.sentBody,
           dropReasoning: merged.params.thinking === "disabled",
         },

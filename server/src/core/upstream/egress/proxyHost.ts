@@ -1,7 +1,5 @@
-import dns from "node:dns/promises";
-import net from "node:net";
-import { isBlockedAddress, UpstreamUrlError, type ResolvedAddress } from "../ssrf";
-import { proxyLabel, type EgressProxy } from "./types";
+import { isBlockedAddress, resolveHostAddresses, toResolvedAddresses, UpstreamUrlError, type ResolvedAddress } from "../ssrf";
+import { MAX_PORT, MIN_PORT, proxyHostName, proxyLabel, type EgressProxy } from "./types";
 
 /**
  * Validating the host of a proxy, which is a different question from
@@ -20,15 +18,13 @@ import { proxyLabel, type EgressProxy } from "./types";
  *
  * What is NOT permitted is the tier {@link isBlockedAddress} refuses even when
  * private addresses are allowed: 0.0.0.0/8, 169.254.0.0/16 (which is where
- * cloud metadata lives), the broadcast address, and fe80::/10. Those are never
+ * cloud metadata lives), multicast, the broadcast address, and fe80::/10
+ * -- in any IPv6 spelling that embeds one of them. Those are never
  * a proxy, and allowing them would turn this field into the metadata-endpoint
  * pivot the guard exists to prevent. That tier is reused from ssrf.ts verbatim
- * rather than restated, so the two cannot drift.
+ * rather than restated, so the two cannot drift -- and so is the resolution
+ * itself; only the wording of a failure is this file's own.
  */
-
-/** Spellings of IPv6 loopback. See the note at the check below for why these
- * need naming rather than falling out of the shared address classifier. */
-const LOOPBACK_V6 = new Set(["::1", "0:0:0:0:0:0:0:1"]);
 
 /** Ports that are never a proxy and are dangerous to let an admin typo into. */
 const REFUSED_PORTS = new Set([0, 22, 25, 465, 587]);
@@ -40,46 +36,33 @@ const REFUSED_PORTS = new Set([0, 22, 25, 465, 587]);
  * DNS-rebinding protection the direct path has.
  */
 export async function resolveProxyHost(p: EgressProxy): Promise<ResolvedAddress[]> {
-  if (!Number.isInteger(p.port) || p.port < 1 || p.port > 65535) {
+  if (!Number.isInteger(p.port) || p.port < MIN_PORT || p.port > MAX_PORT) {
     throw new UpstreamUrlError(`proxy ${proxyLabel(p)} has an invalid port`);
   }
   if (REFUSED_PORTS.has(p.port)) {
     throw new UpstreamUrlError(`proxy ${proxyLabel(p)} uses port ${p.port}, which is not a proxy port`);
   }
 
-  const host = p.host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const host = proxyHostName(p);
   if (!host) throw new UpstreamUrlError(`proxy "${p.name}" has no host`);
 
-  let addrs: string[];
-  if (net.isIP(host)) {
-    addrs = [host];
-  } else {
-    try {
-      addrs = (await dns.lookup(host, { all: true, verbatim: true })).map((r) => r.address);
-    } catch {
-      throw new UpstreamUrlError(`cannot resolve proxy host "${host}" (proxy "${p.name}")`);
-    }
-    if (addrs.length === 0) throw new UpstreamUrlError(`proxy host "${host}" did not resolve`);
-  }
+  const addrs = await resolveHostAddresses(host, {
+    unresolvable: `cannot resolve proxy host "${host}" (proxy "${p.name}")`,
+    empty: `proxy host "${host}" did not resolve`,
+  });
 
   for (const addr of addrs) {
-    // IPv6 loopback, which this validator exists to permit. The shared
-    // classifier refuses it -- not as loopback, but because `::1` parses as a
-    // v4-compatible address whose embedded IPv4 is 0.0.0.1, and 0.0.0.0/8 is
-    // refused even when private addresses are allowed. Correct for an upstream;
-    // wrong for a proxy, and it would otherwise refuse a proxy typed as
-    // `localhost` on any machine that resolves it to ::1 before 127.0.0.1.
-    if (LOOPBACK_V6.has(addr.toLowerCase())) continue;
-    // allowPrivate: true -- a proxy on 127.0.0.1 or a LAN address is the normal
-    // case. The always-refused tier still applies and is what this call keeps.
+    // allowPrivate: true -- a proxy on 127.0.0.1, ::1 (what `localhost` often
+    // resolves to first) or a LAN address is the normal case. The
+    // always-refused tier still applies and is what this call keeps.
     if (isBlockedAddress(addr, true)) {
       throw new UpstreamUrlError(
         `proxy ${proxyLabel(p)} resolves to a disallowed address (${addr}). ` +
           `Loopback and private addresses are fine for a proxy; ` +
-          `"this host", link-local (169.254.x.x, including cloud metadata) and broadcast are not.`,
+          `"this host", link-local (169.254.x.x, including cloud metadata), multicast and broadcast are not.`,
       );
     }
   }
 
-  return addrs.map((address) => ({ address, family: net.isIP(address) === 6 ? 6 : 4 }));
+  return toResolvedAddresses(addrs);
 }

@@ -7,7 +7,10 @@ import crypto from "node:crypto";
  * token is hashed whole and looked up -- so keys issued under an older prefix
  * keep working untouched; only newly generated ones change shape.
  */
-export const TOKEN_PREFIX = "sk-";
+const TOKEN_PREFIX = "sk-";
+const TOKEN_SECRET_BYTES = 32;
+/** Characters of the secret shown after the prefix in the display form. */
+const TOKEN_DISPLAY_CHARS = 6;
 
 export interface GeneratedToken {
   /** The full secret - shown to the user exactly once, never stored. */
@@ -20,12 +23,12 @@ export interface GeneratedToken {
 
 /** Create a new client token with its hash and display prefix. */
 export function generateToken(): GeneratedToken {
-  const secret = crypto.randomBytes(32).toString("base64url");
+  const secret = crypto.randomBytes(TOKEN_SECRET_BYTES).toString("base64url");
   const token = TOKEN_PREFIX + secret;
   return {
     token,
     hash: hashToken(token),
-    prefix: token.slice(0, TOKEN_PREFIX.length + 6),
+    prefix: token.slice(0, TOKEN_PREFIX.length + TOKEN_DISPLAY_CHARS),
   };
 }
 

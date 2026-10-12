@@ -5,7 +5,8 @@ import type { HttpTool } from "./toolHttp";
 import type { HostedToolOptions } from "./definition";
 import { HostedRunError, runHostedTools } from "./hostedToolLoop";
 import type { Invocation, StreamInvocation } from "./outcome";
-import { genId } from "../util/ids";
+import { countAttempts } from "./serviceCall";
+import { genId, ID_PREFIX } from "../util/ids";
 
 /** A named Micro Agent stage executes its own operator-bound tools before returning. */
 export class HostedToolService extends ModelService {
@@ -15,14 +16,17 @@ export class HostedToolService extends ModelService {
   override async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     try {
       const run = await runHostedTools(this.inner, request.withOverrides(overrides), this.tools, this.deps.transport,
-        { ...opts, sessionId: opts.hosted?.sessionId ?? genId("session"), config: this.config, emit: opts.hosted?.emit });
+        { ...opts, sessionId: opts.hosted?.sessionId ?? genId(ID_PREFIX.SESSION), config: this.config, emit: opts.hosted?.emit });
       return { result: { ok: true, value: run.value }, attempts: run.attempts, attemptPath: run.calls };
     } catch (error) {
       if (!(error instanceof HostedRunError)) throw error;
-      return { result: { ok: false, kind: "error", status: error.statusCode, message: error.message }, usage: error.usage, attemptPath: error.calls, attempts: error.calls.reduce((n, call) => n + call.attempts.length, 0) };
+      return { result: { ok: false, kind: "error", status: error.statusCode, message: error.message }, usage: error.usage, attemptPath: error.calls, attempts: countAttempts(error.calls) };
     }
   }
+  /** Always buffered then replayed, with the pacing clock started before the
+   * run like every other executor: the tool loop's own duration counts against
+   * the pacing budget instead of being added to it. */
   override async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
-    return this.fabricated(await this.invoke(request, overrides, opts), Date.now());
+    return this.bufferedStream(request, overrides, opts);
   }
 }

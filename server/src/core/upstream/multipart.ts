@@ -8,7 +8,13 @@
  * parsing/re-framing would buffer and re-encode file parts for no benefit.
  */
 
-export function multipartBoundary(contentType: string | undefined): string | null {
+const CRLF = "\r\n";
+/** The blank line that ends a part's header block. */
+const HEADER_END = CRLF + CRLF;
+/** Prefix of every delimiter line; also the suffix that marks the closing one. */
+const DASHES = "--";
+
+function multipartBoundary(contentType: string | undefined): string | null {
   if (!contentType) return null;
   const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
   return m ? (m[1] ?? m[2]).trim() : null;
@@ -24,22 +30,22 @@ interface Part {
 }
 
 function scanParts(body: Buffer, boundary: string): Part[] {
-  const delim = Buffer.from(`--${boundary}`);
+  const delim = Buffer.from(`${DASHES}${boundary}`);
   const parts: Part[] = [];
   let pos = body.indexOf(delim);
   while (pos !== -1) {
     const lineEnd = pos + delim.length;
-    if (body.subarray(lineEnd, lineEnd + 2).toString("latin1") === "--") break; // closing delimiter
-    const headerStart = body.indexOf("\r\n", lineEnd);
+    if (body.subarray(lineEnd, lineEnd + DASHES.length).toString("latin1") === DASHES) break; // closing delimiter
+    const headerStart = body.indexOf(CRLF, lineEnd);
     if (headerStart === -1) break;
-    const headerEnd = body.indexOf("\r\n\r\n", headerStart);
+    const headerEnd = body.indexOf(HEADER_END, headerStart);
     if (headerEnd === -1) break;
     const next = body.indexOf(delim, headerEnd);
     if (next === -1) break;
     parts.push({
-      contentStart: headerEnd + 4,
-      contentEnd: next - 2, // strip the CRLF that precedes the next delimiter
-      headers: body.subarray(headerStart + 2, headerEnd).toString("utf8"),
+      contentStart: headerEnd + HEADER_END.length,
+      contentEnd: next - CRLF.length, // strip the CRLF that precedes the next delimiter
+      headers: body.subarray(headerStart + CRLF.length, headerEnd).toString("utf8"),
     });
     pos = next;
   }
@@ -50,14 +56,16 @@ function isTextField(headers: string, name: string): boolean {
   return new RegExp(`name="${name}"`, "i").test(headers) && !/filename=/i.test(headers);
 }
 
+/** The first text part named `field`, or null when the body has no boundary or no such part. */
+function findTextField(body: Buffer, boundary: string | null, field: string): Part | null {
+  if (!boundary) return null;
+  return scanParts(body, boundary).find((p) => isTextField(p.headers, field)) ?? null;
+}
+
 /** Read a text field's value from a multipart body, or null when absent. */
 export function readMultipartField(body: Buffer, contentType: string | undefined, field: string): string | null {
-  const boundary = multipartBoundary(contentType);
-  if (!boundary) return null;
-  for (const p of scanParts(body, boundary)) {
-    if (isTextField(p.headers, field)) return body.subarray(p.contentStart, p.contentEnd).toString("utf8").trim();
-  }
-  return null;
+  const part = findTextField(body, multipartBoundary(contentType), field);
+  return part ? body.subarray(part.contentStart, part.contentEnd).toString("utf8").trim() : null;
 }
 
 /** Replace a text field's value in-place, or null when the field is absent. */
@@ -67,14 +75,12 @@ export function rewriteMultipartField(
   field: string,
   value: string,
 ): Buffer | null {
-  const boundary = multipartBoundary(contentType);
-  if (!boundary) return null;
-  for (const p of scanParts(body, boundary)) {
-    if (isTextField(p.headers, field)) {
-      return Buffer.concat([body.subarray(0, p.contentStart), Buffer.from(value, "utf8"), body.subarray(p.contentEnd)]);
-    }
-  }
-  return null;
+  return replaceField(body, multipartBoundary(contentType), field, value);
+}
+
+function replaceField(body: Buffer, boundary: string | null, field: string, value: string): Buffer | null {
+  const part = findTextField(body, boundary, field);
+  return part ? Buffer.concat([body.subarray(0, part.contentStart), Buffer.from(value, "utf8"), body.subarray(part.contentEnd)]) : null;
 }
 
 /**
@@ -92,12 +98,12 @@ export function upsertMultipartField(
   field: string,
   value: string,
 ): Buffer | null {
-  const replaced = rewriteMultipartField(body, contentType, field, value);
-  if (replaced) return replaced;
   const boundary = multipartBoundary(contentType);
+  const replaced = replaceField(body, boundary, field, value);
+  if (replaced) return replaced;
   if (!boundary) return null;
-  const at = body.lastIndexOf(Buffer.from(`--${boundary}--`));
+  const at = body.lastIndexOf(Buffer.from(`${DASHES}${boundary}${DASHES}`));
   if (at === -1) return null;
-  const part = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${field}"\r\n\r\n${value}\r\n`, "utf8");
+  const part = Buffer.from(`${DASHES}${boundary}${CRLF}Content-Disposition: form-data; name="${field}"${HEADER_END}${value}${CRLF}`, "utf8");
   return Buffer.concat([body.subarray(0, at), part, body.subarray(at)]);
 }

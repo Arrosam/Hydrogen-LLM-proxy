@@ -1,8 +1,14 @@
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import type { DB } from "../db";
 import type { Family } from "../core/format/family";
-import { asMillis } from "../util/time";
+import { asMillisOrNull } from "../util/time";
 import { requestLogs, type RequestLog } from "../db/schema";
+import { HTTP_STATUS, STATUS_CLIENT_CLOSED } from "../util/httpStatus";
+
+/** Lowest status the errors-only filter keeps (4xx and 5xx). */
+const ERROR_STATUS_MIN = 400;
+const DEFAULT_LOG_PAGE_SIZE = 50;
+const MAX_LOG_PAGE_SIZE = 500;
 
 /** One request log row. Captures the full HTTP request/response (token-redacted). */
 export interface LogInsert {
@@ -73,10 +79,6 @@ export interface LogSummary {
   error: string | null;
 }
 
-function ms(v: Date | number | null): number {
-  return v == null ? 0 : asMillis(v);
-}
-
 export class RequestLogRepo {
   constructor(private readonly db: DB) {}
 
@@ -86,6 +88,8 @@ export class RequestLogRepo {
     return Number(res.lastInsertRowid);
   }
 
+  transaction<T>(run: () => T): T { return this.db.transaction(() => run()); }
+
   /**
    * Demote an already-logged 200 to 499 when the connection dies right after
    * the response was handed to the network. Node's 'finish' only means the
@@ -94,13 +98,11 @@ export class RequestLogRepo {
    * after the row was written. Only a 200 row is amended — a failure status
    * already tells the truth.
    */
-  transaction<T>(run: () => T): T { return this.db.transaction(() => run()); }
-
   markDeliveryFailed(traceId: string, error: string): boolean {
     const res = this.db
       .update(requestLogs)
-      .set({ httpStatus: 499, error })
-      .where(and(eq(requestLogs.traceId, traceId), eq(requestLogs.httpStatus, 200)))
+      .set({ httpStatus: STATUS_CLIENT_CLOSED, error })
+      .where(and(eq(requestLogs.traceId, traceId), eq(requestLogs.httpStatus, HTTP_STATUS.OK)))
       .run();
     return (res.changes ?? 0) > 0;
   }
@@ -115,7 +117,7 @@ export class RequestLogRepo {
     if (q.tokenId != null) conds.push(eq(requestLogs.tokenId, q.tokenId));
     if (q.serviceId != null) conds.push(eq(requestLogs.serviceId, q.serviceId));
     if (q.status != null) conds.push(eq(requestLogs.httpStatus, q.status));
-    if (q.errorsOnly) conds.push(gte(requestLogs.httpStatus, 400));
+    if (q.errorsOnly) conds.push(gte(requestLogs.httpStatus, ERROR_STATUS_MIN));
     if (q.from != null) conds.push(gte(requestLogs.createdAt, new Date(q.from)));
     if (q.to != null) conds.push(lte(requestLogs.createdAt, new Date(q.to)));
     return conds.length ? and(...conds) : undefined;
@@ -123,7 +125,7 @@ export class RequestLogRepo {
 
   query(q: LogQuery): { rows: LogSummary[]; total: number } {
     const where = this.buildWhere(q);
-    const limit = Math.min(Math.max(q.limit ?? 50, 1), 500);
+    const limit = Math.min(Math.max(q.limit ?? DEFAULT_LOG_PAGE_SIZE, 1), MAX_LOG_PAGE_SIZE);
     const offset = Math.max(q.offset ?? 0, 0);
 
     const base = this.db
@@ -157,7 +159,7 @@ export class RequestLogRepo {
     const countQ = this.db.select({ n: sql<number>`count(*)` }).from(requestLogs);
     const total = (where ? countQ.where(where) : countQ).get()?.n ?? 0;
 
-    return { rows: rows.map((r) => ({ ...r, createdAt: ms(r.createdAt) })), total };
+    return { rows: rows.map((r) => ({ ...r, createdAt: asMillisOrNull(r.createdAt) ?? 0 })), total };
   }
 
   /** Full log row for the detail view, with the dashboard's field aliases. */
@@ -166,7 +168,7 @@ export class RequestLogRepo {
     if (!row) return undefined;
     return {
       ...row,
-      createdAtMs: ms(row.createdAt),
+      createdAtMs: asMillisOrNull(row.createdAt) ?? 0,
       // Aliases the existing dashboard detail view reads.
       serviceName: row.requestedService,
       requestPayload: row.requestBody,

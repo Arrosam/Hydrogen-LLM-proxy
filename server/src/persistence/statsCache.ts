@@ -1,5 +1,6 @@
 import type { SettingsRepo } from "./settingsRepo";
-import type { GroupCount, StatsQueries, StatsSummary, TimePoint } from "./statsQueries";
+import { totalsOf, UNKNOWN_SERVICE_LABEL, type GroupCount, type StatsQueries, type StatsSummary, type StatsTotals, type TimePoint } from "./statsQueries";
+import { isErrorStatus } from "../util/httpStatus";
 
 /** The settings key the cache persists under. Local-only: it describes this
  * database's request_logs, so backups neither export it nor replace it. */
@@ -13,6 +14,9 @@ const FLUSH_DELAY_MS = 5_000;
  * which has no history for the new field -- is discarded and re-seeded from the
  * table instead of being carried forward with a missing counter. */
 const CACHE_VERSION = 3;
+
+/** Length of the `YYYY-MM-DD` prefix of an ISO timestamp: the UTC day key. */
+const ISO_DAY_LENGTH = 10;
 
 interface Bucket {
   requests: number;
@@ -30,23 +34,29 @@ interface DayBucket extends Bucket {
   latencySumMs: number;
 }
 
-interface CacheState {
+/** The running totals: the shared counters plus the latency sum (a sum, not an
+ * average -- the average is a division at read time). */
+interface Counters extends StatsTotals {
+  latencySumMs: number;
+}
+
+/** Every counter, in the order the state is persisted. */
+const COUNTER_KEYS = [
+  "requests",
+  "errors",
+  "promptTokens",
+  "completionTokens",
+  "totalTokens",
+  "cachedInputTokens",
+  "cacheCreationInputTokens",
+  "reasoningTokens",
+  "latencySumMs",
+] as const satisfies readonly (keyof Counters)[];
+
+interface CacheState extends Counters {
   v: number;
   /** Highest request_logs id folded in; the startup catch-up scans above it. */
   lastId: number;
-  requests: number;
-  errors: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  /** Subset of promptTokens served from a provider cache. */
-  cachedInputTokens: number;
-  /** Prompt tokens written into an Anthropic cache (billed separately). */
-  cacheCreationInputTokens: number;
-  /** Subset of completionTokens spent on reasoning. */
-  reasoningTokens: number;
-  /** Sum, not average -- the average is a division at read time. */
-  latencySumMs: number;
   byDay: Record<string, DayBucket>;
   byService: Record<string, Bucket>;
   byModel: Record<string, Bucket>;
@@ -73,20 +83,22 @@ function emptyState(): CacheState {
   return {
     v: CACHE_VERSION,
     lastId: 0,
-    requests: 0,
-    errors: 0,
-    promptTokens: 0,
-    completionTokens: 0,
-    totalTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    reasoningTokens: 0,
-    latencySumMs: 0,
+    ...(Object.fromEntries(COUNTER_KEYS.map((key) => [key, 0])) as unknown as Counters),
     byDay: {},
     byService: {},
     byModel: {},
     byProvider: {},
   };
+}
+
+/** Fold a delta into the running totals. */
+function addCounters(state: Counters, delta: Counters): void {
+  for (const key of COUNTER_KEYS) state[key] += delta[key];
+}
+
+/** Today's day bucket: UTC, matching the SQL seed. */
+function todayKey(): string {
+  return new Date().toISOString().slice(0, ISO_DAY_LENGTH);
 }
 
 /**
@@ -134,25 +146,22 @@ export class StatsCache {
   /** Fold one completed request in. Called for every log row written. */
   recordRequest(r: RequestStat): void {
     const s = this.state;
-    s.requests += 1;
-    if (r.httpStatus >= 400) s.errors += 1;
-    s.promptTokens += r.promptTokens;
-    s.completionTokens += r.completionTokens;
-    s.totalTokens += r.totalTokens;
-    s.cachedInputTokens += r.cachedInputTokens;
-    s.cacheCreationInputTokens += r.cacheCreationInputTokens;
-    s.reasoningTokens += r.reasoningTokens;
-    s.latencySumMs += r.latencyMs;
-    if (r.id > s.lastId) s.lastId = r.id;
-
-    const day = new Date().toISOString().slice(0, 10); // UTC, matching the SQL seed
-    bumpDay(s.byDay, day, {
+    const errors = isErrorStatus(r.httpStatus) ? 1 : 0;
+    addCounters(s, {
       requests: 1,
+      errors,
+      promptTokens: r.promptTokens,
+      completionTokens: r.completionTokens,
       totalTokens: r.totalTokens,
-      errors: r.httpStatus >= 400 ? 1 : 0,
+      cachedInputTokens: r.cachedInputTokens,
+      cacheCreationInputTokens: r.cacheCreationInputTokens,
+      reasoningTokens: r.reasoningTokens,
       latencySumMs: r.latencyMs,
     });
-    bump(s.byService, r.requestedService ?? "(unknown)", r.totalTokens);
+    if (r.id > s.lastId) s.lastId = r.id;
+
+    bumpDay(s.byDay, todayKey(), { requests: 1, totalTokens: r.totalTokens, errors, latencySumMs: r.latencyMs });
+    bump(s.byService, r.requestedService ?? UNKNOWN_SERVICE_LABEL, r.totalTokens);
     if (r.servedModel != null) bump(s.byModel, r.servedModel, r.totalTokens);
     if (r.servedProvider != null) bump(s.byProvider, r.servedProvider, r.totalTokens);
     this.scheduleFlush();
@@ -166,14 +175,14 @@ export class StatsCache {
     // error card cannot drift apart. The original request is dated by when it
     // was logged, which for a demotion is today in every realistic case -- a
     // delivery failure is observed within the same request.
-    bumpDay(this.state.byDay, new Date().toISOString().slice(0, 10), {
+    bumpDay(this.state.byDay, todayKey(), {
       requests: 0,
       totalTokens: 0,
       errors: 1,
       latencySumMs: 0,
     });
     if (persistImmediately) {
-      try { this.settings.set(STATS_CACHE_SETTINGS_KEY, JSON.stringify(this.state)); }
+      try { this.persist(); }
       catch (error) { this.state = previous!; throw error; }
     } else this.scheduleFlush();
   }
@@ -182,17 +191,7 @@ export class StatsCache {
 
   summary(): StatsSummary {
     const s = this.state;
-    return {
-      requests: s.requests,
-      errors: s.errors,
-      promptTokens: s.promptTokens,
-      completionTokens: s.completionTokens,
-      totalTokens: s.totalTokens,
-      cachedInputTokens: s.cachedInputTokens,
-      cacheCreationInputTokens: s.cacheCreationInputTokens,
-      reasoningTokens: s.reasoningTokens,
-      avgLatencyMs: s.requests > 0 ? Math.round(s.latencySumMs / s.requests) : 0,
-    };
+    return { ...totalsOf(s), avgLatencyMs: s.requests > 0 ? Math.round(s.latencySumMs / s.requests) : 0 };
   }
 
   timeSeries(): TimePoint[] {
@@ -228,13 +227,17 @@ export class StatsCache {
     this.flushTimer.unref?.();
   }
 
+  private persist(): void {
+    this.settings.set(STATS_CACHE_SETTINGS_KEY, JSON.stringify(this.state));
+  }
+
   private save(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
     try {
-      this.settings.set(STATS_CACHE_SETTINGS_KEY, JSON.stringify(this.state));
+      this.persist();
     } catch {
       // Best-effort by design: the delayed flush can fire after shutdown closed
       // the database. Whatever this save would have written, the next startup
@@ -265,15 +268,7 @@ export class StatsCache {
     if (acc.maxId <= sinceId) return false;
     const s = this.state;
     s.lastId = acc.maxId;
-    s.requests += acc.requests;
-    s.errors += acc.errors;
-    s.promptTokens += acc.promptTokens;
-    s.completionTokens += acc.completionTokens;
-    s.totalTokens += acc.totalTokens;
-    s.cachedInputTokens += acc.cachedInputTokens;
-    s.cacheCreationInputTokens += acc.cacheCreationInputTokens;
-    s.reasoningTokens += acc.reasoningTokens;
-    s.latencySumMs += acc.latencySumMs;
+    addCounters(s, acc);
     for (const g of acc.byDay) bumpDay(s.byDay, g.key, g);
     for (const g of acc.byService) bump(s.byService, g.key, g.totalTokens, g.requests);
     for (const g of acc.byModel) bump(s.byModel, g.key, g.totalTokens, g.requests);

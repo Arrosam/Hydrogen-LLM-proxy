@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { modelProviders, type ModelProvider } from "../db/schema";
+import { pickDefined, TableRepo } from "./tableRepo";
 
 export interface MappingInput {
   modelId: number;
@@ -14,19 +15,13 @@ export interface MappingInput {
 }
 
 /** Model <-> Provider mappings: the upstream model id for a (model, provider) pair. */
-export class MappingRepo {
-  constructor(private readonly db: DB) {}
-
-  list(): ModelProvider[] {
-    return this.db.select().from(modelProviders).all();
+export class MappingRepo extends TableRepo<typeof modelProviders> {
+  constructor(db: DB) {
+    super(db, modelProviders);
   }
 
   listForModel(modelId: number): ModelProvider[] {
     return this.db.select().from(modelProviders).where(eq(modelProviders.modelId, modelId)).all();
-  }
-
-  get(id: number): ModelProvider | undefined {
-    return this.db.select().from(modelProviders).where(eq(modelProviders.id, id)).get();
   }
 
   getPair(modelId: number, providerId: number): ModelProvider | undefined {
@@ -53,16 +48,6 @@ export class MappingRepo {
   }
 
   update(id: number, input: Partial<Omit<MappingInput, "modelId" | "providerId">>): ModelProvider | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.upstreamModel !== undefined) patch.upstreamModel = input.upstreamModel;
-    if (input.families !== undefined) patch.families = input.families;
-    if (input.priority !== undefined) patch.priority = input.priority;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(modelProviders).set(patch).where(eq(modelProviders.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(modelProviders).where(eq(modelProviders.id, id)).run();
+    return this.patch(id, pickDefined(input, ["upstreamModel", "families", "priority", "enabled"]));
   }
 }

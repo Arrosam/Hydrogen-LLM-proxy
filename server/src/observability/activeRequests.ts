@@ -65,6 +65,9 @@ export const BLOCK_THRESHOLD_MS = 30_000;
 /** Max completed requests retained in the ring buffer for late polling. */
 const DEFAULT_RETENTION = 256;
 
+/** Completed requests returned by listCompleted when the caller names no limit. */
+const DEFAULT_COMPLETED_PAGE = 50;
+
 /**
  * Cap on progress events per request. A long retry chain or a Micro Agent
  * with many stages can emit events without end, and each finished entry
@@ -160,7 +163,7 @@ export class ActiveRequestRegistry {
   }
 
   /** Recently completed requests (newest first). */
-  listCompleted(limit = 50): ActiveRequest[] {
+  listCompleted(limit = DEFAULT_COMPLETED_PAGE): ActiveRequest[] {
     return structuredClone(this.completed.slice(-limit).reverse());
   }
 

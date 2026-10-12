@@ -1,4 +1,5 @@
 import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm";
+import { chunked, PARAM_CHUNK } from "./sqlChunk";
 import type { DB } from "../db";
 import { imageCache } from "../db/schema";
 
@@ -16,11 +17,6 @@ import { imageCache } from "../db/schema";
 
 /** Rows read per eviction round. Bounds the memory one huge eviction touches. */
 const EVICT_CHUNK = 256;
-
-/** Hashes per `IN (...)` list. SQLite's parameter ceiling is far higher, but a
- * request can carry an unbounded number of images and one statement per 200 of
- * them costs nothing. */
-const PARAM_CHUNK = 200;
 
 export interface CacheEntry {
   hash: string;
@@ -44,12 +40,6 @@ export interface CacheStats {
 /** What one entry costs against the budget. */
 export function entrySize(hash: string, description: string): number {
   return Buffer.byteLength(hash, "utf8") + Buffer.byteLength(description, "utf8");
-}
-
-function chunked<T>(items: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
 }
 
 /** Anything with the subset of the drizzle surface this repo uses — the real DB

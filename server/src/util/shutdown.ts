@@ -1,3 +1,6 @@
+/** The signals a supervisor stops the process with. */
+export const SIGNAL = { TERM: "SIGTERM", INT: "SIGINT" } as const;
+
 /** Minimal surface needed to drain Fastify without coupling the helper to its
  * concrete generic parameters. */
 export interface ClosableServer {
@@ -33,5 +36,37 @@ export async function closeWithDeadline(app: ClosableServer, graceMs: number): P
     return forced;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/** What the process holds open besides the HTTP server. */
+export interface ShutdownResources {
+  statsCache: { flush(): void };
+  egressPool: { closeAll(): Promise<void> };
+  sqlite: { close(): void };
+}
+
+/**
+ * The whole shutdown sequence short of exiting: drain the server within
+ * `graceMs`, flush the stats cache, tear down the pooled egress-proxy
+ * dispatchers, close the database.
+ *
+ * The pool goes after the drain, because in-flight requests are still reading
+ * through it until then. After a forced drain (or a close that threw) only
+ * synchronous cleanup is allowed -- see closeWithDeadline -- so its teardown is
+ * started and not awaited; the caller exits right after.
+ */
+export async function shutdownGracefully(app: ClosableServer, resources: ShutdownResources, graceMs: number): Promise<void> {
+  let forced = true;
+  try {
+    forced = await closeWithDeadline(app, graceMs);
+    resources.statsCache.flush();
+  } finally {
+    try {
+      const pooled = resources.egressPool.closeAll().catch(() => undefined);
+      if (!forced) await pooled;
+    } finally {
+      resources.sqlite.close();
+    }
   }
 }

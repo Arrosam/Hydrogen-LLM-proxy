@@ -1,7 +1,7 @@
-import { genId } from "../util/ids";
-import type { ContentPart, Message, ServerToolResultPart, Tool } from "../core/ir/content";
+import { genId, ID_PREFIX } from "../util/ids";
+import { DEFAULT_SERVER_TOOL_ERROR_CODE, type ContentPart, type Message, type ServerToolResultPart, type Tool } from "../core/ir/content";
 import type { HttpTool } from "./toolHttp";
-import { PAUSED_TOOL_MARKER, serverToolOutcome } from "./toolHttp";
+import { PAUSED_TOOL_MARKER, serverToolOutcome, toolErrorOutput } from "./toolHttp";
 
 /**
  * Provider-executed ("server-side") tool round trips, in a protocol-agnostic
@@ -115,12 +115,6 @@ function resultIsError(message: Message, toolUseId: string): boolean {
 }
 
 /**
- * Pair every provider-executed call in the run's history with its result, in
- * round order. `history` carries the UNTRUNCATED adapter output for the whole
- * run — unlike the request trace, which is clipped for the log — so this is the
- * one place the client-facing result can be built from real data.
- */
-/**
  * Hosted calls a paused turn left unexecuted, paired with their bound tools.
  *
  * A resumed request still carries that turn, so these have to run before the
@@ -140,7 +134,7 @@ export function pendingHostedResults(history: Message[], named: Map<string, Http
       results.push({
         type: "tool_result",
         toolUseId: part.id,
-        content: [{ type: "text", text: JSON.stringify({ error: { code: PAUSED_TOOL_MARKER, message: "The previous turn ended before this tool ran; it was not executed" } }) }],
+        content: [{ type: "text", text: toolErrorOutput(PAUSED_TOOL_MARKER, "The previous turn ended before this tool ran; it was not executed") }],
         isError: true,
       });
     }
@@ -193,6 +187,12 @@ export function serverToolResponseContent(
   return content;
 }
 
+/**
+ * Pair every provider-executed call in the run's history with its result, in
+ * round order. `history` carries the UNTRUNCATED adapter output for the whole
+ * run — unlike the request trace, which is clipped for the log — so this is the
+ * one place the client-facing result can be built from real data.
+ */
 export function collectServerToolCalls(history: Message[], matched: Map<string, { tool: HttpTool; declaration: ServerToolDeclaration }>): ServerToolCall[] {
   const calls: ServerToolCall[] = [];
   for (let index = 0; index < history.length; index++) {
@@ -225,14 +225,14 @@ export function collectServerToolCalls(history: Message[], matched: Map<string, 
  * which is a different fact from a broken adapter. The code is the adapter's own
  * when it named one, and `unavailable` when it did not.
  */
-export function serverToolParts(calls: ServerToolCall[], family: "anthropic" | "openai_responses"): ServerToolResultPart[] {
+export function serverToolParts(calls: ServerToolCall[], family: ServerToolResultPart["family"]): ServerToolResultPart[] {
   return calls.map(call => {
     const contract = call.tool.serverTool!;
-    const outcome = call.isError ? { content: [] as [], errorCode: "unavailable" } : serverToolOutcome(call.payload, contract.resultPath);
+    const outcome = call.isError ? { content: [] as [], errorCode: DEFAULT_SERVER_TOOL_ERROR_CODE } : serverToolOutcome(call.payload, contract.resultPath);
     return {
       type: "server_tool_result",
       family,
-      id: call.id || genId("srvtoolu"),
+      id: call.id || genId(ID_PREFIX.SERVER_TOOL_USE),
       name: call.name,
       input: call.input ?? {},
       blockType: contract.resultType,

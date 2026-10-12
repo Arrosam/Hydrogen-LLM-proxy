@@ -1,5 +1,9 @@
 import fs from "node:fs";
 import { APP_VERSION } from "../util/version";
+import { HEADER } from "../util/httpHeaders";
+import { HTTP_STATUS } from "../util/httpStatus";
+import { MS_PER_MINUTE } from "../util/time";
+import { errorMessage } from "../util/errors";
 
 /**
  * Release check + restart-to-upgrade.
@@ -42,6 +46,11 @@ export interface UpdateStatus {
   error?: string;
 }
 
+/** major.minor.patch */
+const VERSION_CORE_PARTS = 3;
+/** A pre-release identifier made only of digits compares as a number. */
+const NUMERIC_IDENTIFIER = /^\d+$/;
+
 /** A version parsed into its precedence parts: the numeric core, plus the
  * dot-separated pre-release identifiers when the tag carries a `-suffix`. */
 interface ParsedVersion {
@@ -78,8 +87,8 @@ function comparePre(a: string[], b: string[]): number {
     if (x === undefined) return -1;
     if (y === undefined) return 1;
     if (x === y) continue;
-    const xNum = /^\d+$/.test(x);
-    const yNum = /^\d+$/.test(y);
+    const xNum = NUMERIC_IDENTIFIER.test(x);
+    const yNum = NUMERIC_IDENTIFIER.test(y);
     if (xNum && yNum) return Number(x) < Number(y) ? -1 : 1;
     if (xNum !== yNum) return xNum ? -1 : 1;
     return x < y ? -1 : 1;
@@ -101,7 +110,7 @@ export function compareVersions(a: string, b: string): number {
   const x = parseVersion(a);
   const y = parseVersion(b);
   if (!x || !y) return 0;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < VERSION_CORE_PARTS; i++) {
     if (x.core[i] !== y.core[i]) return x.core[i] > y.core[i] ? 1 : -1;
   }
   // Same core: the release itself outranks every pre-release of it.
@@ -116,23 +125,33 @@ export function isNewerVersion(candidate: string, base: string): boolean {
   return compareVersions(candidate, base) > 0;
 }
 
+/** Present in every Docker container. */
+const DOCKERENV_PATH = "/.dockerenv";
+
 function detectRuntime(): UpdateStatus["runtime"] {
   if (process.env.KUBERNETES_SERVICE_HOST) return "kubernetes";
   try {
-    if (fs.existsSync("/.dockerenv")) return "docker";
+    if (fs.existsSync(DOCKERENV_PATH)) return "docker";
   } catch {
     /* ignore */
   }
   return "node";
 }
 
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_TTL_MS = 10 * MS_PER_MINUTE;
+/** How long a failed check is served from the cache before GitHub is asked again. */
+const ERROR_CACHE_TTL_MS = 30_000;
 /** Releases read per check. GitHub returns them newest-first by publish date;
  * a page this size covers the window in which a still-current version could
  * be the newest, and the pick inside it is by precedence, not by position. */
 const RELEASE_PAGE_SIZE = 30;
 const NOTES_MAX_CHARS = 4000;
 const FETCH_TIMEOUT_MS = 10_000;
+/** Delay before the restart signal, so the HTTP reply leaves the socket first. */
+const RESTART_DELAY_MS = 500;
+const GITHUB_API_BASE = "https://api.github.com";
+const GITHUB_ACCEPT = "application/vnd.github+json";
+const USER_AGENT_PREFIX = "hydrogen-llm-proxy/";
 
 export interface UpdateServiceOptions {
   /** "owner/name" GitHub repository whose releases are checked. */
@@ -167,7 +186,7 @@ export class UpdateService {
   /** Latest-release status, cached. `force` refetches (the "Check now" button). */
   async check(force = false): Promise<UpdateStatus> {
     if (this.inflight) return this.inflight;
-    if (this.cached?.error && Date.now() - this.cached.checkedAt < 30_000) return this.cached;
+    if (this.cached?.error && Date.now() - this.cached.checkedAt < ERROR_CACHE_TTL_MS) return this.cached;
     if (!force && this.cached && !this.cached.error && Date.now() - this.cached.checkedAt < this.cacheTtlMs) {
       return this.cached;
     }
@@ -198,21 +217,21 @@ export class UpdateService {
     const out = this.base();
     let res: Response;
     try {
-      res = await this.fetchImpl(`https://api.github.com/repos/${this.repo}/releases?per_page=${RELEASE_PAGE_SIZE}`, {
+      res = await this.fetchImpl(`${GITHUB_API_BASE}/repos/${this.repo}/releases?per_page=${RELEASE_PAGE_SIZE}`, {
         headers: {
-          accept: "application/vnd.github+json",
+          [HEADER.ACCEPT]: GITHUB_ACCEPT,
           // GitHub rejects requests without a User-Agent.
-          "user-agent": `hydrogen-llm-proxy/${this.current}`,
+          [HEADER.USER_AGENT]: `${USER_AGENT_PREFIX}${this.current}`,
         },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch (e) {
-      out.error = `update check failed: ${e instanceof Error ? e.message : String(e)}`;
+      out.error = `update check failed: ${errorMessage(e)}`;
       return out;
     }
     if (!res.ok) {
       out.error =
-        res.status === 403 || res.status === 429
+        res.status === HTTP_STATUS.FORBIDDEN || res.status === HTTP_STATUS.TOO_MANY_REQUESTS
           ? `GitHub API rate limit hit (${res.status}); try again later`
           : `GitHub API returned ${res.status}`;
       return out;
@@ -286,7 +305,7 @@ export class UpdateService {
    * explicit operator opt-in; the delay lets the HTTP response leave the socket
    * first.
    */
-  scheduleRestart(delayMs = 500): void {
+  scheduleRestart(delayMs = RESTART_DELAY_MS): void {
     if (!this.restartSupported) {
       throw new Error("remote restart is disabled; set UPDATE_RESTART_ENABLED=true only for a supervised deployment");
     }

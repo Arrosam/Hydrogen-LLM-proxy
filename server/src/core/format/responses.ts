@@ -1,4 +1,4 @@
-import { Request, type RenderTarget } from "../ir/request";
+import type { RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
@@ -8,33 +8,51 @@ import {
   type ServerToolResultPart,
   type FileSource,
   type Message,
-  type Tool,
+  type ReasoningPart,
+  type StopReason,
   type ToolChoice,
+  DEFAULT_SERVER_TOOL_ERROR_CODE,
+  SYSTEM_SEPARATOR,
 } from "../ir/content";
-import type { GenerationParams, ResponseFormat, ThinkingLevel } from "../ir/params";
-import { ThinkingPolicy } from "../ir/thinking";
-import { parseSSE, safeParseJson, type StreamContext, type StreamEvent } from "../ir/stream";
-import { genId, nowSeconds } from "../../util/ids";
+import { isVerbosity, type GenerationParams, type ResponseFormat, type ThinkingLevel } from "../ir/params";
+import { effortToThinking, ThinkingPolicy } from "../ir/thinking";
+import { parseSSE, parseSseJson, sseFrame, type StreamContext, type StreamEvent } from "../ir/stream";
+import { ID_PREFIX, genId, nowSeconds } from "../../util/ids";
 import {
   applyNonCanonical,
-  boolOrUndef,
-  capMaxTokens,
   collectPassthrough,
+  dataUrlOf,
+  foreignFileIdError,
+  hasCacheHint,
+  imageUrlField,
   imageUrlOf,
-  num,
-  numOrUndef,
-  openAiCachedTokens,
+  objectsIn,
+  openAiJsonSchemaFields,
+  OPENAI_ROLE as ROLE,
+  TOOL_RESULT_IMAGES_NOTE,
+  openAiUsageToWire,
+  paramSetter,
   parseDataUrl,
-  safeJsonParse,
-  strOrUndef,
+  parseInlineFileData,
+  parseOpenAiResponseFormat,
+  parseOpenAiUsage,
+  stringContentParts,
+  type OpenAiUsageKeys,
 } from "./wire";
-import { FormatConversionError } from "./errors";
+import { boolOrUndef, num, numOrUndef, parseToolArguments, strOrUndef } from "../ir/coerce";
+import {
+  OPENAI_TOOL_TYPE_FUNCTION as TOOL_TYPE_FUNCTION,
+  parseOpenAiToolChoice,
+  parseToolList,
+  renderOpenAiToolChoice,
+  renderToolList,
+  type ToolWire,
+} from "./tools";
+import { RESPONSE_EVENT, RESPONSE_STATUS, RUNNING_RESPONSE_STATUSES, type ResponseStatus } from "./responsesWire";
 import type { Usage } from "../ir/usage";
-import { decodeReasoning, encodeReasoning, encodeRedacted } from "./reasoningBridge";
+import { clientSignature, decodeReasoning, encodeRedacted, isOwnOrigin, nativeSignature } from "./reasoningBridge";
 import { registerFormat } from "./registry";
-import type { SendTarget, Transport } from "../upstream/transport";
-import type { RelayResult, SendResult } from "../upstream/outcome";
-import { relayStream, sendBuffered } from "../upstream/roundtrip";
+import { WireRequest } from "./wireRequest";
 
 /**
  * OpenAI Responses API (/v1/responses), both directions: clients (Codex CLI,
@@ -42,49 +60,120 @@ import { relayStream, sendBuffered } from "../upstream/roundtrip";
  * are called with it upstream.
  */
 
+// --- wire identifiers ----------------------------------------------------
+
+/** Output / input item types. `web_search_call` is also the block type a search round trip is carried as. */
+const ITEM = {
+  MESSAGE: "message",
+  REASONING: "reasoning",
+  FUNCTION_CALL: "function_call",
+  FUNCTION_CALL_OUTPUT: "function_call_output",
+  WEB_SEARCH_CALL: "web_search_call",
+} as const;
+
+/** Content part types (message content, reasoning summary / content). */
+const PART = {
+  TEXT: "text",
+  INPUT_TEXT: "input_text",
+  OUTPUT_TEXT: "output_text",
+  INPUT_IMAGE: "input_image",
+  INPUT_FILE: "input_file",
+  REFUSAL: "refusal",
+  SUMMARY_TEXT: "summary_text",
+  REASONING_TEXT: "reasoning_text",
+} as const;
+
+/** Item- and part-level SSE event types; the response-level ones are RESPONSE_EVENT. */
+const EVENT = {
+  OUTPUT_ITEM_ADDED: "response.output_item.added",
+  OUTPUT_ITEM_DONE: "response.output_item.done",
+  OUTPUT_TEXT_DELTA: "response.output_text.delta",
+  OUTPUT_TEXT_DONE: "response.output_text.done",
+  REFUSAL_DELTA: "response.refusal.delta",
+  REFUSAL_DONE: "response.refusal.done",
+  REASONING_SUMMARY_TEXT_DELTA: "response.reasoning_summary_text.delta",
+  REASONING_SUMMARY_TEXT_DONE: "response.reasoning_summary_text.done",
+  REASONING_TEXT_DELTA: "response.reasoning_text.delta",
+  REASONING_SUMMARY_PART_ADDED: "response.reasoning_summary_part.added",
+  REASONING_SUMMARY_PART_DONE: "response.reasoning_summary_part.done",
+  CONTENT_PART_ADDED: "response.content_part.added",
+  CONTENT_PART_DONE: "response.content_part.done",
+  FUNCTION_CALL_ARGUMENTS_DELTA: "response.function_call_arguments.delta",
+  FUNCTION_CALL_ARGUMENTS_DONE: "response.function_call_arguments.done",
+} as const;
+
+/** Every event type of this wire starts with this. */
+const RESPONSE_EVENT_PREFIX = "response.";
+
+const OBJECT_RESPONSE = "response";
+
+/** `incomplete_details.reason` values. */
+const INCOMPLETE_REASON = {
+  PAUSE_TURN: "pause_turn",
+  CONTENT_FILTER: "content_filter",
+  MAX_OUTPUT_TOKENS: "max_output_tokens",
+} as const;
+
+/** Where this wire's `usage` object keeps its counters. */
+const USAGE_KEYS: OpenAiUsageKeys = {
+  prompt: "input_tokens",
+  completion: "output_tokens",
+  promptDetails: "input_tokens_details",
+  completionDetails: "output_tokens_details",
+};
+
+/** Statuses of a buffered response object that is not a finished answer. */
+const UNFINISHED_STATUSES: readonly unknown[] = [RESPONSE_STATUS.FAILED, RESPONSE_STATUS.CANCELLED, ...RUNNING_RESPONSE_STATUSES];
+
+/** The provider name a conversion refusal reports. */
+const PROVIDER_LABEL = "an OpenAI Responses";
+
+/** Name of the built-in search tool, and the web_search_call status of a search still running. */
+const WEB_SEARCH_TOOL_NAME = "web_search";
+const WEB_SEARCH_STATUS_SEARCHING = "searching";
+
 // --- content -------------------------------------------------------------
 
 function parseSearchCall(item: Record<string, unknown>): ServerToolResultPart {
   const action = (item.action ?? {}) as Record<string, unknown>;
-  return { type: "server_tool_result", family: "openai_responses", id: String(item.id ?? genId("ws")), name: "web_search",
-    input: action, blockType: "web_search_call", content: Array.isArray(action.sources) ? action.sources : [],
-    ...(item.status === "failed" ? { errorCode: "unavailable" } : {}),
-    ...(item.status === "in_progress" || item.status === "searching" ? { notExecuted: true } : {}) };
+  return { type: "server_tool_result", family: "openai_responses", id: String(item.id ?? genId(ID_PREFIX.WEB_SEARCH)), name: WEB_SEARCH_TOOL_NAME,
+    input: action, blockType: ITEM.WEB_SEARCH_CALL, content: Array.isArray(action.sources) ? action.sources : [],
+    ...(item.status === RESPONSE_STATUS.FAILED ? { errorCode: DEFAULT_SERVER_TOOL_ERROR_CODE } : {}),
+    ...(item.status === RESPONSE_STATUS.IN_PROGRESS || item.status === WEB_SEARCH_STATUS_SEARCHING ? { notExecuted: true } : {}) };
 }
 function renderSearchCall(p: ServerToolResultPart): Record<string, unknown> {
   const action = (p.input ?? {}) as Record<string, unknown>;
-  return { id: p.id, type: "web_search_call", status: p.notExecuted ? "in_progress" : p.errorCode !== undefined ? "failed" : "completed",
+  return { id: p.id, type: ITEM.WEB_SEARCH_CALL, status: p.notExecuted ? RESPONSE_STATUS.IN_PROGRESS : p.errorCode !== undefined ? RESPONSE_STATUS.FAILED : RESPONSE_STATUS.COMPLETED,
     action: { type: "search", ...action, ...(p.content.length ? { sources: p.content.filter((entry): entry is { url: string } => entry !== null && typeof entry === "object" && typeof (entry as { url?: unknown }).url === "string").map(entry => ({ type: "url", ...entry })) } : {}) } };
 }
 
+/** A search the model asked for that has not run: the item a paused turn hands the client. */
+function pendingSearchCall(id: string, name: string, input: unknown): Record<string, unknown> {
+  return renderSearchCall({ type: "server_tool_result", family: "openai_responses", id, name, input, blockType: ITEM.WEB_SEARCH_CALL, content: [], notExecuted: true });
+}
+
 function contentToParts(content: unknown): ContentPart[] {
-  if (content == null) return [];
-  if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
-  if (!Array.isArray(content)) return [];
+  const text = stringContentParts(content);
+  if (text) return text;
   const parts: ContentPart[] = [];
-  for (const raw of content) {
-    if (!raw || typeof raw !== "object") continue;
-    const part = raw as Record<string, unknown>;
+  for (const part of objectsIn(content)) {
     switch (part.type) {
-      case "input_text":
-      case "output_text":
-      case "text":
+      case PART.INPUT_TEXT:
+      case PART.OUTPUT_TEXT:
+      case PART.TEXT:
         parts.push({ type: "text", text: String(part.text ?? "") });
         break;
-      case "input_image": {
-        const img = part.image_url;
-        const url = typeof img === "string" ? img : String((img as Record<string, unknown>)?.url ?? "");
+      case PART.INPUT_IMAGE: {
+        const url = imageUrlField(part.image_url);
         if (url) parts.push({ type: "image", source: parseDataUrl(url) });
         break;
       }
-      case "input_file": {
+      case PART.INPUT_FILE: {
         const name = part.filename != null ? String(part.filename) : undefined;
         if (typeof part.file_url === "string" && part.file_url) {
           parts.push({ type: "file", source: { kind: "url", url: part.file_url }, name });
         } else if (typeof part.file_data === "string" && part.file_data) {
-          const d = part.file_data;
-          const src = d.startsWith("data:") ? parseDataUrl(d) : { kind: "base64" as const, mediaType: "application/pdf", data: d };
-          parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name });
+          parts.push({ type: "file", source: parseInlineFileData(part.file_data), name });
         } else if (typeof part.file_id === "string" && part.file_id) {
           // A handle into this API's own file storage. Kept so a Responses ->
           // Responses hop restores it verbatim; another family cannot resolve
@@ -93,7 +182,7 @@ function contentToParts(content: unknown): ContentPart[] {
         }
         break;
       }
-      case "refusal":
+      case PART.REFUSAL:
         if (part.refusal) parts.push({ type: "text", text: String(part.refusal) });
         break;
     }
@@ -109,16 +198,11 @@ function contentToParts(content: unknown): ContentPart[] {
 function inputFileRef(source: FileSource): Record<string, unknown> {
   switch (source.kind) {
     case "base64":
-      return { file_data: `data:${source.mediaType};base64,${source.data}` };
+      return { file_data: dataUrlOf(source.mediaType, source.data) };
     case "url":
       return { file_url: source.url };
     case "file_id":
-      if (source.family !== "openai_responses") {
-        throw new FormatConversionError(
-          `cannot send a ${source.family} file_id ("${source.id}") to an OpenAI Responses provider: ` +
-            `a file id only resolves in the API that issued it`,
-        );
-      }
+      if (source.family !== "openai_responses") throw foreignFileIdError(source, PROVIDER_LABEL);
       return { file_id: source.id };
   }
 }
@@ -131,78 +215,40 @@ function outputText(output: unknown): string {
 
 // --- tools ---------------------------------------------------------------
 
-function parseTools(raw: unknown): Tool[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const tools: Tool[] = [];
-  for (const t of raw) {
-    if (!t || typeof t !== "object") continue;
-    const tool = t as Record<string, unknown>;
-    // Responses tools are flattened (no nested "function" object).
-    if (tool.type !== "function" || !tool.name) {
-      // Built-in tools (web_search, file_search, code_interpreter, mcp, ...):
-      // keep verbatim for same-family replay instead of dropping them.
-      if (tool.type) tools.push({ name: String(tool.name ?? tool.type), parameters: {}, raw: { family: "openai_responses", value: tool } });
-      continue;
-    }
-    tools.push({
-      name: String(tool.name),
-      description: tool.description ? String(tool.description) : undefined,
-      parameters: (tool.parameters as Record<string, unknown>) ?? { type: "object", properties: {} },
-      ...(typeof tool.strict === "boolean" ? { strict: tool.strict } : {}),
-    });
-  }
-  return tools.length ? tools : undefined;
-}
+/**
+ * Responses tools are flattened (no nested "function" object). Anything that is
+ * not a named function tool is a built-in (web_search, file_search,
+ * code_interpreter, mcp, ...): kept verbatim for same-family replay instead of
+ * dropped, as long as it says what it is.
+ */
+const TOOL_WIRE: ToolWire = {
+  family: "openai_responses",
+  functionFields: (tool) => (tool.type === TOOL_TYPE_FUNCTION && tool.name ? tool : undefined),
+  schemaKey: "parameters",
+  extras: (tool) => (typeof tool.strict === "boolean" ? { strict: tool.strict } : {}),
+  nativeName: (tool) => (tool.type ? String(tool.name ?? tool.type) : undefined),
+  render: (t) => ({ type: TOOL_TYPE_FUNCTION, name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) }),
+};
 
+/** The object form names the tool at the top level and must say it is a function. */
 function parseToolChoice(raw: unknown): ToolChoice | undefined {
-  if (raw == null) return undefined;
-  if (raw === "auto") return { type: "auto" };
-  if (raw === "none") return { type: "none" };
-  if (raw === "required") return { type: "required" };
-  if (typeof raw === "object") {
-    const c = raw as Record<string, unknown>;
-    if (c.type === "function" && c.name) return { type: "tool", name: String(c.name) };
-  }
-  return undefined;
+  return parseOpenAiToolChoice(raw, (c) => c.type === TOOL_TYPE_FUNCTION && c.name);
 }
 
 function toolChoiceToResponses(choice: ToolChoice): unknown {
-  switch (choice.type) {
-    case "auto":
-      return "auto";
-    case "none":
-      return "none";
-    case "required":
-      return "required";
-    case "tool":
-      return { type: "function", name: choice.name };
-  }
+  return renderOpenAiToolChoice(choice, (name) => ({ type: TOOL_TYPE_FUNCTION, name }));
 }
 
 // --- response_format (text.format) ---------------------------------------
 
+/** The format sits under `text.format`, with the json_schema fields on the format object itself. */
 function parseResponseFormat(text: unknown): ResponseFormat | undefined {
   if (!text || typeof text !== "object") return undefined;
-  const fmt = (text as Record<string, unknown>).format;
-  if (!fmt || typeof fmt !== "object") return undefined;
-  const f = fmt as Record<string, unknown>;
-  if (f.type === "text") return { type: "text" };
-  if (f.type === "json_object") return { type: "json_object" };
-  if (f.type === "json_schema") {
-    return {
-      type: "json_schema",
-      name: f.name ? String(f.name) : undefined,
-      schema: (f.schema as Record<string, unknown>) ?? {},
-      strict: typeof f.strict === "boolean" ? f.strict : undefined,
-    };
-  }
-  return undefined;
+  return parseOpenAiResponseFormat((text as Record<string, unknown>).format, (format) => format);
 }
 
 function responseFormatToResponses(rf: ResponseFormat): unknown {
-  if (rf.type === "json_schema") {
-    return { format: { type: "json_schema", name: rf.name ?? "schema", schema: rf.schema, ...(rf.strict != null ? { strict: rf.strict } : {}) } };
-  }
+  if (rf.type === "json_schema") return { format: { type: rf.type, ...openAiJsonSchemaFields(rf) } };
   return { format: { type: rf.type } };
 }
 
@@ -210,19 +256,7 @@ function responseFormatToResponses(rf: ResponseFormat): unknown {
 
 function parseThinking(raw: unknown): ThinkingLevel | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const effort = (raw as Record<string, unknown>).effort;
-  if (effort === "none" || effort === "disabled") return "disabled";
-  if (
-    effort === "minimal" ||
-    effort === "low" ||
-    effort === "medium" ||
-    effort === "high" ||
-    effort === "xhigh" ||
-    effort === "max"
-  ) {
-    return effort;
-  }
-  return undefined;
+  return effortToThinking((raw as Record<string, unknown>).effort);
 }
 
 /** Every key this format models itself — parsed above, or emitted by `render`. */
@@ -265,25 +299,23 @@ const RESERVED = new Set([...OWNED, ...PROVIDER_STATE]);
 
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
-  if (numOrUndef(body.temperature) != null) params.temperature = numOrUndef(body.temperature);
-  if (numOrUndef(body.top_p) != null) params.topP = numOrUndef(body.top_p);
-  if (numOrUndef(body.max_output_tokens) != null) params.maxTokens = numOrUndef(body.max_output_tokens);
+  const set = paramSetter(params);
+  set("temperature", numOrUndef(body.temperature));
+  set("topP", numOrUndef(body.top_p));
+  set("maxTokens", numOrUndef(body.max_output_tokens));
   if (body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)) params.responsesReasoning = { ...body.reasoning as Record<string, unknown> };
   if (body.text && typeof body.text === "object" && !Array.isArray(body.text)) {
     params.responsesText = { ...body.text as Record<string, unknown> };
     const verbosity = params.responsesText.verbosity;
-    if (verbosity === "low" || verbosity === "medium" || verbosity === "high") params.verbosity = verbosity;
+    if (isVerbosity(verbosity)) params.verbosity = verbosity;
   }
-  const thinking = parseThinking(body.reasoning);
-  if (thinking) params.thinking = thinking;
-  const rf = parseResponseFormat(body.text);
-  if (rf) params.responseFormat = rf;
-  if (boolOrUndef(body.parallel_tool_calls) != null) params.parallelToolCalls = boolOrUndef(body.parallel_tool_calls);
-  if (strOrUndef(body.service_tier) != null) params.serviceTier = strOrUndef(body.service_tier);
-  if (strOrUndef(body.user) != null) params.user = strOrUndef(body.user);
-  if (body.prompt_cache_key != null || body.prompt_cache_options != null) params.cacheHint = true;
-  const passthrough = collectPassthrough(body, RESERVED, "openai_responses");
-  if (passthrough) params.passthrough = passthrough;
+  set("thinking", parseThinking(body.reasoning));
+  set("responseFormat", parseResponseFormat(body.text));
+  set("parallelToolCalls", boolOrUndef(body.parallel_tool_calls));
+  set("serviceTier", strOrUndef(body.service_tier));
+  set("user", strOrUndef(body.user));
+  if (hasCacheHint(body)) params.cacheHint = true;
+  set("passthrough", collectPassthrough(body, RESERVED, "openai_responses"));
   return params;
 }
 
@@ -300,12 +332,91 @@ function reasoningItemText(item: Record<string, unknown>): string {
       })
       .filter(Boolean)
       .join("\n");
-  return joinTexts(item.content, "reasoning_text") || joinTexts(item.summary, "summary_text");
+  return joinTexts(item.content, PART.REASONING_TEXT) || joinTexts(item.summary, PART.SUMMARY_TEXT);
+}
+
+/** A reasoning item's `encrypted_content`, when it carries one. */
+function encryptedContentOf(item: Record<string, unknown>): string | undefined {
+  return typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+}
+
+/**
+ * A "reasoning" item as a canonical part, or null when it carries nothing.
+ *
+ * Raw chain of thought (content[].reasoning_text) or summary, whichever the
+ * server produced. encrypted_content and the item id ride along so a
+ * same-family replay restores the item. An envelope this proxy wrapped on the
+ * way out (see reasoningBridge) is unwrapped instead, so the canonical part is
+ * the block its issuing family knows and that upstream gets the real thing back.
+ * An envelope that cannot be read is dropped: it is nobody's native payload.
+ */
+function parseReasoningItem(item: Record<string, unknown>): ReasoningPart | null {
+  const text = reasoningItemText(item);
+  const encrypted = encryptedContentOf(item);
+  const replay = encrypted ? decodeReasoning(encrypted) : null;
+  if (replay) return replay;
+  const signature = nativeSignature(encrypted);
+  if (!text && !signature) return null;
+  return {
+    type: "reasoning",
+    text,
+    signature,
+    origin: "openai_responses",
+    itemId: typeof item.id === "string" && item.id ? item.id : undefined,
+  };
+}
+
+/**
+ * The fields of a reasoning item after its `type` and `id` (which the buffered
+ * and streamed shapes order differently): the summary, the raw text when there
+ * is any, and the opaque payload when one is attached. WHICH payload -- a
+ * native signature, or this proxy's envelope for a client -- is the caller's
+ * decision, so the never-across-families rule stays visible at each call site.
+ */
+function reasoningItemBody(text: string, encrypted?: string): Record<string, unknown> {
+  return {
+    summary: text ? [{ type: PART.SUMMARY_TEXT, text }] : [],
+    ...(text ? { content: [{ type: PART.REASONING_TEXT, text }] } : {}),
+    ...(encrypted ? { encrypted_content: encrypted } : {}),
+  };
+}
+
+/** A completed assistant message item of a buffered response. */
+function messageItem(text: string): Record<string, unknown> {
+  return { type: ITEM.MESSAGE, id: genId(ID_PREFIX.MESSAGE), status: RESPONSE_STATUS.COMPLETED, role: ROLE.ASSISTANT, content: [{ type: PART.OUTPUT_TEXT, text, annotations: [] }] };
+}
+
+// --- stop reason mapping -------------------------------------------------
+
+/**
+ * This wire has no "paused" status: a turn that asks to be continued is
+ * `incomplete` with its own reason, and only that reason distinguishes it from
+ * a token-limit stop. A finished turn stops for a tool call or just stops.
+ */
+function responsesStatusToStop(incomplete: boolean, incompleteReason: unknown, sawToolCall: boolean): StopReason {
+  if (!incomplete) return sawToolCall ? "tool_use" : "stop";
+  if (incompleteReason === INCOMPLETE_REASON.PAUSE_TURN) return "pause_turn";
+  return incompleteReason === INCOMPLETE_REASON.CONTENT_FILTER ? "content_filter" : "length";
+}
+
+/** The `status` and `incomplete_details` a stop reason is reported as. The client resumes a paused turn by
+ * sending the response back, so the reason has to say which kind of "not finished" this is. */
+export function stopToResponsesStatus(stop: StopReason): { status: ResponseStatus; incompleteDetails: { reason: string } | null } {
+  switch (stop) {
+    case "pause_turn":
+      return { status: RESPONSE_STATUS.INCOMPLETE, incompleteDetails: { reason: INCOMPLETE_REASON.PAUSE_TURN } };
+    case "content_filter":
+      return { status: RESPONSE_STATUS.INCOMPLETE, incompleteDetails: { reason: INCOMPLETE_REASON.CONTENT_FILTER } };
+    case "length":
+      return { status: RESPONSE_STATUS.INCOMPLETE, incompleteDetails: { reason: INCOMPLETE_REASON.MAX_OUTPUT_TOKENS } };
+    default:
+      return { status: RESPONSE_STATUS.COMPLETED, incompleteDetails: null };
+  }
 }
 
 // --- request subclass ----------------------------------------------------
 
-export class OpenAIResponsesRequest extends Request {
+export class OpenAIResponsesRequest extends WireRequest {
   readonly family = "openai_responses" as const;
 
   static parse(body: Record<string, unknown>): OpenAIResponsesRequest {
@@ -316,76 +427,55 @@ export class OpenAIResponsesRequest extends Request {
     const input = body.input;
     if (typeof input === "string") {
       if (input) messages.push({ role: "user", content: [{ type: "text", text: input }] });
-    } else if (Array.isArray(input)) {
-      for (const raw of input) {
-        if (!raw || typeof raw !== "object") continue;
-        const item = raw as Record<string, unknown>;
-        const type = item.type ?? "message";
-        if (type === "message") {
-          const role = String(item.role ?? "user");
+    } else {
+      for (const item of objectsIn(input)) {
+        const type = item.type ?? ITEM.MESSAGE;
+        if (type === ITEM.MESSAGE) {
+          const role = String(item.role ?? ROLE.USER);
           const parts = contentToParts(item.content);
-          if (role === "system" || role === "developer") {
+          if (role === ROLE.SYSTEM || role === ROLE.DEVELOPER) {
             const text = textOf(parts);
             if (text) systemChunks.push(text);
           } else if (parts.length) {
-            messages.push({ role: role === "assistant" ? "assistant" : "user", content: parts });
+            messages.push({ role: role === ROLE.ASSISTANT ? "assistant" : "user", content: parts });
           }
-        } else if (type === "function_call") {
+        } else if (type === ITEM.FUNCTION_CALL) {
           messages.push({
             role: "assistant",
-            content: [{ type: "tool_use", id: String(item.call_id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) }],
+            content: [{ type: "tool_use", id: String(item.call_id ?? genId(ID_PREFIX.CALL)), name: String(item.name ?? ""), input: parseToolArguments(item.arguments) }],
           });
-        } else if (type === "web_search_call") {
+        } else if (type === ITEM.WEB_SEARCH_CALL) {
           const p = parseSearchCall(item);
           messages.push({ role: "assistant", content: [p.notExecuted ? { type: "tool_use", serverTool: true, id: p.id, name: p.name, input: p.input } : p] });
-        } else if (type === "function_call_output") {
+        } else if (type === ITEM.FUNCTION_CALL_OUTPUT) {
           messages.push({
             role: "user",
             content: [{ type: "tool_result", toolUseId: String(item.call_id ?? ""), content: [{ type: "text", text: outputText(item.output) }] }],
           });
-        } else if (type === "reasoning") {
+        } else if (type === ITEM.REASONING) {
           // Replayed thinking is parsed, NOT dropped: what may be resent is the
           // EGRESS family's rule. An Anthropic-family target requires the
           // history's thinking back (DeepSeek's 4028), and this family's own
           // render replays it too — DeepSeek-family Responses upstreams 400 a
           // thinking-mode tool loop whose reasoning_text is not passed back.
-          // encrypted_content and the item id ride along so a same-family
-          // replay restores the item. A reasoning item precedes its turn's
-          // message/function_call items, so normalizeMessages folds it in
-          // front of them — the order every family wants.
-          const text = reasoningItemText(item);
-          const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
-          // An Anthropic redacted block this proxy wrapped on the way out (see
-          // reasoningBridge): unwrap it so the canonical part is the redacted
-          // block again, and an Anthropic upstream gets the real thing back.
-          const unwrapped = encrypted ? decodeReasoning(encrypted) : null;
-          if (unwrapped) {
-            messages.push({ role: "assistant", content: [unwrapped] });
-          } else if (text || encrypted) {
-            messages.push({
-              role: "assistant",
-              content: [{
-                type: "reasoning",
-                text,
-                signature: encrypted,
-                origin: "openai_responses",
-                itemId: typeof item.id === "string" && item.id ? item.id : undefined,
-              }],
-            });
-          }
+          // A reasoning item precedes its turn's message/function_call items,
+          // so normalizeMessages folds it in front of them — the order every
+          // family wants.
+          const part = parseReasoningItem(item);
+          if (part) messages.push({ role: "assistant", content: [part] });
         }
       }
     }
 
     return new OpenAIResponsesRequest({
       requestedService: String(body.model ?? ""),
-      system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
+      system: systemChunks.length ? systemChunks.join(SYSTEM_SEPARATOR) : undefined,
       // Reasoning is NOT stripped here: what a target may be sent back is the
       // egress family's rule, applied at render time (this family and the
       // Anthropic renderer both replay it; stale tool-less turns are shed by
       // stripStaleReasoning in the renderers that call it).
       messages: normalizeMessages(messages),
-      tools: parseTools(body.tools),
+      tools: parseToolList(body.tools, TOOL_WIRE),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),
       stream: Boolean(body.stream),
@@ -407,31 +497,31 @@ export class OpenAIResponsesRequest extends Request {
       };
       for (const p of m.content) {
         if (p.type === "text") {
-          parts.push({ type: m.role === "assistant" ? "output_text" : "input_text", text: p.text });
+          parts.push({ type: m.role === "assistant" ? PART.OUTPUT_TEXT : PART.INPUT_TEXT, text: p.text });
         } else if (p.type === "image") {
-          parts.push({ type: "input_image", image_url: imageUrlOf(p.source) });
+          parts.push({ type: PART.INPUT_IMAGE, image_url: imageUrlOf(p.source) });
         } else if (p.type === "file") {
-          parts.push({ type: "input_file", ...(p.name ? { filename: p.name } : {}), ...inputFileRef(p.source) });
+          parts.push({ type: PART.INPUT_FILE, ...(p.name ? { filename: p.name } : {}), ...inputFileRef(p.source) });
         } else if (p.type === "opaque") {
           if (p.family === "openai_responses") parts.push(p.value as Record<string, unknown>);
         } else if (p.type === "server_tool_result") {
           if (p.family === "openai_responses") { flushParts(); input.push(renderSearchCall(p)); }
         } else if (p.type === "tool_use") {
           flushParts();
-          input.push(p.serverTool ? renderSearchCall({ type: "server_tool_result", family: "openai_responses", id: p.id, name: p.name, input: p.input, blockType: "web_search_call", content: [], notExecuted: true })
-            : { type: "function_call", call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
+          input.push(p.serverTool ? pendingSearchCall(p.id, p.name, p.input)
+            : { type: ITEM.FUNCTION_CALL, call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}) });
         } else if (p.type === "tool_result") {
           flushParts();
-          input.push({ type: "function_call_output", call_id: p.toolUseId, output: textOf(p.content) });
+          input.push({ type: ITEM.FUNCTION_CALL_OUTPUT, call_id: p.toolUseId, output: textOf(p.content) });
           // function_call_output is text-only: carry the result's images in a
           // follow-up user message instead of dropping them (screenshot loops).
           const images = p.content.filter((c) => c.type === "image");
           if (images.length) {
             input.push({
-              role: "user",
+              role: ROLE.USER,
               content: [
-                { type: "input_text", text: "(images returned by the tool result above)" },
-                ...images.map((img) => ({ type: "input_image", image_url: imageUrlOf((img as Extract<ContentPart, { type: "image" }>).source) })),
+                { type: PART.INPUT_TEXT, text: TOOL_RESULT_IMAGES_NOTE },
+                ...images.map((img) => ({ type: PART.INPUT_IMAGE, image_url: imageUrlOf((img as Extract<ContentPart, { type: "image" }>).source) })),
               ],
             });
           }
@@ -444,12 +534,12 @@ export class OpenAIResponsesRequest extends Request {
           // family that encrypted it can read it back.
           if (p.redacted) continue;
           flushParts();
+          // Bound for an upstream: only this family's own id and payload go back.
+          const own = isOwnOrigin(p, "openai_responses");
           input.push({
-            type: "reasoning",
-            id: (!p.origin || p.origin === "openai_responses" ? p.itemId : undefined) ?? genId("rs"),
-            summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
-            ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
-            ...(p.signature && (!p.origin || p.origin === "openai_responses") ? { encrypted_content: p.signature } : {}),
+            type: ITEM.REASONING,
+            id: (own ? p.itemId : undefined) ?? genId(ID_PREFIX.REASONING),
+            ...reasoningItemBody(p.text, own ? p.signature : undefined),
           });
         }
       }
@@ -460,25 +550,16 @@ export class OpenAIResponsesRequest extends Request {
     // Provider-side storage is disabled; Hydrogen manages ingress state locally.
     const out: Record<string, unknown> = { model: target.upstreamModel, input, store: false };
     if (this.system) out.instructions = this.system;
-    if (this.tools) {
-      const rendered = this.tools
-        .filter((t) => !t.raw || t.raw.family === "openai_responses")
-        .map((t) => (t.raw ? t.raw.value : { type: "function", name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) }));
-      if (rendered.length) out.tools = rendered;
-    }
+    const tools = renderToolList(this.tools, TOOL_WIRE);
+    if (tools) out.tools = tools;
     if (this.toolChoice) out.tool_choice = toolChoiceToResponses(this.toolChoice);
     if (p.responsesReasoning) out.reasoning = { ...p.responsesReasoning };
     if (p.responsesText) out.text = { ...p.responsesText };
-    if (p.thinking) {
-      // The thinking policy owns max_output_tokens when reasoning is on: the
-      // reasoning is spent out of that same ceiling, so it has to size it.
-      const tf = ThinkingPolicy.responses(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
-      out.reasoning = { ...p.responsesReasoning, effort: tf.effort };
-      if (tf.maxTokens != null) out.max_output_tokens = tf.maxTokens;
-    } else {
-      const maxTokens = capMaxTokens(p.maxTokens, target.providerMaxOutputTokens);
-      if (maxTokens != null) out.max_output_tokens = maxTokens;
-    }
+    // The thinking policy owns max_output_tokens when reasoning is on: the
+    // reasoning is spent out of that same ceiling, so it has to size it.
+    const ceiling = ThinkingPolicy.openai(p.thinking, p.maxTokens, target.providerMaxOutputTokens);
+    if (ceiling.effort != null) out.reasoning = { ...p.responsesReasoning, effort: ceiling.effort };
+    if (ceiling.maxTokens != null) out.max_output_tokens = ceiling.maxTokens;
     if (p.temperature != null) out.temperature = p.temperature;
     if (p.topP != null) out.top_p = p.topP;
     if (p.responseFormat) out.text = { ...p.responsesText, ...responseFormatToResponses(p.responseFormat) as Record<string, unknown> };
@@ -490,19 +571,6 @@ export class OpenAIResponsesRequest extends Request {
     applyNonCanonical(out, p, this.family);
     return out;
   }
-
-  /** Rebuild any canonical Request as an OpenAI Responses request. */
-  static construct(base: Request): OpenAIResponsesRequest {
-    return new OpenAIResponsesRequest(base.data());
-  }
-
-  send(transport: Transport, target: SendTarget): Promise<SendResult> {
-    return sendBuffered(this, transport, target);
-  }
-
-  relay(transport: Transport, target: SendTarget): Promise<RelayResult> {
-    return relayStream(this, transport, target);
-  }
 }
 
 // --- response subclass ---------------------------------------------------
@@ -510,61 +578,41 @@ export class OpenAIResponsesRequest extends Request {
 export class OpenAIResponsesResponse extends Response {
   readonly family = "openai_responses" as const;
 
+  static isEnvelope(body: Record<string, unknown>): boolean {
+    return Array.isArray(body.output);
+  }
+
+  /** A response object states its own status: failed, cancelled, or still queued / running, it is not an answer. */
+  static override isUnfinished(body: Record<string, unknown>): boolean {
+    return UNFINISHED_STATUSES.includes(body.status);
+  }
+
   static parse(body: Record<string, unknown>): OpenAIResponsesResponse {
     const content: ContentPart[] = [];
     let sawToolCall = false;
-    const output = Array.isArray(body.output) ? body.output : [];
-    for (const raw of output) {
-      if (!raw || typeof raw !== "object") continue;
-      const item = raw as Record<string, unknown>;
-      if (item.type === "reasoning") {
-        // Raw chain of thought (content[].reasoning_text) or summary, whichever
-        // the server produced. encrypted_content and the item id are kept so a
-        // replay can restore the item.
-        const text = reasoningItemText(item);
-        const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
-        if (text || encrypted) {
-          content.push((encrypted ? decodeReasoning(encrypted) : null) ?? {
-            type: "reasoning",
-            text,
-            signature: encrypted,
-            origin: "openai_responses",
-            itemId: typeof item.id === "string" && item.id ? item.id : undefined,
-          });
-        }
-      } else if (item.type === "message") {
+    for (const item of objectsIn(body.output)) {
+      if (item.type === ITEM.REASONING) {
+        const part = parseReasoningItem(item);
+        if (part) content.push(part);
+      } else if (item.type === ITEM.MESSAGE) {
         const text = textOf(contentToParts(item.content));
         if (text) content.push({ type: "text", text });
-      } else if (item.type === "web_search_call") {
+      } else if (item.type === ITEM.WEB_SEARCH_CALL) {
         content.push(parseSearchCall(item));
-      } else if (item.type === "function_call") {
+      } else if (item.type === ITEM.FUNCTION_CALL) {
         sawToolCall = true;
-        content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? ""), input: safeJsonParse(item.arguments) });
+        content.push({ type: "tool_use", id: String(item.call_id ?? item.id ?? genId(ID_PREFIX.CALL)), name: String(item.name ?? ""), input: parseToolArguments(item.arguments) });
       }
     }
 
-    const usage = (body.usage ?? {}) as Record<string, unknown>;
-    const promptTokens = numOrUndef(usage.input_tokens) ?? 0;
-    const completionTokens = numOrUndef(usage.output_tokens) ?? 0;
-    const cachedInputTokens = openAiCachedTokens(usage);
-    const reasoningTokens = numOrUndef(((usage.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
-    // This wire has no "paused" status: a turn that asks to be continued is
-    // `incomplete` with its own reason, and only that reason distinguishes it
-    // from a token-limit stop.
     const incompleteReason = ((body.incomplete_details ?? {}) as Record<string, unknown>).reason;
-    const paused = body.status === "incomplete" && incompleteReason === "pause_turn";
-    const incomplete = body.status === "incomplete";
     return new OpenAIResponsesResponse({
-      id: String(body.id ?? genId("resp")),
+      id: String(body.id ?? genId(ID_PREFIX.RESPONSE)),
       model: String(body.model ?? ""),
       created: numOrUndef(body.created_at) ?? 0,
       content,
-      stopReason: paused ? "pause_turn" : incomplete && incompleteReason === "content_filter" ? "content_filter" : incomplete ? "length" : sawToolCall ? "tool_use" : "stop",
-      usage: {
-        promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
-        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
-        ...(reasoningTokens != null ? { reasoningTokens } : {}),
-      },
+      stopReason: responsesStatusToStop(body.status === RESPONSE_STATUS.INCOMPLETE, incompleteReason, sawToolCall),
+      usage: parseOpenAiUsage((body.usage ?? {}) as Record<string, unknown>, USAGE_KEYS),
     });
   }
 
@@ -578,21 +626,10 @@ export class OpenAIResponsesResponse extends Response {
       // A redacted block goes to the CLIENT wrapped, so the next turn can hand
       // it back and reach an Anthropic upstream intact. This is the one place
       // the envelope is created; requests bound for an upstream never carry it.
-      if (p.redacted) {
-        output.push({
-          type: "reasoning",
-          id: p.itemId ?? genId("rs"),
-          summary: [],
-          encrypted_content: encodeRedacted(p),
-        });
-        continue;
-      }
       output.push({
-        type: "reasoning",
-        id: p.itemId ?? genId("rs"),
-        summary: p.text ? [{ type: "summary_text", text: p.text }] : [],
-        ...(p.text ? { content: [{ type: "reasoning_text", text: p.text }] } : {}),
-        ...(p.signature ? { encrypted_content: p.origin && p.origin !== "openai_responses" ? encodeReasoning(p) : p.signature } : {}),
+        type: ITEM.REASONING,
+        id: p.itemId ?? genId(ID_PREFIX.REASONING),
+        ...(p.redacted ? reasoningItemBody("", encodeRedacted(p)) : reasoningItemBody(p.text, clientSignature(p, "openai_responses"))),
       });
     }
 
@@ -605,39 +642,28 @@ export class OpenAIResponsesResponse extends Response {
     }
 
     const text = textOf(this.content);
-    if (text) {
-      output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
-    }
+    if (text) output.push(messageItem(text));
 
     for (const p of this.content) {
       if (p.type === "tool_use") {
-        output.push(p.serverTool ? renderSearchCall({ type: "server_tool_result", family: "openai_responses", id: p.id, name: p.name, input: p.input, blockType: "web_search_call", content: [], notExecuted: true })
-          : { type: "function_call", id: genId("fc"), call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}), status: "completed" });
+        output.push(p.serverTool ? pendingSearchCall(p.id, p.name, p.input)
+          : { type: ITEM.FUNCTION_CALL, id: genId(ID_PREFIX.FUNCTION_CALL), call_id: p.id, name: p.name, arguments: JSON.stringify(p.input ?? {}), status: RESPONSE_STATUS.COMPLETED });
       }
     }
 
-    if (output.length === 0) {
-      output.push({ type: "message", id: genId("msg"), status: "completed", role: "assistant", content: [{ type: "output_text", text: "", annotations: [] }] });
-    }
+    if (output.length === 0) output.push(messageItem(""));
 
-    const paused = this.stopReason === "pause_turn";
-    const incomplete = this.stopReason === "length" || this.stopReason === "content_filter";
+    const { status, incompleteDetails } = stopToResponsesStatus(this.stopReason);
     return {
-      id: genId("resp"),
-      object: "response",
+      id: genId(ID_PREFIX.RESPONSE),
+      object: OBJECT_RESPONSE,
       created_at: this.created,
-      status: paused || incomplete ? "incomplete" : "completed",
+      status,
       error: null,
-      // The client resumes a paused turn by sending the response back, so the
-      // reason has to say which kind of "not finished" this is.
-      incomplete_details: paused ? { reason: "pause_turn" } : incomplete ? { reason: this.stopReason === "content_filter" ? "content_filter" : "max_output_tokens" } : null,
+      incomplete_details: incompleteDetails,
       model,
       output,
-      usage: {
-        input_tokens: this.usage.promptTokens, output_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens,
-        ...(this.usage.cachedInputTokens != null ? { input_tokens_details: { cached_tokens: this.usage.cachedInputTokens } } : {}),
-        ...(this.usage.reasoningTokens != null ? { output_tokens_details: { reasoning_tokens: this.usage.reasoningTokens } } : {}),
-      },
+      usage: openAiUsageToWire(this.usage, USAGE_KEYS),
     };
   }
 
@@ -677,49 +703,59 @@ export class OpenAIResponsesResponse extends Response {
         yield { type: "text_delta", text: delta };
       }
     }
+    /** The one `start` this stream owes, from whichever `response` snapshot arrives first. */
+    function* ensureStarted(r: Record<string, unknown>): Generator<StreamEvent> {
+      if (started) return;
+      started = true;
+      yield { type: "start", id: String(r.id ?? genId(ID_PREFIX.RESPONSE)), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
+    }
     function* emitMessage(item: Record<string, unknown>, outputIndex: unknown): Generator<StreamEvent> {
-      if (item.type !== "message" || !Array.isArray(item.content)) return;
+      if (item.type !== ITEM.MESSAGE || !Array.isArray(item.content)) return;
       for (const [contentIndex, raw] of item.content.entries()) {
         if (!raw || typeof raw !== "object") continue;
         const part = raw as Record<string, unknown>;
-        if (part.type === "output_text" || part.type === "text" || part.type === "refusal") {
-          yield* emitText({ item_id: item.id, output_index: outputIndex, content_index: contentIndex }, part.type === "refusal" ? part.refusal : part.text, true);
+        if (part.type === PART.OUTPUT_TEXT || part.type === PART.TEXT || part.type === PART.REFUSAL) {
+          yield* emitText({ item_id: item.id, output_index: outputIndex, content_index: contentIndex }, part.type === PART.REFUSAL ? part.refusal : part.text, true);
         }
       }
     }
 
     const finishedItems = new Set<string>();
     const toolArguments = new Map<number, string>();
+    const toolStart = (index: number, item: Record<string, unknown>): StreamEvent =>
+      ({ type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId(ID_PREFIX.CALL)), name: String(item.name ?? "") });
+    function* startReasoning(itemId: string): Generator<StreamEvent> {
+      if (reasoningStarted.has(itemId)) return;
+      reasoningStarted.add(itemId);
+      yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
+    }
     function* finishItem(item: Record<string, unknown>, outputIndex: unknown): Generator<StreamEvent> {
-      if (item.type === "message") { yield* emitMessage(item, outputIndex); return; }
-      const itemId = String(item.id ?? item.call_id ?? (item.type === "reasoning" ? currentReasoningId : undefined) ?? outputIndex ?? "0");
+      if (item.type === ITEM.MESSAGE) { yield* emitMessage(item, outputIndex); return; }
+      const itemId = String(item.id ?? item.call_id ?? (item.type === ITEM.REASONING ? currentReasoningId : undefined) ?? outputIndex ?? "0");
       const key = String(item.type) + ":" + itemId;
       if (finishedItems.has(key)) return;
-      if (item.type === "web_search_call") {
+      if (item.type === ITEM.WEB_SEARCH_CALL) {
         const p = parseSearchCall(item);
         yield { type: "server_tool_start", family: p.family, id: p.id, name: p.name, input: p.input };
         yield { type: "server_tool_result", family: p.family, id: p.id, name: p.name, blockType: p.blockType, content: p.content, errorCode: p.errorCode, notExecuted: p.notExecuted };
-      } else if (item.type === "reasoning") {
-        if (!reasoningStarted.has(itemId)) {
-          reasoningStarted.add(itemId);
-          yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
-        }
+      } else if (item.type === ITEM.REASONING) {
+        yield* startReasoning(itemId);
         if (!reasoningWithText.has(itemId)) {
           const text = reasoningItemText(item);
           if (text) yield { type: "reasoning_delta", text };
         }
-        const encrypted = typeof item.encrypted_content === "string" && item.encrypted_content ? item.encrypted_content : undefined;
+        const encrypted = encryptedContentOf(item);
         const replay = encrypted ? decodeReasoning(encrypted) : null;
         yield { type: "reasoning_stop", origin: replay?.origin ?? "openai_responses", id: replay?.itemId ?? itemId, signature: replay?.signature ?? encrypted, redacted: replay?.redacted };
         if (currentReasoningId === itemId) currentReasoningId = undefined;
 
-      } else if (item.type === "function_call") {
+      } else if (item.type === ITEM.FUNCTION_CALL) {
         sawToolCall = true;
         let index = toolIndexByItem.get(itemId);
         if (index == null) {
           index = nextToolIndex++;
           toolIndexByItem.set(itemId, index);
-          yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
+          yield toolStart(index, item);
         }
         const args = typeof item.arguments === "string" ? item.arguments : "";
         const previous = toolArguments.get(index) ?? "";
@@ -732,37 +768,29 @@ export class OpenAIResponsesResponse extends Response {
     }
 
     for await (const frame of parseSSE(readable)) {
-      const data = safeParseJson(frame.data);
+      const data = parseSseJson(frame.data);
       if (!data) continue;
       const type = frame.event ?? String(data.type ?? "");
 
-      if (!started && type.startsWith("response.")) {
-        const r = (data.response ?? {}) as Record<string, unknown>;
-        started = true;
-        yield { type: "start", id: String(r.id ?? genId("resp")), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
-      }
+      if (type.startsWith(RESPONSE_EVENT_PREFIX)) yield* ensureStarted((data.response ?? {}) as Record<string, unknown>);
 
       switch (type) {
-        case "response.created": {
-          break;
-        }
-        case "response.output_text.delta":
-        case "response.refusal.delta":
+        case EVENT.OUTPUT_TEXT_DELTA:
+        case EVENT.REFUSAL_DELTA:
           yield* emitText(data, data.delta, false);
           break;
-        case "response.output_text.done":
+        case EVENT.OUTPUT_TEXT_DONE:
           yield* emitText(data, data.text, true);
           break;
-        case "response.refusal.done":
+        case EVENT.REFUSAL_DONE:
           yield* emitText(data, data.refusal, true);
           break;
-        case "response.reasoning_summary_text.delta":
-        case "response.reasoning_text.delta": {
+        case EVENT.REASONING_SUMMARY_TEXT_DELTA:
+        case EVENT.REASONING_TEXT_DELTA: {
           const itemId = typeof data.item_id === "string" && data.item_id ? data.item_id : currentReasoningId;
           if (itemId && !reasoningStarted.has(itemId)) {
-            reasoningStarted.add(itemId);
             currentReasoningId = itemId;
-            yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
+            yield* startReasoning(itemId);
           }
           if (typeof data.delta === "string" && data.delta) {
             reasoningWithText.add(itemId ?? "");
@@ -770,24 +798,21 @@ export class OpenAIResponsesResponse extends Response {
           }
           break;
         }
-        case "response.output_item.added": {
+        case EVENT.OUTPUT_ITEM_ADDED: {
           const item = (data.item ?? {}) as Record<string, unknown>;
-          if (item.type === "reasoning") {
-            const itemId = String(item.id ?? genId("rs"));
+          if (item.type === ITEM.REASONING) {
+            const itemId = String(item.id ?? genId(ID_PREFIX.REASONING));
             currentReasoningId = itemId;
-            if (!reasoningStarted.has(itemId)) {
-              reasoningStarted.add(itemId);
-              yield { type: "reasoning_start", origin: "openai_responses", id: itemId };
-            }
-          } else if (item.type === "function_call") {
+            yield* startReasoning(itemId);
+          } else if (item.type === ITEM.FUNCTION_CALL) {
             sawToolCall = true;
             const index = nextToolIndex++;
             toolIndexByItem.set(String(item.id ?? item.call_id ?? index), index);
-            yield { type: "tool_start", index, id: String(item.call_id ?? item.id ?? genId("call")), name: String(item.name ?? "") };
+            yield toolStart(index, item);
           }
           break;
         }
-        case "response.function_call_arguments.delta": {
+        case EVENT.FUNCTION_CALL_ARGUMENTS_DELTA: {
           const index = toolIndexByItem.get(String(data.item_id ?? ""));
           if (index != null && typeof data.delta === "string" && data.delta) {
             toolArguments.set(index, (toolArguments.get(index) ?? "") + data.delta);
@@ -795,37 +820,26 @@ export class OpenAIResponsesResponse extends Response {
           }
           break;
         }
-        case "response.output_item.done": {
+        case EVENT.OUTPUT_ITEM_DONE: {
           yield* finishItem((data.item ?? {}) as Record<string, unknown>, data.output_index);
           break;
         }
-        case "response.completed":
-        case "response.incomplete":
-        case "response.failed": {
+        case RESPONSE_EVENT.COMPLETED:
+        case RESPONSE_EVENT.INCOMPLETE:
+        case RESPONSE_EVENT.FAILED: {
           const r = (data.response ?? {}) as Record<string, unknown>;
           const u = (r.usage ?? {}) as Record<string, unknown>;
-          if (u.input_tokens != null || u.output_tokens != null) {
-            const otd = (u.output_tokens_details ?? {}) as Record<string, unknown>;
-            const cached = openAiCachedTokens(u);
-            usage = {
-              promptTokens: num(u.input_tokens), completionTokens: num(u.output_tokens), totalTokens: num(u.total_tokens) || num(u.input_tokens) + num(u.output_tokens),
-              ...(cached != null ? { cachedInputTokens: cached } : {}),
-              ...(numOrUndef(otd.reasoning_tokens) != null ? { reasoningTokens: num(otd.reasoning_tokens) } : {}),
-            };
-          }
+          if (u.input_tokens != null || u.output_tokens != null) usage = parseOpenAiUsage(u, USAGE_KEYS, { zeroTotalIsMissing: true });
           // A failed generation is not an answer: flag it incomplete so the
           // buffered path reports a retryable failure and the streamed path
           // aborts the connection, instead of relaying a failure as a completed
           // response. `incomplete` (max_output_tokens) is a legitimate length
           // stop and stays a normal finish.
-          if (type === "response.failed") {
+          if (type === RESPONSE_EVENT.FAILED) {
             yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
             return;
           }
-          if (!started) {
-            started = true;
-            yield { type: "start", id: String(r.id ?? genId("resp")), model: String(r.model ?? ""), created: num(r.created_at) || nowSeconds() };
-          }
+          yield* ensureStarted(r);
           if (Array.isArray(r.output)) {
             for (const [index, item] of r.output.entries()) {
               if (item && typeof item === "object") yield* finishItem(item as Record<string, unknown>, index);
@@ -834,28 +848,28 @@ export class OpenAIResponsesResponse extends Response {
           // An incomplete turn says WHY it stopped; only the reason tells a
           // paused loop apart from a token limit.
           const why = ((r.incomplete_details ?? {}) as Record<string, unknown>).reason;
-          yield { type: "finish", stopReason: type === "response.incomplete" ? (why === "pause_turn" ? "pause_turn" : why === "content_filter" ? "content_filter" : "length") : sawToolCall ? "tool_use" : "stop", usage };
+          yield { type: "finish", stopReason: responsesStatusToStop(type === RESPONSE_EVENT.INCOMPLETE, why, sawToolCall), usage };
           return;
         }
         default:
           break;
       }
     }
-    if (!started) yield { type: "start", id: genId("resp"), model: "", created: nowSeconds() };
+    yield* ensureStarted({});
     // Reached only when the stream ended without a terminal event -- truncated.
     yield { type: "finish", stopReason: sawToolCall ? "tool_use" : "stop", usage, incomplete: true };
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
-    const id = genId("resp");
+    const id = genId(ID_PREFIX.RESPONSE);
     let created = nowSeconds();
     const model = ctx.model;
     let seq = 0;
     const frame = (event: string, data: Record<string, unknown>): string =>
-      `event: ${event}\ndata: ${JSON.stringify({ type: event, sequence_number: seq++, ...data })}\n\n`;
+      sseFrame(JSON.stringify({ type: event, sequence_number: seq++, ...data }), event);
 
     const response = (status: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-      id, object: "response", created_at: created, status, error: null, incomplete_details: null, model, output: [], ...extra,
+      id, object: OBJECT_RESPONSE, created_at: created, status, error: null, incomplete_details: null, model, output: [], ...extra,
     });
 
     const serverInputs = new Map<string, unknown>();
@@ -867,47 +881,49 @@ export class OpenAIResponsesResponse extends Response {
     let reasoningId = "";
     let reasoningText: string | null = null;
     let reasoningSignature: string | undefined;
-    const tools = new Map<number, { itemId: string; callId: string; name: string; args: string; index: number }>();
+    const tools = new Map<number, OpenTool>();
 
     function* openReasoning(itemId?: string): Generator<string> {
-      reasoningId = itemId || genId("rs");
+      reasoningId = itemId || genId(ID_PREFIX.REASONING);
       reasoningText = "";
       reasoningSignature = undefined;
-      yield frame("response.output_item.added", { output_index: outputIndex, item: { id: reasoningId, type: "reasoning", summary: [] } });
-      yield frame("response.reasoning_summary_part.added", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: "" } });
+      yield frame(EVENT.OUTPUT_ITEM_ADDED, { output_index: outputIndex, item: { id: reasoningId, type: ITEM.REASONING, summary: [] } });
+      yield frame(EVENT.REASONING_SUMMARY_PART_ADDED, { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: PART.SUMMARY_TEXT, text: "" } });
+    }
+
+    /** Emit a finished output item and record it for the terminal snapshot. */
+    function* itemDone(index: number, item: Record<string, unknown>): Generator<string> {
+      yield frame(EVENT.OUTPUT_ITEM_DONE, { output_index: index, item });
+      output.push(item);
     }
 
     function* closeReasoning(): Generator<string> {
       if (reasoningText == null) return;
-      const summary = reasoningText ? [{ type: "summary_text", text: reasoningText }] : [];
-      const item = {
-        id: reasoningId,
-        type: "reasoning",
-        summary,
-        ...(reasoningText ? { content: [{ type: "reasoning_text", text: reasoningText }] } : {}),
-        ...(reasoningSignature ? { encrypted_content: reasoningSignature } : {}),
-      };
+      const item = { id: reasoningId, type: ITEM.REASONING, ...reasoningItemBody(reasoningText, reasoningSignature) };
       if (reasoningText) {
-        yield frame("response.reasoning_summary_text.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, text: reasoningText });
-        yield frame("response.reasoning_summary_part.done", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: "summary_text", text: reasoningText } });
+        yield frame(EVENT.REASONING_SUMMARY_TEXT_DONE, { item_id: reasoningId, output_index: outputIndex, summary_index: 0, text: reasoningText });
+        yield frame(EVENT.REASONING_SUMMARY_PART_DONE, { item_id: reasoningId, output_index: outputIndex, summary_index: 0, part: { type: PART.SUMMARY_TEXT, text: reasoningText } });
       }
-      yield frame("response.output_item.done", { output_index: outputIndex, item });
-      output.push(item);
-      outputIndex++;
+      yield* itemDone(outputIndex++, item);
       reasoningText = null;
       reasoningSignature = undefined;
     }
 
     function* closeMessage(): Generator<string> {
       if (msgText == null) return;
-      const part = { type: "output_text", text: msgText, annotations: [] };
-      const item = { id: msgId, type: "message", status: "completed", role: "assistant", content: [part] };
-      yield frame("response.output_text.done", { item_id: msgId, output_index: outputIndex, content_index: 0, text: msgText });
-      yield frame("response.content_part.done", { item_id: msgId, output_index: outputIndex, content_index: 0, part });
-      yield frame("response.output_item.done", { output_index: outputIndex, item });
-      output.push(item);
-      outputIndex++;
+      const part = { type: PART.OUTPUT_TEXT, text: msgText, annotations: [] };
+      const item = { id: msgId, type: ITEM.MESSAGE, status: RESPONSE_STATUS.COMPLETED, role: ROLE.ASSISTANT, content: [part] };
+      yield frame(EVENT.OUTPUT_TEXT_DONE, { item_id: msgId, output_index: outputIndex, content_index: 0, text: msgText });
+      yield frame(EVENT.CONTENT_PART_DONE, { item_id: msgId, output_index: outputIndex, content_index: 0, part });
+      yield* itemDone(outputIndex++, item);
       msgText = null;
+    }
+
+    type OpenTool = { itemId: string; callId: string; name: string; args: string; index: number };
+    function* closeTool(tc: OpenTool): Generator<string> {
+      const item = { id: tc.itemId, type: ITEM.FUNCTION_CALL, status: RESPONSE_STATUS.COMPLETED, call_id: tc.callId, name: tc.name, arguments: tc.args };
+      yield frame(EVENT.FUNCTION_CALL_ARGUMENTS_DONE, { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
+      yield* itemDone(tc.index, item);
     }
 
     // An Anthropic redacted_thinking block has no native form here, so it is
@@ -924,22 +940,20 @@ export class OpenAIResponsesResponse extends Response {
       switch (ev.type) {
         case "start":
           created = ev.created || created;
-          yield frame("response.created", { response: response("in_progress") });
-          yield frame("response.in_progress", { response: response("in_progress") });
+          yield frame(RESPONSE_EVENT.CREATED, { response: response(RESPONSE_STATUS.IN_PROGRESS) });
+          yield frame(RESPONSE_EVENT.IN_PROGRESS, { response: response(RESPONSE_STATUS.IN_PROGRESS) });
           break;
         case "reasoning_start":
+          yield* closeMessage();
+          yield* closeReasoning();
           if (ev.redacted) {
-            yield* closeMessage();
-            yield* closeReasoning();
-            redactedItemId = ev.id || genId("rs");
-            yield frame("response.output_item.added", {
+            redactedItemId = ev.id || genId(ID_PREFIX.REASONING);
+            yield frame(EVENT.OUTPUT_ITEM_ADDED, {
               output_index: outputIndex,
-              item: { id: redactedItemId, type: "reasoning", summary: [] },
+              item: { id: redactedItemId, type: ITEM.REASONING, summary: [] },
             });
             break;
           }
-          yield* closeMessage();
-          yield* closeReasoning();
           yield* openReasoning(ev.id);
           break;
         case "reasoning_delta":
@@ -949,20 +963,13 @@ export class OpenAIResponsesResponse extends Response {
             yield* openReasoning();
           }
           reasoningText = (reasoningText ?? "") + ev.text;
-          yield frame("response.reasoning_summary_text.delta", { item_id: reasoningId, output_index: outputIndex, summary_index: 0, delta: ev.text });
+          yield frame(EVENT.REASONING_SUMMARY_TEXT_DELTA, { item_id: reasoningId, output_index: outputIndex, summary_index: 0, delta: ev.text });
           break;
         case "reasoning_stop":
           if (redactedItemId || ev.redacted) {
-            const id = redactedItemId ?? ev.id ?? genId("rs");
-            const item = {
-              id,
-              type: "reasoning",
-              summary: [],
-              encrypted_content: encodeRedacted({ type: "reasoning", text: "", redacted: true, signature: ev.signature }),
-            };
-            yield frame("response.output_item.done", { output_index: outputIndex, item });
-            output.push(item);
-            outputIndex++;
+            const id = redactedItemId ?? ev.id ?? genId(ID_PREFIX.REASONING);
+            const envelope = encodeRedacted({ type: "reasoning", text: "", redacted: true, signature: ev.signature });
+            yield* itemDone(outputIndex++, { id, type: ITEM.REASONING, ...reasoningItemBody("", envelope) });
             redactedItemId = null;
             break;
           }
@@ -970,35 +977,34 @@ export class OpenAIResponsesResponse extends Response {
             yield* closeMessage();
             yield* openReasoning(ev.id);
           }
-          reasoningSignature = ev.signature && ev.origin && ev.origin !== "openai_responses"
-            ? encodeReasoning({ type: "reasoning", text: reasoningText ?? "", signature: ev.signature, origin: ev.origin, itemId: ev.id }) : ev.signature;
+          reasoningSignature = clientSignature({ type: "reasoning", text: reasoningText ?? "", signature: ev.signature, origin: ev.origin, itemId: ev.id }, "openai_responses");
           yield* closeReasoning();
           break;
         case "text_delta":
           if (msgText == null) {
             yield* closeReasoning();
-            msgId = genId("msg");
+            msgId = genId(ID_PREFIX.MESSAGE);
             msgText = "";
-            yield frame("response.output_item.added", { output_index: outputIndex, item: { id: msgId, type: "message", status: "in_progress", role: "assistant", content: [] } });
-            yield frame("response.content_part.added", { item_id: msgId, output_index: outputIndex, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+            yield frame(EVENT.OUTPUT_ITEM_ADDED, { output_index: outputIndex, item: { id: msgId, type: ITEM.MESSAGE, status: RESPONSE_STATUS.IN_PROGRESS, role: ROLE.ASSISTANT, content: [] } });
+            yield frame(EVENT.CONTENT_PART_ADDED, { item_id: msgId, output_index: outputIndex, content_index: 0, part: { type: PART.OUTPUT_TEXT, text: "", annotations: [] } });
           }
           msgText += ev.text;
-          yield frame("response.output_text.delta", { item_id: msgId, output_index: outputIndex, content_index: 0, delta: ev.text });
+          yield frame(EVENT.OUTPUT_TEXT_DELTA, { item_id: msgId, output_index: outputIndex, content_index: 0, delta: ev.text });
           break;
         case "tool_start": {
           yield* closeReasoning();
           yield* closeMessage();
-          const tc = { itemId: genId("fc"), callId: ev.id, name: ev.name, args: "", index: outputIndex };
+          const tc = { itemId: genId(ID_PREFIX.FUNCTION_CALL), callId: ev.id, name: ev.name, args: "", index: outputIndex };
           tools.set(ev.index, tc);
           outputIndex++;
-          yield frame("response.output_item.added", { output_index: tc.index, item: { id: tc.itemId, type: "function_call", status: "in_progress", call_id: tc.callId, name: tc.name, arguments: "" } });
+          yield frame(EVENT.OUTPUT_ITEM_ADDED, { output_index: tc.index, item: { id: tc.itemId, type: ITEM.FUNCTION_CALL, status: RESPONSE_STATUS.IN_PROGRESS, call_id: tc.callId, name: tc.name, arguments: "" } });
           break;
         }
         case "tool_args_delta": {
           const tc = tools.get(ev.index);
           if (tc) {
             tc.args += ev.delta;
-            yield frame("response.function_call_arguments.delta", { item_id: tc.itemId, output_index: tc.index, delta: ev.delta });
+            yield frame(EVENT.FUNCTION_CALL_ARGUMENTS_DELTA, { item_id: tc.itemId, output_index: tc.index, delta: ev.delta });
           }
           break;
         }
@@ -1015,19 +1021,15 @@ export class OpenAIResponsesResponse extends Response {
             input: serverInputs.get(ev.id), blockType: ev.blockType, content: ev.content, errorCode: ev.errorCode, notExecuted: ev.notExecuted });
           serverInputs.delete(ev.id);
           const index = outputIndex++;
-          yield frame("response.output_item.added", { output_index: index, item: { ...item, status: "in_progress" } });
-          yield frame("response.output_item.done", { output_index: index, item });
-          output.push(item);
+          yield frame(EVENT.OUTPUT_ITEM_ADDED, { output_index: index, item: { ...item, status: RESPONSE_STATUS.IN_PROGRESS } });
+          yield* itemDone(index, item);
           break;
         }
         case "tool_stop": {
           const tc = tools.get(ev.index);
           if (tc) {
             tools.delete(ev.index);
-            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
-            yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
-            yield frame("response.output_item.done", { output_index: tc.index, item });
-            output.push(item);
+            yield* closeTool(tc);
           }
           break;
         }
@@ -1037,34 +1039,21 @@ export class OpenAIResponsesResponse extends Response {
           if (ev.incomplete || ev.error) return;
           yield* closeReasoning();
           yield* closeMessage();
-          for (const tc of tools.values()) {
-            const item = { id: tc.itemId, type: "function_call", status: "completed", call_id: tc.callId, name: tc.name, arguments: tc.args };
-            yield frame("response.function_call_arguments.done", { item_id: tc.itemId, output_index: tc.index, arguments: tc.args });
-            yield frame("response.output_item.done", { output_index: tc.index, item });
-            output.push(item);
-          }
+          for (const tc of tools.values()) yield* closeTool(tc);
           tools.clear();
           for (const [id, input] of serverInputs) {
-            const item = renderSearchCall({ type: "server_tool_result", family: "openai_responses", id, name: "web_search", input, blockType: "web_search_call", content: [], notExecuted: true });
+            const item = pendingSearchCall(id, WEB_SEARCH_TOOL_NAME, input);
             const index = outputIndex++;
-            yield frame("response.output_item.added", { output_index: index, item });
-            yield frame("response.output_item.done", { output_index: index, item });
-            output.push(item);
+            yield frame(EVENT.OUTPUT_ITEM_ADDED, { output_index: index, item });
+            yield* itemDone(index, item);
           }
           serverInputs.clear();
-          const paused = ev.stopReason === "pause_turn";
-          const incomplete = ev.stopReason === "length" || ev.stopReason === "content_filter";
-          const usage = ev.usage
-            ? { input_tokens: ev.usage.promptTokens, output_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
-                ...(ev.usage.cachedInputTokens != null ? { input_tokens_details: { cached_tokens: ev.usage.cachedInputTokens } } : {}),
-                ...(ev.usage.reasoningTokens != null ? { output_tokens_details: { reasoning_tokens: ev.usage.reasoningTokens } } : {}),
-              }
-            : undefined;
-          yield frame(paused || incomplete ? "response.incomplete" : "response.completed", {
-            response: response(paused || incomplete ? "incomplete" : "completed", {
+          const { status, incompleteDetails } = stopToResponsesStatus(ev.stopReason);
+          yield frame(status === RESPONSE_STATUS.INCOMPLETE ? RESPONSE_EVENT.INCOMPLETE : RESPONSE_EVENT.COMPLETED, {
+            response: response(status, {
               output,
-              ...(paused ? { incomplete_details: { reason: "pause_turn" } } : incomplete ? { incomplete_details: { reason: ev.stopReason === "content_filter" ? "content_filter" : "max_output_tokens" } } : {}),
-              ...(usage ? { usage } : {}),
+              ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}),
+              ...(ev.usage ? { usage: openAiUsageToWire(ev.usage, USAGE_KEYS) } : {}),
             }),
           });
           break;

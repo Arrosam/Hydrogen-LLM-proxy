@@ -2,6 +2,8 @@ import { THINKING_FORMATS } from "../core/ir/thinkingFormat";
 import { z } from "zod";
 import { mergeOverrides, type GenerationParams, type OverridableParam, type RequestOverrides } from "../core/ir/params";
 import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingFormat";
+import { BYTES_PER_GIB } from "../config/limits";
+import { HTTP_STATUS, STATUS_CLIENT_CLOSED, STATUS_UPSTREAM_FAILURE } from "../util/httpStatus";
 
 /**
  * Persisted shape of a Model Service / Micro Agent. This is the config a
@@ -12,6 +14,10 @@ import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingForm
  */
 
 // --- triggers / retry ------------------------------------------------------
+
+/** The range of HTTP status codes a trigger may name. */
+const MIN_TRIGGER_STATUS = 100;
+const MAX_TRIGGER_STATUS = 599;
 
 /**
  * A trigger is an HTTP status code, or a symbolic class:
@@ -24,7 +30,7 @@ import type { ThinkingDelimiters, ThinkingFormat } from "../core/ir/thinkingForm
  *   "exhausted" (advanceOn only) - advance once this step's retries are used up
  */
 export const TriggerSchema = z.union([
-  z.number().int().min(100).max(599),
+  z.number().int().min(MIN_TRIGGER_STATUS).max(MAX_TRIGGER_STATUS),
   z.literal("timeout"),
   z.literal("network"),
   z.literal("error"),
@@ -37,9 +43,54 @@ export const AdvanceTriggerSchema = z.union([TriggerSchema, z.literal("exhausted
  * zod never runs RetrySchema's defaults and `runSteps` falls back to these — so
  * they must be the same values or the two disagree.
  */
-export const DEFAULT_RETRY_ON: z.infer<typeof TriggerSchema>[] = [429, 499, 502, 503, "timeout", "network"];
+export const DEFAULT_RETRY_ON: z.infer<typeof TriggerSchema>[] = [
+  HTTP_STATUS.TOO_MANY_REQUESTS, STATUS_CLIENT_CLOSED, STATUS_UPSTREAM_FAILURE, HTTP_STATUS.SERVICE_UNAVAILABLE, "timeout", "network",
+];
 export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_IDEMPOTENCY = "safe_write" as const;
+
+/** Whole-run timeout of a Model Service or Micro Agent that sets none. */
+export const DEFAULT_SERVICE_TIMEOUT_MS = 60_000;
+
+/** The `kind` discriminator of a service definition (also the model_services.kind column). */
+export const SERVICE_KIND = { MODEL_SERVICE: "model_service", MICRO_AGENT: "micro_agent" } as const;
+/** The dashboard's older spelling of the Micro Agent kind, still accepted on input. */
+export const LEGACY_AGENT_KIND = "agent";
+
+/** Ceiling on any configured retry delay: a fixed interval or either backoff bound (10 minutes). */
+const MAX_RETRY_DELAY_MS = 600_000;
+const DEFAULT_BACKOFF_INITIAL_MS = 100;
+const DEFAULT_BACKOFF_MAX_MS = 1_000;
+const MAX_RETRY_ATTEMPTS = 100;
+
+/** Bounds of an explicit thinking token budget. */
+const MIN_THINKING_BUDGET = 1024;
+const MAX_THINKING_BUDGET = 200_000;
+const MAX_THINKING_DELIMITER_CHARS = 64;
+
+/** Bounds of the generation params an override may set. */
+const MAX_TEMPERATURE = 2;
+const MAX_OUTPUT_TOKENS_OVERRIDE = 1_000_000;
+const MIN_PENALTY = -2;
+const MAX_PENALTY = 2;
+const MAX_REPETITION_PENALTY = 2;
+const MAX_CHOICES = 128;
+const MAX_TOP_LOGPROBS = 20;
+
+/** Bounds of a service, stage or pre-pass timeout. */
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 7_200_000;
+
+const MAX_STAGE_NAME_CHARS = 60;
+
+/** Hosted tool loop: model rounds one request may spend. */
+const MAX_TOOL_ROUNDS = 32;
+const DEFAULT_TOOL_ROUNDS = 8;
+/** Hosted tool loop: the largest configurable `maxCalls`, and the most hosted calls one round may request. */
+export const MAX_HOSTED_CALLS = 128;
+const DEFAULT_HOSTED_CALLS = 16;
+/** Model rounds shared by a hosted tool loop and every loop nested inside it. */
+export const MAX_SHARED_TOOL_ROUNDS = 128;
 
 /**
  * Exponential backoff with full jitter. When `backoff` is enabled the effective
@@ -52,9 +103,9 @@ export const DEFAULT_IDEMPOTENCY = "safe_write" as const;
  */
 export const BackoffSchema = z.object({
   /** Initial delay (attempt 2's upper bound before jitter). Default 100ms. */
-  initialMs: z.number().int().min(1).max(600_000).default(100),
+  initialMs: z.number().int().min(1).max(MAX_RETRY_DELAY_MS).default(DEFAULT_BACKOFF_INITIAL_MS),
   /** Absolute ceiling on the un-jittered delay. Default 1000ms. */
-  maxMs: z.number().int().min(1).max(600_000).default(1_000),
+  maxMs: z.number().int().min(1).max(MAX_RETRY_DELAY_MS).default(DEFAULT_BACKOFF_MAX_MS),
 });
 
 export const RetrySchema = z.object({
@@ -66,9 +117,9 @@ export const RetrySchema = z.object({
    * 503 (unavailable), a timeout, and a connection that died mid-response.
    */
   on: z.array(TriggerSchema).default(DEFAULT_RETRY_ON),
-  maxAttempts: z.number().int().min(1).max(100).default(DEFAULT_MAX_ATTEMPTS),
+  maxAttempts: z.number().int().min(1).max(MAX_RETRY_ATTEMPTS).default(DEFAULT_MAX_ATTEMPTS),
   /** Fixed delay between retries (legacy; ignored when `backoff` is set). */
-  intervalMs: z.number().int().min(0).max(600_000).default(0),
+  intervalMs: z.number().int().min(0).max(MAX_RETRY_DELAY_MS).default(0),
   /**
    * Exponential backoff with full jitter. When present, overrides `intervalMs`
    * and the engine computes a jittered delay per attempt.
@@ -94,7 +145,7 @@ export const ThinkingLevelSchema = z.union([
   z.literal("high"),
   z.literal("xhigh"),
   z.literal("max"),
-  z.object({ budget: z.number().int().min(1024).max(200_000) }),
+  z.object({ budget: z.number().int().min(MIN_THINKING_BUDGET).max(MAX_THINKING_BUDGET) }),
 ]);
 
 /**
@@ -117,8 +168,8 @@ export const ThinkingFormatSchema = z.enum(THINKING_FORMATS);
  * `--reasoning-config`, Open WebUI as a configurable reasoning tag pair.
  */
 export const ThinkingDelimitersSchema = z.object({
-  open: z.string().min(1).max(64),
-  close: z.string().min(1).max(64),
+  open: z.string().min(1).max(MAX_THINKING_DELIMITER_CHARS),
+  close: z.string().min(1).max(MAX_THINKING_DELIMITER_CHARS),
 });
 
 export const ResponseFormatSchema = z.union([
@@ -139,19 +190,19 @@ export const ResponseFormatSchema = z.union([
  */
 export const OverridesSchema = z
   .object({
-    temperature: z.number().min(0).max(2),
+    temperature: z.number().min(0).max(MAX_TEMPERATURE),
     topP: z.number().min(0).max(1),
     topK: z.number().int().min(0),
     minP: z.number().min(0).max(1),
-    maxTokens: z.number().int().min(1).max(1_000_000),
+    maxTokens: z.number().int().min(1).max(MAX_OUTPUT_TOKENS_OVERRIDE),
     stop: z.array(z.string()),
-    frequencyPenalty: z.number().min(-2).max(2),
-    presencePenalty: z.number().min(-2).max(2),
-    repetitionPenalty: z.number().min(0).max(2),
+    frequencyPenalty: z.number().min(MIN_PENALTY).max(MAX_PENALTY),
+    presencePenalty: z.number().min(MIN_PENALTY).max(MAX_PENALTY),
+    repetitionPenalty: z.number().min(0).max(MAX_REPETITION_PENALTY),
     seed: z.number().int(),
-    n: z.number().int().min(1).max(128),
+    n: z.number().int().min(1).max(MAX_CHOICES),
     logprobs: z.boolean(),
-    topLogprobs: z.number().int().min(0).max(20),
+    topLogprobs: z.number().int().min(0).max(MAX_TOP_LOGPROBS),
     logitBias: z.record(z.string(), z.number()),
     responseFormat: ResponseFormatSchema,
     parallelToolCalls: z.boolean(),
@@ -203,8 +254,8 @@ export function isChatPipeline(category: ServiceCategory): boolean {
 
 export const HostedToolOptionsSchema = z.object({
   streamMode: z.enum(["all", "progress", "final"]).default("progress"),
-  maxRounds: z.number().int().min(1).max(32).default(8),
-  maxCalls: z.number().int().min(1).max(128).default(16),
+  maxRounds: z.number().int().min(1).max(MAX_TOOL_ROUNDS).default(DEFAULT_TOOL_ROUNDS),
+  maxCalls: z.number().int().min(1).max(MAX_HOSTED_CALLS).default(DEFAULT_HOSTED_CALLS),
 });
 export type HostedToolOptions = z.infer<typeof HostedToolOptionsSchema>;
 
@@ -215,16 +266,19 @@ export type HostedToolOptions = z.infer<typeof HostedToolOptionsSchema>;
  * (or their box's) appetite can set one per Model Service / Micro Agent.
  * Absent or 0 means unlimited.
  */
-export const MAX_ATTACHMENT_LIMIT = 8 * 1024 * 1024 * 1024;
+export const MAX_ATTACHMENT_LIMIT = 8 * BYTES_PER_GIB;
 export const AttachmentBudgetSchema = z.number().int().min(0).max(MAX_ATTACHMENT_LIMIT);
 
-export const ServiceStepsSchema = z.object({
-  hostedTools: HostedToolOptionsSchema.optional(),
-  kind: z.literal("model_service").optional(),
-  /** Omitted = "chat" (backward compatible with pre-category definitions). */
-  category: ServiceCategorySchema.optional(),
-  timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
-  steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
+/** A call's time budget in milliseconds: a service's whole step chain, or one
+ * stage / pre-pass of an agent. */
+const TimeoutMsSchema = z.number().int().min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS);
+
+/**
+ * The service-level settings of a definition, whichever kind it is: a
+ * Model Service and a Micro Agent declare these identically, and for an agent
+ * they describe the agent as a whole.
+ */
+const ServiceLevelFields = {
   /**
    * Reliable streaming: for a streaming client request, stream the upstream
    * response and buffer it (a truncated stream retries under the step's rules)
@@ -244,9 +298,37 @@ export const ServiceStepsSchema = z.object({
    * Absent or 0 = unlimited. See {@link AttachmentBudgetSchema}.
    */
   maxAttachmentBytes: AttachmentBudgetSchema.optional(),
+};
+
+export const ServiceStepsSchema = z.object({
+  hostedTools: HostedToolOptionsSchema.optional(),
+  kind: z.literal(SERVICE_KIND.MODEL_SERVICE).optional(),
+  /** Omitted = "chat" (backward compatible with pre-category definitions). */
+  category: ServiceCategorySchema.optional(),
+  timeoutMs: TimeoutMsSchema.default(DEFAULT_SERVICE_TIMEOUT_MS),
+  steps: z.array(StepSchema).min(1, "a Model Service needs at least one step"),
+  ...ServiceLevelFields,
 });
 
 // --- Micro Agent (stage orchestration) ------------------------------------
+
+/** How a stage or pre-pass names the model it runs: a saved service, or an
+ * inline step chain of its own. */
+const ModelRefFields = {
+  /** Name of a saved Model Service (for a stage, a Micro Agent too). */
+  service: z.string().min(1).optional(),
+  /** Inline step chain (alternative to `service`). */
+  steps: z.array(StepSchema).min(1).optional(),
+};
+
+/** The two generation params that predate `overrides` and are still accepted
+ * beside it, with the bounds `overrides` itself applies. */
+const LegacyFlatOverrides = {
+  temperature: OverridesSchema.shape.temperature,
+  maxTokens: OverridesSchema.shape.maxTokens,
+};
+
+const ConversationRoleSchema = z.enum(["user", "assistant"]);
 
 export const AgentContextBlockSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("original_conversation") }),
@@ -254,8 +336,8 @@ export const AgentContextBlockSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("last_user") }),
   z.object({ kind: z.literal("last_user_text") }),
   z.object({ kind: z.literal("last_user_images") }),
-  z.object({ kind: z.literal("stage_output"), stage: z.string().min(1), role: z.enum(["user", "assistant"]).default("assistant") }),
-  z.object({ kind: z.literal("message"), role: z.enum(["user", "assistant"]).default("user"), text: z.string().default("") }),
+  z.object({ kind: z.literal("stage_output"), stage: z.string().min(1), role: ConversationRoleSchema.default("assistant") }),
+  z.object({ kind: z.literal("message"), role: ConversationRoleSchema.default("user"), text: z.string().default("") }),
   z.object({
     kind: z.literal("tool_turn"),
     name: z.string().min(1),
@@ -283,11 +365,9 @@ export const AgentTransitionSchema = z.object({
 });
 
 export const AgentStageSchema = z.object({
-  name: z.string().min(1).max(60),
-  /** Name of a saved Model Service / Micro Agent for this stage. */
-  service: z.string().min(1).optional(),
-  /** Inline step chain (alternative to `service`). No service/steps = a router. */
-  steps: z.array(StepSchema).min(1).optional(),
+  name: z.string().min(1).max(MAX_STAGE_NAME_CHARS),
+  /** No service and no steps = a router. */
+  ...ModelRefFields,
   /** Context blocks assembled into the messages. [] = pass the original through. */
   input: z.array(AgentContextBlockSchema).default([]),
   /**
@@ -299,43 +379,39 @@ export const AgentStageSchema = z.object({
   tools: z.enum(["inherit", "none"]).optional(),
   /** Legacy flat overrides (folded into `overrides` at consumption). */
   system: z.string().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  ...LegacyFlatOverrides,
   /** @deprecated Use `overrides.thinking` instead. Folded automatically for backward compat. */
   thinking: ThinkingLevelSchema.optional(),
   /** Rich per-stage parameter overrides (includes the system prompt). */
   overrides: OverridesSchema.optional(),
-  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
+  timeoutMs: TimeoutMsSchema.optional(),
   /** Forward-only conditional edges. Absent/no-match = fall through to the next stage. */
   transitions: z.array(AgentTransitionSchema).optional(),
 });
 
 export const AgentOcrSchema = z.object({
-  service: z.string().min(1).optional(),
-  steps: z.array(StepSchema).min(1).optional(),
+  ...ModelRefFields,
   /** System prompt for the OCR model; omitted = the built-in default. */
   prompt: z.string().optional(),
   /** Legacy flat overrides (folded at consumption). */
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().min(1).max(1_000_000).optional(),
+  ...LegacyFlatOverrides,
   overrides: OverridesSchema.optional(),
-  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
+  timeoutMs: TimeoutMsSchema.optional(),
 });
 
 /** Audio-to-text (ASR) pre-pass config: an stt-category Model Service (or
  * inline steps) that transcribes input_audio attachments before the stages
  * run, mirroring the OCR pre-pass for images. */
 export const AgentAsrSchema = z.object({
-  service: z.string().min(1).optional(),
-  steps: z.array(StepSchema).min(1).optional(),
-  timeoutMs: z.number().int().min(1_000).max(7_200_000).optional(),
+  ...ModelRefFields,
+  timeoutMs: TimeoutMsSchema.optional(),
 });
 
 export const AgentSchema = z.object({
   hostedTools: HostedToolOptionsSchema.optional(),
   // Accept the frontend's legacy "agent" discriminant as well as "micro_agent".
-  kind: z.union([z.literal("micro_agent"), z.literal("agent")]),
-  timeoutMs: z.number().int().min(1_000).max(7_200_000).default(60_000),
+  kind: z.union([z.literal(SERVICE_KIND.MICRO_AGENT), z.literal(LEGACY_AGENT_KIND)]),
+  timeoutMs: TimeoutMsSchema.default(DEFAULT_SERVICE_TIMEOUT_MS),
   stages: z.array(AgentStageSchema).min(1, "a Micro Agent needs at least one stage"),
   /** Name of the stage whose output is returned; omitted = the last stage. */
   output: z.string().optional(),
@@ -343,19 +419,8 @@ export const AgentSchema = z.object({
   ocr: AgentOcrSchema.optional(),
   /** Optional audio-to-text ASR pre-pass run before the first stage. */
   asr: AgentAsrSchema.optional(),
-  /** Reliable streaming for the agent as a whole (see ServiceStepsSchema). */
-  reliableStreaming: z.boolean().optional(),
-  /** How thinking reaches this agent's client (see ServiceStepsSchema). */
-  thinkingFormat: ThinkingFormatSchema.optional(),
-  /** Literal thinking boundaries for this agent's upstreams (see
-   * ServiceStepsSchema). */
-  thinkingDelimiters: ThinkingDelimitersSchema.optional(),
-  /**
-   * Aggregate budget (bytes) for the URL attachments every call this agent
-   * makes may inline. Absent or 0 = unlimited; inherited by stages that do not
-   * set their own.
-   */
-  maxAttachmentBytes: AttachmentBudgetSchema.optional(),
+  /** For the agent as a whole; inherited by stages that set no budget of their own. */
+  ...ServiceLevelFields,
 });
 
 export type Trigger = z.infer<typeof TriggerSchema>;
@@ -373,7 +438,12 @@ export type ServiceDef = AgentDef | ServiceSteps;
 
 export function isAgent(def: ServiceDef): def is AgentDef {
   const kind = (def as AgentDef).kind;
-  return kind === "micro_agent" || kind === "agent";
+  return kind === SERVICE_KIND.MICRO_AGENT || kind === LEGACY_AGENT_KIND;
+}
+
+/** A stage that names no model makes no call: it only routes. */
+export function isRouterStage(stage: Pick<AgentStage, "service" | "steps">): boolean {
+  return !stage.service && (!stage.steps || stage.steps.length === 0);
 }
 
 /**
@@ -406,7 +476,7 @@ export function serviceCategory(def: ServiceDef): ServiceCategory {
 /** Parse & validate a raw definition (Model Service steps or a Micro Agent). Throws ZodError. */
 export function parseService(raw: unknown): ServiceDef {
   const kind = raw && typeof raw === "object" ? (raw as { kind?: unknown }).kind : undefined;
-  if (kind === "micro_agent" || kind === "agent") {
+  if (kind === SERVICE_KIND.MICRO_AGENT || kind === LEGACY_AGENT_KIND) {
     return AgentSchema.parse(raw);
   }
   return ServiceStepsSchema.parse(raw);

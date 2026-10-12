@@ -1,23 +1,26 @@
 import { Agent, request, type Dispatcher } from "undici";
-import type { LookupAddress, LookupOptions } from "node:dns";
+import type { LookupOptions } from "node:dns";
 import type { Readable } from "node:stream";
-import type { SsrfGuard, ResolvedAddress } from "./ssrf";
+import type { SsrfGuard, ResolvedAddress, LookupCallback } from "./ssrf";
 import type { Transport, TransportJsonResult, TransportOptions, TransportStreamResult } from "./transport";
 import type { EgressProxyPool } from "./egress/pool";
-import { UpstreamUrlError } from "./ssrf";
+import { answerLookup, parseHttpUrl, PIN_TTL_MS, UpstreamUrlError } from "./ssrf";
+import { isSuccessStatus } from "../../util/httpStatus";
 
-/**
- * How long a pinned resolution stays fresh. Pinning happens immediately
- * before each request, so the TTL only bounds how long a cached entry may be
- * reused by a pooled connection re-established on its own -- every request
- * re-pins, so an active stream's reconnects always re-validate first.
- */
-const PIN_TTL_MS = 30_000;
+/** What a request carries: a value to serialize as JSON, bytes to send verbatim, or (a GET) nothing. */
+type Payload = { json: unknown } | { raw: Buffer | string } | null;
+
+/** The response of an undici `request`. */
+type UpstreamReply = Dispatcher.ResponseData;
 
 /** Upper bound on remembered resolutions: the map is keyed by hostname, and
  * URLs arrive in request bodies (the file pre-pass), so a hostile client
  * could otherwise grow it without end. Insertion-order eviction is fine. */
 const MAX_PINNED_HOSTS = 512;
+
+/** Name and message of the error a timed-out request is aborted with (those of `AbortSignal.timeout`). */
+const TIMEOUT_ERROR_NAME = "TimeoutError";
+const HEADERS_TIMEOUT_MESSAGE = "The operation was aborted due to timeout";
 
 /**
  * The concrete HTTP transport. Implements the {@link Transport} port used by
@@ -79,15 +82,7 @@ export class UpstreamClient implements Transport {
     if (!this.egressPool) {
       throw new UpstreamUrlError("this provider is configured to use a proxy, but no proxy pool is available");
     }
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw new UpstreamUrlError(`invalid upstream URL: ${url}`);
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new UpstreamUrlError(`unsupported upstream URL scheme "${parsed.protocol}" (use http/https)`);
-    }
+    parseHttpUrl(url);
     return this.egressPool.dispatcherFor(opts.proxy);
   }
 
@@ -109,24 +104,11 @@ export class UpstreamClient implements Transport {
   private lookupPinned(
     hostname: string,
     options: LookupOptions,
-    callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+    callback: LookupCallback,
   ): void {
     const key = hostname.toLowerCase();
-    // On the error paths the address argument is ignored (Node checks err
-    // first), but the LookupFunction signature demands it be present.
-    const fail = (err: unknown): void => {
-      const e = err instanceof Error ? err : new Error(String(err));
-      callback(e, "");
-    };
-    const respond = (addresses: ResolvedAddress[]): void => {
-      if (options && options.all) {
-        callback(null, addresses.map((a) => ({ address: a.address, family: a.family })));
-      } else if (addresses.length > 0) {
-        callback(null, addresses[0].address, addresses[0].family);
-      } else {
-        fail(new Error(`no validated address for upstream host "${hostname}"`));
-      }
-    };
+    const respond = (addresses: ResolvedAddress[]): void =>
+      answerLookup(addresses, options, callback, () => new Error(`no validated address for upstream host "${hostname}"`));
 
     const entry = this.pinned.get(key);
     if (entry && entry.expiresAt > Date.now()) {
@@ -141,7 +123,9 @@ export class UpstreamClient implements Transport {
         respond(addresses);
       })
       .catch((err: unknown) => {
-        fail(err);
+        // The address argument is ignored on an error (Node checks err first),
+        // but the LookupFunction signature demands it be present.
+        callback(err instanceof Error ? err : new Error(String(err)), "");
       });
   }
 
@@ -151,126 +135,113 @@ export class UpstreamClient implements Transport {
     return AbortSignal.any([timeout, external]);
   }
 
-  /** POST a JSON body and read the full JSON (or text) response. */
-  async postJson(
+  /**
+   * A signal that aborts at `timeoutMs` unless `disarm` is called first: the
+   * deadline for a streamed reply's HEADERS, which must not outlive them and
+   * cut the body. It aborts with the same TimeoutError `AbortSignal.timeout`
+   * does, so a caller classifies both alike.
+   */
+  private headersDeadline(timeoutMs: number, external?: AbortSignal): { signal: AbortSignal; disarm(): void } {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new DOMException(HEADERS_TIMEOUT_MESSAGE, TIMEOUT_ERROR_NAME)), timeoutMs);
+    return {
+      signal: external ? AbortSignal.any([controller.signal, external]) : controller.signal,
+      disarm: () => clearTimeout(timer),
+    };
+  }
+
+  /**
+   * Send one request: pick the dispatcher (which validates the URL), then hand
+   * it to undici.
+   *
+   * `headersTimeout` bounds time-to-first-headers and `bodyTimeout` is an IDLE
+   * timeout between body chunks. undici defaults BOTH to 5 minutes when
+   * omitted, and a non-streaming upstream (a local model especially) sends its
+   * headers only after the whole completion is computed, which can take far
+   * longer -- the service's timeoutMs must be the only cap, so it is passed
+   * through explicitly on every request.
+   *
+   * `totalTimeout` additionally aborts the whole exchange, body included, at
+   * timeoutMs. Every method wants that except {@link postStream}, which gets a
+   * deadline on the headers alone: undici keeps `headersTimeout` on a coarse
+   * shared timer (about a second), so on its own a sub-second timeoutMs was
+   * not honoured before the first byte of a streamed reply.
+   */
+  private async dispatch(
+    method: "GET" | "POST",
     url: string,
     headers: Record<string, string>,
-    body: unknown,
+    payload: Payload,
     opts: TransportOptions,
-  ): Promise<TransportJsonResult> {
+    totalTimeout: boolean,
+  ): Promise<UpstreamReply> {
     const dispatcher = await this.egress(url, opts);
-    const res = await request(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
-      // undici defaults BOTH of these to 5 minutes when omitted. A non-streaming
-      // upstream (a local model especially) sends its headers only after the
-      // whole completion is computed, which can take far longer — the service's
-      // timeoutMs must be the only cap, so pass it through explicitly.
-      headersTimeout: opts.timeoutMs,
-      bodyTimeout: opts.timeoutMs,
-    });
+    const headersOnly = totalTimeout ? undefined : this.headersDeadline(opts.timeoutMs, opts.signal);
+    try {
+      return await request(url, {
+        method,
+        headers,
+        ...(payload ? { body: "json" in payload ? JSON.stringify(payload.json) : payload.raw } : {}),
+        dispatcher,
+        signal: headersOnly ? headersOnly.signal : this.combineSignals(opts.timeoutMs, opts.signal),
+        headersTimeout: opts.timeoutMs,
+        bodyTimeout: opts.timeoutMs,
+      });
+    } finally {
+      headersOnly?.disarm();
+    }
+  }
+
+  /**
+   * Read a whole reply as text, and as JSON when it parses. A body that does
+   * not parse is `json: undefined` -- unless `strictJson`, where a 2xx that is
+   * not JSON is an error rather than an answer.
+   */
+  private async readBuffered(res: UpstreamReply, strictJson: boolean): Promise<TransportJsonResult> {
     const text = await res.body.text();
     let json: unknown = undefined;
     try {
       json = text ? JSON.parse(text) : undefined;
     } catch {
+      if (strictJson && isSuccessStatus(res.statusCode)) throw new Error("upstream returned invalid JSON");
       json = undefined;
     }
     return { status: res.statusCode, headers: res.headers, json, text };
+  }
+
+  private streamed(res: UpstreamReply): TransportStreamResult {
+    return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
+  }
+
+  /** POST a JSON body and read the full JSON (or text) response. */
+  async postJson(url: string, headers: Record<string, string>, body: unknown, opts: TransportOptions): Promise<TransportJsonResult> {
+    return this.readBuffered(await this.dispatch("POST", url, headers, { json: body }, opts, true), false);
   }
 
   /**
    * POST a JSON body and return the raw response stream (for SSE translation).
-   * `headersTimeout` bounds time-to-first-headers. `bodyTimeout` is an IDLE
-   * timeout *between* body chunks -- undici resets it on every chunk (including
-   * SSE keep-alive comments), so a long completion that keeps streaming is never
-   * cut off, but a stream that goes silent aborts after `timeoutMs` instead of
-   * hanging forever.
+   * No total timeout: undici resets the idle `bodyTimeout` on every chunk
+   * (including SSE keep-alive comments), so a long completion that keeps
+   * streaming is never cut off, but a stream that goes silent aborts after
+   * `timeoutMs` instead of hanging forever.
    */
-  async postStream(
-    url: string,
-    headers: Record<string, string>,
-    body: unknown,
-    opts: TransportOptions,
-  ): Promise<TransportStreamResult> {
-    const dispatcher = await this.egress(url, opts);
-    const res = await request(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      dispatcher,
-      signal: opts.signal,
-      headersTimeout: opts.timeoutMs,
-      bodyTimeout: opts.timeoutMs,
-    });
-    return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
+  async postStream(url: string, headers: Record<string, string>, body: unknown, opts: TransportOptions): Promise<TransportStreamResult> {
+    return this.streamed(await this.dispatch("POST", url, headers, { json: body }, opts, false));
   }
 
   /** POST a pre-serialized body verbatim (e.g. a multipart form the caller
    * already framed — headers must carry the matching content-type). */
-  async postRaw(
-    url: string,
-    headers: Record<string, string>,
-    body: Buffer | string,
-    opts: TransportOptions,
-  ): Promise<TransportJsonResult> {
-    const dispatcher = await this.egress(url, opts);
-    const res = await request(url, {
-      method: "POST",
-      headers,
-      body,
-      dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
-      headersTimeout: opts.timeoutMs,
-      bodyTimeout: opts.timeoutMs,
-    });
-    const text = await res.body.text();
-    let json: unknown = undefined;
-    try {
-      json = text ? JSON.parse(text) : undefined;
-    } catch {
-      json = undefined;
-    }
-    return { status: res.statusCode, headers: res.headers, json, text };
+  async postRaw(url: string, headers: Record<string, string>, body: Buffer | string, opts: TransportOptions): Promise<TransportJsonResult> {
+    return this.readBuffered(await this.dispatch("POST", url, headers, { raw: body }, opts, true), false);
   }
 
   /** GET returning the raw response stream (binary downloads, e.g. video content). */
   async getStream(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportStreamResult> {
-    const dispatcher = await this.egress(url, opts);
-    const res = await request(url, {
-      method: "GET",
-      headers,
-      dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
-      headersTimeout: opts.timeoutMs,
-      bodyTimeout: opts.timeoutMs,
-    });
-    return { status: res.statusCode, headers: res.headers, body: res.body as unknown as Readable };
+    return this.streamed(await this.dispatch("GET", url, headers, null, opts, true));
   }
 
-  /** GET request returning JSON (provider connection tests / model lists). */
+  /** GET request returning JSON (provider connection tests / model lists). A 2xx that is not JSON throws. */
   async getJson(url: string, headers: Record<string, string>, opts: TransportOptions): Promise<TransportJsonResult> {
-    const dispatcher = await this.egress(url, opts);
-    const res = await request(url, {
-      method: "GET",
-      headers,
-      dispatcher,
-      signal: this.combineSignals(opts.timeoutMs, opts.signal),
-      // Same as postJson: keep undici's silent 5-minute defaults out of the way.
-      headersTimeout: opts.timeoutMs,
-      bodyTimeout: opts.timeoutMs,
-    });
-    const text = await res.body.text();
-    let json: unknown = undefined;
-    try {
-      json = text ? JSON.parse(text) : undefined;
-    } catch {
-      if (res.statusCode >= 200 && res.statusCode < 300) throw new Error("upstream returned invalid JSON");
-      json = undefined;
-    }
-    return { status: res.statusCode, headers: res.headers, json, text };
+    return this.readBuffered(await this.dispatch("GET", url, headers, null, opts, true), true);
   }
 }

@@ -1,4 +1,5 @@
 import net from "node:net";
+import { IP_V6, stripHostBrackets } from "../ssrf";
 
 /**
  * Egress proxying: the optional network hop between Hydrogen and a provider.
@@ -15,6 +16,14 @@ import net from "node:net";
  * so it is left out rather than reimplemented carelessly. The `scheme` enum is
  * the only thing that would have to grow to add it later.
  */
+
+/** Valid TCP port range. */
+export const MIN_PORT = 1;
+export const MAX_PORT = 65535;
+
+/** FNV-1a 32-bit parameters, for the dispatcher-key digest. */
+const FNV32_OFFSET_BASIS = 0x811c9dc5;
+const FNV32_PRIME = 0x01000193;
 
 /** A proxy resolved for use: the password is decrypted and in memory. */
 export interface EgressProxy {
@@ -44,10 +53,10 @@ export function proxyKey(p: EgressProxy): string {
 
 /** A short non-reversible digest, for dispatcher keying only. */
 function hash(s: string): string {
-  let h = 0x811c9dc5;
+  let h = FNV32_OFFSET_BASIS;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
+    h = Math.imul(h, FNV32_PRIME) >>> 0;
   }
   return h.toString(16);
 }
@@ -63,8 +72,16 @@ function hash(s: string): string {
  * reported to the operator as a transient blip.
  */
 export function proxyOrigin(p: EgressProxy): string {
-  const host = p.host.trim().replace(/^\[|\]$/g, "");
-  return `${p.scheme}://${net.isIP(host) === 6 ? `[${host}]` : host}:${p.port}`;
+  const host = stripHostBrackets(p.host.trim());
+  return `${p.scheme}://${net.isIP(host) === IP_V6 ? `[${host}]` : host}:${p.port}`;
+}
+
+/**
+ * The proxy's host as it is resolved and as a connect-time lookup names it:
+ * trimmed, lowercased, without IPv6 brackets.
+ */
+export function proxyHostName(p: EgressProxy): string {
+  return stripHostBrackets(p.host.trim().toLowerCase());
 }
 
 /** How a proxy is named in an error or a log line. Credentials never appear. */

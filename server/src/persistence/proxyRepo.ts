@@ -2,8 +2,10 @@ import { eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { providers, proxies, type ProxyRow } from "../db/schema";
 import { asMillis } from "../util/time";
-import { decryptProxyPassword, encryptProxyPassword } from "../security/proxySecret";
+import { decryptProxyPassword, encryptProxyPassword, type ProxyPasswordColumns } from "../security/proxySecret";
+import { pickDefined, TableRepo } from "./tableRepo";
 import type { EgressProxy } from "../core/upstream/egress/types";
+import { STATUS_UPSTREAM_FAILURE } from "../util/httpStatus";
 
 export interface ProxyInput {
   name: string;
@@ -30,33 +32,48 @@ export interface PublicProxy {
 }
 
 /**
+ * A provider names an egress proxy whose row is gone. Thrown rather than
+ * answered with "no proxy": the reference is dangling, so sending the
+ * provider's traffic (and its credential) out directly would be the silent
+ * bypass a proxy exists to prevent. The catalog turns it into an unresolvable
+ * mapping, so a call through that provider fails before any socket is opened.
+ */
+export class EgressProxyMissingError extends Error {
+  /** A broken upstream route, not a caller mistake. */
+  readonly statusCode = STATUS_UPSTREAM_FAILURE;
+  constructor(readonly proxyId: number) {
+    super(`egress proxy #${proxyId} no longer exists; re-attach a proxy to the provider or set it to a direct connection`);
+    this.name = "EgressProxyMissingError";
+  }
+}
+
+/** The plain columns an update may set; the password has its own rule. */
+const PATCHABLE = ["name", "scheme", "host", "port", "username", "enabled"] as const;
+
+/**
  * Proxy persistence + password (de)cryption, mirroring ProviderRepo exactly:
  * same master-key injection, same "undefined leaves it alone, null clears it"
  * convention on the secret, same toPublic/materialize split.
  */
-export class ProxyRepo {
+export class ProxyRepo extends TableRepo<typeof proxies> {
   constructor(
-    private readonly db: DB,
+    db: DB,
     private readonly masterKey: Buffer,
-  ) {}
-
-  list(): ProxyRow[] {
-    return this.db.select().from(proxies).all();
-  }
-
-  get(id: number): ProxyRow | undefined {
-    return this.db.select().from(proxies).where(eq(proxies.id, id)).get();
+  ) {
+    super(db, proxies);
   }
 
   getByName(name: string): ProxyRow | undefined {
-    return this.db.select().from(proxies).where(eq(proxies.name, name)).get();
+    return this.findBy(proxies.name, name);
+  }
+
+  /** The password columns for a plaintext password; none (null, "" or absent) clears them. */
+  private passwordColumns(password: string | null | undefined): ProxyPasswordColumns {
+    return password ? encryptProxyPassword(password, this.masterKey) : { passwordCiphertext: null, passwordIv: null, passwordTag: null };
   }
 
   create(input: ProxyInput): ProxyRow {
-    const cols =
-      input.password && input.password.length > 0
-        ? encryptProxyPassword(input.password, this.masterKey)
-        : { passwordCiphertext: null, passwordIv: null, passwordTag: null };
+    const cols = this.passwordColumns(input.password);
     return this.db
       .insert(proxies)
       .values({
@@ -73,22 +90,9 @@ export class ProxyRepo {
   }
 
   update(id: number, input: Partial<ProxyInput>): ProxyRow | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch.name = input.name;
-    if (input.scheme !== undefined) patch.scheme = input.scheme;
-    if (input.host !== undefined) patch.host = input.host;
-    if (input.port !== undefined) patch.port = input.port;
-    if (input.username !== undefined) patch.username = input.username;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (input.password !== undefined) {
-      if (input.password === null || input.password === "") {
-        Object.assign(patch, { passwordCiphertext: null, passwordIv: null, passwordTag: null });
-      } else {
-        Object.assign(patch, encryptProxyPassword(input.password, this.masterKey));
-      }
-    }
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(proxies).set(patch).where(eq(proxies.id, id)).returning().get();
+    const patch: Partial<typeof proxies.$inferInsert> = pickDefined(input, PATCHABLE);
+    if (input.password !== undefined) Object.assign(patch, this.passwordColumns(input.password));
+    return this.patch(id, patch);
   }
 
   /**
@@ -110,10 +114,6 @@ export class ProxyRepo {
       .all();
   }
 
-  delete(id: number): void {
-    this.db.delete(proxies).where(eq(proxies.id, id)).run();
-  }
-
   toPublic(p: ProxyRow): PublicProxy {
     return {
       id: p.id,
@@ -122,7 +122,8 @@ export class ProxyRepo {
       host: p.host,
       port: p.port,
       username: p.username ?? null,
-      hasPassword: Boolean(p.passwordCiphertext),
+      // All three columns, as decryptProxyPassword requires.
+      hasPassword: Boolean(p.passwordCiphertext && p.passwordIv && p.passwordTag),
       enabled: p.enabled,
       createdAt: asMillis(p.createdAt),
     };
@@ -145,18 +146,24 @@ export class ProxyRepo {
   }
 
   /**
-   * The proxy a provider should egress through, or null.
+   * The proxy a provider should egress through, or null for a direct
+   * connection.
    *
-   * Null covers three cases that are deliberately identical to the caller: the
-   * provider has no proxy, the proxy row is gone, or the proxy is disabled.
-   * Disabling a proxy therefore returns its providers to a direct connection,
-   * which is the one place that is the right default -- it is an explicit
-   * operator action on the proxy itself, not a silent failure.
+   * Null covers two cases: the provider has no proxy, or its proxy is disabled.
+   * Disabling a proxy returns its providers to a direct connection, which is
+   * the one place that is the right default -- it is an explicit operator
+   * action on the proxy itself (and what the Proxies page says it does), not a
+   * silent failure.
+   *
+   * A proxy id whose row is gone is neither: nobody chose a direct connection
+   * for that provider, so it throws {@link EgressProxyMissingError} instead of
+   * failing open.
    */
   forProvider(proxyId: number | null | undefined): EgressProxy | null {
     if (proxyId == null) return null;
     const row = this.get(proxyId);
-    if (!row || !row.enabled) return null;
+    if (!row) throw new EgressProxyMissingError(proxyId);
+    if (!row.enabled) return null;
     return this.toEgress(row);
   }
 }

@@ -3,6 +3,15 @@ import { extractUpstreamMessage } from "../core/proxy/errors";
 import { serializeForLog } from "../util/logPayload";
 import type { AdvanceTrigger, BackoffConfig, RetryConfig, ServiceStep, ServiceSteps, Trigger } from "./definition";
 import type { ProgressRecorder } from "../observability/progressRecorder";
+import { HTTP_STATUS, STATUS_CLIENT_CLOSED, STATUS_UPSTREAM_FAILURE } from "../util/httpStatus";
+import { errorMessage } from "../util/errors";
+
+/** Live-progress node ids recorded by the retry loop. */
+const PROGRESS_NODE = {
+  RETRY_DELAY: "retry.delay",
+  RETRY_TRIGGER: "retry.trigger",
+  RETRY_EXHAUSTED: "retry.exhausted",
+} as const;
 
 /**
  * "network" is a transport failure: the connection never completed, so there is
@@ -33,7 +42,12 @@ export type AttemptResult<T> = AttemptSuccess<T> | AttemptFailure;
  * operator who shrinks the payload budget to keep transcripts small should not
  * thereby lose the explanation of why a call failed.
  */
-const ERROR_BODY_MAX_CHARS = 8_000;
+export const ERROR_BODY_MAX_CHARS = 8_000;
+
+/** The first attempt that is a retry, and so the first with a pre-delay. */
+const FIRST_RETRY_ATTEMPT = 2;
+/** Each further retry multiplies the un-jittered backoff delay by this. */
+const BACKOFF_GROWTH_FACTOR = 2;
 
 /** One recorded attempt, persisted to request_logs.attempt_path_json. */
 export interface AttemptRecord {
@@ -88,14 +102,14 @@ export function computeRetryDelay(
 ): number {
   if (!config) return 0;
   // The first attempt (attempt === 1) never has a pre-delay.
-  if (attempt < 2) return 0;
+  if (attempt < FIRST_RETRY_ATTEMPT) return 0;
   const backoff: BackoffConfig | undefined = config.backoff;
   if (!backoff) {
     return config.intervalMs ?? 0;
   }
   // Exponential growth: attempt 2 -> 2^0=1, attempt 3 -> 2^1=2, attempt 4 -> 2^2=4 ...
-  const exponent = attempt - 2;
-  const raw = backoff.initialMs * Math.pow(2, exponent);
+  const exponent = attempt - FIRST_RETRY_ATTEMPT;
+  const raw = backoff.initialMs * Math.pow(BACKOFF_GROWTH_FACTOR, exponent);
   const base = Math.min(raw, backoff.maxMs);
   // Full jitter: uniform random in [0, base).
   return Math.floor(Math.random() * base);
@@ -114,7 +128,7 @@ export function computeRetryDelay(
  *   must confirm safety before retrying.
  */
 export function is499Retryable(idempotency: RetryConfig["idempotency"] | undefined): boolean {
-  const mode = idempotency ?? "safe_write";
+  const mode = idempotency ?? DEFAULT_IDEMPOTENCY;
   return mode !== "unsafe";
 }
 
@@ -139,7 +153,7 @@ function shouldAdvance(advanceOn: AdvanceTrigger[] | undefined, f: AttemptFailur
 }
 
 export function classifyError(e: unknown): { kind: FailureKind; message: string } {
-  const message = e instanceof Error ? e.message : String(e);
+  const message = errorMessage(e);
   const name = e instanceof Error ? e.name : "";
   if (name === "UpstreamUrlError" || name === "FormatConversionError") return { kind: "error", message };
   if (name === "TimeoutError" || name === "AbortError" || /timed out|timeout/i.test(message)) {
@@ -219,7 +233,7 @@ export async function runSteps<T>(
       // Computed once so the log and the actual sleep agree.
       const preDelayMs = a > 1 ? computeRetryDelay(a, retry) : 0;
       if (preDelayMs > 0) {
-        prog?.record("retry", "retry.delay", `retry #${a - 1}: sleeping ${preDelayMs}ms before attempt`, { retryIndex: a - 1, delayMs: preDelayMs });
+        prog?.record("retry", PROGRESS_NODE.RETRY_DELAY, `retry #${a - 1}: sleeping ${preDelayMs}ms before attempt`, { retryIndex: a - 1, delayMs: preDelayMs });
         await sleep(preDelayMs);
         if (opts.signal?.aborted) break;
       }
@@ -245,21 +259,21 @@ export async function runSteps<T>(
               reason: `succeeded on retry #${a - 1}`,
             }
           : undefined;
-        path.push({ step: i + 1, attempt: a, model: step.model, provider: step.provider, status: 200, kind: "ok", latencyMs, retry: retryCtx });
+        path.push({ step: i + 1, attempt: a, model: step.model, provider: step.provider, status: HTTP_STATUS.OK, kind: "ok", latencyMs, retry: retryCtx });
         return { result: res, path };
       }
 
       // Determine whether a retry is permitted for THIS failure.
       const triggerMatched = triggerMatches(retryOn, res);
-      const is499 = res.status === 499;
+      const is499 = res.status === STATUS_CLIENT_CLOSED;
       const four99Allowed = !is499 || is499Retryable(idempotency);
       const canRetryFlag = a < maxAttempts && triggerMatched && four99Allowed;
 
       // Emit real-time retry trigger / suppression progress events.
       if (canRetryFlag) {
-        prog?.record("retry", "retry.trigger", `attempt ${a} failed (${res.status || res.kind}); retrying`, { retryIndex: a, status: res.status, reason: res.message });
+        prog?.record("retry", PROGRESS_NODE.RETRY_TRIGGER, `attempt ${a} failed (${res.status || res.kind}); retrying`, { retryIndex: a, status: res.status, reason: res.message });
       } else if (a > 1 || triggerMatched) {
-        prog?.record("retry", "retry.exhausted", `retries exhausted after ${a} attempt(s)`, { attempts: a, status: res.status });
+        prog?.record("retry", PROGRESS_NODE.RETRY_EXHAUSTED, `retries exhausted after ${a} attempt(s)`, { attempts: a, status: res.status });
       }
 
       // Every failed attempt carries the retry decision, including the ones that
@@ -312,7 +326,7 @@ export async function runSteps<T>(
   }
 
   return {
-    result: lastFailure ?? { ok: false, status: 502, kind: "error", message: "no steps executed" },
+    result: lastFailure ?? { ok: false, status: STATUS_UPSTREAM_FAILURE, kind: "error", message: "no steps executed" },
     path,
   };
 }

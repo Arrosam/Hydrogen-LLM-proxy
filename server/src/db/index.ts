@@ -7,6 +7,10 @@ import { ensureDir, resolveMigrationsDir } from "../util/paths";
 
 export type DB = BetterSQLite3Database<typeof schema>;
 
+const DB_FILENAME = "hydrogen.db";
+/** How long a writer waits on a locked database before SQLite reports SQLITE_BUSY. */
+const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
 export interface OpenedDatabase {
   db: DB;
   sqlite: Database.Database;
@@ -19,10 +23,10 @@ export interface OpenedDatabase {
  */
 export function openDatabase(dataDir: string): OpenedDatabase {
   ensureDir(dataDir);
-  const sqlite = new Database(path.join(dataDir, "hydrogen.db"));
+  const sqlite = new Database(path.join(dataDir, DB_FILENAME));
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
-  sqlite.pragma("busy_timeout = 5000");
+  sqlite.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 
   const db = drizzle(sqlite, { schema });
 

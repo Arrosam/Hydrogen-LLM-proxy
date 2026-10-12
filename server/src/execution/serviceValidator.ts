@@ -1,6 +1,7 @@
-import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
+import { MEDIA_FAMILIES, OPENAI_ENDPOINT_REMEDY, type Catalog } from "../catalog/catalog";
 import type { ServiceRepo } from "../persistence/serviceRepo";
-import { isAgent, isChatPipeline, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
+import { isAgent, isChatPipeline, isRouterStage, parseService, serviceCategory, summarizeService, type ServiceCategory, type ServiceDef } from "./definition";
+import { GOTO_END, MAX_CONDITION_PATTERN } from "./agentContext";
 
 /**
  * Thrown when a definition is structurally valid (passes the zod schema) but
@@ -57,7 +58,7 @@ export class ServiceValidator {
           }
         }
 
-        const isRouter = !stage.service && (!stage.steps || stage.steps.length === 0);
+        const isRouter = isRouterStage(stage);
         if (stage.service) {
           const ref = this.services.getByName(stage.service);
           if (!ref) bad(`references unknown Model Service or Micro Agent "${stage.service}"`);
@@ -69,13 +70,11 @@ export class ServiceValidator {
             if (cat && !isChatPipeline(cat as ServiceCategory)) bad(`references "${stage.service}", a ${cat} service — only chat/OCR services can run inside a Micro Agent`);
           }
         } else if (stage.steps && stage.steps.length) {
-          for (const s of stage.steps) {
-            if (!this.catalog.exists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
-          }
+          invalidPairs.push(...this.unmappedPairs(stage.steps));
         }
 
         for (const t of stage.transitions ?? []) {
-          if (t.goto !== "end") {
+          if (t.goto !== GOTO_END) {
             const j = indexByName.get(t.goto);
             if (j == null) bad(`transition goto "${t.goto}" is not a stage`);
             else if (j <= i) bad(`transition goto "${t.goto}" must be a later stage (forward-only)`);
@@ -84,9 +83,7 @@ export class ServiceValidator {
             if (j == null) bad(`transition returns unknown stage "${t.output}"`);
             else if (j > i) bad(`transition returns later stage "${t.output}" (must be this or an earlier stage)`);
             else {
-              const target = def.stages[j];
-              const targetIsRouter = !target.service && (!target.steps || target.steps.length === 0);
-              if (targetIsRouter) bad(`transition returns router stage "${t.output}", which produces no output`);
+              if (isRouterStage(def.stages[j])) bad(`transition returns router stage "${t.output}", which produces no output`);
             }
           }
           const c = t.when;
@@ -95,8 +92,8 @@ export class ServiceValidator {
             // client-influenced text on the event loop, so a huge pattern is a
             // DoS hazard the compile check below cannot see. agentContext.ts
             // also refuses (never matches) anything longer at run time.
-            if (c.value.length > 200) {
-              bad(`condition regex is too long (${c.value.length} chars, max 200)`);
+            if (c.value.length > MAX_CONDITION_PATTERN) {
+              bad(`condition regex is too long (${c.value.length} chars, max ${MAX_CONDITION_PATTERN})`);
             }
             try {
               new RegExp(c.value);
@@ -120,19 +117,11 @@ export class ServiceValidator {
       if (def.ocr) {
         const o = def.ocr;
         if (o.service) {
-          const m = this.services.getByName(o.service);
-          if (!m) throw new ServiceValidationError(`image translation (OCR) references unknown Model Service "${o.service}"`, []);
-          if (isAgent(this.services.def(m))) {
-            throw new ServiceValidationError(`image translation (OCR) references a Micro Agent "${o.service}" (must be a Model Service)`, []);
-          }
-          const cat = this.categoryOf(o.service);
-          if (cat && !isChatPipeline(cat as ServiceCategory)) {
-            throw new ServiceValidationError(`image translation (OCR) references "${o.service}", a ${cat} service — it must be a chat or OCR Model Service`, []);
-          }
+          // An unreadable category is let through, as it is for a stage.
+          this.requireModelService(o.service, "image translation (OCR)", "a Model Service", (cat) =>
+            cat && !isChatPipeline(cat as ServiceCategory) ? `a ${cat} service — it must be a chat or OCR Model Service` : null);
         } else if (o.steps && o.steps.length) {
-          for (const s of o.steps) {
-            if (!this.catalog.exists(s.model, s.provider)) invalidPairs.push(`${s.model}@${s.provider}`);
-          }
+          invalidPairs.push(...this.unmappedPairs(o.steps));
         } else {
           throw new ServiceValidationError("image translation (OCR) is enabled but has no model (pick a Model Service)", []);
         }
@@ -141,15 +130,8 @@ export class ServiceValidator {
       if (def.asr) {
         const a = def.asr;
         if (a.service) {
-          const m = this.services.getByName(a.service);
-          if (!m) throw new ServiceValidationError(`audio transcription (ASR) references unknown Model Service "${a.service}"`, []);
-          if (isAgent(this.services.def(m))) {
-            throw new ServiceValidationError(`audio transcription (ASR) references a Micro Agent "${a.service}" (must be an stt Model Service)`, []);
-          }
-          const cat = this.categoryOf(a.service);
-          if (cat !== "stt") {
-            throw new ServiceValidationError(`audio transcription (ASR) references "${a.service}", a ${cat ?? "chat"} service — it must be an stt (speech-to-text) Model Service`, []);
-          }
+          this.requireModelService(a.service, "audio transcription (ASR)", "an stt Model Service", (cat) =>
+            cat !== "stt" ? `a ${cat ?? "chat"} service — it must be an stt (speech-to-text) Model Service` : null);
         } else if (a.steps && a.steps.length) {
           // Inline ASR steps call /audio/transcriptions directly, so they carry
           // the same OpenAI-endpoint requirement an stt service would.
@@ -166,7 +148,7 @@ export class ServiceValidator {
       for (const step of def.steps) {
         // Chat-pipeline categories (chat, ocr) translate, so any family works.
         if (isChatPipeline(category)) {
-          if (!this.catalog.exists(step.model, step.provider)) invalidPairs.push(`${step.model}@${step.provider}`);
+          invalidPairs.push(...this.unmappedPairs([step]));
           continue;
         }
         // Media passthrough categories are OpenAI-shaped routes. Validate with
@@ -187,6 +169,34 @@ export class ServiceValidator {
     return { def, summary: summarizeService(def) };
   }
 
+  /** The steps whose (model, provider) pair the catalog does not map, as `model@provider`. */
+  private unmappedPairs(steps: ReadonlyArray<{ model: string; provider: string }>): string[] {
+    return steps.filter((s) => !this.catalog.exists(s.model, s.provider)).map((s) => `${s.model}@${s.provider}`);
+  }
+
+  /**
+   * A pre-pass reference must name a saved Model Service (`mustBe`, never a
+   * Micro Agent) of a category the pre-pass can drive; `wrongCategory` words
+   * what is wrong with the one it has, or returns null when it is fine.
+   */
+  private requireModelService(name: string, what: string, mustBe: string, wrongCategory: (category: string | null) => string | null): void {
+    const row = this.services.getByName(name);
+    if (!row) throw new ServiceValidationError(`${what} references unknown Model Service "${name}"`, []);
+    let def: ServiceDef;
+    try {
+      def = this.services.def(row);
+    } catch {
+      // A pre-pass has to run this service, so one it cannot read is a fault of
+      // the reference -- reported as such, not as the parser's own error.
+      throw new ServiceValidationError(`${what} references "${name}", whose saved definition is no longer valid (open and re-save it)`, []);
+    }
+    if (isAgent(def)) {
+      throw new ServiceValidationError(`${what} references a Micro Agent "${name}" (must be ${mustBe})`, []);
+    }
+    const problem = wrongCategory(this.categoryOf(name));
+    if (problem) throw new ServiceValidationError(`${what} references "${name}", ${problem}`, []);
+  }
+
   /**
    * Check that a step can reach an OpenAI-shaped endpoint, the way the media
    * controller and the ASR pre-pass resolve it at run time. Returns the pair to
@@ -200,7 +210,7 @@ export class ServiceValidator {
     if (res.error !== "no_endpoint_in_family") return `${model}@${provider}`;
     throw new ServiceValidationError(
       `step ${model}@${provider}: ${what} require an OpenAI-compatible endpoint, and this mapping enables none ` +
-        `(add an OpenAI alternate endpoint to the provider and enable it on the mapping)`,
+        OPENAI_ENDPOINT_REMEDY,
       [],
     );
   }

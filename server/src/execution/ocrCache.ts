@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { ImagePart } from "../core/ir/content";
 import type { ImageCacheRepo } from "../persistence/imageCacheRepo";
+import { BYTES_PER_KIB } from "../config/limits";
 
 /**
  * The image-description cache behind the Micro Agent's OCR pre-pass, expressed
@@ -26,6 +27,18 @@ export interface OcrCacheStore {
  * description at once, which is the escape hatch if what we hash ever changes. */
 const HASH_VERSION = "hydrogen-image-v1";
 
+/** How much base64 is decoded per hash update. The slice boundary is a
+ * multiple of 4, so the decoded bytes are byte-for-byte what a whole-string
+ * decode produces -- the point is that a large image never has to be
+ * materialized as one big Buffer just to be content-addressed. */
+const HASH_DECODE_CHUNK = 256 * BYTES_PER_KIB;
+
+function updateWithBase64(h: crypto.Hash, data: string): void {
+  for (let i = 0; i < data.length; i += HASH_DECODE_CHUNK) {
+    h.update(Buffer.from(data.slice(i, i + HASH_DECODE_CHUNK), "base64"));
+  }
+}
+
 /**
  * A stable content address for an image.
  *
@@ -39,18 +52,6 @@ const HASH_VERSION = "hydrogen-image-v1";
  * the price of not downloading every referenced image, and the LRU budget bounds
  * how long such an entry can linger.
  */
-/** How much base64 is decoded per hash update. The slice boundary is a
- * multiple of 4, so the decoded bytes are byte-for-byte what a whole-string
- * decode produces -- the point is that a large image never has to be
- * materialized as one big Buffer just to be content-addressed. */
-const HASH_DECODE_CHUNK = 256 * 1024;
-
-function updateWithBase64(h: crypto.Hash, data: string): void {
-  for (let i = 0; i < data.length; i += HASH_DECODE_CHUNK) {
-    h.update(Buffer.from(data.slice(i, i + HASH_DECODE_CHUNK), "base64"));
-  }
-}
-
 export function imageHash(img: ImagePart): string {
   const h = crypto.createHash("sha256");
   h.update(HASH_VERSION);
@@ -78,6 +79,13 @@ export function imageHash(img: ImagePart): string {
  */
 export class ImageDescriptionCache implements OcrCacheStore {
   private readonly fills = new Map<string, Promise<void>>();
+
+  constructor(
+    private readonly repo: ImageCacheRepo,
+    private readonly maxBytes: () => number,
+    private readonly now: () => number = Date.now,
+    private readonly onError: (op: string, err: unknown) => void = warnOnce,
+  ) {}
 
   async acquire(hashes: string[], signal?: AbortSignal): Promise<() => void> {
     if (!this.enabled()) return () => {};
@@ -111,13 +119,6 @@ export class ImageDescriptionCache implements OcrCacheStore {
       throw error;
     } finally { if (abort) signal?.removeEventListener("abort", abort); }
   }
-
-  constructor(
-    private readonly repo: ImageCacheRepo,
-    private readonly maxBytes: () => number,
-    private readonly now: () => number = Date.now,
-    private readonly onError: (op: string, err: unknown) => void = warnOnce,
-  ) {}
 
   enabled(): boolean {
     return this.maxBytes() > 0;

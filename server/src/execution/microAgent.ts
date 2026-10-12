@@ -5,9 +5,8 @@ import type { Response } from "../core/ir/response";
 import { buildResponse } from "../core/format/registry";
 import { textOf, type ImagePart } from "../core/ir/content";
 import { addUsage, ZERO_USAGE, type Usage } from "../core/ir/usage";
-import { callService, countAttempts, requestPayload, responsePayload, type ServiceCall } from "./serviceCall";
-export { countAttempts, type ServiceCall } from "./serviceCall";
-import { stageOverrides, type AgentDef, type ServiceSteps } from "./definition";
+import { CALL_LABEL, callService, countAttempts, requestPayload, responsePayload, type ServiceCall } from "./serviceCall";
+import { isRouterStage, stageOverrides, type AgentDef, type ServiceSteps } from "./definition";
 import { audioHash, transcribeAudio } from "./asr";
 import {
   buildOcrRequest,
@@ -21,9 +20,54 @@ import {
   translateAudioInRequest,
 } from "./agentContext";
 import { imageHash, type OcrCacheStore } from "./ocrCache";
-import type { AttemptFailure, AttemptResult } from "./steps";
+import { refOrInline, runCachedPrePass, type PrePassLabels } from "./prePass";
+import type { AttemptFailure } from "./steps";
 import type { Invocation, InvokeValue, StreamInvocation } from "./outcome";
-import type { ProgressRecorder } from "../observability/progressRecorder";
+import { BYTES_PER_MIB } from "../config/limits";
+import { HTTP_STATUS } from "../util/httpStatus";
+import { errorMessage } from "../util/errors";
+
+/** Live-progress node ids recorded while an agent runs. */
+const PROGRESS_NODE = {
+  AGENT_INIT: "agent.init",
+  AGENT_OCR_START: "agent.ocr.start",
+  AGENT_OCR_FAIL: "agent.ocr.fail",
+  AGENT_OCR_DONE: "agent.ocr.done",
+  AGENT_ASR_START: "agent.asr.start",
+  AGENT_ASR_FAIL: "agent.asr.fail",
+  AGENT_ASR_DONE: "agent.asr.done",
+  AGENT_STAGE_START: "agent.stage.start",
+  AGENT_STAGE_ROUTER: "agent.stage.router",
+  AGENT_STAGE_RESOLVE: "agent.stage.resolve",
+  AGENT_STAGE_CYCLE: "agent.stage.cycle",
+  AGENT_STAGE_DEPTH: "agent.stage.depth",
+  AGENT_STAGE_NESTED: "agent.stage.nested",
+  AGENT_STAGE_FAIL: "agent.stage.fail",
+  AGENT_STAGE_DONE: "agent.stage.done",
+  AGENT_STAGE_CALL: "agent.stage.call",
+  AGENT_STAGE_EMPTY: "agent.stage.empty",
+  AGENT_STAGE_END: "agent.stage.end",
+  AGENT_NOOUTPUT: "agent.nooutput",
+  AGENT_COMPLETE: "agent.complete",
+  AGENT_EXCEPTION: "agent.exception",
+} as const;
+
+const OCR_LABELS: PrePassLabels = {
+  startNode: PROGRESS_NODE.AGENT_OCR_START,
+  doneNode: PROGRESS_NODE.AGENT_OCR_DONE,
+  countKey: "images",
+  start: (total, cached, pending) => `OCR pre-pass: ${total} image(s) detected, ${cached} from cache, ${pending} to transcribe`,
+  doneCached: "OCR pre-pass complete, every image served from the cache",
+  doneFresh: "OCR pre-pass complete, images translated to text",
+};
+const ASR_LABELS: PrePassLabels = {
+  startNode: PROGRESS_NODE.AGENT_ASR_START,
+  doneNode: PROGRESS_NODE.AGENT_ASR_DONE,
+  countKey: "audios",
+  start: (total, cached, pending) => `ASR pre-pass: ${total} audio attachment(s), ${cached} from cache, ${pending} to transcribe`,
+  doneCached: "ASR pre-pass complete, every attachment served from the cache",
+  doneFresh: "ASR pre-pass complete, audio transcribed to text",
+};
 
 /** How deep nested Micro Agents may reference one another before we stop. */
 const MAX_AGENT_DEPTH = 8;
@@ -43,7 +87,7 @@ const MAX_AGENT_DEPTH = 8;
  * still makes exactly one call, so nothing changes for it.
  */
 export const OCR_IMAGES_PER_CALL = 32;
-export const OCR_BYTES_PER_CALL = 8 * 1024 * 1024;
+export const OCR_BYTES_PER_CALL = 8 * BYTES_PER_MIB;
 
 /** The image's contribution to a wire body: base64 characters, or a URL. */
 function imageApproxBytes(img: ImagePart): number {
@@ -98,10 +142,6 @@ function withoutSystem(o?: RequestOverrides): RequestOverrides | undefined {
   return rest;
 }
 
-function isRouter(stage: AgentDef["stages"][number]): boolean {
-  return !stage.service && (!stage.steps || stage.steps.length === 0);
-}
-
 /**
  * A Micro Agent: a coordinator that runs multiple Model Service rounds (stages)
  * and presents itself AS a Model Service (extends {@link ModelService}), so it
@@ -136,22 +176,20 @@ export class MicroAgent extends ModelService {
     return typeof v === "function" ? v() : v;
   }
 
-  /** A Micro Agent always buffers, then replays the complete result as a stream.
-   * The pacing budget starts here, so the (often long) multi-stage run counts
-   * against it rather than being added to it. */
+  /** A Micro Agent always buffers, then replays the complete result as a stream. */
   async stream(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<StreamInvocation> {
-    const startedAt = Date.now();
-    return this.fabricated(await this.invoke(request, overrides, opts), startedAt);
+    return this.bufferedStream(request, overrides, opts);
   }
 
   async invoke(request: Request, overrides?: RequestOverrides, opts: InvokeOptions = {}): Promise<Invocation> {
     const agent = this.agent;
     const stack = opts.stack ?? [];
     const prog = opts.progress ?? null;
+    const logMaxChars = (): number => this.resolveLogMaxChars();
     // A URL-attachment budget set on this agent bounds each call it makes; an
     // enclosing agent's budget is inherited when this one sets none.
     const attachmentLimit = this.agent.maxAttachmentBytes ?? opts.maxAttachmentBytes;
-    prog?.record("agent", "agent.init", `micro agent initialized: ${agent.stages.length} stage(s)`, { stages: agent.stages.map((s) => s.name) });
+    prog?.record("agent", PROGRESS_NODE.AGENT_INIT, `micro agent initialized: ${agent.stages.length} stage(s)`, { stages: agent.stages.map((s) => s.name) });
     const byName = new Map(agent.stages.map((s, i) => [s.name, i]));
     const outputs = new Map<string, string>();
     const values = new Map<string, InvokeValue>();
@@ -184,6 +222,36 @@ export class MicroAgent extends ModelService {
       usage = addUsage(usage, value.response.usage);
     };
 
+    /** Invoke a child Model Service (buffered) and record it as one ServiceCall. */
+    const callChild = (
+      service: ModelService,
+      stageReq: Request,
+      childOverrides: RequestOverrides | undefined,
+      meta: { stage: string; service?: string },
+      timeoutMs: number | undefined,
+    ) => callService(service, stageReq, childOverrides, meta, { signal: opts.signal, timeoutMs, progress: prog, hosted: opts.hosted, maxAttachmentBytes: attachmentLimit }, logMaxChars);
+    /** Run a stage on a Model Service -- the saved one named `service`, or the
+     * stage's inline steps when there is none -- and commit its output.
+     * Returns the failed invocation, or null. */
+    const runStage = async (
+      stage: AgentDef["stages"][number],
+      executor: ModelService,
+      stageReq: Request,
+      childOverrides: RequestOverrides | undefined,
+      service?: string,
+    ): Promise<Invocation | null> => {
+      const label = service === undefined ? " (inline)" : "";
+      const { call, result } = await callChild(executor, stageReq, childOverrides, { stage: stage.name, service }, stage.timeoutMs);
+      calls.push(call);
+      if (!result.ok) {
+        prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_FAIL, `stage "${stage.name}"${label} failed: ${result.message}`, { stage: stage.name, status: result.status });
+        return fail(result);
+      }
+      commit(stage.name, result.value);
+      prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_DONE, `stage "${stage.name}"${label} completed`, { stage: stage.name, latencyMs: call.latencyMs });
+      return null;
+    };
+
     try {
       let source = request;
 
@@ -196,81 +264,49 @@ export class MicroAgent extends ModelService {
           // reference must fail the same way whether or not the images happen
           // to be cached, or a misconfigured agent looks healthy until the
           // cache turns over.
-          let ocrService: ModelService;
-          if (ocr.service) {
-            const r = this.resolver.resolve(ocr.service);
-            if (!r.ok) return errorInv(r.message);
-            if (r.isAgent) return errorInv(`OCR reference "${ocr.service}" must be a Model Service, not a Micro Agent`);
-            ocrService = r.executor;
-          } else if (ocr.steps && ocr.steps.length) {
-            ocrService = new ModelService({ timeoutMs: ocr.timeoutMs ?? agent.timeoutMs, steps: ocr.steps }, this.deps);
-          } else {
-            return errorInv("image translation (OCR) is enabled but has no model configured");
-          }
+          const ocrService = refOrInline<ModelService>(
+            ocr,
+            (name) => {
+              const r = this.resolver.resolve(name);
+              if (!r.ok) return r;
+              if (r.isAgent) return { ok: false, message: `OCR reference "${name}" must be a Model Service, not a Micro Agent` };
+              return { ok: true, value: r.executor };
+            },
+            (steps) => new ModelService({ timeoutMs: ocr.timeoutMs ?? agent.timeoutMs, steps }, this.deps),
+            "image translation (OCR) is enabled but has no model configured",
+          );
+          if (!ocrService.ok) return errorInv(ocrService.message);
 
-          // Content-addressed cache: a picture already transcribed is not sent
-          // to the model again. Positions are kept in `hashes` so the results
-          // land back on the right images, whatever their cache status.
-          const hashes = images.map(imageHash);
-          const cache = this.ocrCache;
-          const release = await cache?.acquire?.(hashes, opts.signal);
-          try {
-            const known = cache ? cache.lookup(hashes) : new Map<string, string>();
-
-            // Misses, de-duplicated: the same image pasted twice is one job.
-            const pending: Array<{ hash: string; image: ImagePart }> = [];
-            const queued = new Set<string>();
-            images.forEach((image, i) => {
-              const hash = hashes[i];
-              if (known.has(hash) || queued.has(hash)) return;
-              queued.add(hash);
-              pending.push({ hash, image });
-            });
-
-            const hits = [...known.keys()];
-            prog?.record(
-              "agent",
-              "agent.ocr.start",
-              `OCR pre-pass: ${images.length} image(s) detected, ${images.length - pending.length} from cache, ${pending.length} to transcribe`,
-              { images: images.length, cached: images.length - pending.length, pending: pending.length },
-            );
-
-            const byHash = new Map(known);
-            if (pending.length > 0) {
+          const pass = await runCachedPrePass({
+            items: images,
+            hash: imageHash,
+            cache: this.ocrCache,
+            signal: opts.signal,
+            storeWhenIdle: false,
+            progress: prog,
+            labels: OCR_LABELS,
+            transcribe: async (pending, texts) => {
               // One call per bounded batch, not one for every image in the request
               // (see OCR_IMAGES_PER_CALL): a smaller wire body per call is the
               // whole point, and positions are tracked per batch so results still
               // land on the right images.
-              const stored: Array<{ hash: string; description: string }> = [];
-              for (const batch of batchImages(pending)) {
+              for (const batch of batchImages(pending.map((p) => ({ hash: p.hash, image: p.item })))) {
                 const ocrReq = buildOcrRequest(request, batch.map((p) => p.image), ocr);
-                const { call, result } = await this.callService(ocrService, ocrReq, undefined, { stage: "(ocr)", service: ocr.service }, opts.signal, ocr.timeoutMs, prog, opts.hosted, attachmentLimit);
+                const { call, result } = await callChild(ocrService.value, ocrReq, undefined, { stage: CALL_LABEL.OCR, service: ocr.service }, ocr.timeoutMs);
                 calls.push(call);
                 if (!result.ok) {
-                  prog?.record("error", "agent.ocr.fail", `OCR pre-pass failed: ${result.message}`);
-                  return fail(result);
+                  prog?.record("error", PROGRESS_NODE.AGENT_OCR_FAIL, `OCR pre-pass failed: ${result.message}`);
+                  return result;
                 }
                 usage = addUsage(usage, result.value.response.usage);
-                const fresh = parseOcrResults(result.value.response.text(), batch.length);
-                fresh.forEach((description, i) => {
-                  byHash.set(batch[i].hash, description);
-                  // Only what the model actually produced is remembered: caching
-                  // an empty result would make one bad response that image's
-                  // permanent description.
-                  if (description.trim() !== "") stored.push({ hash: batch[i].hash, description });
-                });
+                parseOcrResults(result.value.response.text(), batch.length).forEach((description, i) => texts.set(batch[i].hash, description));
               }
-              cache?.store(stored);
-            }
-            // Re-stamp the hits only once the pre-pass actually succeeded, so a
-            // failed run does not extend the life of entries it never used.
-            if (hits.length > 0) cache?.touch(hits);
-
-            source = translateImagesInRequest(request, hashes.map((h) => byHash.get(h) ?? ""));
-            prog?.record("agent", "agent.ocr.done", pending.length === 0
-              ? "OCR pre-pass complete, every image served from the cache"
-              : "OCR pre-pass complete, images translated to text");
-          } finally { release?.(); }
+              return undefined;
+            },
+            rewrite: (texts) => translateImagesInRequest(request, texts),
+          });
+          if (!pass.ok) return fail(pass);
+          source = pass.request;
         }
       }
 
@@ -279,59 +315,49 @@ export class MicroAgent extends ModelService {
         const audios = collectAudio(source);
         if (audios.length > 0) {
           const asr = agent.asr;
-          let asrDef: ServiceSteps;
-          if (asr.service) {
-            const r = this.resolver.sttDef(asr.service);
-            if (!r.ok) return errorInv(r.message);
-            asrDef = r.def;
-          } else if (asr.steps && asr.steps.length) {
-            asrDef = { timeoutMs: asr.timeoutMs ?? agent.timeoutMs, steps: asr.steps };
-          } else {
-            return errorInv("audio transcription (ASR) is enabled but has no model configured");
-          }
+          const asrDef = refOrInline<ServiceSteps>(
+            asr,
+            (name) => {
+              const r = this.resolver.sttDef(name);
+              return r.ok ? { ok: true, value: r.def } : r;
+            },
+            (steps) => ({ timeoutMs: asr.timeoutMs ?? agent.timeoutMs, steps }),
+            "audio transcription (ASR) is enabled but has no model configured",
+          );
+          if (!asrDef.ok) return errorInv(asrDef.message);
 
           // Content-addressed cache, shared with OCR (hashes are "a:"-prefixed
           // so the two kinds can never collide).
-          const hashes = audios.map(audioHash);
-          const cache = this.ocrCache;
-          const known = cache ? cache.lookup(hashes) : new Map<string, string>();
-          const pending: Array<{ hash: string; index: number }> = [];
-          const queued = new Set<string>();
-          audios.forEach((_, i) => {
-            const hash = hashes[i];
-            if (known.has(hash) || queued.has(hash)) return;
-            queued.add(hash);
-            pending.push({ hash, index: i });
+          const base = source;
+          const pass = await runCachedPrePass({
+            items: audios,
+            hash: audioHash,
+            cache: this.ocrCache,
+            signal: opts.signal,
+            storeWhenIdle: true,
+            progress: prog,
+            labels: ASR_LABELS,
+            transcribe: async (pending, texts) => {
+              for (const job of pending) {
+                const started = Date.now();
+                const out = await transcribeAudio(asrDef.value, job.item, this.deps, { timeoutMs: asr.timeoutMs, signal: opts.signal });
+                calls.push({
+                  stage: CALL_LABEL.ASR, service: asr.service ?? CALL_LABEL.INLINE, kind: "service",
+                  status: out.result.ok ? HTTP_STATUS.OK : out.result.status, latencyMs: Date.now() - started,
+                  attempts: out.path, error: out.result.ok ? undefined : out.result.message,
+                });
+                if (!out.result.ok) {
+                  prog?.record("error", PROGRESS_NODE.AGENT_ASR_FAIL, `ASR pre-pass failed: ${out.result.message}`);
+                  return out.result;
+                }
+                if (out.result.value.trim() !== "") texts.set(job.hash, out.result.value);
+              }
+              return undefined;
+            },
+            rewrite: (texts) => translateAudioInRequest(base, texts),
           });
-          prog?.record("agent", "agent.asr.start",
-            `ASR pre-pass: ${audios.length} audio attachment(s), ${audios.length - pending.length} from cache, ${pending.length} to transcribe`,
-            { audios: audios.length, cached: audios.length - pending.length, pending: pending.length });
-
-          const byHash = new Map(known);
-          for (const job of pending) {
-            const started = Date.now();
-            const out = await transcribeAudio(asrDef, audios[job.index], this.deps, { timeoutMs: asr.timeoutMs, signal: opts.signal });
-            calls.push({
-              stage: "(asr)", service: asr.service ?? "(inline)", kind: "service",
-              status: out.result.ok ? 200 : out.result.status, latencyMs: Date.now() - started,
-              attempts: out.path, error: out.result.ok ? undefined : out.result.message,
-            });
-            if (!out.result.ok) {
-              prog?.record("error", "agent.asr.fail", `ASR pre-pass failed: ${out.result.message}`);
-              return fail(out.result);
-            }
-            if (out.result.value.trim() !== "") byHash.set(job.hash, out.result.value);
-          }
-          cache?.store(pending
-            .map((j) => ({ hash: j.hash, description: byHash.get(j.hash) ?? "" }))
-            .filter((e) => e.description.trim() !== ""));
-          const hits = [...known.keys()];
-          if (hits.length > 0) cache?.touch(hits);
-
-          source = translateAudioInRequest(source, hashes.map((h) => byHash.get(h) ?? ""));
-          prog?.record("agent", "agent.asr.done", pending.length === 0
-            ? "ASR pre-pass complete, every attachment served from the cache"
-            : "ASR pre-pass complete, audio transcribed to text");
+          if (!pass.ok) return fail(pass);
+          source = pass.request;
         }
       }
 
@@ -341,12 +367,12 @@ export class MicroAgent extends ModelService {
       while (idx >= 0 && idx < agent.stages.length) {
         const stage = agent.stages[idx];
         terminal = stage.name;
-        prog?.record("agent", "agent.stage.start", `stage "${stage.name}" starting (index ${idx})`, { stage: stage.name, index: idx });
+        prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_START, `stage "${stage.name}" starting (index ${idx})`, { stage: stage.name, index: idx });
 
-        if (isRouter(stage)) {
-          prog?.record("agent", "agent.stage.router", `stage "${stage.name}" is a router (no model call)`, { stage: stage.name });
+        if (isRouterStage(stage)) {
+          prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_ROUTER, `stage "${stage.name}" is a router (no model call)`, { stage: stage.name });
           outputs.set(stage.name, "");
-          calls.push({ stage: stage.name, service: "(router)", kind: "router", status: 200, latencyMs: 0, attempts: [] });
+          calls.push({ stage: stage.name, service: CALL_LABEL.ROUTER, kind: "router", status: HTTP_STATUS.OK, latencyMs: 0, attempts: [] });
         } else {
           // Outer overrides fold over this stage's config, the outer winning.
           const combined = mergeOverrides(stageOverrides(stage), overrides);
@@ -361,22 +387,22 @@ export class MicroAgent extends ModelService {
           if (stage.service) {
             const r = this.resolver.resolve(stage.service);
             if (!r.ok) {
-              prog?.record("error", "agent.stage.resolve", `stage "${stage.name}": ${r.message}`);
+              prog?.record("error", PROGRESS_NODE.AGENT_STAGE_RESOLVE, `stage "${stage.name}": ${r.message}`);
               return errorInv(r.message);
             }
 
             if (r.isAgent) {
               if (stack.includes(stage.service)) {
-                prog?.record("error", "agent.stage.cycle", `micro-agent cycle detected: "${stage.service}"`);
+                prog?.record("error", PROGRESS_NODE.AGENT_STAGE_CYCLE, `micro-agent cycle detected: "${stage.service}"`);
                 return errorInv(`micro-agent cycle detected: "${stage.service}" is already running`);
               }
               if (stack.length >= MAX_AGENT_DEPTH) {
-                prog?.record("error", "agent.stage.depth", `micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
+                prog?.record("error", PROGRESS_NODE.AGENT_STAGE_DEPTH, `micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
                 return errorInv(`micro-agent nesting too deep (>${MAX_AGENT_DEPTH})`);
               }
-              prog?.record("agent", "agent.stage.nested", `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
+              prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_NESTED, `stage "${stage.name}": invoking nested agent "${stage.service}"`, { stage: stage.name, service: stage.service });
               const started = Date.now();
-              const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: this.stageRequestPayload(stageReq), calls: [] };
+              const wrapper: ServiceCall = { stage: stage.name, service: stage.service, kind: "agent", status: 0, latencyMs: 0, attempts: [], request: requestPayload(stageReq, logMaxChars()), calls: [] };
               const sub = await r.executor.invoke(stageReq, childOverrides, { ...opts, stack: [...stack, stage.service], signal: opts.signal, timeoutMs: stage.timeoutMs, progress: prog, maxAttachmentBytes: attachmentLimit });
               wrapper.calls = sub.attemptPath as ServiceCall[];
               wrapper.latencyMs = Date.now() - started;
@@ -385,38 +411,26 @@ export class MicroAgent extends ModelService {
                 wrapper.usage = sub.usage;
                 wrapper.status = sub.result.status;
                 wrapper.error = sub.result.message;
-                prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (nested agent) failed: ${sub.result.message}`, { stage: stage.name, status: sub.result.status });
+                prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_FAIL, `stage "${stage.name}" (nested agent) failed: ${sub.result.message}`, { stage: stage.name, status: sub.result.status });
                 return fail(sub.result);
               }
-              wrapper.status = 200;
+              wrapper.status = HTTP_STATUS.OK;
               wrapper.usage = sub.result.value.response.usage;
-              wrapper.response = this.stageResponsePayload(sub.result.value.response);
+              wrapper.response = responsePayload(sub.result.value.response, logMaxChars());
               commit(stage.name, sub.result.value);
-              prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
+              prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_DONE, `stage "${stage.name}" (nested agent) completed`, { stage: stage.name, latencyMs: wrapper.latencyMs });
             } else {
-              prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
-              const { call, result } = await this.callService(r.executor, stageReq, childOverrides, { stage: stage.name, service: stage.service }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
-              calls.push(call);
-              if (!result.ok) {
-                prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" failed: ${result.message}`, { stage: stage.name, status: result.status });
-                return fail(result);
-              }
-              commit(stage.name, result.value);
-              prog?.record("agent", "agent.stage.done", `stage "${stage.name}" completed`, { stage: stage.name, latencyMs: call.latencyMs });
+              prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_CALL, `stage "${stage.name}": calling service "${stage.service}"`, { stage: stage.name, service: stage.service });
+              const failed = await runStage(stage, r.executor, stageReq, childOverrides, stage.service);
+              if (failed) return failed;
             }
           } else if (stage.steps && stage.steps.length) {
-            prog?.record("agent", "agent.stage.call", `stage "${stage.name}": calling inline steps`, { stage: stage.name });
+            prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_CALL, `stage "${stage.name}": calling inline steps`, { stage: stage.name });
             const anon = new ModelService({ timeoutMs: stage.timeoutMs ?? agent.timeoutMs, steps: stage.steps }, this.deps);
-            const { call, result } = await this.callService(anon, stageReq, childOverrides, { stage: stage.name }, opts.signal, stage.timeoutMs, prog, opts.hosted, attachmentLimit);
-            calls.push(call);
-            if (!result.ok) {
-              prog?.record("agent", "agent.stage.fail", `stage "${stage.name}" (inline) failed: ${result.message}`, { stage: stage.name, status: result.status });
-              return fail(result);
-            }
-            commit(stage.name, result.value);
-            prog?.record("agent", "agent.stage.done", `stage "${stage.name}" (inline) completed`, { stage: stage.name, latencyMs: call.latencyMs });
+            const failed = await runStage(stage, anon, stageReq, childOverrides);
+            if (failed) return failed;
           } else {
-            prog?.record("error", "agent.stage.empty", `stage "${stage.name}" has no Model Service or steps`);
+            prog?.record("error", PROGRESS_NODE.AGENT_STAGE_EMPTY, `stage "${stage.name}" has no Model Service or steps`);
             return errorInv(`stage "${stage.name}" has no Model Service or steps`);
           }
         }
@@ -424,7 +438,7 @@ export class MicroAgent extends ModelService {
         const step = nextStep(stage, idx, byName, input, outputs);
         if ("end" in step) {
           if (step.output) returnStage = step.output;
-          prog?.record("agent", "agent.stage.end", `agent ending at stage "${stage.name}"${step.output ? `, returning output of "${step.output}"` : ""}`, { terminal: stage.name, output: step.output });
+          prog?.record("agent", PROGRESS_NODE.AGENT_STAGE_END, `agent ending at stage "${stage.name}"${step.output ? `, returning output of "${step.output}"` : ""}`, { terminal: stage.name, output: step.output });
           break;
         }
         idx = step.index;
@@ -432,7 +446,7 @@ export class MicroAgent extends ModelService {
 
       const chosen = (returnStage ? values.get(returnStage) : undefined) ?? values.get(terminal) ?? lastValue;
       if (!chosen) {
-        prog?.record("error", "agent.nooutput", "agent produced no model output");
+        prog?.record("error", PROGRESS_NODE.AGENT_NOOUTPUT, "agent produced no model output");
         return errorInv("agent produced no model output");
       }
       // Report the agent's total usage across all stages on the returned response.
@@ -440,35 +454,12 @@ export class MicroAgent extends ModelService {
       // Carry the last stage's wire body for the request log; the per-stage
       // bodies were deliberately released above.
       const value: InvokeValue = { ...chosen, upstreamRequest: lastUpstreamRequest, response };
-      prog?.record("agent", "agent.complete", `micro agent completed: ${calls.length} call(s), ${usage.totalTokens} tokens`, { calls: calls.length, totalTokens: usage.totalTokens });
+      prog?.record("agent", PROGRESS_NODE.AGENT_COMPLETE, `micro agent completed: ${calls.length} call(s), ${usage.totalTokens} tokens`, { calls: calls.length, totalTokens: usage.totalTokens });
       return { result: { ok: true, value }, attemptPath: calls, attempts: countAttempts(calls) };
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      prog?.record("error", "agent.exception", `agent execution error: ${message}`);
+      const message = errorMessage(e);
+      prog?.record("error", PROGRESS_NODE.AGENT_EXCEPTION, `agent execution error: ${message}`);
       return errorInv(`agent execution error: ${message}`);
     }
-  }
-
-  /** Invoke a child Model Service (buffered) and record it as one ServiceCall. */
-  private async callService(
-    service: ModelService,
-    stageReq: Request,
-    overrides: RequestOverrides | undefined,
-    meta: { stage: string; service?: string },
-    signal: AbortSignal | undefined,
-    timeoutMs: number | undefined,
-    prog: ProgressRecorder | null = null,
-    hosted?: InvokeOptions["hosted"],
-    maxAttachmentBytes?: number,
-  ): Promise<{ call: ServiceCall; result: AttemptResult<InvokeValue> }> {
-    return callService(service, stageReq, overrides, meta, { signal, timeoutMs, progress: prog, hosted, maxAttachmentBytes }, () => this.resolveLogMaxChars());
-  }
-
-  private stageRequestPayload(stageReq: Request): string {
-    return requestPayload(stageReq, this.resolveLogMaxChars());
-  }
-
-  private stageResponsePayload(response: Response): string {
-    return responsePayload(response, this.resolveLogMaxChars());
   }
 }

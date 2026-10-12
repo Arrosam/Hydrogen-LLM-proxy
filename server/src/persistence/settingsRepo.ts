@@ -1,17 +1,40 @@
 import { eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { settings } from "../db/schema";
+import {
+  DEFAULT_IMAGE_CACHE_MAX_BYTES,
+  DEFAULT_LOG_PAYLOAD_MAX_CHARS,
+  DEFAULT_PROMPT_CACHE_TTL_MINUTES,
+  DEFAULT_SESSION_TTL_MS,
+  DEFAULT_SIMULATED_STREAMING_TOKEN_RATE,
+} from "../config/defaults";
+import { MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, MS_PER_SECOND } from "../util/time";
 
-const ALLOWLIST_KEY = "upstream_allowlist";
-const UI_LANGUAGE_KEY = "ui_language";
-const LOG_PAYLOAD_MAX_CHARS_KEY = "log_payload_max_chars";
-const SIMULATED_STREAMING_TOKEN_RATE_KEY = "simulated_streaming_token_rate";
-const PROMPT_CACHE_TTL_KEY = "prompt_cache_ttl_minutes";
-const ALLOW_PRIVATE_UPSTREAMS_KEY = "allow_private_upstreams";
-const IMAGE_CACHE_MAX_BYTES_KEY = "image_cache_max_bytes";
-const SESSION_TTL_KEY = "session_ttl";
+export const ALLOWLIST_KEY = "upstream_allowlist";
+export const UI_LANGUAGE_KEY = "ui_language";
+export const LOG_PAYLOAD_MAX_CHARS_KEY = "log_payload_max_chars";
+export const SIMULATED_STREAMING_TOKEN_RATE_KEY = "simulated_streaming_token_rate";
+export const PROMPT_CACHE_TTL_KEY = "prompt_cache_ttl_minutes";
+export const ALLOW_PRIVATE_UPSTREAMS_KEY = "allow_private_upstreams";
+export const IMAGE_CACHE_MAX_BYTES_KEY = "image_cache_max_bytes";
+export const SESSION_TTL_KEY = "session_ttl";
 /** Instance-wide session cutoff (epoch ms): sessions issued before it are dead. */
-const SESSION_EPOCH_KEY = "session_epoch";
+export const SESSION_EPOCH_KEY = "session_epoch";
+export const LOG_RETENTION_DAYS_KEY = "log_retention_days";
+export const RESPONSE_RETENTION_DAYS_KEY = "response_retention_days";
+
+/** Days a stored response is kept when the setting is absent or unusable. */
+const DEFAULT_RESPONSE_RETENTION_DAYS = 30;
+/** Largest retention the setting accepts (ten years). */
+export const MAX_RETENTION_DAYS = 3650;
+const DEFAULT_UI_LANGUAGE = "en";
+/** The spellings of an enabled flag in a stored setting. */
+const TRUTHY_FLAG_PATTERN = /^(1|true|yes|on)$/i;
+/** Milliseconds per unit suffix of a duration string. A bare number is
+ * milliseconds, as it is in the environment (config's SESSION_TTL); the
+ * repository itself always writes a suffixed value (see setSessionTtlMs). */
+const DURATION_UNIT_MS: Record<string, number> = { ms: 1, s: MS_PER_SECOND, m: MS_PER_MINUTE, h: MS_PER_HOUR, d: MS_PER_DAY };
+const DEFAULT_DURATION_UNIT = "ms";
 
 /**
  * Key/value settings, plus an in-memory cache of the SSRF-guard allowlist and
@@ -38,11 +61,11 @@ export class SettingsRepo {
       promptCacheTtlMinutes: number;
     } = {
       allowPrivate: false,
-      logPayloadMaxChars: 100_000,
-      simulatedStreamingTokenRate: 2000,
-      sessionTtlMs: 12 * 60 * 60 * 1000,
-      imageCacheMaxBytes: 64 * 1024 * 1024,
-      promptCacheTtlMinutes: 30,
+      logPayloadMaxChars: DEFAULT_LOG_PAYLOAD_MAX_CHARS,
+      simulatedStreamingTokenRate: DEFAULT_SIMULATED_STREAMING_TOKEN_RATE,
+      sessionTtlMs: DEFAULT_SESSION_TTL_MS,
+      imageCacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES,
+      promptCacheTtlMinutes: DEFAULT_PROMPT_CACHE_TTL_MINUTES,
     },
   ) {
     this.allowlistCache = this.readAllowlist();
@@ -65,10 +88,20 @@ export class SettingsRepo {
     return this.db.select().from(settings).where(eq(settings.key, key)).get()?.value;
   }
 
+  /**
+   * An integer setting within `[min, max]`. Absent, non-integer or out of range
+   * all read as `fallback`: a stored override that cannot be used never beats
+   * the default.
+   */
+  private readInt(key: string, fallback: number, min: number, max = Infinity): number {
+    const raw = this.get(key);
+    if (raw == null) return fallback;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+  }
+
   responseRetentionDays(): number {
-    const raw = this.get("response_retention_days");
-    const days = raw == null ? 30 : Number(raw);
-    return Number.isInteger(days) && days >= 0 && days <= 3650 ? days : 30;
+    return this.readInt(RESPONSE_RETENTION_DAYS_KEY, DEFAULT_RESPONSE_RETENTION_DAYS, 0, MAX_RETENTION_DAYS);
   }
 
   set(key: string, value: string): void {
@@ -108,7 +141,7 @@ export class SettingsRepo {
   private readAllowPrivate(): boolean {
     const raw = this.get(ALLOW_PRIVATE_UPSTREAMS_KEY);
     if (raw == null) return this.defaults.allowPrivate;
-    return /^(1|true|yes|on)$/i.test(raw.trim());
+    return TRUTHY_FLAG_PATTERN.test(raw.trim());
   }
 
   /** Whether private/loopback/LAN upstreams are permitted (env overrideable). */
@@ -125,7 +158,7 @@ export class SettingsRepo {
 
   /** UI language code (e.g. "en", "zh"). Falls back to "en". */
   uiLanguage(): string {
-    return this.get(UI_LANGUAGE_KEY) ?? "en";
+    return this.get(UI_LANGUAGE_KEY) ?? DEFAULT_UI_LANGUAGE;
   }
 
   setUiLanguage(lang: string): void {
@@ -133,10 +166,7 @@ export class SettingsRepo {
   }
 
   logPayloadMaxChars(): number {
-    const raw = this.get(LOG_PAYLOAD_MAX_CHARS_KEY);
-    if (raw == null) return this.defaults.logPayloadMaxChars;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 && Number.isInteger(n) ? n : this.defaults.logPayloadMaxChars;
+    return this.readInt(LOG_PAYLOAD_MAX_CHARS_KEY, this.defaults.logPayloadMaxChars, 0);
   }
 
   setLogPayloadMaxChars(n: number): void {
@@ -144,10 +174,7 @@ export class SettingsRepo {
   }
 
   simulatedStreamingTokenRate(): number {
-    const raw = this.get(SIMULATED_STREAMING_TOKEN_RATE_KEY);
-    if (raw == null) return this.defaults.simulatedStreamingTokenRate;
-    const n = Number(raw);
-    return Number.isFinite(n) && n > 0 && Number.isInteger(n) ? n : this.defaults.simulatedStreamingTokenRate;
+    return this.readInt(SIMULATED_STREAMING_TOKEN_RATE_KEY, this.defaults.simulatedStreamingTokenRate, 1);
   }
 
   setSimulatedStreamingTokenRate(n: number): void {
@@ -157,10 +184,7 @@ export class SettingsRepo {
   /** Auto-planted Anthropic cache-breakpoint lifetime, minutes. Wire values are
    * 5m/1h only: <=5 renders as the 5m default, anything longer as 1h. */
   promptCacheTtlMinutes(): number {
-    const raw = this.get(PROMPT_CACHE_TTL_KEY);
-    if (raw == null) return this.defaults.promptCacheTtlMinutes;
-    const n = Number(raw);
-    return Number.isFinite(n) && n > 0 && Number.isInteger(n) ? n : this.defaults.promptCacheTtlMinutes;
+    return this.readInt(PROMPT_CACHE_TTL_KEY, this.defaults.promptCacheTtlMinutes, 1);
   }
 
   setPromptCacheTtlMinutes(n: number): void {
@@ -172,10 +196,7 @@ export class SettingsRepo {
    * cache off (and empties it) — every image goes to the OCR model.
    */
   imageCacheMaxBytes(): number {
-    const raw = this.get(IMAGE_CACHE_MAX_BYTES_KEY);
-    if (raw == null) return this.defaults.imageCacheMaxBytes;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 && Number.isInteger(n) ? n : this.defaults.imageCacheMaxBytes;
+    return this.readInt(IMAGE_CACHE_MAX_BYTES_KEY, this.defaults.imageCacheMaxBytes, 0);
   }
 
   setImageCacheMaxBytes(n: number): void {
@@ -190,7 +211,7 @@ export class SettingsRepo {
   }
 
   setSessionTtlMs(ms: number): void {
-    this.set(SESSION_TTL_KEY, `${Math.round(ms / 1000)}s`);
+    this.set(SESSION_TTL_KEY, `${Math.round(ms / MS_PER_SECOND)}s`);
   }
 
   /** The instance-wide session cutoff (epoch ms). 0 = no sessions invalidated. */
@@ -223,7 +244,7 @@ export class SettingsRepo {
   }
 }
 
-/** Parse a human duration string ("12h", "30m", "3600s", "2d") to ms. Returns null if unparseable. */
+/** Parse a human duration string ("12h", "30m", "3600s", "2d"; a bare number is ms) to ms. Returns null if unparseable. */
 export function parseDurationToMs(raw: string): number | null {
   const s = raw.trim();
   if (!s) return null;
@@ -231,7 +252,6 @@ export function parseDurationToMs(raw: string): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n) || n < 0) return null;
-  const unit = (m[2] ?? "s").toLowerCase();
-  const mult: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-  return n * mult[unit];
+  const unit = (m[2] ?? DEFAULT_DURATION_UNIT).toLowerCase();
+  return n * DURATION_UNIT_MS[unit];
 }

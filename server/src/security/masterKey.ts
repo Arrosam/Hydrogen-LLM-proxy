@@ -3,7 +3,7 @@ import type { DB } from "../db";
 import { settings } from "../db/schema";
 import { decryptSecret, encryptSecret, type EncryptedBlob } from "./crypto";
 
-const SENTINEL_KEY = "master_key_check";
+export const SENTINEL_KEY = "master_key_check";
 const SENTINEL_PLAINTEXT = "hydrogen-master-key-ok";
 
 /**

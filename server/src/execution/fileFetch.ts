@@ -3,6 +3,11 @@ import type { Family } from "../core/ir/params";
 import type { ContentPart, FilePart, Message } from "../core/ir/content";
 import type { Request, RequestData } from "../core/ir/request";
 import type { Transport } from "../core/upstream/transport";
+import { DEFAULT_FILE_MEDIA_TYPE } from "../core/ir/content";
+import { BYTES_PER_MIB } from "../config/limits";
+import { HEADER, MIME } from "../util/httpHeaders";
+import { isSuccessStatus } from "../util/httpStatus";
+import { readBounded } from "./boundedBody";
 
 /**
  * File pre-pass: fetch a URL attachment and inline its bytes for an egress
@@ -39,7 +44,21 @@ const MAX_REDIRECTS = 5;
  * holder could point the proxy at a huge (or endless) response and OOM the
  * process: the bytes are fully buffered, then base64-inflated by a third.
  */
-export const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+export const MAX_DOWNLOAD_BYTES = 50 * BYTES_PER_MIB;
+
+/** The 3xx range: a response the download follows rather than reads. */
+const REDIRECT_STATUS_MIN = 300;
+const REDIRECT_STATUS_END = 400;
+
+/** The download takes whatever media type the file server offers. */
+const ACCEPT_ANY = "*/*";
+
+/** A downloaded attachment: its base64 form, and the size of the file itself. */
+interface Downloaded {
+  data: string;
+  mediaType: string;
+  byteLength: number;
+}
 
 const isUrlFile = (p: ContentPart): p is FilePart & { source: { kind: "url"; url: string } } =>
   p.type === "file" && p.source.kind === "url";
@@ -53,14 +72,14 @@ export function needsUrlFileInlining(request: Request, family: Family): boolean 
 /** The media type to label the inlined bytes with. The provider re-sniffs the
  * content anyway; this only has to be honest about what the server said. */
 function mediaTypeOf(headers: Record<string, string | string[] | undefined>): string {
-  const raw = headers["content-type"];
+  const raw = headers[HEADER.CONTENT_TYPE];
   const value = Array.isArray(raw) ? raw[0] : raw;
   const type = value?.split(";")[0]?.trim();
-  return type && type !== "application/octet-stream" ? type : "application/pdf";
+  return type && type !== MIME.OCTET_STREAM ? type : DEFAULT_FILE_MEDIA_TYPE;
 }
 
 function locationOf(headers: Record<string, string | string[] | undefined>): string | undefined {
-  const raw = headers["location"];
+  const raw = headers[HEADER.LOCATION];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return value || undefined;
 }
@@ -79,7 +98,7 @@ async function download(
   url: string,
   transport: Transport,
   opts: { timeoutMs: number; signal?: AbortSignal },
-): Promise<{ data: string; mediaType: string }> {
+): Promise<Downloaded> {
   // Deliberately no `proxy` in `opts`: this is the ONE transport caller whose
   // URL comes out of a client's request body rather than a provider row.
   // Leaving it unset keeps it on the direct, DNS-pinned path -- so nothing an
@@ -93,8 +112,8 @@ async function download(
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     signal.throwIfAborted();
-    const res = await transport.getStream(current, { accept: "*/*" }, opts);
-    if (res.status >= 300 && res.status < 400) {
+    const res = await transport.getStream(current, { [HEADER.ACCEPT]: ACCEPT_ANY }, opts);
+    if (res.status >= REDIRECT_STATUS_MIN && res.status < REDIRECT_STATUS_END) {
       const next = locationOf(res.headers);
       res.body?.destroy?.();
       if (!next) {
@@ -103,32 +122,24 @@ async function download(
       current = new URL(next, current).toString();
       continue;
     }
-    if (res.status < 200 || res.status >= 300) {
+    if (!isSuccessStatus(res.status)) {
       res.body?.destroy?.();
       throw new FormatConversionError(`cannot inline the file at ${url}: the file server returned ${res.status}`);
     }
-    const chunks: Buffer[] = [];
-    let received = 0;
     const abort = () => res.body.destroy(signal.reason instanceof Error ? signal.reason : new Error("download aborted"));
     signal.addEventListener("abort", abort, { once: true });
     try {
       signal.throwIfAborted();
-      for await (const chunk of res.body) {
-        signal.throwIfAborted();
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-        received += buf.length;
-        if (received > MAX_DOWNLOAD_BYTES) {
-          // Stop reading before buffering more: destroy the stream so the
-          // connection does not drain a huge body nobody will use.
-          res.body?.destroy?.();
-          throw new FormatConversionError(
-            `cannot inline the file at ${url}: it exceeds the ${MAX_DOWNLOAD_BYTES}-byte download limit`,
-          );
-        }
-        chunks.push(buf);
+      const bytes = await readBounded(res.body, MAX_DOWNLOAD_BYTES, signal);
+      if (!bytes) {
+        // Stopped before buffering more: destroy the stream so the connection
+        // does not drain a huge body nobody will use.
+        res.body?.destroy?.();
+        throw new FormatConversionError(
+          `cannot inline the file at ${url}: it exceeds the ${MAX_DOWNLOAD_BYTES}-byte download limit`,
+        );
       }
-      signal.throwIfAborted();
-      return { data: Buffer.concat(chunks).toString("base64"), mediaType: mediaTypeOf(res.headers) };
+      return { data: bytes.toString("base64"), mediaType: mediaTypeOf(res.headers), byteLength: bytes.length };
     } finally {
       signal.removeEventListener("abort", abort);
       if (signal.aborted) res.body.destroy();
@@ -166,12 +177,13 @@ export async function inlineUrlFiles(
   for (const m of request.messages) for (const p of m.content) if (isUrlFile(p)) urls.add(p.source.url);
 
   const limit = opts.maxTotalBytes != null && opts.maxTotalBytes > 0 ? opts.maxTotalBytes : Infinity;
-  const fetched = new Map<string, { data: string; mediaType: string }>();
+  const fetched = new Map<string, Downloaded>();
   let totalBytes = 0;
   for (const url of urls) {
     const got = await download(url, transport, opts);
-    // base64 is 4/3 of the bytes it encodes.
-    totalBytes += Math.floor((got.data.length * 3) / 4);
+    // The file's own size: its base64 form is padded, so deriving the size
+    // from that would over-count by up to two bytes.
+    totalBytes += got.byteLength;
     if (totalBytes > limit) {
       throw new FormatConversionError(
         `cannot inline the URL attachments: together they exceed the ${limit}-byte limit configured for this service`,

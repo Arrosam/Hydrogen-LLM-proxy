@@ -28,10 +28,16 @@ export class HostedToolRepo {
     return { ...row.config, name: row.name, enabled: row.enabled, headers: JSON.parse(decryptSecret(row.headersSecret, this.masterKey)) as Record<string, string> };
   }
 
-  create(input: HttpTool): PublicHostedTool {
-    const { headers, ...config } = HttpToolSchema.parse(input);
+  /** The stored columns of a validated tool: its headers sealed apart from the
+   * rest of its config, and its parameter schema checked to compile. */
+  private columns(tool: HttpTool): Omit<typeof hostedTools.$inferInsert, "id"> {
+    const { headers, ...config } = tool;
     toolValidator(config.parameters);
-    const row = this.db.insert(hostedTools).values({ name: config.name, config, enabled: config.enabled, headersSecret: encryptSecret(JSON.stringify(headers), this.masterKey) }).returning().get();
+    return { name: config.name, config, enabled: config.enabled, headersSecret: encryptSecret(JSON.stringify(headers), this.masterKey) };
+  }
+
+  create(input: HttpTool): PublicHostedTool {
+    const row = this.db.insert(hostedTools).values(this.columns(HttpToolSchema.parse(input))).returning().get();
     return this.public(row);
   }
 
@@ -39,9 +45,7 @@ export class HostedToolRepo {
     const existing = this.get(id);
     if (!existing) return undefined;
     const merged = HttpToolSchema.parse({ ...input, headers: input.headers ?? this.materialize(existing).headers });
-    const { headers, ...config } = merged;
-    toolValidator(config.parameters);
-    const row = this.db.update(hostedTools).set({ name: config.name, config, enabled: config.enabled, headersSecret: encryptSecret(JSON.stringify(headers), this.masterKey) }).where(eq(hostedTools.id, id)).returning().get();
+    const row = this.db.update(hostedTools).set(this.columns(merged)).where(eq(hostedTools.id, id)).returning().get();
     return this.public(row);
   }
 

@@ -1,8 +1,8 @@
-import { eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { providers, type Provider } from "../db/schema";
 import { asMillis } from "../util/time";
-import { decryptProviderKey, encryptProviderKey } from "../security/providerKeys";
+import { decryptProviderKey, encryptProviderKey, type ProviderKeyColumns } from "../security/providerKeys";
+import { pickDefined, TableRepo } from "./tableRepo";
 import type { UpstreamProvider } from "../core/upstream/endpoints";
 import type { ProviderType } from "../core/format/family";
 import type { EgressProxy } from "../core/upstream/egress/types";
@@ -38,32 +38,31 @@ export interface PublicProvider {
   createdAt: number;
 }
 
+/** The plain columns an update may set; the API key has its own rule. */
+const PATCHABLE = ["name", "type", "baseUrl", "extraHeaders", "maxOutputTokens", "altEndpoints", "proxyId", "enabled"] as const;
+
 /** Provider persistence + key (de)cryption. The master key is injected. */
-export class ProviderRepo {
+export class ProviderRepo extends TableRepo<typeof providers> {
   constructor(
-    private readonly db: DB,
+    db: DB,
     private readonly masterKey: Buffer,
     /** Resolves a provider's egress proxy. Omitted = every provider is direct. */
     private readonly proxies?: { forProvider(id: number | null | undefined): EgressProxy | null },
-  ) {}
-
-  list(): Provider[] {
-    return this.db.select().from(providers).all();
-  }
-
-  get(id: number): Provider | undefined {
-    return this.db.select().from(providers).where(eq(providers.id, id)).get();
+  ) {
+    super(db, providers);
   }
 
   getByName(name: string): Provider | undefined {
-    return this.db.select().from(providers).where(eq(providers.name, name)).get();
+    return this.findBy(providers.name, name);
+  }
+
+  /** The key columns for a plaintext key; none (null, "" or absent) clears them. */
+  private keyColumns(apiKey: string | null | undefined): ProviderKeyColumns {
+    return apiKey ? encryptProviderKey(apiKey, this.masterKey) : { keyCiphertext: null, keyIv: null, keyTag: null };
   }
 
   create(input: ProviderInput): Provider {
-    const keyCols =
-      input.apiKey && input.apiKey.length > 0
-        ? encryptProviderKey(input.apiKey, this.masterKey)
-        : { keyCiphertext: null, keyIv: null, keyTag: null };
+    const keyCols = this.keyColumns(input.apiKey);
     return this.db
       .insert(providers)
       .values({
@@ -82,28 +81,9 @@ export class ProviderRepo {
   }
 
   update(id: number, input: Partial<ProviderInput>): Provider | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch.name = input.name;
-    if (input.type !== undefined) patch.type = input.type;
-    if (input.baseUrl !== undefined) patch.baseUrl = input.baseUrl;
-    if (input.extraHeaders !== undefined) patch.extraHeaders = input.extraHeaders;
-    if (input.maxOutputTokens !== undefined) patch.maxOutputTokens = input.maxOutputTokens;
-    if (input.altEndpoints !== undefined) patch.altEndpoints = input.altEndpoints;
-    if (input.proxyId !== undefined) patch.proxyId = input.proxyId;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (input.apiKey !== undefined) {
-      if (input.apiKey === null || input.apiKey === "") {
-        Object.assign(patch, { keyCiphertext: null, keyIv: null, keyTag: null });
-      } else {
-        Object.assign(patch, encryptProviderKey(input.apiKey, this.masterKey));
-      }
-    }
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(providers).set(patch).where(eq(providers.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(providers).where(eq(providers.id, id)).run();
+    const patch: Partial<typeof providers.$inferInsert> = pickDefined(input, PATCHABLE);
+    if (input.apiKey !== undefined) Object.assign(patch, this.keyColumns(input.apiKey));
+    return this.patch(id, patch);
   }
 
   toPublic(p: Provider): PublicProvider {
@@ -112,7 +92,8 @@ export class ProviderRepo {
       name: p.name,
       type: p.type,
       baseUrl: p.baseUrl,
-      hasKey: Boolean(p.keyCiphertext),
+      // All three columns, as decryptProviderKey requires: a partial row has no usable key.
+      hasKey: Boolean(p.keyCiphertext && p.keyIv && p.keyTag),
       extraHeaders: p.extraHeaders ?? null,
       maxOutputTokens: p.maxOutputTokens ?? null,
       altEndpoints: p.altEndpoints ?? null,
@@ -122,7 +103,6 @@ export class ProviderRepo {
     };
   }
 
-  /** Materialize a provider row (decrypted key) for making upstream calls. */
   /**
    * Materialize a provider row (decrypted key) for making upstream calls.
    *

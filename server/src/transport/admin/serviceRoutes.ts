@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z, ZodError } from "zod";
 import { requireAdmin } from "../../auth/authorization";
 import type { Container } from "../../composition/container";
@@ -7,29 +7,42 @@ import { textOf, type ImagePart } from "../../core/ir/content";
 import { failureMessage } from "../../core/proxy/errors";
 import type { ModelServiceRow } from "../../db/schema";
 import { buildOcrRequest, parseOcrResults } from "../../execution/agentContext";
-import { AgentOcrSchema, isAgent, isChatPipeline, serviceCategory, summarizeService, type AgentOcr, type ServiceDef } from "../../execution/definition";
+import { AgentOcrSchema, DEFAULT_SERVICE_TIMEOUT_MS, isAgent, isChatPipeline, serviceCategory, summarizeService, type AgentOcr, type ServiceDef } from "../../execution/definition";
 import type { ModelService } from "../../execution/modelService";
 import { ServiceValidationError } from "../../execution/serviceValidator";
 import { asMillis } from "../../util/time";
-import { idParam, parse } from "../../util/validate";
+import { HTTP_STATUS } from "../../util/httpStatus";
 import { withJsonHeartbeat } from "../jsonKeepalive";
+import { ERR_MODEL_SERVICE_NOT_FOUND } from "../errorMessages";
+import { MAX_NAME_LENGTH } from "../limits";
+import { PositiveIntSchema, formatZodIssues } from "../../util/validate";
+import { badRequest, loadById, notFound, parseBody } from "./replies";
+
+/** Hosted tools one service may bind. */
+const MAX_TOOLS_PER_SERVICE = 64;
+/** Output budget of a dry-run request: a Micro Agent needs room for its stages. */
+const DRY_RUN_MAX_TOKENS_AGENT = 64;
+const DRY_RUN_MAX_TOKENS_SERVICE = 16;
+/** Characters of the dry-run answer returned to the editor. */
+const DRY_RUN_OUTPUT_PREVIEW_CHARS = 500;
+/** Characters of the raw OCR answer returned to the editor. */
+const OCR_RAW_PREVIEW_CHARS = 20_000;
+/** Heartbeat interval of a dry-run; fixed, not the operator's ping setting. */
+const DRY_RUN_PING_INTERVAL_MS = 10_000;
+
+const ACTION_BIND_HOSTED_TOOLS = "bind hosted tools";
+const ERR_HOSTED_TOOLS_NEED_CHAT = "Hosted tools require a chat service";
 
 // --- services ---------------------------------------------------------------
 
 const ServiceCreate = z.object({
-  toolIds: z.array(z.number().int().positive()).max(64).optional(),
-  name: z.string().min(1).max(120),
+  toolIds: z.array(PositiveIntSchema).max(MAX_TOOLS_PER_SERVICE).optional(),
+  name: z.string().min(1).max(MAX_NAME_LENGTH),
   description: z.string().nullable().optional(),
   steps: z.unknown(),
   enabled: z.boolean().optional(),
 });
-const ServiceUpdate = z.object({
-  toolIds: z.array(z.number().int().positive()).max(64).optional(),
-  name: z.string().min(1).max(120).optional(),
-  description: z.string().nullable().optional(),
-  steps: z.unknown().optional(),
-  enabled: z.boolean().optional(),
-});
+const ServiceUpdate = ServiceCreate.partial();
 
 function presentService(c: Container, m: ModelServiceRow): Record<string, unknown> {
   let summary = "";
@@ -50,12 +63,19 @@ const OcrTestSchema = z.object({
 });
 
 function serviceValidationError(e: unknown): { status: number; body: Record<string, unknown> } | null {
-  if (e instanceof ServiceValidationError) return { status: 400, body: { error: e.message, invalidPairs: e.invalidPairs } };
+  if (e instanceof ServiceValidationError) return { status: HTTP_STATUS.BAD_REQUEST, body: { error: e.message, invalidPairs: e.invalidPairs } };
   if (e instanceof ZodError) {
-    const msg = e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-    return { status: 400, body: { error: `invalid steps: ${msg}` } };
+    return { status: HTTP_STATUS.BAD_REQUEST, body: { error: `invalid steps: ${formatZodIssues(e.issues)}` } };
   }
   return null;
+}
+
+/** The catch arm of a handler that validates a definition: answer with the
+ * mapped 400, or rethrow what is not a validation failure. */
+function replyValidationError(reply: FastifyReply, e: unknown): FastifyReply {
+  const mapped = serviceValidationError(e);
+  if (!mapped) throw e;
+  return reply.code(mapped.status).send(mapped.body);
 }
 
 export async function serviceRoutes(app: FastifyInstance, c: Container): Promise<void> {
@@ -70,65 +90,59 @@ export async function serviceRoutes(app: FastifyInstance, c: Container): Promise
       return { valid: true, summary, kind, count };
     } catch (e) {
       const mapped = serviceValidationError(e);
-      if (mapped) return reply.code(200).send({ valid: false, ...mapped.body });
+      if (mapped) return reply.code(HTTP_STATUS.OK).send({ valid: false, ...mapped.body });
       throw e;
     }
   });
 
   app.post("/", async (req, reply) => {
-    const parsed = parse(ServiceCreate, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    if (parsed.data.toolIds !== undefined && !requireAdmin(req, reply, "bind hosted tools")) return;
+    const data = parseBody(ServiceCreate, req, reply);
+    if (!data) return reply;
+    if (data.toolIds !== undefined && !requireAdmin(req, reply, ACTION_BIND_HOSTED_TOOLS)) return;
     try {
-      const { def } = c.validator.validate(parsed.data.steps);
-      if (parsed.data.toolIds?.length && !isChatPipeline(serviceCategory(def))) return reply.code(400).send({ error: "Hosted tools require a chat service" });
+      const { def } = c.validator.validate(data.steps);
+      if (data.toolIds?.length && !isChatPipeline(serviceCategory(def))) return badRequest(reply, ERR_HOSTED_TOOLS_NEED_CHAT);
       const row = c.db.transaction(() => {
-        const row = c.services.create({ name: parsed.data.name, description: parsed.data.description, definition: def, enabled: parsed.data.enabled });
-        if (parsed.data.toolIds) c.hostedTools.bind(row.id, parsed.data.toolIds);
+        const row = c.services.create({ name: data.name, description: data.description, definition: def, enabled: data.enabled });
+        if (data.toolIds) c.hostedTools.bind(row.id, data.toolIds);
         return row;
       });
-      return reply.code(201).send({ service: presentService(c, row) });
+      return reply.code(HTTP_STATUS.CREATED).send({ service: presentService(c, row) });
     } catch (e) {
-      const mapped = serviceValidationError(e);
-      if (mapped) return reply.code(mapped.status).send(mapped.body);
-      throw e;
+      return replyValidationError(reply, e);
     }
   });
 
   app.patch("/:id", async (req, reply) => {
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    if (!c.services.get(id)) return reply.code(404).send({ error: "not found" });
-    const parsed = parse(ServiceUpdate, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    if (parsed.data.toolIds !== undefined && !requireAdmin(req, reply, "bind hosted tools")) return;
+    const hit = loadById(req, reply, (id) => c.services.get(id));
+    if (!hit) return reply;
+    const data = parseBody(ServiceUpdate, req, reply);
+    if (!data) return reply;
+    if (data.toolIds !== undefined && !requireAdmin(req, reply, ACTION_BIND_HOSTED_TOOLS)) return;
     try {
       const patch: { name?: string; description?: string | null; definition?: ServiceDef; enabled?: boolean } = {
-        name: parsed.data.name,
-        description: parsed.data.description,
-        enabled: parsed.data.enabled,
+        name: data.name,
+        description: data.description,
+        enabled: data.enabled,
       };
-      if (parsed.data.steps !== undefined) patch.definition = c.validator.validate(parsed.data.steps).def;
-      const effective = patch.definition ?? c.services.def(c.services.get(id)!);
-      if ((parsed.data.toolIds ?? c.hostedTools.boundIds(id)).length && !isChatPipeline(serviceCategory(effective))) return reply.code(400).send({ error: "Hosted tools require a chat service" });
+      if (data.steps !== undefined) patch.definition = c.validator.validate(data.steps).def;
+      const effective = patch.definition ?? c.services.def(c.services.get(hit.id)!);
+      if ((data.toolIds ?? c.hostedTools.boundIds(hit.id)).length && !isChatPipeline(serviceCategory(effective))) return badRequest(reply, ERR_HOSTED_TOOLS_NEED_CHAT);
       const row = c.db.transaction(() => {
-        const row = c.services.update(id, patch);
-        if (parsed.data.toolIds) c.hostedTools.bind(id, parsed.data.toolIds);
+        const row = c.services.update(hit.id, patch);
+        if (data.toolIds) c.hostedTools.bind(hit.id, data.toolIds);
         return row;
       });
       return { service: row ? presentService(c, row) : null };
     } catch (e) {
-      const mapped = serviceValidationError(e);
-      if (mapped) return reply.code(mapped.status).send(mapped.body);
-      throw e;
+      return replyValidationError(reply, e);
     }
   });
 
   app.delete("/:id", async (req, reply) => {
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    if (!c.services.get(id)) return reply.code(404).send({ error: "not found" });
-    c.services.delete(id);
+    const hit = loadById(req, reply, (id) => c.services.get(id));
+    if (!hit) return reply;
+    c.services.delete(hit.id);
     return { ok: true };
   });
 
@@ -139,38 +153,36 @@ export async function serviceRoutes(app: FastifyInstance, c: Container): Promise
     try {
       if (body.serviceId) {
         const row = c.services.get(body.serviceId);
-        if (!row) return reply.code(404).send({ error: "Model Service not found" });
+        if (!row) return notFound(reply, ERR_MODEL_SERVICE_NOT_FOUND);
         def = c.services.def(row);
       } else {
         def = c.validator.validate(body.steps).def;
       }
     } catch (e) {
-      const mapped = serviceValidationError(e);
-      if (mapped) return reply.code(mapped.status).send(mapped.body);
-      throw e;
+      return replyValidationError(reply, e);
     }
 
     // The dry-run fires a chat request; media categories speak other shapes.
     if (!isChatPipeline(serviceCategory(def))) {
-      return reply.code(400).send({ error: `dry-run supports chat-pipeline services only (this is a ${serviceCategory(def)} service)` });
+      return badRequest(reply, `dry-run supports chat-pipeline services only (this is a ${serviceCategory(def)} service)`);
     }
 
     const { executor } = c.factory.buildDef(def);
     const request = buildRequest("openai_completion", {
       requestedService: "(dry-run)",
       messages: [{ role: "user", content: [{ type: "text", text: body.prompt || "ping" }] }],
-      params: { maxTokens: isAgent(def) ? 64 : 16 },
+      params: { maxTokens: isAgent(def) ? DRY_RUN_MAX_TOKENS_AGENT : DRY_RUN_MAX_TOKENS_SERVICE },
       stream: false,
     });
     // A dry-run against a slow chain can outlive intermediary idle timeouts
     // (Cloudflare 524s a silent origin at ~100s); heartbeat while it runs.
     // Failures already travel in-body ({ok:false}), so committing 200 early
     // changes nothing semantically.
-    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, 10_000, async () => {
+    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, DRY_RUN_PING_INTERVAL_MS, async () => {
       const outcome = await executor.invoke(request);
       if (outcome.result.ok) {
         const v = outcome.result.value;
-        return { ok: true, attemptPath: outcome.attemptPath, served: { model: v.modelName, provider: v.providerName }, output: textOf(v.response.content).slice(0, 500) };
+        return { ok: true, attemptPath: outcome.attemptPath, served: { model: v.modelName, provider: v.providerName }, output: textOf(v.response.content).slice(0, DRY_RUN_OUTPUT_PREVIEW_CHARS) };
       }
       return { ok: false, status: outcome.result.status, message: failureMessage(outcome.result), attemptPath: outcome.attemptPath };
     });
@@ -181,40 +193,36 @@ export async function serviceRoutes(app: FastifyInstance, c: Container): Promise
   // (possibly unsaved). The image cache is bypassed by construction -- the OCR
   // service is invoked directly, so the test always measures the model.
   app.post("/test-ocr", async (req, reply) => {
-    const parsed = parse(OcrTestSchema, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const data = parseBody(OcrTestSchema, req, reply);
+    if (!data) return reply;
     let ocr: AgentOcr;
     try {
-      ocr = AgentOcrSchema.parse(parsed.data.ocr);
+      ocr = AgentOcrSchema.parse(data.ocr);
     } catch (e) {
-      const mapped = serviceValidationError(e);
-      if (mapped) return reply.code(mapped.status).send(mapped.body);
-      throw e;
+      return replyValidationError(reply, e);
     }
 
     // Resolve the OCR model exactly the way the Micro Agent pre-pass does.
     let executor: ModelService;
     if (ocr.service) {
       const r = c.factory.resolve(ocr.service);
-      if (!r.ok) return reply.code(400).send({ error: r.message });
-      if (r.isAgent) return reply.code(400).send({ error: `OCR reference "${ocr.service}" must be a Model Service, not a Micro Agent` });
+      if (!r.ok) return badRequest(reply, r.message);
+      if (r.isAgent) return badRequest(reply, `OCR reference "${ocr.service}" must be a Model Service, not a Micro Agent`);
       executor = r.executor;
     } else if (ocr.steps && ocr.steps.length) {
       try {
-        const { def } = c.validator.validate({ timeoutMs: ocr.timeoutMs ?? 60_000, steps: ocr.steps });
+        const { def } = c.validator.validate({ timeoutMs: ocr.timeoutMs ?? DEFAULT_SERVICE_TIMEOUT_MS, steps: ocr.steps });
         executor = c.factory.buildDef(def).executor;
       } catch (e) {
-        const mapped = serviceValidationError(e);
-        if (mapped) return reply.code(mapped.status).send(mapped.body);
-        throw e;
+        return replyValidationError(reply, e);
       }
     } else {
-      return reply.code(400).send({ error: "image translation (OCR) is enabled but has no model configured" });
+      return badRequest(reply, "image translation (OCR) is enabled but has no model configured");
     }
 
     const image: ImagePart = {
       type: "image",
-      source: { kind: "base64", mediaType: parsed.data.image.mediaType, data: parsed.data.image.data },
+      source: { kind: "base64", mediaType: data.image.mediaType, data: data.image.data },
     };
     const parent = buildRequest("openai_completion", {
       requestedService: "(ocr-test)",
@@ -228,7 +236,7 @@ export async function serviceRoutes(app: FastifyInstance, c: Container): Promise
     // wire, Cloudflare answers the panel with a 524 at ~100s while the test
     // keeps running. Heartbeat until the outcome arrives — failures already
     // travel in-body ({ok:false}), so the early 200 commit costs nothing.
-    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, 10_000, async () => {
+    return withJsonHeartbeat(reply, c.config.jsonCommitGraceMs, DRY_RUN_PING_INTERVAL_MS, async () => {
       const started = Date.now();
       const outcome = await executor.invoke(ocrReq, undefined, ocr.timeoutMs ? { timeoutMs: ocr.timeoutMs } : {});
       const latencyMs = Date.now() - started;
@@ -243,7 +251,7 @@ export async function serviceRoutes(app: FastifyInstance, c: Container): Promise
           latencyMs,
           usage: v.response.usage,
           description,
-          raw: raw.slice(0, 20_000),
+          raw: raw.slice(0, OCR_RAW_PREVIEW_CHARS),
           attemptPath: outcome.attemptPath,
         };
       }

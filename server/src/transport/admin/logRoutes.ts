@@ -1,27 +1,19 @@
 import type { FastifyInstance } from "fastify";
 import { requireAdmin } from "../../auth/authorization";
 import type { Container } from "../../composition/container";
-import { idParam } from "../../util/validate";
+import { boolParam, numParam } from "../../util/validate";
+import { loadById } from "./replies";
+
+const ACTION_VIEW_LOGS = "view request logs";
 
 // --- logs + stats -----------------------------------------------------------
-
-function numParam(v: unknown): number | undefined {
-  if (v == null || v === "") return undefined;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
-}
-function boolParam(v: unknown): boolean | undefined {
-  if (v === "true" || v === "1") return true;
-  if (v === "false" || v === "0") return false;
-  return undefined;
-}
 
 // Request logs carry every caller's full conversation payload, so reading them
 // is an admin capability. Stats and active-request progress stay visible to
 // every dashboard user: they hold counters and metadata, not content.
 export async function logRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.get("/logs", async (req, reply) => {
-    if (!requireAdmin(req, reply, "view request logs")) return reply;
+    if (!requireAdmin(req, reply, ACTION_VIEW_LOGS)) return reply;
     const q = req.query as Record<string, string>;
     return c.logs.query({
       tokenId: numParam(q.tokenId),
@@ -36,12 +28,10 @@ export async function logRoutes(app: FastifyInstance, c: Container): Promise<voi
   });
 
   app.get("/logs/:id", async (req, reply) => {
-    if (!requireAdmin(req, reply, "view request logs")) return reply;
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    const log = c.logs.get(id);
-    if (!log) return reply.code(404).send({ error: "not found" });
-    return { log };
+    if (!requireAdmin(req, reply, ACTION_VIEW_LOGS)) return reply;
+    const hit = loadById(req, reply, (id) => c.logs.get(id));
+    if (!hit) return reply;
+    return { log: hit.row };
   });
 
   // Clear the entire request log (and reclaim the file space).
@@ -60,25 +50,18 @@ export async function logRoutes(app: FastifyInstance, c: Container): Promise<voi
   // The unbounded queries the dashboard actually issues come straight from the
   // in-memory StatsCache -- no SQL per view. An explicit from/to still runs the
   // SQL aggregation, since the cache only accumulates all-time totals.
-  const range = (req: { query: unknown }): { from?: number; to?: number } => {
+  type StatsRange = { from?: number; to?: number };
+  const range = (req: { query: unknown }): StatsRange => {
     const q = req.query as Record<string, string>;
     return { from: numParam(q.from), to: numParam(q.to) };
   };
-  const bounded = (r: { from?: number; to?: number }): boolean => r.from != null || r.to != null;
-  app.get("/stats/summary", async (req) => {
+  const bounded = (r: StatsRange): boolean => r.from != null || r.to != null;
+  const stat = <T>(req: { query: unknown }, aggregate: (r: StatsRange) => T, cached: () => T): T => {
     const r = range(req);
-    return bounded(r) ? c.stats.summary(r) : c.statsCache.summary();
-  });
-  app.get("/stats/timeseries", async (req) => {
-    const r = range(req);
-    return { points: bounded(r) ? c.stats.timeSeries(r) : c.statsCache.timeSeries() };
-  });
-  app.get("/stats/by-service", async (req) => {
-    const r = range(req);
-    return { groups: bounded(r) ? c.stats.byService(r) : c.statsCache.byService() };
-  });
-  app.get("/stats/by-model-provider", async (req) => {
-    const r = range(req);
-    return bounded(r) ? c.stats.byModelProvider(r) : c.statsCache.byModelProvider();
-  });
+    return bounded(r) ? aggregate(r) : cached();
+  };
+  app.get("/stats/summary", async (req) => stat(req, (r) => c.stats.summary(r), () => c.statsCache.summary()));
+  app.get("/stats/timeseries", async (req) => ({ points: stat(req, (r) => c.stats.timeSeries(r), () => c.statsCache.timeSeries()) }));
+  app.get("/stats/by-service", async (req) => ({ groups: stat(req, (r) => c.stats.byService(r), () => c.statsCache.byService()) }));
+  app.get("/stats/by-model-provider", async (req) => stat(req, (r) => c.stats.byModelProvider(r), () => c.statsCache.byModelProvider()));
 }

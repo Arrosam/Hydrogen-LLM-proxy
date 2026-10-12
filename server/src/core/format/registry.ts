@@ -21,6 +21,10 @@ export interface ResponseClass {
   parse(body: Record<string, unknown>): Response;
   parseStream(readable: AsyncIterable<Buffer | string>): AsyncGenerator<StreamEvent>;
   serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string>;
+  /** Whether a buffered 2xx body is this family's response envelope at all. */
+  isEnvelope(body: Record<string, unknown>): boolean;
+  /** Whether a buffered 2xx body reports a generation that did not finish. */
+  isUnfinished(body: Record<string, unknown>): boolean;
 }
 
 const requestClasses: Partial<Record<Family, RequestClass>> = {};
@@ -61,6 +65,17 @@ export function parseResponse(family: Family, body: Record<string, unknown>): Re
 /** Build a Response of `family` from canonical data (for rendering to a client). */
 export function buildResponse(family: Family, data: ResponseData): Response {
   return new (responseClass(family))(data);
+}
+
+/**
+ * Why a buffered 2xx body of `family` is not an answer, or null when it is one
+ * to parse: it reports an error or an unfinished generation ("unfinished"), or
+ * it is not that family's envelope ("invalid").
+ */
+export function responseBodyFault(family: Family, body: Record<string, unknown>): "unfinished" | "invalid" | null {
+  const c = responseClass(family);
+  if (body.error != null || c.isUnfinished(body)) return "unfinished";
+  return c.isEnvelope(body) ? null : "invalid";
 }
 
 /** Parse an upstream SSE stream (of `family`) into canonical events. */

@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { users, type User } from "../db/schema";
 import { asMillis } from "../util/time";
 import { hashPassword, verifyPassword } from "../security/passwords";
+import { pickDefined, TableRepo } from "./tableRepo";
 
 export type Role = "admin" | "manager";
 
@@ -28,8 +29,10 @@ const DUMMY_PASSWORD = "hydrogen-timing-equalizer";
 let dummyHash: string | null = null;
 
 /** Dashboard accounts + password verification (argon2id). */
-export class UserRepo {
-  constructor(private readonly db: DB) {}
+export class UserRepo extends TableRepo<typeof users> {
+  constructor(db: DB) {
+    super(db, users);
+  }
 
   toPublic(u: User): PublicUser {
     return {
@@ -42,20 +45,8 @@ export class UserRepo {
     };
   }
 
-  list(): User[] {
-    return this.db.select().from(users).all();
-  }
-
-  get(id: number): User | undefined {
-    return this.db.select().from(users).where(eq(users.id, id)).get();
-  }
-
   getByUsername(username: string): User | undefined {
-    return this.db.select().from(users).where(eq(users.username, username)).get();
-  }
-
-  count(): number {
-    return this.db.select().from(users).all().length;
+    return this.findBy(users.username, username);
   }
 
   async create(input: {
@@ -92,16 +83,10 @@ export class UserRepo {
   }
 
   async update(id: number, input: { role?: Role; enabled?: boolean; password?: string }): Promise<User | undefined> {
-    const patch: Record<string, unknown> = {};
-    if (input.role !== undefined) patch.role = input.role;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
+    const patch: Partial<typeof users.$inferInsert> = pickDefined(input, ["role", "enabled"]);
+    // Truthiness, not `!== undefined`: an empty password means "unchanged".
     if (input.password) patch.passwordHash = await hashPassword(input.password);
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(users).set(patch).where(eq(users.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(users).where(eq(users.id, id)).run();
+    return this.patch(id, patch);
   }
 
   /** Verify a username/password login. Returns the user on success, null on

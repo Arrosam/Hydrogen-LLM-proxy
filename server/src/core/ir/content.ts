@@ -6,6 +6,19 @@
  * whether it is the client's (ingress) or the upstream's (egress) side.
  */
 
+import { MIME } from "../../util/httpHeaders";
+import type { Family, ServerToolFamily } from "./params";
+
+/** Media type assumed for a file / an image whose source names none. */
+export const DEFAULT_FILE_MEDIA_TYPE = MIME.PDF;
+export const DEFAULT_IMAGE_MEDIA_TYPE = MIME.PNG;
+
+/** Separator between the chunks of a system prompt (joined blocks, appended notes). */
+export const SYSTEM_SEPARATOR = "\n\n";
+
+/** Error code substituted for a failed server-tool call whose result names none. */
+export const DEFAULT_SERVER_TOOL_ERROR_CODE = "unavailable";
+
 export interface TextPart {
   type: "text";
   text: string;
@@ -30,7 +43,7 @@ export interface ImagePart {
 export type FileSource =
   | { kind: "base64"; mediaType: string; data: string }
   | { kind: "url"; url: string }
-  | { kind: "file_id"; id: string; family: "openai_completion" | "anthropic" | "openai_responses" };
+  | { kind: "file_id"; id: string; family: Family };
 
 /** A document/file attachment (PDF etc.): Anthropic `document`, Responses
  * `input_file`, Chat Completions `file` content part. */
@@ -46,7 +59,7 @@ export interface FilePart {
  * dropped when crossing families. */
 export interface OpaquePart {
   type: "opaque";
-  family: "openai_completion" | "anthropic" | "openai_responses";
+  family: Family;
   value: unknown;
 }
 
@@ -75,7 +88,7 @@ export interface ToolResultPart {
 /** A reasoning/thinking block produced by the model (extended thinking). */
 export interface ReasoningPart {
   /** Wire family that issued the opaque signature; never replay across families. */
-  origin?: "anthropic" | "openai_responses" | "openai_completion";
+  origin?: Family;
   type: "reasoning";
   text: string;
   /** Provider signature for the block (Anthropic thinking/redacted_thinking),
@@ -102,7 +115,7 @@ export interface ReasoningPart {
  */
 export interface ServerToolResultPart {
   type: "server_tool_result";
-  family: "anthropic" | "openai_responses";
+  family: ServerToolFamily;
   /** Provider-executed call id, referenced by the result half of the pair. */
   id: string;
   /** Name the CLIENT declared for the server tool. */
@@ -152,7 +165,7 @@ export interface Tool {
   /** A provider-executed (server-side) or otherwise family-specific tool
    * declaration, kept verbatim: replayed untouched to the SAME family, dropped
    * when crossing families (never mangled into an empty client tool). */
-  raw?: { family: "openai_completion" | "anthropic" | "openai_responses"; value: unknown };
+  raw?: { family: Family; value: unknown };
 }
 
 export type ToolChoice =

@@ -1,7 +1,13 @@
 /** Small wire-format coercion helpers shared by the format subclasses. */
 
-import type { ImagePart } from "../ir/content";
-import type { Family, GenerationParams } from "../ir/params";
+import { DEFAULT_FILE_MEDIA_TYPE, type ContentPart, type FileSource, type ImagePart } from "../ir/content";
+import type { Family, GenerationParams, ResponseFormat } from "../ir/params";
+import type { Usage } from "../ir/usage";
+import { FILE_ID_SCOPE_NOTE, FormatConversionError } from "./errors";
+import { num, numOrUndef } from "../ir/coerce";
+
+/** `name` an OpenAI json_schema format is given when the request named none. */
+export const DEFAULT_JSON_SCHEMA_NAME = "schema";
 
 /**
  * The cache-hit count out of an OpenAI-shaped `usage` object, whatever the
@@ -25,30 +31,42 @@ export function openAiCachedTokens(usage: Record<string, unknown>): number | und
     ?? numOrUndef(usage.cached_tokens);
 }
 
-export function numOrUndef(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+/** Where an OpenAI-shaped `usage` object keeps its counters; the two OpenAI wires differ only in these names. */
+export interface OpenAiUsageKeys {
+  prompt: string;
+  completion: string;
+  promptDetails: string;
+  completionDetails: string;
 }
 
-export function num(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+/**
+ * Canonical usage from a complete OpenAI-shaped `usage` object.
+ *
+ * `zeroTotalIsMissing` is how a reported `total_tokens` of 0 is read: as the
+ * total (false), or as "not reported", falling back to prompt + completion
+ * (true). The buffered parsers do the former and the Responses stream parser
+ * the latter; the difference is kept as it was.
+ */
+export function parseOpenAiUsage(usage: Record<string, unknown>, keys: OpenAiUsageKeys, opts: { zeroTotalIsMissing?: boolean } = {}): Usage {
+  const promptTokens = num(usage[keys.prompt]);
+  const completionTokens = num(usage[keys.completion]);
+  const cachedInputTokens = openAiCachedTokens(usage);
+  const reasoningTokens = numOrUndef(((usage[keys.completionDetails] ?? {}) as Record<string, unknown>).reasoning_tokens);
+  const total = opts.zeroTotalIsMissing ? num(usage.total_tokens) || undefined : numOrUndef(usage.total_tokens);
+  return {
+    promptTokens, completionTokens, totalTokens: total ?? promptTokens + completionTokens,
+    ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+    ...(reasoningTokens != null ? { reasoningTokens } : {}),
+  };
 }
 
-export function boolOrUndef(v: unknown): boolean | undefined {
-  return typeof v === "boolean" ? v : undefined;
-}
-
-export function strOrUndef(v: unknown): string | undefined {
-  return typeof v === "string" && v ? v : undefined;
-}
-
-/** JSON-parse tool arguments, falling back to the raw value. */
-export function safeJsonParse(v: unknown): unknown {
-  if (typeof v !== "string") return v ?? {};
-  try {
-    return JSON.parse(v);
-  } catch {
-    return v;
-  }
+/** Canonical usage as an OpenAI-shaped `usage` object, buffered or streamed. */
+export function openAiUsageToWire(u: Usage, keys: OpenAiUsageKeys): Record<string, unknown> {
+  return {
+    [keys.prompt]: u.promptTokens, [keys.completion]: u.completionTokens, total_tokens: u.totalTokens,
+    ...(u.cachedInputTokens != null ? { [keys.promptDetails]: { cached_tokens: u.cachedInputTokens } } : {}),
+    ...(u.reasoningTokens != null ? { [keys.completionDetails]: { reasoning_tokens: u.reasoningTokens } } : {}),
+  };
 }
 
 /** Parse a stop/stop_sequences field (string or array) into a string[]. */
@@ -65,20 +83,113 @@ export function parseDataUrl(url: string): ImagePart["source"] {
   return { kind: "url", url };
 }
 
+/** Inline bytes as a base64 data URL. */
+export function dataUrlOf(mediaType: string, data: string): string {
+  return `data:${mediaType};base64,${data}`;
+}
+
 /** Build a displayable image URL from an image source. */
 export function imageUrlOf(source: ImagePart["source"]): string {
-  return source.kind === "base64" ? `data:${source.mediaType};base64,${source.data}` : source.url;
+  return source.kind === "base64" ? dataUrlOf(source.mediaType, source.data) : source.url;
+}
+
+/** The URL of an OpenAI image part's `image_url`, which is a string or `{ url }`. */
+export function imageUrlField(image: unknown): string {
+  return typeof image === "string" ? image : String((image as Record<string, unknown> | null | undefined)?.url ?? "");
+}
+
+/** An OpenAI `file_data` value as a file source: a base64 data URL, or bare base64 taken to be a PDF. */
+export function parseInlineFileData(data: string): FileSource {
+  const src = data.startsWith("data:") ? parseDataUrl(data) : { kind: "base64" as const, mediaType: DEFAULT_FILE_MEDIA_TYPE, data };
+  return src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data };
 }
 
 /**
- * Fit a requested output-token max under the provider's hard cap. Asking for
- * more than a provider allows gets the whole request rejected, so the cap wins.
- * A request that named no max keeps naming none — the provider's own default is
- * already within its limit.
+ * The refusal every adapter raises for a file id minted by another family: id
+ * spaces do not overlap, so forwarding one either 404s upstream or resolves to
+ * an unrelated document. `provider` names the egress in the message.
  */
-export function capMaxTokens(maxTokens: number | undefined, cap: number | undefined): number | undefined {
-  if (maxTokens == null) return undefined;
-  return cap != null && maxTokens > cap ? cap : maxTokens;
+export function foreignFileIdError(source: Extract<FileSource, { kind: "file_id" }>, provider: string): FormatConversionError {
+  return new FormatConversionError(`cannot send a ${source.family} file_id ("${source.id}") to ${provider} provider: ${FILE_ID_SCOPE_NOTE}`);
+}
+
+/** The object entries of a wire array; anything else in it (and a non-array) is skipped. */
+export function* objectsIn(list: unknown): Generator<Record<string, unknown>> {
+  if (!Array.isArray(list)) return;
+  for (const entry of list) {
+    if (entry && typeof entry === "object") yield entry as Record<string, unknown>;
+  }
+}
+
+/** A message `content` given as a bare string, as parts; undefined when it is not a string. */
+export function stringContentParts(content: unknown): ContentPart[] | undefined {
+  if (typeof content !== "string") return undefined;
+  return content ? [{ type: "text", text: content }] : [];
+}
+
+/** Message roles as the two OpenAI wires spell them (`tool` exists on Chat Completions only). */
+/**
+ * Text of the user message that carries a tool result's images on the two
+ * OpenAI wires, whose tool-result carriers (the `tool` role, a
+ * `function_call_output` item) are text-only.
+ */
+export const TOOL_RESULT_IMAGES_NOTE = "(images returned by the tool results above)";
+
+export const OPENAI_ROLE = {
+  SYSTEM: "system",
+  DEVELOPER: "developer",
+  USER: "user",
+  ASSISTANT: "assistant",
+  TOOL: "tool",
+} as const;
+
+/** `response_format.type` / `text.format.type` values of the two OpenAI wires. */
+export const OPENAI_RESPONSE_FORMAT = {
+  TEXT: "text",
+  JSON_OBJECT: "json_object",
+  JSON_SCHEMA: "json_schema",
+} as const;
+
+/**
+ * Parse an OpenAI structured-output format object. `schemaFields` says where
+ * the json_schema's name / schema / strict live: nested under `json_schema` on
+ * Chat Completions, on the format object itself on Responses.
+ */
+export function parseOpenAiResponseFormat(
+  raw: unknown,
+  schemaFields: (format: Record<string, unknown>) => Record<string, unknown>,
+): ResponseFormat | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const format = raw as Record<string, unknown>;
+  if (format.type === OPENAI_RESPONSE_FORMAT.TEXT) return { type: "text" };
+  if (format.type === OPENAI_RESPONSE_FORMAT.JSON_OBJECT) return { type: "json_object" };
+  if (format.type === OPENAI_RESPONSE_FORMAT.JSON_SCHEMA) {
+    const js = schemaFields(format);
+    return {
+      type: "json_schema",
+      name: js.name ? String(js.name) : undefined,
+      schema: (js.schema as Record<string, unknown>) ?? {},
+      strict: typeof js.strict === "boolean" ? js.strict : undefined,
+    };
+  }
+  return undefined;
+}
+
+/** The name / schema / strict fields of a json_schema format, as both OpenAI wires spell them. */
+export function openAiJsonSchemaFields(rf: Extract<ResponseFormat, { type: "json_schema" }>): Record<string, unknown> {
+  return { name: rf.name ?? DEFAULT_JSON_SCHEMA_NAME, schema: rf.schema, ...(rf.strict != null ? { strict: rf.strict } : {}) };
+}
+
+/** True when an OpenAI-family client named a prompt-cache tuning param: its way of saying the conversation repeats. */
+export function hasCacheHint(body: Record<string, unknown>): boolean {
+  return body.prompt_cache_key != null || body.prompt_cache_options != null;
+}
+
+/** A setter that writes only defined values onto `params` -- an absent wire field stays an absent canonical one. */
+export function paramSetter(params: GenerationParams): <K extends keyof GenerationParams>(key: K, value: GenerationParams[K] | undefined) => void {
+  return (key, value) => {
+    if (value !== undefined) params[key] = value;
+  };
 }
 
 /**

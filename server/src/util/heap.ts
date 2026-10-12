@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import { spawn } from "node:child_process";
+import { BYTES_PER_MIB } from "../config/limits";
+import { SIGNAL } from "./shutdown";
 
 /**
  * Size Node's old-space to the CONTAINER's memory limit.
@@ -34,6 +36,18 @@ const CGROUP_FILES = [
 /** Anything at or above 1 TiB is cgroup's "no limit" sentinel, not a real cap. */
 const UNLIMITED_BYTES = 1024 ** 4;
 
+/** The Node flag that sets the old-space ceiling, in MiB. */
+const HEAP_FLAG = "--max-old-space-size";
+/** Set on the re-exec'd child so it does not re-exec again. */
+const RESPAWN_MARKER_ENV = "HYDROGEN_HEAP_RESPAWNED";
+const RESPAWN_MARKER_VALUE = "1";
+/** NODE_HEAP_PERCENT when unset or out of range: the whole container. */
+const DEFAULT_HEAP_PERCENT = 100;
+const MAX_HEAP_PERCENT = 100;
+const PERCENT_SCALE = 100;
+/** Never size the heap below this many MiB. */
+const MIN_HEAP_MB = 128;
+
 /** Parse one cgroup memory value to MiB, or undefined when absent/unlimited. */
 export function parseCgroupLimit(raw: string | undefined): number | undefined {
   if (raw == null) return undefined;
@@ -41,7 +55,7 @@ export function parseCgroupLimit(raw: string | undefined): number | undefined {
   if (!/^\d+$/.test(text)) return undefined; // "max", or a junk value
   const bytes = Number(text);
   if (!Number.isFinite(bytes) || bytes <= 0 || bytes >= UNLIMITED_BYTES) return undefined;
-  return Math.max(1, Math.floor(bytes / (1024 * 1024)));
+  return Math.max(1, Math.floor(bytes / BYTES_PER_MIB));
 }
 
 /** The container's memory limit in MiB, or undefined when it cannot be read. */
@@ -77,13 +91,13 @@ export function inContainer(read: (path: string) => string | undefined = default
 }
 
 /** The host's total RAM in MiB: what a container with no explicit limit may use. */
-export function hostMemoryMb(): number {
-  return Math.max(1, Math.floor(os.totalmem() / (1024 * 1024)));
+function hostMemoryMb(): number {
+  return Math.max(1, Math.floor(os.totalmem() / BYTES_PER_MIB));
 }
 
 /** Whether a heap ceiling was already requested by the operator. */
 export function heapAlreadySized(execArgv: string[], nodeOptions: string | undefined): boolean {
-  return execArgv.some((a) => a.startsWith("--max-old-space-size")) ||
+  return execArgv.some((a) => a.startsWith(HEAP_FLAG)) ||
     /--max[-_]old[-_]space[-_]size/.test(nodeOptions ?? "");
 }
 
@@ -106,7 +120,7 @@ export interface HeapAutosizeOptions {
  */
 export function ensureHeapSized(opts: HeapAutosizeOptions = {}): boolean {
   const env = opts.env ?? process.env;
-  if (env.HYDROGEN_HEAP_AUTOSIZE === "0" || env.HYDROGEN_HEAP_RESPAWNED === "1") return false;
+  if (env.HYDROGEN_HEAP_AUTOSIZE === "0" || env[RESPAWN_MARKER_ENV] === RESPAWN_MARKER_VALUE) return false;
   const execArgv = opts.execArgv ?? process.execArgv;
   if (heapAlreadySized(execArgv, env.NODE_OPTIONS)) return false;
 
@@ -122,22 +136,29 @@ export function ensureHeapSized(opts: HeapAutosizeOptions = {}): boolean {
   const mb = cgroupMb ?? (source === "host" ? (opts.totalMemMb ?? hostMemoryMb()) : undefined);
   if (mb == null || source == null) return false;
 
-  const rawPercent = Number(env.NODE_HEAP_PERCENT ?? "100");
-  const percent = Number.isFinite(rawPercent) && rawPercent > 0 && rawPercent <= 100 ? rawPercent : 100;
-  const sizeMb = Math.max(128, Math.floor((mb * percent) / 100));
+  const rawPercent = Number(env.NODE_HEAP_PERCENT ?? String(DEFAULT_HEAP_PERCENT));
+  const percentValid = Number.isFinite(rawPercent) && rawPercent > 0 && rawPercent <= MAX_HEAP_PERCENT;
+  const percent = percentValid ? rawPercent : DEFAULT_HEAP_PERCENT;
+  // An empty value is "not set"; anything else the operator typed and did not
+  // get deserves a line saying so.
+  if (!percentValid && env.NODE_HEAP_PERCENT?.trim()) {
+    // eslint-disable-next-line no-console
+    console.warn(`hydrogen: ignoring NODE_HEAP_PERCENT=${JSON.stringify(env.NODE_HEAP_PERCENT)} (expected a number above 0 and at most ${MAX_HEAP_PERCENT}); using ${DEFAULT_HEAP_PERCENT}`);
+  }
+  const sizeMb = Math.max(MIN_HEAP_MB, Math.floor((mb * percent) / PERCENT_SCALE));
 
   const spawnFn = opts.spawnFn ?? spawn;
   const child = spawnFn(
     process.execPath,
-    [...execArgv, `--max-old-space-size=${sizeMb}`, ...argv.slice(1)],
-    { stdio: "inherit", env: { ...env, HYDROGEN_HEAP_RESPAWNED: "1" } },
+    [...execArgv, `${HEAP_FLAG}=${sizeMb}`, ...argv.slice(1)],
+    { stdio: "inherit", env: { ...env, [RESPAWN_MARKER_ENV]: RESPAWN_MARKER_VALUE } },
   );
 
   const forward = (signal: NodeJS.Signals): void => {
     try { child.kill(signal); } catch { /* already gone */ }
   };
-  process.on("SIGTERM", () => forward("SIGTERM"));
-  process.on("SIGINT", () => forward("SIGINT"));
+  process.on(SIGNAL.TERM, () => forward(SIGNAL.TERM));
+  process.on(SIGNAL.INT, () => forward(SIGNAL.INT));
   child.on("error", () => (opts.onExit ?? process.exit)(1));
   child.on("exit", (code, signal) => (opts.onExit ?? process.exit)(signal ? 1 : code ?? 0));
 

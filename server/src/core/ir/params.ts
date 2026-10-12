@@ -12,10 +12,36 @@
  */
 export const FAMILIES = ["openai_completion", "anthropic", "openai_responses"] as const;
 export type Family = typeof FAMILIES[number];
+/** The families whose providers execute tools themselves (server tools). */
+export type ServerToolFamily = Extract<Family, "anthropic" | "openai_responses">;
 
 /** Named reasoning-effort levels (OpenAI `reasoning_effort`; mapped to a token
  * budget on Anthropic upstreams). */
 export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/** The effort spellings as the wires carry them, for tests against untyped input. */
+export const EFFORT = {
+  MINIMAL: "minimal",
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+  XHIGH: "xhigh",
+  MAX: "max",
+} as const satisfies Record<string, EffortLevel>;
+/** Whether an untyped wire value is one of the named effort levels. */
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return (Object.values(EFFORT) as unknown[]).includes(value);
+}
+/** Output verbosity spellings (`verbosity` / `text.verbosity`). */
+export const VERBOSITY = {
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+} as const;
+export type Verbosity = typeof VERBOSITY[keyof typeof VERBOSITY];
+/** Whether an untyped wire value is one of the verbosity levels. */
+export function isVerbosity(value: unknown): value is Verbosity {
+  return (Object.values(VERBOSITY) as unknown[]).includes(value);
+}
 
 /**
  * Extended-thinking configuration, normalized across providers.
@@ -66,7 +92,7 @@ export interface GenerationParams {
   /** End-user identifier passed through for provider-side abuse tracking. */
   user?: string;
   /** Output verbosity hint (newer OpenAI models). */
-  verbosity?: "low" | "medium" | "high";
+  verbosity?: Verbosity;
   /** Extended thinking / reasoning level. */
   thinking?: ThinkingLevel;
   /** Provider-specific params with no canonical field, passed through verbatim. */
@@ -120,7 +146,17 @@ export function mergeParams(base: GenerationParams, patch?: Partial<GenerationPa
   if (!patch) return structuredClone(base);
   const out: GenerationParams = structuredClone(base);
   if (patch.thinking !== undefined) out.anthropicThinking = undefined;
-  for (const key of Object.keys(patch) as OverridableParam[]) {
+  applyPatch(out, patch);
+  return out;
+}
+
+/**
+ * Write every present key of `patch` onto `out`: an undefined value (and a
+ * null `extra`) leaves the base alone, `extra` deep-merges, anything else is
+ * replaced by a clone.
+ */
+function applyPatch(out: RequestOverrides, patch: RequestOverrides): void {
+  for (const key of Object.keys(patch) as (keyof RequestOverrides)[]) {
     const v = patch[key];
     if (v === undefined || (key === "extra" && v === null)) continue;
     if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
@@ -130,7 +166,6 @@ export function mergeParams(base: GenerationParams, patch?: Partial<GenerationPa
       (out as Record<string, unknown>)[key] = structuredClone(v);
     }
   }
-  return out;
 }
 
 /**
@@ -142,16 +177,7 @@ export function mergeOverrides(base?: RequestOverrides, patch?: RequestOverrides
   if (!base) return patch ? structuredClone(patch) : undefined;
   if (!patch) return structuredClone(base);
   const out: RequestOverrides = structuredClone(base);
-  for (const key of Object.keys(patch) as (keyof RequestOverrides)[]) {
-    const v = patch[key];
-    if (v === undefined || (key === "extra" && v === null)) continue;
-    if (key === "extra" && typeof v === "object" && !Array.isArray(v) && v !== null) {
-      const baseExtra = (out.extra ?? {}) as Record<string, unknown>;
-      (out as Record<string, unknown>).extra = mergeExtra(baseExtra, v as Record<string, unknown>);
-    } else {
-      (out as Record<string, unknown>)[key] = structuredClone(v);
-    }
-  }
+  applyPatch(out, patch);
   return out;
 }
 

@@ -58,29 +58,17 @@ export class ServiceFactory implements ServiceResolver {
    * pre-pass drives the transcriptions endpoint itself; there is no chat
    * executor to build). */
   sttDef(name: string): { ok: true; def: import("./definition").ServiceSteps } | { ok: false; message: string } {
-    const row = this.services.getByName(name);
-    if (!row || !row.enabled) {
-      return { ok: false, message: `audio transcription (ASR) references unknown or disabled Model Service "${name}"` };
-    }
-    try {
-      const def = parseService(row.definition);
+    return this.withDef(name, `audio transcription (ASR) references unknown or disabled Model Service "${name}"`, (def) => {
       if (isAgent(def)) return { ok: false, message: `audio transcription (ASR) references a Micro Agent "${name}" (must be an stt Model Service)` };
       if (serviceCategory(def) !== "stt") {
         return { ok: false, message: `audio transcription (ASR) references "${name}", a ${serviceCategory(def)} service — it must be an stt (speech-to-text) Model Service` };
       }
       return { ok: true, def };
-    } catch {
-      return { ok: false, message: `"${name}" has an invalid definition` };
-    }
+    });
   }
 
   resolve(name: string): ResolveResult {
-    const row = this.services.getByName(name);
-    if (!row || !row.enabled) {
-      return { ok: false, message: `references unknown or disabled Model Service or Micro Agent "${name}"` };
-    }
-    try {
-      const def = parseService(row.definition);
+    return this.withDef<ResolveResult>(name, `references unknown or disabled Model Service or Micro Agent "${name}"`, (def, row) => {
       // The save-time validator rejects this too, but the referenced service
       // can change category after the agent was saved — re-check at runtime.
       const category = serviceCategory(def);
@@ -90,6 +78,19 @@ export class ServiceFactory implements ServiceResolver {
       const { executor, isAgent: agent } = this.buildDef(def);
       const tools = this.hostedTools?.forService(row.id) ?? [];
       return { ok: true, executor: tools.length ? new HostedToolService(executor, this.deps, tools, def.hostedTools) : executor, isAgent: agent };
+    });
+  }
+
+  /**
+   * Run `use` on a saved service's parsed definition. A reference only resolves
+   * to an ENABLED service at run time (`missing` otherwise), and a definition
+   * that no longer parses -- or cannot be built -- is reported, not thrown.
+   */
+  private withDef<T>(name: string, missing: string, use: (def: ServiceDef, row: ModelServiceRow) => T): T | { ok: false; message: string } {
+    const row = this.services.getByName(name);
+    if (!row || !row.enabled) return { ok: false, message: missing };
+    try {
+      return use(parseService(row.definition), row);
     } catch {
       return { ok: false, message: `"${name}" has an invalid definition` };
     }

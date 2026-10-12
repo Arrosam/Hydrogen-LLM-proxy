@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireAdmin } from "../../auth/authorization";
-import { SESSION_COOKIE } from "../../auth/session";
+import { clearSessionCookie } from "../../auth/session";
 import { BackupError, exportBackup, restoreBackup } from "../../backup/archive";
 import type { Container } from "../../composition/container";
 import { PassphraseError } from "../../security/passphrase";
-import { parse } from "../../util/validate";
+import { BYTES_PER_MIB } from "../../config/limits";
 import { APP_VERSION } from "../../util/version";
+import { badRequest, conflict, parseBody } from "./replies";
 
 // --- backup / restore --------------------------------------------------------
 
@@ -30,17 +31,17 @@ const BackupRestore = z.object({
  * global cap is sized for chat requests, not for an instance's whole history),
  * so restore gets its own limit.
  */
-const RESTORE_BODY_LIMIT = 512 * 1024 * 1024;
+const RESTORE_BODY_LIMIT = 512 * BYTES_PER_MIB;
 
 export async function backupRoutes(app: FastifyInstance, c: Container): Promise<void> {
   app.post("/export", async (req, reply) => {
     if (!requireAdmin(req, reply, "export a backup")) return reply;
-    const parsed = parse(BackupExport, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const data = parseBody(BackupExport, req, reply);
+    if (!data) return reply;
     const pkg = await exportBackup(c.sqlite, c.config.masterKey, {
-      passphrase: parsed.data.passphrase,
-      includeLogs: parsed.data.includeLogs ?? true,
-      includeImageCache: parsed.data.includeImageCache ?? false,
+      passphrase: data.passphrase,
+      includeLogs: data.includeLogs ?? true,
+      includeImageCache: data.includeImageCache ?? false,
       appVersion: APP_VERSION,
     });
     return { backup: pkg };
@@ -48,18 +49,18 @@ export async function backupRoutes(app: FastifyInstance, c: Container): Promise<
 
   app.post("/restore", { bodyLimit: RESTORE_BODY_LIMIT }, async (req, reply) => {
     if (!requireAdmin(req, reply, "restore a backup")) return reply;
-    if (c.activeRequests.listActive().length) return reply.code(409).send({ error: "Wait for active requests to finish or cancel them before restoring a backup" });
-    const parsed = parse(BackupRestore, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    if (c.activeRequests.listActive().length) return conflict(reply, "Wait for active requests to finish or cancel them before restoring a backup");
+    const data = parseBody(BackupRestore, req, reply);
+    if (!data) return reply;
     let report;
     c.responses.beginRestore();
     try {
-      report = await restoreBackup(c.sqlite, c.config.masterKey, parsed.data.backup, parsed.data.passphrase);
+      report = await restoreBackup(c.sqlite, c.config.masterKey, data.backup, data.passphrase);
     } catch (e) {
       // A bad passphrase or a malformed package is the caller's mistake, not a
       // server fault: 400 with the reason, and the database is untouched.
       if (e instanceof PassphraseError || e instanceof BackupError) {
-        return reply.code(400).send({ error: e.message });
+        return badRequest(reply, e.message);
       }
       throw e;
     } finally {
@@ -86,7 +87,7 @@ export async function backupRoutes(app: FastifyInstance, c: Container): Promise<
     // move the session cutoff past every token issued so far, then clear the
     // caller's own cookie so they re-authenticate against the restored accounts.
     c.settings.bumpSessionEpoch(Date.now());
-    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    clearSessionCookie(reply);
     return { ok: true, ...report };
   });
 }

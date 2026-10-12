@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { requireAdmin } from "../../auth/authorization";
 import type { Container } from "../../composition/container";
+import { HTTP_STATUS } from "../../util/httpStatus";
 
 // --- updates ------------------------------------------------------------------
 
@@ -20,7 +21,7 @@ export async function updateRoutes(app: FastifyInstance, c: Container): Promise<
   app.post("/restart", async (req, reply) => {
     if (!requireAdmin(req, reply, "restart the server")) return reply;
     if (!c.updates.restartSupported) {
-      return reply.code(409).send({
+      return reply.code(HTTP_STATUS.CONFLICT).send({
         error: "remote restart is disabled for this deployment; update and restart it through its supervisor",
       });
     }

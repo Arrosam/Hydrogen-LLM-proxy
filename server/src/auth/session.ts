@@ -1,7 +1,17 @@
+import type { FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
 import { getConfig } from "../context";
+import { MS_PER_SECOND } from "../util/time";
 
 export const SESSION_COOKIE = "hydrogen_session";
+/** Path the session cookie is set on; clearing it must name the same path. */
+export const SESSION_COOKIE_PATH = "/";
+
+/** Dashboard user roles (the values of the users.role column). */
+export const ROLE = { ADMIN: "admin", MANAGER: "manager" } as const;
+
+/** Shared by the session preHandler and the auth routes. */
+export const ERR_UNAUTHORIZED = "unauthorized";
 
 export interface SessionPayload {
   uid: number;
@@ -14,10 +24,14 @@ export interface SessionPayload {
   iat?: number;
 }
 
-export function signSession(payload: SessionPayload): string {
-  const cfg = getConfig();
-  return jwt.sign(payload, cfg.sessionSecret, {
-    expiresIn: Math.floor(cfg.sessionTtlMs / 1000),
+/**
+ * `ttlMs` is the session lifetime in force when the session is issued: the
+ * runtime setting (settings.sessionTtlMs(), which itself falls back to the
+ * boot-time value) where a caller has it, the boot-time SESSION_TTL otherwise.
+ */
+export function signSession(payload: SessionPayload, ttlMs: number = getConfig().sessionTtlMs): string {
+  return jwt.sign(payload, getConfig().sessionSecret, {
+    expiresIn: Math.floor(ttlMs / MS_PER_SECOND),
   });
 }
 
@@ -29,7 +43,7 @@ export function verifySession(token: string): SessionPayload | null {
       uid: decoded.uid,
       passwordChangeOnly: decoded.passwordChangeOnly === true,
       username: String(decoded.username),
-      role: decoded.role === "admin" ? "admin" : "manager",
+      role: decoded.role === ROLE.ADMIN ? ROLE.ADMIN : ROLE.MANAGER,
       iat: typeof decoded.iat === "number" ? decoded.iat : undefined,
     };
   } catch {
@@ -49,7 +63,7 @@ export function resolveCookieSecure(isHttps: boolean): boolean {
   }
 }
 
-export function cookieOptions(secure: boolean): {
+export function cookieOptions(secure: boolean, ttlMs: number = getConfig().sessionTtlMs): {
   httpOnly: true;
   sameSite: "lax";
   secure: boolean;
@@ -60,7 +74,18 @@ export function cookieOptions(secure: boolean): {
     httpOnly: true,
     sameSite: "lax",
     secure,
-    path: "/",
-    maxAge: Math.floor(getConfig().sessionTtlMs / 1000),
+    path: SESSION_COOKIE_PATH,
+    maxAge: Math.floor(ttlMs / MS_PER_SECOND),
   };
+}
+
+/** Sign `payload` and set it as the session cookie on `reply`; the token and
+ * the cookie expire together, after `ttlMs`. */
+export function issueSessionCookie(req: { protocol: string }, reply: FastifyReply, payload: SessionPayload, ttlMs?: number): void {
+  reply.setCookie(SESSION_COOKIE, signSession(payload, ttlMs), cookieOptions(resolveCookieSecure(req.protocol === "https"), ttlMs));
+}
+
+/** Clear the session cookie; names the path it was set on, or it would stay. */
+export function clearSessionCookie(reply: FastifyReply): void {
+  reply.clearCookie(SESSION_COOKIE, { path: SESSION_COOKIE_PATH });
 }

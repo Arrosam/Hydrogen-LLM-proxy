@@ -1,5 +1,5 @@
 import type { ContentPart, StopReason } from "./content";
-import type { StreamEvent } from "./stream";
+import { isReasoningEvent, type StreamEvent } from "./stream";
 
 function missingAnswer(hasAnswer: boolean, hasThinking: boolean, stop: StopReason): string | undefined {
   if (hasAnswer || stop === "content_filter") return undefined;
@@ -23,7 +23,7 @@ export async function* requireAnswer(events: AsyncGenerator<StreamEvent>): Async
   let hasThinking = false;
   for await (const ev of events) {
     if (ev.type === "tool_start" || ev.type === "server_tool_start" || ev.type === "server_tool_result" || (ev.type === "text_delta" && ev.text.trim())) hasAnswer = true;
-    if (ev.type === "reasoning_start" || ev.type === "reasoning_delta" || ev.type === "reasoning_stop") hasThinking = true;
+    if (isReasoningEvent(ev)) hasThinking = true;
     if (ev.type === "finish" && !ev.incomplete && !ev.error) {
       const error = missingAnswer(hasAnswer, hasThinking, ev.stopReason);
       yield error ? { ...ev, error } : ev;

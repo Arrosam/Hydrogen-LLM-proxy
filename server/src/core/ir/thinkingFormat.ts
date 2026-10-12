@@ -1,5 +1,5 @@
 import type { ContentPart, ReasoningPart, TextPart } from "./content";
-import { withoutReasoning, type StreamEvent } from "./stream";
+import { chunkText, isReasoningEvent, withoutReasoning, type StreamEvent } from "./stream";
 
 /**
  * How a service presents the model's thinking to ITS client.
@@ -38,8 +38,6 @@ import { withoutReasoning, type StreamEvent } from "./stream";
  * clients would not read. `think_tags` and `none` are content-level and apply
  * to all three.
  */
-export type ThinkingFormat = "original" | "reasoning_content" | "reasoning" | "think_tags" | "none";
-
 export const THINKING_FORMATS = [
   "original",
   "reasoning_content",
@@ -47,9 +45,10 @@ export const THINKING_FORMATS = [
   "think_tags",
   "none",
 ] as const;
+export type ThinkingFormat = typeof THINKING_FORMATS[number];
 
 /** Whether a format asks for anything at all. `original` and absence do not. */
-export function isThinkingFormatActive(f: ThinkingFormat | undefined): f is Exclude<ThinkingFormat, "original"> {
+function isThinkingFormatActive(f: ThinkingFormat | undefined): f is Exclude<ThinkingFormat, "original"> {
   return f != null && f !== "original";
 }
 
@@ -71,6 +70,24 @@ const REASONING_NAME = /^[a-z_]*(?:think|reason|thought)[a-z_]*$/;
 
 /** Longest tag name worth recognising. Bounds the streaming hold below. */
 const MAX_NAME = 24;
+
+/** Leading whitespace: template padding before a tag, or the separator after a block. */
+const LEADING_WS_RE = /^\s+/;
+
+/** How much invisible padding may precede a tag before it counts as content.
+ * Generous on purpose: a template's leading newlines are not the answer
+ * beginning, and a purely-padding run is the only thing this bounds. One limit
+ * for the buffered scan and the streaming hold, so a response is read the same
+ * way whether or not it streamed. */
+const MAX_PAD = 512;
+
+/** Whether `text` begins with more padding than a tag may sit behind. */
+function exceedsLeadingPad(text: string): boolean {
+  return (LEADING_WS_RE.exec(text)?.[0].length ?? 0) > MAX_PAD;
+}
+
+/** Markers a Markdown fence needs on a line of its own. */
+const MIN_FENCE_RUN = 3;
 
 /** Whitespace a template may put AROUND a tag: `<think >`, `< think>`, or a
  * newline before the bracket. `\s` in JavaScript already covers the space, the
@@ -149,6 +166,7 @@ interface TagMatcher {
 /** The built-in rules: a reasoning-ish tag name, read generously. */
 const BUILTIN_MATCHER: TagMatcher = {
   open(text) {
+    if (exceedsLeadingPad(text)) return undefined;
     const m = OPEN_RE.exec(text);
     return m && isReasoningName(m[1]) ? m[0].length : undefined;
   },
@@ -170,6 +188,7 @@ function declaredMatcher(pair: ThinkingDelimiters): TagMatcher {
   const close = pair.close;
   return {
     open(text) {
+      if (exceedsLeadingPad(text)) return undefined;
       const pad = /^\s*/.exec(text)?.[0].length ?? 0;
       return text.slice(pad).replace(ZW_RE, "").startsWith(open) ? pad + open.length : undefined;
     },
@@ -178,7 +197,7 @@ function declaredMatcher(pair: ThinkingDelimiters): TagMatcher {
       return index < 0 ? undefined : { index, length: close.length };
     },
     pending(buffered) {
-      const s = buffered.replace(ZW_RE, "").replace(/^\s+/, "");
+      const s = buffered.replace(ZW_RE, "").replace(LEADING_WS_RE, "");
       if (!s) return buffered.length <= MAX_PAD;
       return s.length <= open.length && open.startsWith(s);
     },
@@ -194,6 +213,11 @@ function matcherFor(delimiters: ThinkingDelimiters | undefined): TagMatcher {
  * one spelling out means a client only ever has to parse one. */
 const OPEN_TAG = "<think>";
 const CLOSE_TAG = "</think>";
+/** What ends an inlined block on a live stream: the close tag and the blank line before the answer. */
+const STREAM_BLOCK_END = `\n${CLOSE_TAG}\n\n`;
+
+/** Slack for the brackets and padding around a tag name. */
+const TAG_OVERHEAD_CHARS = 8;
 
 /**
  * Longest run of NON-padding characters that could still turn out to be an
@@ -202,12 +226,7 @@ const CLOSE_TAG = "</think>";
  * backstop that keeps the streaming hold bounded. Pure padding is bounded
  * separately, by MAX_PAD.
  */
-const MAX_SCAN = MAX_NAME + 8;
-
-/** How much invisible padding may precede a tag before it counts as content.
- * Generous on purpose: a template's leading newlines are not the answer
- * beginning, and a purely-padding run is the only thing this bounds. */
-const MAX_PAD = 512;
+const MAX_SCAN = MAX_NAME + TAG_OVERHEAD_CHARS;
 
 /**
  * Whether `buffered` could still grow into an opening tag.
@@ -221,7 +240,7 @@ const MAX_PAD = 512;
  * closed -- at which point OPEN_RE has had its say.
  */
 function couldStillOpen(buffered: string): boolean {
-  const compact = buffered.replace(ZW_RE, "").replace(/^\s+/, "");
+  const compact = buffered.replace(ZW_RE, "").replace(LEADING_WS_RE, "");
   if (!compact) return buffered.length <= MAX_PAD; // padding only so far
   if (compact.length > MAX_SCAN) return false;
   if (compact[0] !== "<") return false;
@@ -267,7 +286,7 @@ function insideCode(text: string, index: number): boolean {
     while (i + run < text.length && text[i + run] === ch) run++;
     // A fence opens and closes on a line of its own (three or more markers).
     const atLineStart = text.slice(lineStart, i).trim() === "";
-    if (run >= 3 && atLineStart) {
+    if (run >= MIN_FENCE_RUN && atLineStart) {
       if (fence === undefined) {
         fence = ch;
         fenceLength = run;
@@ -345,7 +364,7 @@ export function liftThinkTags(content: ContentPart[], delimiters?: ThinkingDelim
   if (!close) return content;
 
   const thought = rest.slice(0, close.index);
-  const tail = rest.slice(close.index + close.length).replace(/^\s+/, "");
+  const tail = rest.slice(close.index + close.length).replace(LEADING_WS_RE, "");
   const replacement: ContentPart[] = thought.trim() ? [{ type: "reasoning", text: thought.trim() }] : [];
   if (tail) replacement.push({ ...part, text: tail });
 
@@ -407,8 +426,6 @@ export function applyThinkingFormat(
  */
 async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimiters?: ThinkingDelimiters): AsyncGenerator<StreamEvent> {
   const matcher = matcherFor(delimiters);
-  /** Chunk size for replaying a held thought, so clients still see deltas. */
-  const REPLAY_CHUNK = 24;
   let mode: "scan" | "inside" | "done" = "scan";
   /** Raw text held since the start; while `inside` it still carries the open tag. */
   let held = "";
@@ -433,7 +450,7 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimit
   for await (const ev of events) {
     // The upstream used a structured field: it has told us where its thinking
     // is and the text is just the answer.
-    if (ev.type === "reasoning_start" || ev.type === "reasoning_delta" || ev.type === "reasoning_stop") {
+    if (isReasoningEvent(ev)) {
       yield* asText();
       yield ev;
       continue;
@@ -458,7 +475,7 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimit
 
     if (mode === "done") {
       if (trimAfterBlock) {
-        const trimmed = ev.text.replace(/^\s+/, "");
+        const trimmed = ev.text.replace(LEADING_WS_RE, "");
         if (!trimmed) continue; // still only the separator
         trimAfterBlock = false;
         yield { type: "text_delta", text: trimmed };
@@ -492,11 +509,9 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimit
     if (!close) continue; // still buffering; emit nothing yet
     const at = thoughtFrom + close.index;
     const thought = held.slice(thoughtFrom, at);
-    const tail = held.slice(at + close.length).replace(/^\s+/, "");
+    const tail = held.slice(at + close.length).replace(LEADING_WS_RE, "");
     yield { type: "reasoning_start" };
-    for (let i = 0; i < thought.length; i += REPLAY_CHUNK) {
-      yield { type: "reasoning_delta", text: thought.slice(i, i + REPLAY_CHUNK) };
-    }
+    for (const piece of chunkText(thought)) yield { type: "reasoning_delta", text: piece };
     yield { type: "reasoning_stop" };
     held = "";
     mode = "done";
@@ -513,6 +528,11 @@ async function* liftThinkTagsStream(events: AsyncGenerator<StreamEvent>, delimit
 /** The streaming half of {@link inlineThinkTags}. */
 async function* inlineThinkTagsStream(events: AsyncGenerator<StreamEvent>): AsyncGenerator<StreamEvent> {
   let open = false;
+  function* closeBlock(): Generator<StreamEvent> {
+    if (!open) return;
+    open = false;
+    yield { type: "text_delta", text: STREAM_BLOCK_END };
+  }
   for await (const ev of events) {
     if (ev.type === "usage") { yield ev; continue; }
     if (ev.type === "reasoning_start") continue; // deferred until there is text
@@ -525,21 +545,15 @@ async function* inlineThinkTagsStream(events: AsyncGenerator<StreamEvent>): Asyn
       continue;
     }
     if (ev.type === "reasoning_stop") {
-      if (open) {
-        open = false;
-        yield { type: "text_delta", text: `\n${CLOSE_TAG}\n\n` };
-      }
+      yield* closeBlock();
       continue;
     }
     // Close an open block before anything else goes out, so the tags can never
     // straddle a tool call or a finish.
-    if (open) {
-      open = false;
-      yield { type: "text_delta", text: `\n${CLOSE_TAG}\n\n` };
-    }
+    yield* closeBlock();
     yield ev;
   }
-  if (open) yield { type: "text_delta", text: `\n${CLOSE_TAG}\n\n` };
+  yield* closeBlock();
 }
 
 /** Apply a format to a live canonical event stream. */

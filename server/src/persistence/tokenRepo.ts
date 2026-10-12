@@ -4,6 +4,7 @@ import { tokens, type Token } from "../db/schema";
 import { asMillis, asMillisOrNull } from "../util/time";
 import { decryptSecret, encryptSecret } from "../security/crypto";
 import { generateToken, hashToken } from "../security/tokens";
+import { pickDefined, TableRepo } from "./tableRepo";
 
 export interface TokenInput {
   name: string;
@@ -35,11 +36,13 @@ export interface PublicToken {
 
 /** Client tokens: SHA-256 hash for lookup, master-key-encrypted secret so an
  * admin can copy an issued key again later. */
-export class TokenRepo {
+export class TokenRepo extends TableRepo<typeof tokens> {
   constructor(
-    private readonly db: DB,
+    db: DB,
     private readonly masterKey: Buffer,
-  ) {}
+  ) {
+    super(db, tokens);
+  }
 
   toPublic(t: Token): PublicToken {
     return {
@@ -57,14 +60,6 @@ export class TokenRepo {
       createdAt: asMillis(t.createdAt),
       hasStoredKey: Boolean(t.keyCiphertext && t.keyIv && t.keyTag),
     };
-  }
-
-  list(): Token[] {
-    return this.db.select().from(tokens).all();
-  }
-
-  get(id: number): Token | undefined {
-    return this.db.select().from(tokens).where(eq(tokens.id, id)).get();
   }
 
   /** Create a token, returning the row plus the plaintext secret. */
@@ -93,19 +88,9 @@ export class TokenRepo {
   }
 
   update(id: number, input: Partial<Omit<TokenInput, "ownerUserId">>): Token | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch.name = input.name;
-    if (input.scopeServices !== undefined) patch.scopeServices = input.scopeServices;
-    if (input.maxRequests !== undefined) patch.maxRequests = input.maxRequests;
-    if (input.maxTokens !== undefined) patch.maxTokens = input.maxTokens;
+    const patch: Partial<typeof tokens.$inferInsert> = pickDefined(input, ["name", "scopeServices", "maxRequests", "maxTokens", "enabled"]);
     if (input.expiresAt !== undefined) patch.expiresAt = input.expiresAt != null ? new Date(input.expiresAt) : null;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(tokens).set(patch).where(eq(tokens.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(tokens).where(eq(tokens.id, id)).run();
+    return this.patch(id, patch);
   }
 
   /** Decrypt a token's stored secret, or null when the token predates stored
@@ -119,7 +104,7 @@ export class TokenRepo {
   /** Look up a token by the presented secret (via the hash index). */
   authenticate(presented: string): Token | undefined {
     const hash = hashToken(presented);
-    return this.db.select().from(tokens).where(eq(tokens.keyHash, hash)).get();
+    return this.findBy(tokens.keyHash, hash);
   }
 
   /** Atomically add to a token's usage counters. */

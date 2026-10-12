@@ -12,8 +12,15 @@ import { adminRoutes } from "./transport/adminRoutes";
 import { ProxyController } from "./transport/proxyController";
 import { ResponsesController } from "./transport/responsesController";
 import { MediaController } from "./transport/mediaController";
+import { notFound } from "./transport/admin/replies";
+import { DEFAULT_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW } from "./transport/rateLimits";
+import { ADMIN_API_PREFIX, API_PREFIX, HEALTH_PATH } from "./transport/routes";
+import { BYTES_PER_MIB } from "./config/limits";
+import { MIME } from "./util/httpHeaders";
+import { HTTP_STATUS, isServerErrorStatus } from "./util/httpStatus";
+import { DEV_BUILD_SHA } from "./util/version";
 
-const MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB (allow image payloads)
+const MAX_BODY_BYTES = 25 * BYTES_PER_MIB; // 25 MiB (allow image payloads)
 
 export async function buildApp(c: Container): Promise<FastifyInstance> {
   const cfg = c.config;
@@ -34,32 +41,32 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   });
 
   await app.register(fastifyCookie, { secret: cfg.sessionSecret });
-  await app.register(fastifyRateLimit, { global: false, max: 100, timeWindow: "1 minute" });
+  await app.register(fastifyRateLimit, { global: false, max: DEFAULT_RATE_LIMIT_MAX, timeWindow: RATE_LIMIT_WINDOW });
 
   app.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyReply) => {
     if (err instanceof ZodError) {
-      return reply.code(400).send({ error: err.issues.map((i) => i.message).join("; ") });
+      return reply.code(HTTP_STATUS.BAD_REQUEST).send({ error: err.issues.map((i) => i.message).join("; ") });
     }
     const msg = err.message || "";
     if (/UNIQUE constraint failed/i.test(msg)) {
-      return reply.code(409).send({ error: "resource already exists (unique constraint)" });
+      return reply.code(HTTP_STATUS.CONFLICT).send({ error: "resource already exists (unique constraint)" });
     }
     if (/FOREIGN KEY constraint failed/i.test(msg)) {
-      return reply.code(409).send({ error: "referenced resource is in use or missing" });
+      return reply.code(HTTP_STATUS.CONFLICT).send({ error: "referenced resource is in use or missing" });
     }
     req.log.error({ err }, "unhandled error");
-    const status = typeof err.statusCode === "number" ? err.statusCode : 500;
-    return reply.code(status).send({ error: status >= 500 ? "internal server error" : msg });
+    const status = typeof err.statusCode === "number" ? err.statusCode : HTTP_STATUS.INTERNAL_SERVER_ERROR;
+    return reply.code(status).send({ error: isServerErrorStatus(status) ? "internal server error" : msg });
   });
 
   // `build` is the git SHA baked in at image build time (GIT_SHA build arg),
   // so a deployment can be checked against the repo: without it there is no
   // way to tell whether a fix is actually running.
-  app.get("/healthz", async () => ({ status: "ok", build: process.env.GIT_SHA || "dev" }));
+  app.get(HEALTH_PATH, async () => ({ status: "ok", build: process.env.GIT_SHA || DEV_BUILD_SHA }));
 
   // Speech-to-text passthrough forwards multipart bodies verbatim; buffer them
   // raw (Fastify has no default parser for this content type).
-  app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
+  app.addContentTypeParser(MIME.MULTIPART_FORM_DATA, { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 
   const proxyDeps = {
     logMaxChars: () => c.settings.logPayloadMaxChars(),
@@ -80,13 +87,13 @@ export async function buildApp(c: Container): Promise<FastifyInstance> {
   new ProxyController(proxyDeps, responses).register(app);
   new MediaController({ ...proxyDeps, providers: c.providers }).register(app);
 
-  await app.register((scoped) => adminRoutes(scoped, c), { prefix: "/admin/api" });
+  await app.register((scoped) => adminRoutes(scoped, c), { prefix: ADMIN_API_PREFIX });
 
   app.addHook("onSend", async (req, reply, payload) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");
     reply.header("Referrer-Policy", "same-origin");
-    if (req.method === "GET" && !req.url.startsWith("/v1") && !req.url.startsWith("/admin/api")) {
+    if (req.method === "GET" && !req.url.startsWith(API_PREFIX) && !req.url.startsWith(ADMIN_API_PREFIX)) {
       reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
     }
     return payload;
@@ -107,12 +114,9 @@ async function registerWebDashboard(app: FastifyInstance): Promise<void> {
 
   const indexHtml = path.join(webDir, "index.html");
   app.setNotFoundHandler((req, reply) => {
-    if (req.url.startsWith("/v1") || req.url.startsWith("/admin/api") || req.url.startsWith("/healthz")) {
-      return reply.code(404).send({ error: "not found" });
-    }
-    if (req.method !== "GET" || !fs.existsSync(indexHtml)) {
-      return reply.code(404).send({ error: "not found" });
-    }
-    return reply.type("text/html").send(fs.readFileSync(indexHtml));
+    // An API path never falls back to the SPA; neither does a non-GET.
+    const isApiPath = req.url.startsWith(API_PREFIX) || req.url.startsWith(ADMIN_API_PREFIX) || req.url.startsWith(HEALTH_PATH);
+    if (isApiPath || req.method !== "GET" || !fs.existsSync(indexHtml)) return notFound(reply);
+    return reply.type(MIME.HTML).send(fs.readFileSync(indexHtml));
   });
 }

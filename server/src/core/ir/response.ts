@@ -1,9 +1,9 @@
 import type { Family } from "./params";
 import { reasoningOf, textOf, toolCallsOf, type ContentPart } from "./content";
 import type { Usage } from "./usage";
-import { fabricateStream, type ResponseData, type StreamContext } from "./stream";
+import type { ResponseData } from "./stream";
 import { applyThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "./thinkingFormat";
-import { buildResponse, serializeStream } from "../format/registry";
+import { buildResponse } from "../format/registry";
 
 export type { ResponseData };
 
@@ -19,10 +19,11 @@ export interface RenderOptions {
  * data object. It can render itself into ANY client wire family (a response
  * parsed from an Anthropic upstream can be delivered to an OpenAI client), tap
  * off its text/reasoning/tool-calls for logging, strip reasoning to honor a
- * "disabled" thinking level, and fabricate a paced client stream when a buffered
- * result must be delivered to a streaming client. The three format subclasses add
- * `static parse` (wire -> canonical), `renderSelf` (canonical -> their wire), and
- * the streaming parse/serialize for their family.
+ * "disabled" thinking level, and hand its data to `fabricateStream` when a
+ * buffered result must be delivered to a streaming client. The three format
+ * subclasses add `static parse` (wire -> canonical), `renderSelf` (canonical ->
+ * their wire), the streaming parse/serialize for their family, and the check
+ * that a buffered body is their envelope.
  */
 export abstract class Response implements ResponseData {
   id: string;
@@ -39,6 +40,16 @@ export abstract class Response implements ResponseData {
     this.content = data.content;
     this.stopReason = data.stopReason;
     this.usage = data.usage;
+  }
+
+  /**
+   * Whether a buffered 2xx body reports a generation that did not finish, in a
+   * way particular to the family (a top-level `error` is checked for all of
+   * them by the caller). None does by default; a family with a status field
+   * overrides this.
+   */
+  static isUnfinished(_body: Record<string, unknown>): boolean {
+    return false;
   }
 
   /** The wire family this subclass's `renderSelf` produces. */
@@ -79,7 +90,7 @@ export abstract class Response implements ResponseData {
   withoutReasoning(): this {
     const content = this.content.filter((p) => p.type !== "reasoning");
     if (content.length === this.content.length) return this;
-    return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
+    return this.withContent(content);
   }
 
   /**
@@ -90,17 +101,17 @@ export abstract class Response implements ResponseData {
   withThinkingFormat(format: ThinkingFormat | undefined, delimiters?: ThinkingDelimiters): this {
     const content = applyThinkingFormat(this.content, format, delimiters);
     if (content === this.content) return this;
+    return this.withContent(content);
+  }
+
+  /** A NEW response of the same family (the same subclass) carrying `content` instead. */
+  private withContent(content: ContentPart[]): this {
     return new (this.constructor as new (d: ResponseData) => this)({ ...this.data(), content });
   }
 
   /** Render into any client wire family (dispatched to that family's subclass). */
   render(family: Family, model: string, opts?: RenderOptions): Record<string, unknown> {
     return buildResponse(family, this.data()).renderSelf(model, opts);
-  }
-
-  /** A paced client SSE stream (in `family`) fabricated from this complete response. */
-  fabricate(family: Family, ctx: StreamContext): AsyncGenerator<string> {
-    return serializeStream(family, fabricateStream(this.data()), ctx);
   }
 
   /** A compact structured view for the request log (text + reasoning + tool calls). */

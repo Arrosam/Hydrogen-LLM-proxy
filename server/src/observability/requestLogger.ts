@@ -23,6 +23,16 @@ export interface HttpRequestInfo {
   bodyPayload: string;
 }
 
+/** The request line and headers of a client request, beside its already
+ * captured body (see `bodyPayload`). */
+export function httpRequestInfo(
+  req: { method: string; url: string; headers: unknown },
+  bodyPayload: string,
+): HttpRequestInfo {
+  const [path, query = ""] = req.url.split("?");
+  return { method: req.method, path, query, headers: req.headers as Record<string, unknown>, bodyPayload };
+}
+
 export interface LogParams {
   traceId: string;
   tokenId: number | null;

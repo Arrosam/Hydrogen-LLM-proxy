@@ -59,6 +59,21 @@ export function foldCacheIntoPrompt(uncached: number, cachedRead?: number, cache
 }
 
 /**
+ * The two cache counters as optional fields: each is present only when it was
+ * reported, so "this provider never reported a cache" and "the cache served
+ * zero tokens" stay distinguishable wherever the pair is copied.
+ */
+export function cacheCounters(
+  cachedInputTokens: number | undefined,
+  cacheCreationInputTokens: number | undefined,
+): Pick<Usage, "cachedInputTokens" | "cacheCreationInputTokens"> {
+  return {
+    ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
+    ...(cacheCreationInputTokens != null ? { cacheCreationInputTokens } : {}),
+  };
+}
+
+/**
  * Sum two usages, detail counters included.
  *
  * The detail fields used to be dropped here, so a Micro Agent -- which adds up

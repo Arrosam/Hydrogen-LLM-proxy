@@ -9,8 +9,10 @@
  * formattable) while its size is bounded.
  */
 
+import { HEADER } from "./httpHeaders";
+
 /** Pretty-print for storage; falls back to a string form on error. */
-export function safeStringify(value: unknown): string {
+function safeStringify(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -18,31 +20,64 @@ export function safeStringify(value: unknown): string {
   }
 }
 
+/** What a redacted credential is replaced with, in payloads and in headers. */
+export const REDACTED_MARKER = "[redacted]";
+
+/**
+ * Per-string budgets tried when a payload is over its limit: start at a
+ * quarter of the limit (at least PER_STRING_START_MIN), halve down to
+ * PER_STRING_FLOOR; the slim form allows an eighth (at least SLIM_PER_STRING_MIN).
+ */
+const PER_STRING_START_MIN = 2000;
+const PER_STRING_START_DIVISOR = 4;
+const PER_STRING_FLOOR = 200;
+const SLIM_PER_STRING_MIN = 400;
+const SLIM_PER_STRING_DIVISOR = 8;
+
+/** Top-level arrays replaced by a size note in the slim form. */
+const BULKY_KEYS = new Set(["messages", "input", "content", "choices", "tools"]);
+
 // Object keys whose value is a credential, not content — redacted before a
 // payload is ever written to the log store.
-const REDACT_KEYS = new Set([
-  "authorization",
+const REDACT_KEYS = new Set<string>([
+  HEADER.AUTHORIZATION,
   "api_key",
   "apikey",
   "api-key",
-  "x-api-key",
+  HEADER.X_API_KEY,
   "x_api_key",
   "access_token",
   "secret",
   "password",
 ]);
 
-/** Deep-copy `value`, replacing values of credential-named keys with a marker. */
-function redactSensitive(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSensitive);
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+/** What a reference back to one of its own ancestors is replaced with. */
+const CIRCULAR_MARKER = "[circular]";
+
+/**
+ * Deep-copy `value`, replacing values of credential-named keys with a marker.
+ *
+ * `ancestors` holds the containers on the path to `value`, so a cyclic payload
+ * (only a programmatic caller can build one) ends at a marker instead of
+ * recursing until the stack overflows. The copy is therefore always a tree,
+ * which is what everything downstream of it walks.
+ */
+function redactSensitive(value: unknown, ancestors: Set<object> = new Set()): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (ancestors.has(value)) return CIRCULAR_MARKER;
+  ancestors.add(value);
+  let out: unknown;
+  if (Array.isArray(value)) {
+    out = value.map((v) => redactSensitive(v, ancestors));
+  } else {
+    const copy: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = REDACT_KEYS.has(k.toLowerCase()) ? "[redacted]" : redactSensitive(v);
+      copy[k] = REDACT_KEYS.has(k.toLowerCase()) ? REDACTED_MARKER : redactSensitive(v, ancestors);
     }
-    return out;
+    out = copy;
   }
-  return value;
+  ancestors.delete(value);
+  return out;
 }
 
 /** Deep-copy `value`, truncating any string longer than `perStringMax`. */
@@ -126,8 +161,8 @@ export function serializeForLog(value: unknown, maxChars: number): string {
 
   let prevLen = Infinity;
   for (
-    let perString = Math.max(2000, Math.floor(maxChars / 4));
-    perString >= 200;
+    let perString = Math.max(PER_STRING_START_MIN, Math.floor(maxChars / PER_STRING_START_DIVISOR));
+    perString >= PER_STRING_FLOOR;
     perString = Math.floor(perString / 2)
   ) {
     const clamped = safeStringify(truncateStrings(redacted, perString));
@@ -148,12 +183,11 @@ export function serializeForLog(value: unknown, maxChars: number): string {
   const approxChars = approxLength(redacted);
 
   if (redacted && typeof redacted === "object" && !Array.isArray(redacted)) {
-    const BULKY = new Set(["messages", "input", "content", "choices", "tools"]);
     const slim: Record<string, unknown> = { _truncated: true, _approxOriginalChars: approxChars };
     for (const [k, v] of Object.entries(redacted as Record<string, unknown>)) {
-      slim[k] = BULKY.has(k) && Array.isArray(v) ? `[${v.length} item(s) omitted; ~${approxChars} chars total]` : v;
+      slim[k] = BULKY_KEYS.has(k) && Array.isArray(v) ? `[${v.length} item(s) omitted; ~${approxChars} chars total]` : v;
     }
-    const clamped = safeStringify(truncateStrings(slim, Math.max(400, Math.floor(maxChars / 8))));
+    const clamped = safeStringify(truncateStrings(slim, Math.max(SLIM_PER_STRING_MIN, Math.floor(maxChars / SLIM_PER_STRING_DIVISOR))));
     if (clamped.length <= maxChars) return clamped;
   }
 

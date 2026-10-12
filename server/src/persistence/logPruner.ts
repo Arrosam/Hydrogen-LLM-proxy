@@ -1,6 +1,7 @@
 import { desc, lt, lte } from "drizzle-orm";
 import type { DB } from "../db";
 import { requestLogs } from "../db/schema";
+import { MS_PER_DAY } from "../util/time";
 
 /** Bounds the request_logs table: prune by age and/or cap the row count. */
 export class LogPruner {
@@ -9,7 +10,7 @@ export class LogPruner {
   /** Delete logs older than `retentionDays`. Returns the number deleted. */
   pruneOlderThan(retentionDays: number): number {
     if (retentionDays <= 0) return 0;
-    const cutoff = new Date(Date.now() - retentionDays * 86_400_000);
+    const cutoff = new Date(Date.now() - retentionDays * MS_PER_DAY);
     const res = this.db.delete(requestLogs).where(lt(requestLogs.createdAt, cutoff)).run();
     return res.changes ?? 0;
   }

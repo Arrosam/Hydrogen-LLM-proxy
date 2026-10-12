@@ -1,6 +1,8 @@
 import { buildHeaders, modelsUrl, type UpstreamProvider } from "../core/upstream/endpoints";
 import { familyForProviderType } from "../core/format/family";
 import type { TransportJsonResult, TransportOptions } from "../core/upstream/transport";
+import { isSuccessStatus } from "../util/httpStatus";
+import { errorMessage } from "../util/errors";
 
 /** The slice of the transport model discovery needs (a plain GET). */
 export interface ModelListTransport {
@@ -25,13 +27,21 @@ export const MAX_MODEL_ID_LENGTH = 200;
 
 const DISCOVERY_TIMEOUT_MS = 15_000;
 
+/** Characters of an upstream error body quoted in the failure message. */
+const ERROR_SNIPPET_MAX_CHARS = 200;
+
+/** Keys under which a /models response may carry its entry array, in lookup order. */
+const MODEL_LIST_KEYS = ["data", "models"];
+/** Fields of an entry that may hold its id, in lookup order. */
+const MODEL_ID_KEYS = ["id", "name", "model"];
+
 /** The array of entries in a /models response, whichever shape it arrived in. */
 function entriesOf(json: unknown): unknown[] {
   if (Array.isArray(json)) return json;
   if (!json || typeof json !== "object") return [];
   const obj = json as Record<string, unknown>;
   // OpenAI and Anthropic both use `data`; several self-hosted gateways use `models`.
-  for (const key of ["data", "models"]) {
+  for (const key of MODEL_LIST_KEYS) {
     if (Array.isArray(obj[key])) return obj[key] as unknown[];
   }
   return [];
@@ -42,7 +52,7 @@ function idOf(entry: unknown): string | null {
   if (typeof entry === "string") return entry;
   if (!entry || typeof entry !== "object") return null;
   const obj = entry as Record<string, unknown>;
-  for (const key of ["id", "name", "model"]) {
+  for (const key of MODEL_ID_KEYS) {
     const v = obj[key];
     if (typeof v === "string" && v.trim()) return v;
   }
@@ -80,9 +90,9 @@ export async function discoverModels(
   const family = familyForProviderType(provider.type);
   try {
     const res = await transport.getJson(modelsUrl(provider), buildHeaders(provider), { timeoutMs, proxy: provider.proxy });
-    if (res.status < 200 || res.status >= 300) {
+    if (!isSuccessStatus(res.status)) {
       const text = (res.text ?? "").trim();
-      const short = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+      const short = text.length > ERROR_SNIPPET_MAX_CHARS ? `${text.slice(0, ERROR_SNIPPET_MAX_CHARS)}...` : text;
       return {
         ok: false,
         status: res.status,
@@ -100,6 +110,6 @@ export async function discoverModels(
       models,
     };
   } catch (e) {
-    return { ok: false, status: 0, message: e instanceof Error ? e.message : String(e), models: [] };
+    return { ok: false, status: 0, message: errorMessage(e), models: [] };
   }
 }

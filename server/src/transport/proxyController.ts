@@ -1,10 +1,8 @@
-import { tokenAllowsService } from "../auth/authorization";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import type { Family } from "../core/format/family";
 import { parseRequest, serializeStream } from "../core/format/registry";
-import { buildErrorBody, buildErrorFrame, failureMessage, failureStatus, pingFrame } from "../core/proxy/errors";
+import { buildErrorBody, buildErrorFrame, failureMessage, failureStatus } from "../core/proxy/errors";
 import {
   newAccumulator,
   tapStream,
@@ -17,23 +15,44 @@ import type { AttemptFailure } from "../execution/steps";
 import type { StreamValue } from "../execution/outcome";
 import { isChatPipeline, serviceCategory, serviceThinkingDelimiters, serviceThinkingFormat } from "../execution/definition";
 import { withThinkingFormat, type ThinkingDelimiters, type ThinkingFormat } from "../core/ir/thinkingFormat";
+import { tokenAllowsService } from "../auth/authorization";
 import { requireClientToken } from "../auth/tokenAuth";
-import { genId } from "../util/ids";
-import { asMillis } from "../util/time";
+import { genId, ID_PREFIX } from "../util/ids";
+import { asMillis, MS_PER_SECOND } from "../util/time";
+import { HEADER } from "../util/httpHeaders";
+import { HTTP_STATUS, STATUS_CLIENT_CLOSED, STATUS_UPSTREAM_FAILURE } from "../util/httpStatus";
+import { DEFAULT_STREAM_COMMIT_GRACE_MS, DEFAULT_STREAM_PING_INTERVAL_MS } from "../config/defaults";
 import type { ModelServiceRow, Token } from "../db/schema";
-import type { HttpRequestInfo } from "../observability/requestLogger";
+import { httpRequestInfo, type HttpRequestInfo, type LogParams } from "../observability/requestLogger";
 import { ProgressRecorder } from "../observability/progressRecorder";
+import { abortOnClientClose, drained, endWith, responseFlushed, watchDelivery } from "./delivery";
+import { collectForwardHeaders } from "./forwardHeaders";
 import { JsonKeepalive } from "./jsonKeepalive";
+import { openSse } from "./keepalive";
+import { resolveServiceAccess } from "./serviceAccess";
+import { SseKeepalive } from "./sseKeepalive";
+import { errorMessage } from "../util/errors";
 import type { ProxyDeps } from "./deps";
+import { ROUTE } from "./routes";
+import { ERR_SERVICE_OUT_OF_SCOPE } from "./errorMessages";
 
-interface RequestCtx {
+const ERR_CONNECTION_CLOSED_BEFORE_SENT = "connection closed before the response was fully sent";
+
+/** What every request-log row of one request repeats. Before the service is
+ * resolved there is no row to name and no clock running yet. */
+interface LogCtx {
   traceId: string;
   token: Token;
-  service: ModelServiceRow;
+  service: ModelServiceRow | null;
   serviceName: string;
   http: HttpRequestInfo;
-  started: number;
   ingress: Family;
+  started?: number;
+}
+
+interface RequestCtx extends LogCtx {
+  service: ModelServiceRow;
+  started: number;
   /** How this service presents thinking to its client (ir/thinkingFormat.ts). */
   thinkingFormat: ThinkingFormat;
   /** Literal thinking boundaries this service declares, when its upstream's
@@ -52,156 +71,9 @@ interface RequestCtx {
  * parsed conversation alive until the log row was written.
  */
 function httpInfo(req: FastifyRequest, capture: (v: unknown) => string): HttpRequestInfo {
-  const [path, query = ""] = req.url.split("?");
-  const info: HttpRequestInfo = {
-    method: req.method,
-    path,
-    query,
-    headers: req.headers as Record<string, unknown>,
-    bodyPayload: capture(req.body),
-  };
+  const info = httpRequestInfo(req, capture(req.body));
   (req as { body?: unknown }).body = undefined;
   return info;
-}
-
-
-
-/**
- * Resolve once the response has actually finished writing, or false if the
- * connection died first.
- *
- * `res.write()` returning true only means the bytes reached the kernel, so a
- * relay loop can run to completion — and report success — over a connection the
- * peer has already abandoned. Waiting for 'finish' is what distinguishes a
- * delivered response from one that evaporated in the socket buffer.
- *
- * A peer that stops reading without closing would otherwise hold the log row
- * hostage, so the wait is bounded; on expiry we assume what the old code always
- * assumed, that the write succeeded.
- *
- * Arm this BEFORE calling end(): 'finish' can be emitted synchronously from it.
- */
-function responseFlushed(raw: ServerResponse, guardMs = 5_000): Promise<boolean> {
-  if (raw.writableFinished) return Promise.resolve(true);
-  if (raw.destroyed) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    const settle = (delivered: boolean): void => {
-      clearTimeout(timer);
-      raw.off("finish", onFinish);
-      raw.off("close", onClose);
-      raw.off("error", onError);
-      resolve(delivered);
-    };
-    const onFinish = (): void => settle(true);
-    const onClose = (): void => settle(raw.writableFinished === true);
-    const onError = (): void => settle(false);
-    const timer = setTimeout(() => settle(true), guardMs);
-    timer.unref?.();
-    raw.once("finish", onFinish);
-    raw.once("close", onClose);
-    raw.once("error", onError);
-  });
-}
-
-// Do NOT set `connection` here. Node only frames the body itself when the user
-// has not supplied a Connection header: forcing "keep-alive" made it skip that
-// logic, and an HTTP/1.0 peer (nginx's default proxy_http_version) then
-// received a body with no Transfer-Encoding, no Content-Length, and a claim
-// that the connection persists — a message whose end cannot be found.
-const SSE_HEADERS = {
-  "content-type": "text/event-stream; charset=utf-8",
-  "cache-control": "no-cache, no-transform",
-  "x-accel-buffering": "no",
-} as const;
-
-/**
- * Dead-air guard for a streaming request. A buffering executor (Micro Agent,
- * Reliable Streaming) — or a slow upstream first token — can be silent for
- * minutes, and every intermediary and client kills a silent connection long
- * before that: the answer then arrives at a connection nobody is listening to,
- * and the log records a 200 the client never saw. After a short grace window
- * this commits the SSE response and emits protocol keep-alive frames until the
- * outcome arrives, so bytes are always flowing. The cost: a failure slower than
- * the grace window must be delivered as an in-stream error event instead of an
- * HTTP status (a fast failure still gets its real status).
- */
-class SseKeepalive {
-  committed = false;
-  private readonly graceTimer: NodeJS.Timeout;
-  private pingTimer: NodeJS.Timeout | null = null;
-
-  constructor(
-    private readonly reply: FastifyReply,
-    private readonly family: Family,
-    graceMs: number,
-    private readonly intervalMs: number,
-  ) {
-    this.graceTimer = setTimeout(() => this.commit(), graceMs);
-    this.graceTimer.unref?.();
-  }
-
-  private commit(): void {
-    const raw = this.reply.raw;
-    if (this.committed || raw.destroyed || raw.headersSent) return;
-    this.reply.hijack();
-    raw.writeHead(200, SSE_HEADERS);
-    this.committed = true;
-    raw.write(pingFrame(this.family));
-    this.pingTimer = setInterval(() => {
-      if (raw.destroyed || raw.writableEnded) {
-        this.stop();
-        return;
-      }
-      raw.write(pingFrame(this.family));
-    }, this.intervalMs);
-    this.pingTimer.unref?.();
-  }
-
-  /** The outcome has arrived: stop the grace/ping timers. */
-  stop(): void {
-    clearTimeout(this.graceTimer);
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
-  }
-}
-
-
-/**
- * Watch a client socket AFTER its response finished writing, and report whether
- * the peer disproves delivery.
- *
- * 'finish' means every byte reached the kernel's send buffer — for a response
- * small enough to fit there (a few hundred KB to a few MB), it fires instantly
- * even when the peer has stopped reading, and the log records a 200 the client
- * never received. The disproof arrives moments later on the socket itself:
- *   - 'error' / 'close' with hadError: the peer reset while unacknowledged data
- *     was still in flight — delivery failed.
- *   - inbound 'data': the peer sent its next request, which means it consumed
- *     our response — delivery confirmed.
- *   - clean 'close': a peer that closes with unread data in its receive queue
- *     resets instead of FIN-ing, so a graceful close implies it read everything.
- *   - window expiry: no evidence either way; assume delivered, as before.
- */
-function watchDelivery(socket: Socket, onFailed: (reason: string) => void, windowMs = 15_000): void {
-  if (socket.destroyed) return;
-  const done = (failed: string | null): void => {
-    clearTimeout(timer);
-    socket.off("error", onError);
-    socket.off("close", onClose);
-    socket.off("data", onData);
-    if (failed) onFailed(failed);
-  };
-  const onError = (e: Error): void => done(`connection reset after the response was written (${e.message}); delivery not confirmed`);
-  const onClose = (hadError: boolean): void =>
-    done(hadError ? "connection reset after the response was written; delivery not confirmed" : null);
-  const onData = (): void => done(null);
-  const timer = setTimeout(() => done(null), windowMs);
-  timer.unref?.();
-  socket.on("error", onError);
-  socket.on("close", onClose);
-  socket.on("data", onData);
 }
 
 /** The client-facing proxy: parse -> resolve service -> invoke/stream -> log. */
@@ -213,20 +85,20 @@ export class ProxyController {
 
   register(app: FastifyInstance): void {
     const { tokens } = this.deps;
-    app.post("/v1/chat/completions", { preHandler: requireClientToken(tokens, "openai_completion") }, (req, reply) =>
+    app.post(ROUTE.CHAT_COMPLETIONS, { preHandler: requireClientToken(tokens, "openai_completion") }, (req, reply) =>
       this.handleChat(req, reply, "openai_completion"),
     );
-    app.post("/v1/messages", { preHandler: requireClientToken(tokens, "anthropic") }, (req, reply) =>
+    app.post(ROUTE.MESSAGES, { preHandler: requireClientToken(tokens, "anthropic") }, (req, reply) =>
       this.handleChat(req, reply, "anthropic"),
     );
-    app.post("/v1/responses", { preHandler: requireClientToken(tokens, "openai_responses") }, (req, reply) =>
+    app.post(ROUTE.RESPONSES, { preHandler: requireClientToken(tokens, "openai_responses") }, (req, reply) =>
       this.handleChat(req, reply, "openai_responses"),
     );
     app.get(
-      "/v1/models",
+      ROUTE.MODELS,
       {
         preHandler: (req: FastifyRequest, reply: FastifyReply) => {
-          const family: Family = req.headers["anthropic-version"] ? "anthropic" : "openai_completion";
+          const family: Family = req.headers[HEADER.ANTHROPIC_VERSION] ? "anthropic" : "openai_completion";
           return requireClientToken(tokens, family)(req, reply);
         },
       },
@@ -252,83 +124,68 @@ export class ProxyController {
     try {
       request = parseRequest(ingress, body);
     } catch {
-      return this.replyError(reply, ingress, 400, "Invalid request body.");
+      return this.replyError(reply, ingress, HTTP_STATUS.BAD_REQUEST, "Invalid request body.");
     }
     body = null;
 
     const serviceName = request.requestedService;
     if (!serviceName) {
-      return this.replyError(reply, ingress, 400, "Missing 'model' (must be a Model Service or Micro Agent name).");
+      return this.replyError(reply, ingress, HTTP_STATUS.BAD_REQUEST, "Missing 'model' (must be a Model Service or Micro Agent name).");
     }
 
     // Reject what cannot be honored rather than silently narrowing it: only
     // choices[0] would survive translation, which is worse than an honest 400.
     if ((request.params.n ?? 1) > 1) {
-      return this.replyError(reply, ingress, 400, "n > 1 is not supported through this proxy; send one request per completion.");
+      return this.replyError(reply, ingress, HTTP_STATUS.BAD_REQUEST, "n > 1 is not supported through this proxy; send one request per completion.");
     }
 
     // Carry allowlisted client feature headers to same-family upstreams
     // (anthropic-beta feature flags, attribution headers). Auth never forwards.
-    const fwd: Record<string, string> = {};
-    const allow = ingress === "anthropic" ? ["anthropic-beta"] : ["openai-beta", "http-referer", "x-title"];
-    for (const key of allow) {
-      const v = req.headers[key];
-      if (typeof v === "string" && v) fwd[key] = v;
-      else if (Array.isArray(v) && v.length) fwd[key] = v.join(",");
-    }
+    const fwd = collectForwardHeaders(req.headers, ingress, { joinRepeated: true, keepEmpty: false });
     if (Object.keys(fwd).length) request.params.forwardHeaders = { family: ingress, headers: fwd };
 
-    const traceId = genId("trace");
-    const service = this.deps.services.getByName(serviceName);
-    if (!service || !service.enabled) {
-      this.deps.logger.record({
-        traceId, tokenId: token.id, serviceId: null, requestedService: serviceName, ingress, streaming: request.stream,
-        httpStatus: 404, http, latencyMs: 0, error: `unknown model '${serviceName}'`,
-      });
-      return this.replyError(reply, ingress, 404, `Model '${serviceName}' not found. The 'model' field must be a Model Service or Micro Agent name.`);
+    const traceId = genId(ID_PREFIX.TRACE);
+    const streaming = request.stream;
+    const access = resolveServiceAccess(token, this.deps.services.getByName(serviceName), (row) => this.deps.services.def(row));
+    const pre: LogCtx = { traceId, token, service: "service" in access ? access.service : null, serviceName, http, ingress };
+    // A request refused before any upstream work: one log row, no quota spent.
+    const refuse = (status: number, logged: string, message: string): FastifyReply => {
+      this.logOutcome(pre, streaming, status, logged);
+      return this.replyError(reply, ingress, status, message);
+    };
+    if (!access.ok && access.reason === "unknown") {
+      return refuse(HTTP_STATUS.NOT_FOUND, `unknown model '${serviceName}'`, `Model '${serviceName}' not found. The 'model' field must be a Model Service or Micro Agent name.`);
     }
-
-    if (!tokenAllowsService(token, service.id)) {
-      this.deps.logger.record({
-        traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
-        httpStatus: 403, http, latencyMs: 0, error: "service out of token scope",
-      });
-      return this.replyError(reply, ingress, 403, `This API key is not allowed to use '${serviceName}'.`);
+    if (!access.ok && access.reason === "forbidden") {
+      return refuse(HTTP_STATUS.FORBIDDEN, ERR_SERVICE_OUT_OF_SCOPE, `This API key is not allowed to use '${serviceName}'.`);
     }
+    const service = access.service;
 
     // Media passthrough categories (image/tts/embedding/...) have their own
-    // endpoints; the chat pipeline serves chat and ocr services.
+    // endpoints; the chat pipeline serves chat and ocr services. An unparsable
+    // definition is not answered here: building the executor below fails on it
+    // the same way, and that is where its 500 is logged.
     let thinkingFormat: ThinkingFormat = "original";
     let thinkingDelimiters: ThinkingDelimiters | undefined;
-    try {
-      const def = this.deps.services.def(service);
-      const category = serviceCategory(def);
+    if (access.ok) {
+      const category = serviceCategory(access.def);
       if (!isChatPipeline(category)) {
-        this.deps.logger.record({
-          traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
-          httpStatus: 400, http, latencyMs: 0, error: `'${serviceName}' is a ${category} service`,
-        });
-        return this.replyError(reply, ingress, 400, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
+        return refuse(HTTP_STATUS.BAD_REQUEST, `'${serviceName}' is a ${category} service`, `'${serviceName}' is a ${category} service; use its dedicated endpoint instead of chat.`);
       }
-      thinkingFormat = serviceThinkingFormat(def);
-      thinkingDelimiters = serviceThinkingDelimiters(def);
-    } catch { /* an unparsable definition falls through to the 500 below */ }
+      thinkingFormat = serviceThinkingFormat(access.def);
+      thinkingDelimiters = serviceThinkingDelimiters(access.def);
+    }
 
     const started = Date.now();
+    const ctx: RequestCtx = { ...pre, service, started, thinkingFormat, thinkingDelimiters };
     let executor;
     try {
       executor = this.deps.factory.forRow(service).executor;
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      this.deps.logger.record({
-        traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName, ingress, streaming: request.stream,
-        httpStatus: 500, http, latencyMs: Date.now() - started, error: `invalid Model Service definition: ${message}`,
-      });
-      this.deps.usage.record(token.id, 0);
-      return this.replyError(reply, ingress, 500, `Model '${serviceName}' has an invalid definition.`);
+      this.logFailure(ctx, streaming, HTTP_STATUS.INTERNAL_SERVER_ERROR, `invalid Model Service definition: ${errorMessage(e)}`);
+      return this.replyError(reply, ingress, HTTP_STATUS.INTERNAL_SERVER_ERROR, `Model '${serviceName}' has an invalid definition.`);
     }
 
-    const ctx: RequestCtx = { traceId, token, service, serviceName, http, started, ingress, thinkingFormat, thinkingDelimiters };
     // Register the request for real-time progress monitoring.
     this.deps.activeRequests.start({ traceId, tokenId: token.id, serviceId: service.id, serviceName, ingress, streaming: request.stream });
     try {
@@ -336,21 +193,15 @@ export class ProxyController {
       prog.record("init", "request.received", `request received: ${ingress} -> ${serviceName}`, { streaming: request.stream });
       prog.record("init", "request.parsed", "request body parsed and service resolved");
 
-      // A client that abandons the connection aborts the upstream work: nobody
-      // will receive the answer, so every further retry only burns quota — and
-      // the log row must end up saying 499, not 200.
-      const clientGone = new AbortController();
-      reply.raw.once("close", () => {
-        if (!reply.raw.writableFinished) clientGone.abort();
-      });
+      const clientGone = abortOnClientClose(reply);
 
       if (request.stream) {
         // Keep bytes flowing while the executor works: commit the SSE response
         // after the grace window and ping until the outcome arrives.
         const keepalive = new SseKeepalive(
           reply, ingress,
-          this.deps.streamCommitGraceMs ?? 2_500,
-          this.deps.streamPingIntervalMs ?? 10_000,
+          this.deps.streamCommitGraceMs ?? DEFAULT_STREAM_COMMIT_GRACE_MS,
+          this.deps.streamPingIntervalMs ?? DEFAULT_STREAM_PING_INTERVAL_MS,
         );
         const outcome = await executor.stream(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => keepalive.stop());
         keepalive.stop();
@@ -369,11 +220,7 @@ export class ProxyController {
 
       // Keep bytes flowing on the JSON response too: an OCR/vision answer can
       // take minutes, and a silent connection dies at the first intermediary.
-      const jsonKeepalive = new JsonKeepalive(
-        reply,
-        this.deps.jsonCommitGraceMs ?? 30_000,
-        this.deps.streamPingIntervalMs ?? 10_000,
-      );
+      const jsonKeepalive = JsonKeepalive.forClient(reply, this.deps);
       const outcome = await executor.invoke(request, undefined, { progress: prog, signal: clientGone.signal }).finally(() => jsonKeepalive.stop());
       jsonKeepalive.stop();
       if (!outcome.result.ok) {
@@ -400,51 +247,65 @@ export class ProxyController {
       const shapedResponse = value.response.withThinkingFormat(thinkingFormat, thinkingDelimiters);
       const emptyReason = missingAnswerReason(value.response.content, value.response.stopReason) ??
         missingAnswerReason(shapedResponse.content, shapedResponse.stopReason);
-      const clientBody = emptyReason ? buildErrorBody(ingress, 502, emptyReason)
+      const clientBody = emptyReason ? buildErrorBody(ingress, STATUS_UPSTREAM_FAILURE, emptyReason)
         : shapedResponse.render(ingress, serviceName, { thinkingFormat });
       // Deliver first, then log what actually happened: writing the 200 row
       // before send() is how a response nobody received was recorded as success.
       const socket = reply.raw.socket;
       const settled = responseFlushed(reply.raw);
-      if (jsonKeepalive.committed) {
-        // Headers + whitespace already sent; append the JSON document and end.
-        try {
-          if (!reply.raw.destroyed && !reply.raw.writableEnded) {
-            reply.raw.write(JSON.stringify(clientBody));
-            reply.raw.end();
-          }
-        } catch { /* the connection died first; responseFlushed reports it */ }
-      } else {
-        reply.code(emptyReason ? 502 : 200).send(clientBody);
-      }
+      // When the keep-alive committed, headers + whitespace are already sent:
+      // it appends the JSON document and ends (a connection that died first is
+      // reported by responseFlushed).
+      if (!jsonKeepalive.finish(clientBody)) reply.code(emptyReason ? STATUS_UPSTREAM_FAILURE : HTTP_STATUS.OK).send(clientBody);
       const flushed = await settled;
-      const status = flushed ? (emptyReason ? 502 : 200) : 499;
-      const error = flushed ? emptyReason ?? null : "connection closed before the response was fully sent";
+      const status = flushed ? (emptyReason ? STATUS_UPSTREAM_FAILURE : HTTP_STATUS.OK) : STATUS_CLIENT_CLOSED;
+      const error = flushed ? emptyReason ?? null : ERR_CONNECTION_CLOSED_BEFORE_SENT;
       prog.record("done", "request.complete", `request completed in ${Date.now() - started}ms`, { httpStatus: status });
       this.deps.activeRequests.finish(traceId, status, error ?? undefined);
-      this.deps.logger.record({
-        traceId, tokenId: token.id, serviceId: service.id, requestedService: serviceName,
-        servedModel: value.modelName, servedProvider: value.providerName,
-        ingress, egress: value.family, streaming: false, httpStatus: status, http,
+      this.logOutcome(ctx, false, status, error, {
+        servedModel: value.modelName, servedProvider: value.providerName, egress: value.family,
         upstreamPayload,
         responseBody: emptyReason ? { ...clientBody, upstream_response: value.response.toLogPayload() } : clientBody,
-        usage: value.response.usage, latencyMs: Date.now() - started,
-        attempts: outcome.attempts, attemptPath: outcome.attemptPath, error,
+        usage: value.response.usage, attempts: outcome.attempts, attemptPath: outcome.attemptPath,
       });
       // The upstream consumed these tokens whether or not the delivery landed.
       this.deps.usage.record(token.id, value.response.usage.totalTokens);
-      if (status === 200 && socket) {
-        watchDelivery(socket, (reason) => {
-          this.deps.logger.amendDeliveryFailure(traceId, reason);
-          this.deps.activeRequests.amendCompleted(traceId, 499, reason);
-        });
-      }
+      if (status === HTTP_STATUS.OK && socket) this.demoteOnLateReset(socket, traceId);
       return reply;
     } catch (error) {
-      this.deps.activeRequests.finish(traceId, 500, error instanceof Error ? error.message : String(error));
+      this.deps.activeRequests.finish(traceId, HTTP_STATUS.INTERNAL_SERVER_ERROR, errorMessage(error));
       if (reply.raw.headersSent && !reply.raw.writableEnded) reply.raw.destroy();
       throw error;
     }
+  }
+
+  /** Write the request-log row of one request. The fields every row repeats
+   * come from `ctx`; `extra` carries what only some outcomes have. */
+  private logOutcome(ctx: LogCtx, streaming: boolean, httpStatus: number, error: string | null, extra: Partial<LogParams> = {}): void {
+    this.deps.logger.record({
+      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service?.id ?? null, requestedService: ctx.serviceName,
+      ingress: ctx.ingress, streaming, httpStatus, http: ctx.http,
+      latencyMs: ctx.started == null ? 0 : Date.now() - ctx.started, error,
+      ...extra,
+    });
+  }
+
+  /** Log a request that reached its service and produced no answer. It still
+   * spends one request of the key's quota (and no tokens). */
+  private logFailure(ctx: RequestCtx, streaming: boolean, httpStatus: number, error: string, o: { attempts?: number; attemptPath?: unknown } = {}): void {
+    this.logOutcome(ctx, streaming, httpStatus, error, { attempts: o.attempts, attemptPath: o.attemptPath });
+    this.deps.usage.record(ctx.token.id, 0);
+  }
+
+  /** A 200 only means "handed to the kernel". Keep watching the socket: if the
+   * peer resets it before sending anything else, the tail of the response
+   * never arrived — demote the row to 499 so the log stops claiming a delivery
+   * that did not happen. */
+  private demoteOnLateReset(socket: Socket, traceId: string): void {
+    watchDelivery(socket, (reason) => {
+      this.deps.logger.amendDeliveryFailure(traceId, reason);
+      this.deps.activeRequests.amendCompleted(traceId, STATUS_CLIENT_CLOSED, reason);
+    });
   }
 
   /** The client hung up while the upstream work was still running; the work was
@@ -456,13 +317,8 @@ export class ProxyController {
     o: { attemptPath: unknown; attempts: number },
   ): undefined {
     const error = "client disconnected before the response could be sent; upstream work aborted";
-    this.deps.activeRequests.finish(ctx.traceId, 499, error);
-    this.deps.logger.record({
-      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
-      ingress: ctx.ingress, streaming, httpStatus: 499, http: ctx.http,
-      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
-    });
-    this.deps.usage.record(ctx.token.id, 0);
+    this.deps.activeRequests.finish(ctx.traceId, STATUS_CLIENT_CLOSED, error);
+    this.logFailure(ctx, streaming, STATUS_CLIENT_CLOSED, error, o);
     // The connection is already dead — detach Fastify and close it out.
     reply.hijack();
     try { reply.raw.destroy(); } catch { /* already closed */ }
@@ -494,20 +350,9 @@ export class ProxyController {
   ): void {
     const status = failureStatus(failure);
     const message = failureMessage(failure);
-    const raw = reply.raw;
-    try {
-      if (!raw.destroyed && !raw.writableEnded) {
-        raw.write(buildErrorFrame(ctx.ingress, status, message));
-        raw.end();
-      }
-    } catch { /* the connection died first; the log below still tells the truth */ }
-    this.deps.logger.record({
-      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
-      ingress: ctx.ingress, streaming: true, httpStatus: status, http: ctx.http,
-      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath,
-      error: `${message}${this.retrySuffix(o.attemptPath)} (delivered as in-stream error event)`,
-    });
-    this.deps.usage.record(ctx.token.id, 0);
+    // If the connection died first, the log below still tells the truth.
+    endWith(reply.raw, () => buildErrorFrame(ctx.ingress, status, message));
+    this.logFailure(ctx, true, status, `${message}${this.retrySuffix(o.attemptPath)} (delivered as in-stream error event)`, o);
     this.deps.activeRequests.finish(ctx.traceId, status, message);
   }
 
@@ -526,20 +371,9 @@ export class ProxyController {
   ): void {
     const status = failureStatus(failure);
     const message = failureMessage(failure);
-    const raw = reply.raw;
-    try {
-      if (!raw.destroyed && !raw.writableEnded) {
-        raw.write(JSON.stringify(buildErrorBody(ctx.ingress, status, message)));
-        raw.end();
-      }
-    } catch { /* the connection died first; the log below still tells the truth */ }
-    this.deps.logger.record({
-      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
-      ingress: ctx.ingress, streaming: false, httpStatus: status, http: ctx.http,
-      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath,
-      error: `${message}${this.retrySuffix(o.attemptPath)} (delivered as error body after keep-alive commit)`,
-    });
-    this.deps.usage.record(ctx.token.id, 0);
+    // If the connection died first, the log below still tells the truth.
+    endWith(reply.raw, () => JSON.stringify(buildErrorBody(ctx.ingress, status, message)));
+    this.logFailure(ctx, false, status, `${message}${this.retrySuffix(o.attemptPath)} (delivered as error body after keep-alive commit)`, o);
   }
 
   private replyFailure(
@@ -552,13 +386,7 @@ export class ProxyController {
     const message = failureMessage(failure);
     // When the failure was retried (e.g. 499), append the last retry context so
     // the log + client-facing error carry the full diagnosis trail.
-    const detailedError = message + this.retrySuffix(o.attemptPath);
-    this.deps.logger.record({
-      traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
-      ingress: ctx.ingress, streaming: o.streaming, httpStatus: status, http: ctx.http,
-      latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error: detailedError,
-    });
-    this.deps.usage.record(ctx.token.id, 0);
+    this.logFailure(ctx, o.streaming, status, message + this.retrySuffix(o.attemptPath), o);
     return reply.code(status).send(buildErrorBody(ctx.ingress, status, message));
   }
 
@@ -588,14 +416,8 @@ export class ProxyController {
     value.upstreamRequest = {};
 
     const raw = reply.raw;
-    if (!o.committed) {
-      // Hijack the reply so Fastify does not interfere with our raw SSE writes.
-      // Without this, Fastify's lifecycle hooks (onSend, preSerialization, etc.)
-      // can race with the async writer below, causing truncated responses.
-      // (When the keep-alive already committed the response, both happened.)
-      reply.hijack();
-      raw.writeHead(200, SSE_HEADERS);
-    }
+    // When the keep-alive already committed the response, it is open already.
+    if (!o.committed) openSse(reply);
 
     // Start an async writer that drains the generator into the raw response.
     // Using raw.write + raw.flush (instead of Readable.from) avoids the
@@ -615,21 +437,18 @@ export class ProxyController {
           const flushable = raw as unknown as { flush?: () => void };
           if (typeof flushable.flush === "function") flushable.flush();
           // Apply backpressure: wait for 'drain' if the internal buffer is full.
-          if (!ok && !raw.destroyed) {
-            await new Promise<void>((resolve) => {
-              const onDrain = (): void => { raw.off("close", onClose); resolve(); };
-              const onClose = (): void => { raw.off("drain", onDrain); resolve(); };
-              raw.once("drain", onDrain);
-              raw.once("close", onClose);
-            });
-          }
+          if (!ok && !raw.destroyed) await drained(raw);
           if (raw.destroyed) {
             clientDisconnected = true;
             break;
           }
         }
       } catch (e) {
-        streamError = e instanceof Error ? e.message : String(e);
+        streamError = errorMessage(e);
+        // A client that hung up aborts the upstream read, which surfaces here as
+        // a throw too. Only a response the client had already abandoned is the
+        // client's doing; anything else is the upstream failing mid-stream.
+        clientDisconnected = raw.destroyed;
       } finally {
         // Capture the socket now: Node detaches it from the response on finish,
         // and the delivery watch below needs it after that point.
@@ -645,7 +464,7 @@ export class ProxyController {
           const answerIsShort = streamError !== null || acc.incomplete;
           try {
             if (acc.error) {
-              raw.write(buildErrorFrame(ctx.ingress, 502, acc.error));
+              raw.write(buildErrorFrame(ctx.ingress, STATUS_UPSTREAM_FAILURE, acc.error));
               raw.end();
             } else if (answerIsShort) raw.destroy();
             else raw.end();
@@ -661,14 +480,16 @@ export class ProxyController {
         if (acc.reasoning) responseBody.reasoning = acc.reasoning;
         if (acc.toolCalls.length) responseBody.tool_calls = acc.toolCalls;
         let error = streamError;
-        let status = 200;
-        if (streamError) status = 499;
-        else if (clientDisconnected) {
-          status = 499;
-          error = "client disconnected before stream completed";
+        let status = HTTP_STATUS.OK;
+        if (clientDisconnected) {
+          status = STATUS_CLIENT_CLOSED;
+          error = streamError ?? "client disconnected before stream completed";
         }
+        // The client is still connected: the stream broke on the upstream side,
+        // exactly like the clean truncation below.
+        else if (streamError) status = STATUS_UPSTREAM_FAILURE;
         else if (acc.incomplete) {
-          status = 502;
+          status = STATUS_UPSTREAM_FAILURE;
           error = acc.error ?? "upstream stream ended before completion (truncated)";
           responseBody.incomplete = true;
           if (acc.error) responseBody.error = acc.error;
@@ -676,29 +497,17 @@ export class ProxyController {
         else if (!flushed) {
           // Every byte was written, but the connection died before they left
           // the machine. Reporting 200 here is what hid this failure.
-          status = 499;
-          error = "connection closed before the response was fully sent";
+          status = STATUS_CLIENT_CLOSED;
+          error = ERR_CONNECTION_CLOSED_BEFORE_SENT;
         }
-        this.deps.logger.record({
-          traceId: ctx.traceId, tokenId: ctx.token.id, serviceId: ctx.service.id, requestedService: ctx.serviceName,
-          servedModel: value.modelName, servedProvider: value.providerName,
-          ingress: ctx.ingress, egress: value.family, streaming: true, httpStatus: status, http: ctx.http,
-          upstreamPayload,
-          responseBody, usage, latencyMs: Date.now() - ctx.started, attempts: o.attempts, attemptPath: o.attemptPath, error,
+        this.logOutcome(ctx, true, status, error, {
+          servedModel: value.modelName, servedProvider: value.providerName, egress: value.family,
+          upstreamPayload, responseBody, usage, attempts: o.attempts, attemptPath: o.attemptPath,
         });
         this.deps.usage.record(ctx.token.id, usage.totalTokens);
         // Mark the active request as finished (streaming relay end).
         this.deps.activeRequests.finish(ctx.traceId, status, error ?? undefined);
-        // A 200 at this point still only means "handed to the kernel". Keep
-        // watching the socket: if the peer resets it before sending anything
-        // else, the tail of the response never arrived — demote the row to 499
-        // so the log stops claiming a delivery that did not happen.
-        if (status === 200 && socket) {
-          watchDelivery(socket, (reason) => {
-            this.deps.logger.amendDeliveryFailure(ctx.traceId, reason);
-            this.deps.activeRequests.amendCompleted(ctx.traceId, 499, reason);
-          });
-        }
+        if (status === HTTP_STATUS.OK && socket) this.demoteOnLateReset(socket, ctx.traceId);
       }
     })()
       // This writer is deliberately not awaited (the relay hands the client its
@@ -716,8 +525,10 @@ export class ProxyController {
   }
 
   private handleListModels(req: FastifyRequest): unknown {
-    const isAnthropic = typeof req.headers["anthropic-version"] === "string";
-    const services = this.deps.services.list().filter((m) => m.enabled);
+    const isAnthropic = typeof req.headers[HEADER.ANTHROPIC_VERSION] === "string";
+    // Only what this key may call: a name it would be refused on is not "available".
+    const token = req.clientToken!;
+    const services = this.deps.services.list().filter((m) => m.enabled && tokenAllowsService(token, m.id));
     const created = (m: ModelServiceRow): number => asMillis(m.createdAt);
 
     if (isAnthropic) {
@@ -730,7 +541,7 @@ export class ProxyController {
     }
     return {
       object: "list",
-      data: services.map((m) => ({ id: m.name, object: "model", created: Math.floor(created(m) / 1000), owned_by: "hydrogen" })),
+      data: services.map((m) => ({ id: m.name, object: "model", created: Math.floor(created(m) / MS_PER_SECOND), owned_by: "hydrogen" })),
     };
   }
 }

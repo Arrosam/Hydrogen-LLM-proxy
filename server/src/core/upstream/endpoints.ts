@@ -1,5 +1,6 @@
-import { familyForProviderType, type ProviderType } from "../format/family";
+import { familyForProviderType, type Family, type ProviderType } from "../format/family";
 import type { EgressProxy } from "./egress/types";
+import { HEADER, MIME } from "../../util/httpHeaders";
 
 /** A materialized provider (decrypted key) ready to be called upstream. */
 export interface UpstreamProvider {
@@ -22,6 +23,43 @@ export interface UpstreamProvider {
 }
 
 export const ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * What differs between the wire families when calling an upstream. A
+ * `Record<Family, ...>`, so a new family states its own paths and auth instead
+ * of silently falling through to another's.
+ */
+const FAMILY_UPSTREAM: Record<Family, {
+  /** Path of the chat endpoint under the base URL. */
+  chatPath: string;
+  /** Path of the model listing under the base URL. */
+  modelsPath: string;
+  /** Whether the OpenAI-shaped media/passthrough surface exists under the base URL. */
+  openAiMedia: boolean;
+  /** Write the provider's auth (and any version header the family requires) onto the outgoing headers. */
+  applyAuth(headers: Record<string, string>, apiKey: string | null): void;
+}> = {
+  openai_completion: { chatPath: "/chat/completions", modelsPath: "/models", openAiMedia: true, applyAuth: bearerAuth },
+  openai_responses: { chatPath: "/responses", modelsPath: "/models", openAiMedia: true, applyAuth: bearerAuth },
+  anthropic: {
+    chatPath: "/v1/messages",
+    modelsPath: "/v1/models",
+    openAiMedia: false,
+    applyAuth(headers, apiKey) {
+      if (apiKey) headers[HEADER.X_API_KEY] = apiKey;
+      headers[HEADER.ANTHROPIC_VERSION] = ANTHROPIC_VERSION;
+    },
+  },
+};
+
+function bearerAuth(headers: Record<string, string>, apiKey: string | null): void {
+  if (apiKey) headers[HEADER.AUTHORIZATION] = `Bearer ${apiKey}`;
+}
+
+/** A type outside the three (bad stored data) keeps reading as Chat Completions, as it always has. */
+function familyUpstream(t: ProviderType): (typeof FAMILY_UPSTREAM)[Family] {
+  return FAMILY_UPSTREAM[familyForProviderType(t)] ?? FAMILY_UPSTREAM.openai_completion;
+}
 
 /** One endpoint a provider serves, with its position in the provider's list. */
 export interface ProviderEndpoint {
@@ -52,7 +90,7 @@ export function providerEndpoints(p: {
  * surface at all.
  */
 export function servesOpenAiMedia(t: ProviderType): boolean {
-  return familyForProviderType(t) !== "anthropic";
+  return familyUpstream(t).openAiMedia;
 }
 
 /**
@@ -72,48 +110,44 @@ const BLOCKED_EXTRA_HEADERS = new Set([
   "upgrade",
 ]);
 
-function trimBase(base: string): string {
-  return base.replace(/\/+$/, "");
+/** `path` under a provider's base URL, whose trailing slashes are not part of it. */
+function endpointUrl(p: UpstreamProvider, path: string): string {
+  return `${p.baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
 /** The chat/messages/responses endpoint URL for a provider. */
 export function chatUrl(p: UpstreamProvider): string {
-  const base = trimBase(p.baseUrl);
-  const family = familyForProviderType(p.type);
-  if (family === "anthropic") return `${base}/v1/messages`;
-  if (family === "openai_responses") return `${base}/responses`;
-  return `${base}/chat/completions`;
+  return endpointUrl(p, familyUpstream(p.type).chatPath);
 }
 
 export function embeddingsUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/embeddings`;
+  return endpointUrl(p, "/embeddings");
 }
 
 /** OpenAI-style media endpoints (non-chat service categories). */
 export function imagesUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/images/generations`;
+  return endpointUrl(p, "/images/generations");
 }
 
 export function speechUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/audio/speech`;
+  return endpointUrl(p, "/audio/speech");
 }
 
 export function transcriptionsUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/audio/transcriptions`;
+  return endpointUrl(p, "/audio/transcriptions");
 }
 
 /** Jina/Cohere-compatible rerank endpoint. */
 export function rerankUrl(p: UpstreamProvider): string {
-  return `${trimBase(p.baseUrl)}/rerank`;
+  return endpointUrl(p, "/rerank");
 }
 
 export function videosUrl(p: UpstreamProvider, suffix = ""): string {
-  return `${trimBase(p.baseUrl)}/videos${suffix}`;
+  return endpointUrl(p, `/videos${suffix}`);
 }
 
 export function modelsUrl(p: UpstreamProvider): string {
-  const base = trimBase(p.baseUrl);
-  return familyForProviderType(p.type) === "anthropic" ? `${base}/v1/models` : `${base}/models`;
+  return endpointUrl(p, familyUpstream(p.type).modelsPath);
 }
 
 /**
@@ -123,19 +157,14 @@ export function modelsUrl(p: UpstreamProvider): string {
  * auth header via a case variant.
  */
 export function buildHeaders(p: UpstreamProvider, extra?: Record<string, string>): Record<string, string> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = { [HEADER.CONTENT_TYPE]: MIME.JSON };
   if (p.extraHeaders) {
     for (const [k, v] of Object.entries(p.extraHeaders)) {
       const key = k.toLowerCase();
       if (!BLOCKED_EXTRA_HEADERS.has(key)) headers[key] = v;
     }
   }
-  if (familyForProviderType(p.type) === "anthropic") {
-    if (p.apiKey) headers["x-api-key"] = p.apiKey;
-    headers["anthropic-version"] = ANTHROPIC_VERSION;
-  } else if (p.apiKey) {
-    headers["authorization"] = `Bearer ${p.apiKey}`;
-  }
+  familyUpstream(p.type).applyAuth(headers, p.apiKey);
   if (extra) for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v;
   return headers;
 }

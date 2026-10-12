@@ -1,4 +1,5 @@
 import type { ReasoningPart } from "../ir/content";
+import { FAMILIES, type Family } from "../ir/params";
 
 /** Client replay metadata preserves block boundaries, text and signature origin.
  * Envelopes are decoded at ingress; only native signatures reach an upstream.
@@ -13,7 +14,7 @@ interface Envelope {
 
 /** Whether a wire value is one of our envelopes rather than a provider's own
  * encrypted payload. */
-export function isRedactedEnvelope(value: string): boolean {
+function isRedactedEnvelope(value: string): boolean {
   return value.startsWith(PREFIX);
 }
 
@@ -30,7 +31,7 @@ export function encodeRedacted(part: ReasoningPart): string {
  * an unreadable envelope degrades to "not an envelope", which loses the block
  * rather than corrupting the request around it.
  */
-export function decodeRedacted(value: string): Pick<ReasoningPart, "redacted" | "signature"> | null {
+function decodeRedacted(value: string): Pick<ReasoningPart, "redacted" | "signature"> | null {
   if (!isRedactedEnvelope(value)) return null;
   try {
     const raw = Buffer.from(value.slice(PREFIX.length), "base64").toString("utf8");
@@ -49,6 +50,26 @@ export function encodeReasoning(part: ReasoningPart): string {
   return REASONING_PREFIX + Buffer.from(JSON.stringify(part), "utf8").toString("base64");
 }
 
+/**
+ * Whether a wire value is one of this proxy's envelopes, in either version,
+ * readable or not. An envelope is client-only: one that does not decode is not
+ * a provider payload either, so it must not be kept as a signature.
+ */
+function isEnvelope(value: string): boolean {
+  return isRedactedEnvelope(value) || value.startsWith(REASONING_PREFIX);
+}
+
+/**
+ * The opaque payload a client sent with a reasoning block, as a signature an
+ * upstream may be handed: the value itself when it is a provider's own, and
+ * nothing when it is an envelope {@link decodeReasoning} could not read --
+ * which loses the signature (and a block that had nothing else) rather than
+ * forwarding this proxy's wrapper to a provider.
+ */
+export function nativeSignature(value: string | undefined): string | undefined {
+  return value && !isEnvelope(value) ? value : undefined;
+}
+
 export function decodeReasoning(value: string): ReasoningPart | null {
   const redacted = decodeRedacted(value);
   if (redacted) return { type: "reasoning", text: "", origin: "anthropic", ...redacted };
@@ -56,11 +77,30 @@ export function decodeReasoning(value: string): ReasoningPart | null {
   try {
     const p = JSON.parse(Buffer.from(value.slice(REASONING_PREFIX.length), "base64").toString("utf8"));
     if (p.type !== "reasoning" || typeof p.text !== "string") return null;
-    if (p.origin !== undefined && !["anthropic", "openai_responses", "openai_completion"].includes(p.origin)) return null;
+    if (p.origin !== undefined && !FAMILIES.includes(p.origin)) return null;
     if (p.signature !== undefined && typeof p.signature !== "string") return null;
     if (p.itemId !== undefined && typeof p.itemId !== "string") return null;
     return { type: "reasoning", text: p.text, origin: p.origin, signature: p.signature, itemId: p.itemId, ...(p.redacted === true ? { redacted: true } : {}) };
   } catch { return null; }
+}
+
+/**
+ * Whether a reasoning block's opaque signature may be handed to `family` as
+ * its own: it was issued by that family, or carries no origin at all. A
+ * signature is never replayed across families -- only its issuer can read it.
+ */
+export function isOwnOrigin(part: Pick<ReasoningPart, "origin">, family: Family): boolean {
+  return !part.origin || part.origin === family;
+}
+
+/**
+ * The signature a CLIENT of `family` is given for a block: the native one when
+ * the block is that family's own, otherwise this proxy's envelope around the
+ * whole part, so the client can hand it back and the issuing family gets its
+ * block again.
+ */
+export function clientSignature(part: ReasoningPart, family: Family): string | undefined {
+  return part.signature && !isOwnOrigin(part, family) ? encodeReasoning(part) : part.signature;
 }
 
 /** Chat clients that preserve reasoning_details can replay signed blocks. */

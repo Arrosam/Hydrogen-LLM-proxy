@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { modelServices, type ModelServiceRow } from "../db/schema";
-import { isAgent, parseService, type ServiceDef } from "../execution/definition";
+import { pickDefined, TableRepo } from "./tableRepo";
+import { isAgent, parseService, SERVICE_KIND, type ServiceDef } from "../execution/definition";
 
 export interface ServiceRecordInput {
   name: string;
@@ -11,20 +11,19 @@ export interface ServiceRecordInput {
   enabled?: boolean;
 }
 
+/** The stored `kind` discriminator of a definition. */
+function serviceKind(def: ServiceDef): ModelServiceRow["kind"] {
+  return isAgent(def) ? SERVICE_KIND.MICRO_AGENT : SERVICE_KIND.MODEL_SERVICE;
+}
+
 /** Model Services / Micro Agents: the only entities exposed to clients. */
-export class ServiceRepo {
-  constructor(private readonly db: DB) {}
-
-  list(): ModelServiceRow[] {
-    return this.db.select().from(modelServices).all();
-  }
-
-  get(id: number): ModelServiceRow | undefined {
-    return this.db.select().from(modelServices).where(eq(modelServices.id, id)).get();
+export class ServiceRepo extends TableRepo<typeof modelServices> {
+  constructor(db: DB) {
+    super(db, modelServices);
   }
 
   getByName(name: string): ModelServiceRow | undefined {
-    return this.db.select().from(modelServices).where(eq(modelServices.name, name)).get();
+    return this.findBy(modelServices.name, name);
   }
 
   /** Parse a row's stored definition (throws ZodError if it is invalid). */
@@ -38,7 +37,7 @@ export class ServiceRepo {
       .values({
         name: input.name,
         description: input.description ?? null,
-        kind: isAgent(input.definition) ? "micro_agent" : "model_service",
+        kind: serviceKind(input.definition),
         definition: input.definition,
         enabled: input.enabled ?? true,
       })
@@ -50,19 +49,8 @@ export class ServiceRepo {
     id: number,
     input: { name?: string; description?: string | null; definition?: ServiceDef; enabled?: boolean },
   ): ModelServiceRow | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch.name = input.name;
-    if (input.description !== undefined) patch.description = input.description;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (input.definition !== undefined) {
-      patch.definition = input.definition;
-      patch.kind = isAgent(input.definition) ? "micro_agent" : "model_service";
-    }
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(modelServices).set(patch).where(eq(modelServices.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(modelServices).where(eq(modelServices.id, id)).run();
+    const patch: Partial<typeof modelServices.$inferInsert> = pickDefined(input, ["name", "description", "enabled", "definition"]);
+    if (input.definition !== undefined) patch.kind = serviceKind(input.definition);
+    return this.patch(id, patch);
   }
 }

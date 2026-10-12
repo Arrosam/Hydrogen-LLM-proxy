@@ -7,7 +7,7 @@ import path from "node:path";
  * bundle works whether launched from the repo root (Docker: /app) or from the
  * `server` workspace during development.
  */
-export function resolveExistingDir(candidates: (string | undefined)[]): string | null {
+function resolveExistingDir(candidates: (string | undefined)[]): string | null {
   for (const c of candidates) {
     if (!c) continue;
     const abs = path.resolve(process.cwd(), c);

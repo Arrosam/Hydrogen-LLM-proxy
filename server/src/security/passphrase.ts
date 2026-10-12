@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { promisify } from "node:util";
-import { decryptSecret, encryptSecret, type EncryptedBlob } from "./crypto";
+import { AES_256_KEY_BYTES, decryptSecret, encryptSecret, type EncryptedBlob } from "./crypto";
+import { BYTES_PER_MIB } from "../config/limits";
 
 /**
  * Seal a payload under a human-chosen passphrase.
@@ -22,11 +23,18 @@ import { decryptSecret, encryptSecret, type EncryptedBlob } from "./crypto";
 const SCRYPT_N = 32_768;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
-const KEY_BYTES = 32;
+const KEY_BYTES = AES_256_KEY_BYTES;
 const SALT_BYTES = 16;
 /** Memory ceiling for scrypt. scrypt needs ~128*N*r bytes; this both sizes our
  * own derivation and bounds what a package may ask for (see openWithPassphrase). */
-const SCRYPT_MAXMEM = 256 * 1024 * 1024;
+const SCRYPT_MAXMEM = 256 * BYTES_PER_MIB;
+/** scrypt needs about this many bytes per unit of N*r. */
+const SCRYPT_MEM_FACTOR = 128;
+/** Largest cost parameters a package may ask for. */
+const MAX_SCRYPT_N = 1 << 20;
+const MAX_SCRYPT_R = 32;
+const MAX_SCRYPT_P = 16;
+const KDF_SCRYPT = "scrypt";
 
 const scrypt = promisify(crypto.scrypt) as (
   password: crypto.BinaryLike,
@@ -62,7 +70,7 @@ export async function sealWithPassphrase(plaintext: string, passphrase: string):
   const salt = crypto.randomBytes(SALT_BYTES);
   const key = await deriveKey(passphrase, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P);
   return {
-    kdf: "scrypt",
+    kdf: KDF_SCRYPT,
     n: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,
@@ -78,7 +86,7 @@ export async function sealWithPassphrase(plaintext: string, passphrase: string):
  * guessing).
  */
 export async function openWithPassphrase(sealed: SealedPayload, passphrase: string): Promise<string> {
-  if (sealed?.kdf !== "scrypt") {
+  if (sealed?.kdf !== KDF_SCRYPT) {
     throw new PassphraseError("unsupported key-derivation function in this backup");
   }
   // The cost parameters come from the file, so clamp them: a malicious package
@@ -90,19 +98,19 @@ export async function openWithPassphrase(sealed: SealedPayload, passphrase: stri
   const p = Number(sealed.p);
   if (
     !isPowerOfTwo(n) ||
-    n > 1 << 20 ||
+    n > MAX_SCRYPT_N ||
     !Number.isInteger(r) ||
     r < 1 ||
-    r > 32 ||
+    r > MAX_SCRYPT_R ||
     !Number.isInteger(p) ||
     p < 1 ||
-    p > 16 ||
-    128 * n * r > SCRYPT_MAXMEM
+    p > MAX_SCRYPT_P ||
+    SCRYPT_MEM_FACTOR * n * r > SCRYPT_MAXMEM
   ) {
     throw new PassphraseError("invalid key-derivation parameters in this backup");
   }
   const salt = Buffer.from(sealed.salt, "base64");
-  if (salt.length !== 16 || salt.toString("base64") !== sealed.salt) {
+  if (salt.length !== SALT_BYTES || salt.toString("base64") !== sealed.salt) {
     throw new PassphraseError("malformed backup: invalid salt");
   }
   let key: Buffer;

@@ -1,12 +1,6 @@
 import type { Family, GenerationParams, RequestOverrides } from "./params";
 import { mergeParams } from "./params";
-import {
-  normalizeMessages,
-  stripStaleReasoning,
-  type Message,
-  type Tool,
-  type ToolChoice,
-} from "./content";
+import type { Message, Tool, ToolChoice } from "./content";
 import type { SendTarget, Transport } from "../upstream/transport";
 import type { RelayResult, SendResult } from "../upstream/outcome";
 
@@ -82,7 +76,8 @@ export abstract class Request implements RequestData {
    * Emit this request and buffer the reply into one complete Response. Abstract
    * here because a canonical Request must first be `construct`ed into a concrete
    * format subclass (which knows how to render and how to parse its own reply);
-   * the subclasses implement it as a thin call to the shared round-trip.
+   * the subclasses inherit it from `format/WireRequest`, a thin call to the
+   * shared round-trip.
    */
   abstract send(transport: Transport, target: SendTarget): Promise<SendResult>;
 
@@ -113,27 +108,20 @@ export abstract class Request implements RequestData {
   withOverrides(o?: RequestOverrides): this {
     if (!o) return this;
     const { stream, system, ...paramPatch } = o;
-    const next: RequestData = {
-      ...this.data(),
-      params: mergeParams(this.params, paramPatch),
-    };
-    if (system !== undefined) next.system = system;
-    if (stream !== undefined) next.stream = stream;
-    return new (this.constructor as new (d: RequestData) => this)(next);
+    const patch: Partial<RequestData> = { params: mergeParams(this.params, paramPatch) };
+    if (system !== undefined) patch.system = system;
+    if (stream !== undefined) patch.stream = stream;
+    return this.clone(patch);
   }
 
   /** Force the transport mode (a Micro Agent sets stream:false for internal calls). */
   withStream(stream: boolean): this {
     if (stream === this.stream) return this;
-    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), stream });
+    return this.clone({ stream });
   }
 
-  /** Merge same-role messages and drop stale prior-turn reasoning.
-   * NOTE: the pipeline does NOT use this — resent reasoning is an egress-family
-   * decision made in each `render()` (Anthropic keeps it, OpenAI strips it), and
-   * applying it to a canonical Request would decide for every family at once. */
-  normalized(): this {
-    const messages = stripStaleReasoning(normalizeMessages(this.messages));
-    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), messages });
+  /** A NEW request of the same family (the same subclass) with `patch` applied over the canonical fields. */
+  protected clone(patch: Partial<RequestData>): this {
+    return new (this.constructor as new (d: RequestData) => this)({ ...this.data(), ...patch });
   }
 }

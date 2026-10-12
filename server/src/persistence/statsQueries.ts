@@ -2,12 +2,17 @@ import { and, gt, gte, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import type { DB } from "../db";
 import { requestLogs } from "../db/schema";
 
+/** Bucket label of a request that named no service. */
+export const UNKNOWN_SERVICE_LABEL = "(unknown)";
+
 export interface StatsQuery {
   from?: number; // epoch ms
   to?: number;
 }
 
-export interface StatsSummary {
+/** The counters every aggregate reports: one definition of the column set, so
+ * the SQL totals, the cache seed and the cache's own state cannot disagree. */
+export interface StatsTotals {
   requests: number;
   errors: number;
   promptTokens: number;
@@ -19,7 +24,24 @@ export interface StatsSummary {
   cacheCreationInputTokens: number;
   /** Subset of completionTokens spent on reasoning. */
   reasoningTokens: number;
+}
+
+export interface StatsSummary extends StatsTotals {
   avgLatencyMs: number;
+}
+
+/** The totals of an aggregate row, a missing row or column reading as zero. */
+export function totalsOf(row: Partial<StatsTotals> | undefined): StatsTotals {
+  return {
+    requests: row?.requests ?? 0,
+    errors: row?.errors ?? 0,
+    promptTokens: row?.promptTokens ?? 0,
+    completionTokens: row?.completionTokens ?? 0,
+    totalTokens: row?.totalTokens ?? 0,
+    cachedInputTokens: row?.cachedInputTokens ?? 0,
+    cacheCreationInputTokens: row?.cacheCreationInputTokens ?? 0,
+    reasoningTokens: row?.reasoningTokens ?? 0,
+  };
 }
 
 export interface TimePoint {
@@ -48,26 +70,36 @@ export interface GroupCount {
   totalTokens: number;
 }
 
-/** Everything the StatsCache accumulates, aggregated in one pass over the rows
- * above `sinceId`. Latency comes back as a SUM so the cache can keep adding to
- * it and derive the average by division. */
 /** The UTC day bucket every per-day aggregation groups on. One definition, so
  * the SQL path and the cache seed can never disagree about where a day starts. */
 const DAY_KEY = sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt} / 1000, 'unixepoch')`;
 /** "An error" means the same thing everywhere: a 4xx or 5xx final status. */
 const ERRORS_SUM = sql<number>`coalesce(sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end),0)`;
+/** The model / provider that actually served a request, as bucket keys. */
+const SERVED_MODEL_KEY = sql<string>`${requestLogs.servedModel}`;
+const SERVED_PROVIDER_KEY = sql<string>`${requestLogs.servedProvider}`;
+/** The per-service bucket key: the requested service, or the unknown label. */
+const SERVICE_KEY = sql<string>`coalesce(${requestLogs.requestedService}, ${sql.raw(`'${UNKNOWN_SERVICE_LABEL}'`)})`;
 
-export interface StatsAccumulators {
+/** `count(*)`: the requests column of every aggregate. */
+const REQUEST_COUNT = sql<number>`count(*)`;
+/** The six token columns, summed; spread into a select in this order. */
+const TOKEN_SUMS = {
+  promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
+  completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
+  totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+  cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
+  cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
+  reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
+};
+const LATENCY_SUM = sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`;
+
+/** Everything the StatsCache accumulates, aggregated in one pass over the rows
+ * above `sinceId`. Latency comes back as a SUM so the cache can keep adding to
+ * it and derive the average by division. */
+export interface StatsAccumulators extends StatsTotals {
   /** Highest row id covered (== sinceId when no rows were above it). */
   maxId: number;
-  requests: number;
-  errors: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  cachedInputTokens: number;
-  cacheCreationInputTokens: number;
-  reasoningTokens: number;
   latencySumMs: number;
   byDay: DayCount[];
   byService: GroupCount[];
@@ -95,27 +127,15 @@ export class StatsQueries {
     const where = this.range(q);
     const base = this.db
       .select({
-        requests: sql<number>`count(*)`,
+        requests: REQUEST_COUNT,
         errors: sql<number>`sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end)`,
-        promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
-        completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
-        cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
-        cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
-        reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
+        ...TOKEN_SUMS,
         avgLatencyMs: sql<number>`coalesce(avg(${requestLogs.latencyMs}),0)`,
       })
       .from(requestLogs);
     const r = (where ? base.where(where) : base).get();
     return {
-      requests: r?.requests ?? 0,
-      errors: r?.errors ?? 0,
-      promptTokens: r?.promptTokens ?? 0,
-      completionTokens: r?.completionTokens ?? 0,
-      totalTokens: r?.totalTokens ?? 0,
-      cachedInputTokens: r?.cachedInputTokens ?? 0,
-      cacheCreationInputTokens: r?.cacheCreationInputTokens ?? 0,
-      reasoningTokens: r?.reasoningTokens ?? 0,
+      ...totalsOf(r),
       avgLatencyMs: Math.round(r?.avgLatencyMs ?? 0),
     };
   }
@@ -126,8 +146,8 @@ export class StatsQueries {
     const base = this.db
       .select({
         day,
-        requests: sql<number>`count(*)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        requests: REQUEST_COUNT,
+        totalTokens: TOKEN_SUMS.totalTokens,
         errors: ERRORS_SUM,
         // Rounded in SQL so the wire type is an integer either way -- the cached
         // path rounds too, and a chart that flips between 12 and 12.4 ms across
@@ -140,7 +160,7 @@ export class StatsQueries {
 
   /** Requests + tokens grouped by the requested service name. */
   byService(q: StatsQuery): GroupCount[] {
-    return this.groupBy(this.range(q), sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`);
+    return this.groupBy(this.range(q), SERVICE_KEY);
   }
 
   /**
@@ -153,34 +173,22 @@ export class StatsQueries {
     const totals = this.db
       .select({
         maxId: sql<number>`coalesce(max(${requestLogs.id}),0)`,
-        requests: sql<number>`count(*)`,
-        errors: sql<number>`coalesce(sum(case when ${requestLogs.httpStatus} >= 400 then 1 else 0 end),0)`,
-        promptTokens: sql<number>`coalesce(sum(${requestLogs.promptTokens}),0)`,
-        completionTokens: sql<number>`coalesce(sum(${requestLogs.completionTokens}),0)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
-        cachedInputTokens: sql<number>`coalesce(sum(${requestLogs.cachedInputTokens}),0)`,
-        cacheCreationInputTokens: sql<number>`coalesce(sum(${requestLogs.cacheCreationInputTokens}),0)`,
-        reasoningTokens: sql<number>`coalesce(sum(${requestLogs.reasoningTokens}),0)`,
-        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
+        requests: REQUEST_COUNT,
+        errors: ERRORS_SUM,
+        ...TOKEN_SUMS,
+        latencySumMs: LATENCY_SUM,
       })
       .from(requestLogs)
       .where(above)
       .get();
     return {
       maxId: Math.max(sinceId, totals?.maxId ?? 0),
-      requests: totals?.requests ?? 0,
-      errors: totals?.errors ?? 0,
-      promptTokens: totals?.promptTokens ?? 0,
-      completionTokens: totals?.completionTokens ?? 0,
-      totalTokens: totals?.totalTokens ?? 0,
-      cachedInputTokens: totals?.cachedInputTokens ?? 0,
-      cacheCreationInputTokens: totals?.cacheCreationInputTokens ?? 0,
-      reasoningTokens: totals?.reasoningTokens ?? 0,
+      ...totalsOf(totals),
       latencySumMs: totals?.latencySumMs ?? 0,
       byDay: this.groupByDay(above),
-      byService: this.groupBy(above, sql<string>`coalesce(${requestLogs.requestedService}, '(unknown)')`),
-      byModel: this.groupBy(and(above, isNotNull(requestLogs.servedModel)), sql<string>`${requestLogs.servedModel}`),
-      byProvider: this.groupBy(and(above, isNotNull(requestLogs.servedProvider)), sql<string>`${requestLogs.servedProvider}`),
+      byService: this.groupBy(above, SERVICE_KEY),
+      byModel: this.groupBy(and(above, isNotNull(requestLogs.servedModel)), SERVED_MODEL_KEY),
+      byProvider: this.groupBy(and(above, isNotNull(requestLogs.servedProvider)), SERVED_PROVIDER_KEY),
     };
   }
 
@@ -190,8 +198,8 @@ export class StatsQueries {
     const servedModel = and(range, isNotNull(requestLogs.servedModel));
     const servedProvider = and(range, isNotNull(requestLogs.servedProvider));
     return {
-      models: this.groupBy(servedModel, sql<string>`${requestLogs.servedModel}`),
-      providers: this.groupBy(servedProvider, sql<string>`${requestLogs.servedProvider}`),
+      models: this.groupBy(servedModel, SERVED_MODEL_KEY),
+      providers: this.groupBy(servedProvider, SERVED_PROVIDER_KEY),
     };
   }
 
@@ -202,10 +210,10 @@ export class StatsQueries {
     const base = this.db
       .select({
         key: DAY_KEY,
-        requests: sql<number>`count(*)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        requests: REQUEST_COUNT,
+        totalTokens: TOKEN_SUMS.totalTokens,
         errors: ERRORS_SUM,
-        latencySumMs: sql<number>`coalesce(sum(${requestLogs.latencyMs}),0)`,
+        latencySumMs: LATENCY_SUM,
       })
       .from(requestLogs);
     return (where ? base.where(where) : base).groupBy(DAY_KEY).orderBy(DAY_KEY).all();
@@ -215,8 +223,8 @@ export class StatsQueries {
     const base = this.db
       .select({
         key,
-        requests: sql<number>`count(*)`,
-        totalTokens: sql<number>`coalesce(sum(${requestLogs.totalTokens}),0)`,
+        requests: REQUEST_COUNT,
+        totalTokens: TOKEN_SUMS.totalTokens,
       })
       .from(requestLogs);
     return (where ? base.where(where) : base).groupBy(key).orderBy(sql`count(*) desc`).all();

@@ -1,10 +1,18 @@
 import type { FastifyReply } from "fastify";
+import type { OutgoingHttpHeaders } from "node:http";
+import { HEADER, MIME } from "../util/httpHeaders";
+import { DEFAULT_JSON_COMMIT_GRACE_MS, DEFAULT_STREAM_PING_INTERVAL_MS } from "../config/defaults";
+import { endWith } from "./delivery";
+import type { ProxyDeps } from "./deps";
+import { CommitKeepalive, NO_BUFFER_HEADERS } from "./keepalive";
 
 const JSON_KEEPALIVE_HEADERS = {
-  "content-type": "application/json; charset=utf-8",
-  "cache-control": "no-cache, no-transform",
-  "x-accel-buffering": "no",
+  [HEADER.CONTENT_TYPE]: MIME.JSON_UTF8,
+  ...NO_BUFFER_HEADERS,
 } as const;
+
+/** The whitespace heartbeat: leading whitespace every JSON parser skips. */
+const JSON_HEARTBEAT = "\n";
 
 /**
  * Dead-air guard for a NON-streaming request. A slow upstream (an OCR/vision
@@ -23,46 +31,27 @@ const JSON_KEEPALIVE_HEADERS = {
  * endpoints (service test, OCR test), which wait synchronously on the same
  * slow upstreams.
  */
-export class JsonKeepalive {
-  committed = false;
-  private graceTimer: NodeJS.Timeout | null = null;
-  private pingTimer: NodeJS.Timeout | null = null;
-
-  constructor(
-    private readonly reply: FastifyReply,
-    graceMs: number,
-    private readonly intervalMs: number,
-  ) {
-    if (graceMs <= 0) return;
-    this.graceTimer = setTimeout(() => this.commit(), graceMs);
-    this.graceTimer.unref?.();
+export class JsonKeepalive extends CommitKeepalive {
+  constructor(reply: FastifyReply, graceMs: number, intervalMs: number) {
+    super(reply, intervalMs);
+    if (graceMs > 0) this.arm(graceMs);
   }
 
-  private commit(): void {
-    const raw = this.reply.raw;
-    if (this.committed || raw.destroyed || raw.headersSent) return;
-    this.reply.hijack();
-    raw.writeHead(200, JSON_KEEPALIVE_HEADERS);
-    this.committed = true;
-    raw.write("\n");
-    this.pingTimer = setInterval(() => {
-      if (raw.destroyed || raw.writableEnded) {
-        this.stop();
-        return;
-      }
-      raw.write("\n");
-    }, this.intervalMs);
-    this.pingTimer.unref?.();
+  /** The guard for a client-facing JSON answer, timed by the proxy's settings. */
+  static forClient(reply: FastifyReply, deps: Pick<ProxyDeps, "jsonCommitGraceMs" | "streamPingIntervalMs">): JsonKeepalive {
+    return new JsonKeepalive(
+      reply,
+      deps.jsonCommitGraceMs ?? DEFAULT_JSON_COMMIT_GRACE_MS,
+      deps.streamPingIntervalMs ?? DEFAULT_STREAM_PING_INTERVAL_MS,
+    );
   }
 
-  /** The outcome has arrived: stop the grace/ping timers. */
-  stop(): void {
-    if (this.graceTimer) clearTimeout(this.graceTimer);
-    this.graceTimer = null;
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
+  protected headers(): OutgoingHttpHeaders {
+    return JSON_KEEPALIVE_HEADERS;
+  }
+
+  protected beat(): string {
+    return JSON_HEARTBEAT;
   }
 
   /** Finish a committed response with the handler's JSON body. Returns true
@@ -70,13 +59,7 @@ export class JsonKeepalive {
   finish(body: unknown): boolean {
     this.stop();
     if (!this.committed) return false;
-    const raw = this.reply.raw;
-    try {
-      if (!raw.destroyed && !raw.writableEnded) {
-        raw.write(JSON.stringify(body));
-        raw.end();
-      }
-    } catch { /* the connection died first */ }
+    endWith(this.reply.raw, () => JSON.stringify(body));
     return true;
   }
 }

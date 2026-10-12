@@ -1,17 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { requireSession } from "../auth/middleware";
 import type { Container } from "../composition/container";
-import { benchRoutes } from "./benchRoutes";
-import { hostedToolRoutes } from "./hostedToolRoutes";
-import { proxyRoutes } from "./proxyRoutes";
 
 import { activeRequestRoutes } from "./admin/activeRequestRoutes";
 import { authRoutes } from "./admin/authRoutes";
 import { backupRoutes } from "./admin/backupRoutes";
+import { benchRoutes } from "./admin/benchRoutes";
 import { catalogRoutes } from "./admin/catalogRoutes";
 import { checkRoutes } from "./admin/checkRoutes";
+import { hostedToolRoutes } from "./admin/hostedToolRoutes";
 import { logRoutes } from "./admin/logRoutes";
 import { providerRoutes } from "./admin/providerRoutes";
+import { proxyRoutes } from "./admin/proxyRoutes";
 import { serviceRoutes } from "./admin/serviceRoutes";
 import { settingsRoutes } from "./admin/settingsRoutes";
 import { tokenRoutes } from "./admin/tokenRoutes";

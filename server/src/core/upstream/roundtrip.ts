@@ -1,9 +1,9 @@
-import { StringDecoder } from "node:string_decoder";
 import type { Request } from "../ir/request";
-import { buildResponse, parseResponse, parseStream } from "../format/registry";
-import { collectStream } from "../ir/stream";
-import type { SendTarget, Transport } from "./transport";
-import type { RelayResult, SendResult } from "./outcome";
+import { buildResponse, parseResponse, parseStream, responseBodyFault } from "../format/registry";
+import { collectStream, decodeUtf8 } from "../ir/stream";
+import type { SendTarget, Transport, TransportStreamResult } from "./transport";
+import type { RelayResult, SendFailure, SendResult } from "./outcome";
+import { STATUS_UPSTREAM_FAILURE, isSuccessStatus } from "../../util/httpStatus";
 
 /**
  * The shared wire round-trip behind every Request subclass's `send`/`relay`. The
@@ -21,13 +21,9 @@ import type { RelayResult, SendResult } from "./outcome";
  */
 
 async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown> {
-  // Decode across chunk boundaries: a per-chunk toString() mangles any multi-byte
-  // character split between two chunks.
-  const decoder = new StringDecoder("utf8");
   let text = "";
   try {
-    for await (const chunk of body) text += typeof chunk === "string" ? chunk : decoder.write(chunk);
-    text += decoder.end();
+    for await (const chunk of decodeUtf8(body)) text += chunk;
   } catch {
     /* ignore */
   }
@@ -38,6 +34,32 @@ async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown
   }
 }
 
+/** A 2xx the proxy itself judged not to be an answer -- reported as 502 so a step's numeric 502 trigger matches it. */
+function upstreamFault(message: string, sentBody: Record<string, unknown>, body?: unknown): SendFailure {
+  return { ok: false, status: STATUS_UPSTREAM_FAILURE, kind: "http", message, ...(body !== undefined ? { body } : {}), sentBody };
+}
+
+/** The upstream answered with a non-2xx status; `body` is whatever it said. */
+function upstreamRejection(status: number, body: unknown, sentBody: Record<string, unknown>): SendFailure {
+  return { ok: false, status, kind: "http", message: `upstream returned ${status}`, body, sentBody };
+}
+
+/**
+ * POST the rendered request as a stream; a non-2xx reply is drained into the
+ * failure it becomes. (The transport options are spelled out at each call on
+ * purpose: that every provider-addressed call names its `proxy` is checked
+ * structurally, by test/egressProxy.test.ts.)
+ */
+async function openStream(
+  transport: Transport,
+  target: SendTarget,
+  sentBody: Record<string, unknown>,
+): Promise<{ ok: true; reply: TransportStreamResult } | SendFailure> {
+  const reply = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
+  if (isSuccessStatus(reply.status)) return { ok: true, reply };
+  return upstreamRejection(reply.status, await drainError(reply.body), sentBody);
+}
+
 /**
  * Buffer an upstream response into one complete Response. When the request's
  * `stream` flag is true, the upstream is streamed and collected via SSE parsing
@@ -46,49 +68,37 @@ async function drainError(body: AsyncIterable<Buffer | string>): Promise<unknown
  * parsed directly -- no stream to truncate.
  */
 export async function sendBuffered(req: Request, transport: Transport, target: SendTarget): Promise<SendResult> {
+  const sentBody = req.render(target);
   if (req.stream) {
-    const sentBody = req.render(target);
-    const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
-    if (r.status >= 200 && r.status < 300) {
-      // A consumption error throws and is mapped to a retryable failure upstream.
-      const { data, incomplete } = await collectStream(parseStream(req.family, r.body));
-      // A truncated stream (no terminal event) is a failure, not a usage-less
-      // "success" -- reported as 502 so a step's numeric 502 trigger matches it.
-      if (incomplete) {
-        return { ok: false, status: 502, kind: "http", message: "upstream stream ended before completion (truncated)", sentBody };
-      }
-      return { ok: true, response: buildResponse(req.family, data), sentBody };
-    }
-    return { ok: false, status: r.status, kind: "http", message: `upstream returned ${r.status}`, body: await drainError(r.body), sentBody };
+    const opened = await openStream(transport, target, sentBody);
+    if (!opened.ok) return opened;
+    // A consumption error throws and is mapped to a retryable failure upstream.
+    const { data, incomplete } = await collectStream(parseStream(req.family, opened.reply.body));
+    // A truncated stream (no terminal event) is a failure, not a usage-less "success".
+    if (incomplete) return upstreamFault("upstream stream ended before completion (truncated)", sentBody);
+    return { ok: true, response: buildResponse(req.family, data), sentBody };
   }
   // Non-streaming path: send stream=false, get a complete JSON response.
-  const sentBody = req.render(target);
   const r = await transport.postJson(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
-  if (r.status >= 200 && r.status < 300) {
-    const body = r.json as Record<string, unknown> | undefined;
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return { ok: false, status: 502, kind: "http", message: "upstream returned empty or invalid JSON body", sentBody };
-    }
-    if (body.error != null || (req.family === "openai_responses" && (body.status === "failed" || body.status === "cancelled" || body.status === "queued" || body.status === "in_progress"))) {
-      const error = body.error as Record<string, unknown> | undefined;
-      return { ok: false, status: 502, kind: "http", message: typeof error?.message === "string" ? error.message : "upstream response did not complete", body, sentBody };
-    }
-    const hasEnvelope = req.family === "openai_completion" ? Array.isArray(body.choices) && body.choices.length > 0
-      : req.family === "anthropic" ? Array.isArray(body.content)
-      : Array.isArray(body.output);
-    if (!hasEnvelope) return { ok: false, status: 502, kind: "http", message: `upstream returned invalid ${req.family} response`, body, sentBody };
-    return { ok: true, response: parseResponse(req.family, body), sentBody };
+  if (!isSuccessStatus(r.status)) return upstreamRejection(r.status, r.json ?? r.text, sentBody);
+  const body = r.json as Record<string, unknown> | undefined;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return upstreamFault("upstream returned empty or invalid JSON body", sentBody);
   }
-  const errBody = r.json ?? r.text;
-  return { ok: false, status: r.status, kind: "http", message: `upstream returned ${r.status}`, body: errBody, sentBody };
+  // What makes a body this family's answer is the family's own knowledge (see the format registry).
+  const fault = responseBodyFault(req.family, body);
+  if (fault === "unfinished") {
+    const error = body.error as Record<string, unknown> | undefined;
+    return upstreamFault(typeof error?.message === "string" ? error.message : "upstream response did not complete", sentBody, body);
+  }
+  if (fault === "invalid") return upstreamFault(`upstream returned invalid ${req.family} response`, sentBody, body);
+  return { ok: true, response: parseResponse(req.family, body), sentBody };
 }
 
 /** Return the committed live event stream for a streaming client relay. */
 export async function relayStream(req: Request, transport: Transport, target: SendTarget): Promise<RelayResult> {
   const sentBody = req.withStream(true).render(target);
-  const r = await transport.postStream(target.url, target.headers, sentBody, { timeoutMs: target.timeoutMs, signal: target.signal, proxy: target.proxy });
-  if (r.status >= 200 && r.status < 300) {
-    return { ok: true, status: r.status, events: parseStream(req.family, r.body), sentBody };
-  }
-  return { ok: false, status: r.status, kind: "http", message: `upstream returned ${r.status}`, body: await drainError(r.body), sentBody };
+  const opened = await openStream(transport, target, sentBody);
+  if (!opened.ok) return opened;
+  return { ok: true, status: opened.reply.status, events: parseStream(req.family, opened.reply.body), sentBody };
 }

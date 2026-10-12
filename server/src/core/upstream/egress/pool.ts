@@ -1,8 +1,8 @@
 import { ProxyAgent, type Dispatcher } from "undici";
-import type { LookupAddress, LookupOptions } from "node:dns";
-import type { ResolvedAddress } from "../ssrf";
+import type { LookupOptions } from "node:dns";
+import { answerLookup, PIN_TTL_MS, type LookupCallback, type ResolvedAddress } from "../ssrf";
 import { resolveProxyHost } from "./proxyHost";
-import { proxyKey, proxyLabel, proxyOrigin, type EgressProxy } from "./types";
+import { proxyHostName, proxyKey, proxyLabel, proxyOrigin, type EgressProxy } from "./types";
 
 /**
  * One `ProxyAgent` per distinct proxy configuration, cached.
@@ -40,9 +40,6 @@ import { proxyKey, proxyLabel, proxyOrigin, type EgressProxy } from "./types";
  * order (see the re-insert in dispatcherFor), so eviction takes the coldest. */
 const MAX_DISPATCHERS = 32;
 
-/** How long a proxy-host resolution stays pinned. Matches the direct path. */
-const PIN_TTL_MS = 30_000;
-
 interface Entry {
   dispatcher: Dispatcher;
   /** Addresses the proxy host validated to, and when they go stale. */
@@ -78,23 +75,18 @@ export class EgressProxyPool {
 
     const addresses = await resolveProxyHost(proxy);
 
-    if (existing && this.entries.get(key) === existing) {
-      // Same proxy, stale pin: refresh the addresses in place. The dispatcher
-      // (and its pooled sockets) is still valid -- the lookup closure reads
-      // this entry, so updating it is what re-points any reconnect.
-      existing.addresses = addresses;
-      existing.expiresAt = Date.now() + PIN_TTL_MS;
-      return existing.dispatcher;
-    }
-
-    // `resolveProxyHost` awaited, so another request may have built this same
-    // dispatcher while we were resolving. Without this check both would build
-    // one and the loser's would be dropped from the map still holding sockets.
-    const raced = this.entries.get(key);
-    if (raced) {
-      raced.addresses = addresses;
-      raced.expiresAt = Date.now() + PIN_TTL_MS;
-      return raced.dispatcher;
+    // Whatever is in the map NOW is refreshed in place rather than replaced.
+    // That is the same proxy with a stale pin -- its dispatcher (and pooled
+    // sockets) is still valid, and the lookup closure reads the entry, so
+    // updating it is what re-points any reconnect -- or it is a dispatcher
+    // another request built while `resolveProxyHost` was awaited here. Without
+    // the second case both would build one and the loser's would be dropped
+    // from the map still holding sockets.
+    const current = this.entries.get(key);
+    if (current) {
+      current.addresses = addresses;
+      current.expiresAt = Date.now() + PIN_TTL_MS;
+      return current.dispatcher;
     }
 
     const entry: Entry = { dispatcher: undefined as unknown as Dispatcher, addresses, expiresAt: Date.now() + PIN_TTL_MS };
@@ -127,23 +119,13 @@ export class EgressProxyPool {
     proxy: EgressProxy,
     hostname: string,
     options: LookupOptions,
-    callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+    callback: LookupCallback,
   ): void {
-    const expected = proxy.host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-    if (hostname.toLowerCase() !== expected) {
+    if (hostname.toLowerCase() !== proxyHostName(proxy)) {
       callback(new Error(`proxy dispatcher asked to resolve "${hostname}", which is not proxy ${proxyLabel(proxy)}`), "");
       return;
     }
-    const { addresses } = entry;
-    if (addresses.length === 0) {
-      callback(new Error(`no validated address for proxy ${proxyLabel(proxy)}`), "");
-      return;
-    }
-    if (options && options.all) {
-      callback(null, addresses.map((a) => ({ address: a.address, family: a.family })));
-    } else {
-      callback(null, addresses[0].address, addresses[0].family);
-    }
+    answerLookup(entry.addresses, options, callback, () => new Error(`no validated address for proxy ${proxyLabel(proxy)}`));
   }
 
   private evictOldest(): void {

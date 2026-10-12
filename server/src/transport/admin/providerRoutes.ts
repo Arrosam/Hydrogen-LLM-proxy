@@ -4,7 +4,13 @@ import { requireAdmin } from "../../auth/authorization";
 import { discoverModels, MAX_DISCOVERED_MODELS, MAX_MODEL_ID_LENGTH } from "../../catalog/modelDiscovery";
 import type { Container } from "../../composition/container";
 import { FAMILIES } from "../../core/ir/params";
-import { idParam, parse } from "../../util/validate";
+import { HTTP_STATUS } from "../../util/httpStatus";
+import { MAX_NAME_LENGTH } from "../limits";
+import { loadById, notFound, parseBody } from "./replies";
+import { PositiveIntSchema } from "../../util/validate";
+
+/** Alternate endpoints a provider may declare beside its primary. */
+const MAX_ALT_ENDPOINTS = 4;
 
 // --- providers --------------------------------------------------------------
 
@@ -13,7 +19,10 @@ const HeadersSchema = z.record(z.string(), z.string()).nullable().optional();
 const BaseUrlSchema = z
   .string()
   .url()
-  .refine((u) => /^https?:$/.test(new URL(u).protocol), { message: "baseUrl must use http or https" });
+  // zod still runs a refinement on a string `.url()` has already refused, so
+  // the scheme is only judged on something that parses (a non-URL keeps the
+  // one "Invalid url" issue instead of throwing out of the schema).
+  .refine((u) => !URL.canParse(u) || /^https?:$/.test(new URL(u).protocol), { message: "baseUrl must use http or https" });
 
 /** The model list captured from a provider test, persisted alongside the save.
  * Omitted = leave whatever is stored alone; `[]` = the provider reported none. */
@@ -22,50 +31,35 @@ const AvailableModelsSchema = z
   .max(MAX_DISCOVERED_MODELS)
   .optional();
 
-const AltEndpointsSchema = z.array(z.object({ type: TypeSchema, baseUrl: BaseUrlSchema })).max(4).nullable().optional();
+const AltEndpointsSchema = z.array(z.object({ type: TypeSchema, baseUrl: BaseUrlSchema })).max(MAX_ALT_ENDPOINTS).nullable().optional();
 const ProviderCreate = z.object({
-  name: z.string().min(1).max(120),
+  name: z.string().min(1).max(MAX_NAME_LENGTH),
   type: TypeSchema,
   baseUrl: BaseUrlSchema,
   altEndpoints: AltEndpointsSchema,
   apiKey: z.string().nullable().optional(),
   extraHeaders: HeadersSchema,
-  maxOutputTokens: z.number().int().positive().nullable().optional(),
+  maxOutputTokens: PositiveIntSchema.nullable().optional(),
   /** Route this provider's upstream traffic through a saved proxy. null = direct. */
-  proxyId: z.number().int().positive().nullable().optional(),
+  proxyId: PositiveIntSchema.nullable().optional(),
   enabled: z.boolean().optional(),
   availableModels: AvailableModelsSchema,
 });
-const ProviderUpdate = z.object({
-  name: z.string().min(1).max(120).optional(),
-  type: TypeSchema.optional(),
-  baseUrl: BaseUrlSchema.optional(),
-  altEndpoints: AltEndpointsSchema,
-  apiKey: z.string().nullable().optional(),
-  extraHeaders: HeadersSchema,
-  maxOutputTokens: z.number().int().positive().nullable().optional(),
-  /** Route this provider's upstream traffic through a saved proxy. null = direct. */
-  proxyId: z.number().int().positive().nullable().optional(),
-  enabled: z.boolean().optional(),
-  availableModels: AvailableModelsSchema,
-});
+const ProviderUpdate = ProviderCreate.partial();
 
 /**
  * A provider test runs against the form in front of the user, not against what
  * is stored — that is the whole point of testing before saving. `id` is only
  * consulted to reuse the saved key when the key field was left blank (the
  * dashboard never sends a key it doesn't have the plaintext for).
+ *
+ * `proxyId` tests through that saved proxy; omitted on an existing provider =
+ * the one it is already attached to. An id, never a host: nothing a caller
+ * writes can become a proxy address, only select an existing row.
  */
 const ProviderTest = z.object({
-  id: z.number().int().positive().optional(),
-  type: TypeSchema,
-  baseUrl: BaseUrlSchema,
-  apiKey: z.string().nullable().optional(),
-  extraHeaders: HeadersSchema,
-  /** Test through this saved proxy. Omitted on an existing provider = the one
-   * it is already attached to. An id, never a host: nothing a caller writes can
-   * become a proxy address, only select an existing row. */
-  proxyId: z.number().int().positive().nullable().optional(),
+  id: PositiveIntSchema.optional(),
+  ...ProviderCreate.pick({ type: true, baseUrl: true, apiKey: true, extraHeaders: true, proxyId: true }).shape,
 });
 
 /**
@@ -81,33 +75,31 @@ export async function providerRoutes(app: FastifyInstance, c: Container): Promis
 
   app.post("/", async (req, reply) => {
     if (!requireAdmin(req, reply, "create providers")) return reply;
-    const parsed = parse(ProviderCreate, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const { availableModels, ...input } = parsed.data;
+    const data = parseBody(ProviderCreate, req, reply);
+    if (!data) return reply;
+    const { availableModels, ...input } = data;
     const provider = c.providers.create(input);
     if (availableModels) c.providerModels.replaceForProvider(provider.id, availableModels);
-    return reply.code(201).send({ provider: c.providers.toPublic(provider) });
+    return reply.code(HTTP_STATUS.CREATED).send({ provider: c.providers.toPublic(provider) });
   });
 
   app.patch("/:id", async (req, reply) => {
     if (!requireAdmin(req, reply, "modify providers")) return reply;
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
-    const parsed = parse(ProviderUpdate, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const { availableModels, ...input } = parsed.data;
-    const provider = c.providers.update(id, input);
-    if (availableModels) c.providerModels.replaceForProvider(id, availableModels);
+    const hit = loadById(req, reply, (id) => c.providers.get(id));
+    if (!hit) return reply;
+    const data = parseBody(ProviderUpdate, req, reply);
+    if (!data) return reply;
+    const { availableModels, ...input } = data;
+    const provider = c.providers.update(hit.id, input);
+    if (availableModels) c.providerModels.replaceForProvider(hit.id, availableModels);
     return { provider: provider ? c.providers.toPublic(provider) : null };
   });
 
   app.delete("/:id", async (req, reply) => {
     if (!requireAdmin(req, reply, "delete providers")) return reply;
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
-    c.providers.delete(id);
+    const hit = loadById(req, reply, (id) => c.providers.get(id));
+    if (!hit) return reply;
+    c.providers.delete(hit.id);
     return { ok: true };
   });
 
@@ -117,14 +109,14 @@ export async function providerRoutes(app: FastifyInstance, c: Container): Promis
    * own key is open to any dashboard user; re-using a STORED key is admin-only,
    * because it sends that decrypted credential to the caller's baseUrl. */
   app.post("/test", async (req, reply) => {
-    const parsed = parse(ProviderTest, req.body);
-    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-    const { id, type, baseUrl, apiKey, extraHeaders, proxyId } = parsed.data;
+    const data = parseBody(ProviderTest, req, reply);
+    if (!data) return reply;
+    const { id, type, baseUrl, apiKey, extraHeaders, proxyId } = data;
     let key = apiKey ?? null;
     const stored = id !== undefined ? c.providers.get(id) : undefined;
     if (apiKey === undefined && id !== undefined) {
       if (!requireAdmin(req, reply, "test a provider with its stored key")) return reply;
-      if (!stored) return reply.code(404).send({ error: "not found" });
+      if (!stored) return notFound(reply);
       key = c.providers.toUpstream(stored).apiKey;
     }
     // The test has to take the SAME route a real call would, for two reasons:
@@ -139,9 +131,8 @@ export async function providerRoutes(app: FastifyInstance, c: Container): Promis
 
   /** The stored list for one provider. */
   app.get("/:id/available-models", async (req, reply) => {
-    const id = idParam(req);
-    if (!id) return reply.code(400).send({ error: "invalid id" });
-    if (!c.providers.get(id)) return reply.code(404).send({ error: "not found" });
-    return c.providerModels.forProvider(id);
+    const hit = loadById(req, reply, (id) => c.providers.get(id));
+    if (!hit) return reply;
+    return c.providerModels.forProvider(hit.id);
   });
 }

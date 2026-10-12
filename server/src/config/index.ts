@@ -2,6 +2,39 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import {
+  DEFAULT_IMAGE_CACHE_MAX_BYTES,
+  DEFAULT_JSON_COMMIT_GRACE_MS,
+  DEFAULT_LOG_PAYLOAD_MAX_CHARS,
+  DEFAULT_SESSION_TTL,
+  DEFAULT_SIMULATED_STREAMING_TOKEN_RATE,
+  DEFAULT_STREAM_COMMIT_GRACE_MS,
+  DEFAULT_STREAM_PING_INTERVAL_MS,
+} from "./defaults";
+import { AES_256_KEY_BYTES } from "../security/crypto";
+import { formatZodIssues } from "../util/validate";
+import { MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, MS_PER_SECOND } from "../util/time";
+
+const DEFAULT_PORT = 8080;
+const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_DATA_DIR = "./data";
+const DEFAULT_ADMIN_USERNAME = "admin";
+const DEFAULT_UPDATE_REPO = "Arrosam/Hydrogen-LLM-proxy";
+
+/** Boolean env spellings that mean "on" (case-insensitive). */
+const TRUTHY_ENV_PATTERN = /^(1|true|yes|on)$/i;
+/** TRUST_PROXY spellings, tested against the trimmed, lower-cased value. */
+const TRUST_PROXY_TRUE_PATTERN = /^(1|true|yes|on)$/;
+const TRUST_PROXY_FALSE_PATTERN = /^(|0|false|no|off)$/;
+const TRUST_PROXY_HOPS_PATTERN = /^\d+$/;
+
+const MASTER_KEY_BYTES = AES_256_KEY_BYTES;
+/** A hex-encoded master key: two hex digits per key byte. */
+const MASTER_KEY_HEX_PATTERN = new RegExp(`^[0-9a-fA-F]{${MASTER_KEY_BYTES * 2}}$`);
+const SESSION_SECRET_BYTES = 48;
+const MIN_SESSION_SECRET_CHARS = 16;
+/** Owner read/write only. */
+const SECRETS_FILE_MODE = 0o600;
 
 /**
  * Parse a human duration like "12h", "30m", "45s", "7d" into milliseconds.
@@ -14,10 +47,10 @@ function parseDuration(input: string): number {
   const unit = m[2] ?? "ms";
   const factor: Record<string, number> = {
     ms: 1,
-    s: 1000,
-    m: 60_000,
-    h: 3_600_000,
-    d: 86_400_000,
+    s: MS_PER_SECOND,
+    m: MS_PER_MINUTE,
+    h: MS_PER_HOUR,
+    d: MS_PER_DAY,
   };
   return value * factor[unit];
 }
@@ -32,9 +65,9 @@ function parseDuration(input: string): number {
  */
 function parseTrustProxy(raw: string): boolean | number {
   const s = raw.trim().toLowerCase();
-  if (/^(1|true|yes|on)$/.test(s)) return true;
-  if (/^(|0|false|no|off)$/.test(s)) return false;
-  if (/^\d+$/.test(s)) {
+  if (TRUST_PROXY_TRUE_PATTERN.test(s)) return true;
+  if (TRUST_PROXY_FALSE_PATTERN.test(s)) return false;
+  if (TRUST_PROXY_HOPS_PATTERN.test(s)) {
     const n = Number(s);
     if (n >= 1 && Number.isInteger(n)) return n;
   }
@@ -46,9 +79,9 @@ function parseTrustProxy(raw: string): boolean | number {
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("production"),
-  PORT: z.coerce.number().int().positive().default(8080),
-  HOST: z.string().default("0.0.0.0"),
-  DATA_DIR: z.string().default("./data"),
+  PORT: z.coerce.number().int().positive().default(DEFAULT_PORT),
+  HOST: z.string().default(DEFAULT_HOST),
+  DATA_DIR: z.string().default(DEFAULT_DATA_DIR),
 
   // Whether (and how far) to honour X-Forwarded-* headers. "false" (default)
   // trusts nothing, which is the safe setting when the port is exposed
@@ -61,12 +94,12 @@ const EnvSchema = z.object({
   PROXY_MASTER_KEY: z.string().optional().default(""),
   SESSION_SECRET: z.string().optional().default(""),
 
-  ADMIN_USERNAME: z.string().min(1).default("admin"),
+  ADMIN_USERNAME: z.string().min(1).default(DEFAULT_ADMIN_USERNAME),
   // Blank: a temporary password is generated and printed on first boot.
   ADMIN_PASSWORD: z.string().optional().default(""),
 
-  SESSION_TTL: z.string().default("12h"),
-  LOG_PAYLOAD_MAX_CHARS: z.coerce.number().int().nonnegative().default(100000),
+  SESSION_TTL: z.string().default(DEFAULT_SESSION_TTL),
+  LOG_PAYLOAD_MAX_CHARS: z.coerce.number().int().nonnegative().default(DEFAULT_LOG_PAYLOAD_MAX_CHARS),
   // Session cookie Secure flag: "auto" = set only on HTTPS requests (via
   // X-Forwarded-Proto). Use "false" behind a plain-HTTP proxy, "true" to force.
   COOKIE_SECURE: z.enum(["auto", "true", "false"]).default("auto"),
@@ -79,11 +112,11 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .default("false")
-    .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
+    .transform((v) => TRUTHY_ENV_PATTERN.test(v.trim())),
   // Simulated streaming token rate (tokens/second) used when Reliable Streaming
   // is enabled. The proxy buffers the complete upstream response, then replays
   // it as a paced SSE stream at this rate. Default 2000 tok/s.
-  SIMULATED_STREAMING_TOKEN_RATE: z.coerce.number().int().positive().default(2000),
+  SIMULATED_STREAMING_TOKEN_RATE: z.coerce.number().int().positive().default(DEFAULT_SIMULATED_STREAMING_TOKEN_RATE),
   // Dead-air guard for streaming requests. A buffering executor (Micro Agent,
   // Reliable Streaming) or a slow upstream first token can be silent for
   // minutes, and intermediaries kill silent connections long before that. If a
@@ -91,14 +124,14 @@ const EnvSchema = z.object({
   // commits the SSE response and emits keep-alive pings until it has one; a
   // failure after that point is delivered as the protocol's in-stream error
   // event. Failures faster than the grace window keep their real HTTP status.
-  STREAM_COMMIT_GRACE_MS: z.coerce.number().int().positive().default(2_500),
-  STREAM_PING_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
+  STREAM_COMMIT_GRACE_MS: z.coerce.number().int().positive().default(DEFAULT_STREAM_COMMIT_GRACE_MS),
+  STREAM_PING_INTERVAL_MS: z.coerce.number().int().positive().default(DEFAULT_STREAM_PING_INTERVAL_MS),
   // Storage budget for the OCR image-description cache, in bytes. A Micro Agent
   // that runs an image-translation pre-pass remembers each image's description
   // by content hash and skips the model on a repeat; when the budget is
   // exceeded, least-recently-used entries are evicted to make room. 0 turns the
   // cache off. Default 64 MiB. Overridable at runtime from the dashboard.
-  IMAGE_CACHE_MAX_BYTES: z.coerce.number().int().nonnegative().default(64 * 1024 * 1024),
+  IMAGE_CACHE_MAX_BYTES: z.coerce.number().int().nonnegative().default(DEFAULT_IMAGE_CACHE_MAX_BYTES),
   // Dead-air guard for NON-streaming chat requests (OCR/vision answers can
   // take minutes; Cloudflare kills a silent origin at ~100s with a 524). If a
   // JSON response has produced no outcome within this window, the proxy
@@ -107,12 +140,12 @@ const EnvSchema = z.object({
   // Anthropic's own API uses for long non-streaming requests. A failure after
   // that point is delivered as an error JSON body on the committed 200 (the
   // log keeps the semantic status). 0 disables the guard entirely.
-  JSON_COMMIT_GRACE_MS: z.coerce.number().int().nonnegative().default(30_000),
+  JSON_COMMIT_GRACE_MS: z.coerce.number().int().nonnegative().default(DEFAULT_JSON_COMMIT_GRACE_MS),
   // GitHub repo ("owner/name") the Settings page checks for new releases.
   // Point a fork at itself so its own tags drive the update banner.
   UPDATE_REPO: z
     .string()
-    .default("Arrosam/Hydrogen-LLM-proxy")
+    .default(DEFAULT_UPDATE_REPO)
     .refine((v) => /^[\w.-]+\/[\w.-]+$/.test(v), "UPDATE_REPO must be owner/name"),
   // Remote restart is deliberately opt-in. Enabling it asserts that an
   // external supervisor will both restart the process and deploy the intended
@@ -121,7 +154,7 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .default("false")
-    .transform((v) => /^(1|true|yes|on)$/i.test(v.trim())),
+    .transform((v) => TRUTHY_ENV_PATTERN.test(v.trim())),
 });
 
 
@@ -156,10 +189,7 @@ export interface AppConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
-      .join("\n");
-    throw new Error(`Invalid environment configuration:\n${issues}`);
+    throw new Error(`Invalid environment configuration:\n${formatZodIssues(parsed.error.issues, "\n", "  - ")}`);
   }
   const e = parsed.data;
 
@@ -195,15 +225,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
  */
 function decodeMasterKey(raw: string): Buffer {
   let key: Buffer | null = null;
-  // Try base64 first.
-  try {
-    const b = Buffer.from(raw, "base64");
-    if (b.length === 32) key = b;
-  } catch {
-    /* ignore */
-  }
+  // Try base64 first. (Buffer.from never throws on a string: characters that
+  // are not base64 are skipped, so a wrong value shows up as a wrong length.)
+  const b = Buffer.from(raw, "base64");
+  if (b.length === MASTER_KEY_BYTES) key = b;
   // Then hex.
-  if (!key && /^[0-9a-fA-F]{64}$/.test(raw)) {
+  if (!key && MASTER_KEY_HEX_PATTERN.test(raw)) {
     key = Buffer.from(raw, "hex");
   }
   if (!key) {
@@ -241,9 +268,9 @@ function readStoredSecrets(dataDir: string): StoredSecrets {
 function writeStoredSecrets(dataDir: string, secrets: StoredSecrets): void {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = secretsPath(dataDir);
-  fs.writeFileSync(file, JSON.stringify(secrets, null, 2), { mode: 0o600 });
+  fs.writeFileSync(file, JSON.stringify(secrets, null, 2), { mode: SECRETS_FILE_MODE });
   try {
-    fs.chmodSync(file, 0o600); // best-effort; a no-op on Windows
+    fs.chmodSync(file, SECRETS_FILE_MODE); // best-effort; a no-op on Windows
   } catch {
     /* ignore */
   }
@@ -265,7 +292,7 @@ function resolveSecrets(
   } else if (stored.masterKey) {
     masterKey = decodeMasterKey(stored.masterKey);
   } else {
-    masterKey = crypto.randomBytes(32);
+    masterKey = crypto.randomBytes(MASTER_KEY_BYTES);
     stored.masterKey = masterKey.toString("base64");
     dirty = true;
     generated.push("PROXY_MASTER_KEY");
@@ -274,14 +301,14 @@ function resolveSecrets(
   // Session secret: env > persisted > generate.
   let sessionSecret: string;
   if (envSessionSecret.trim()) {
-    if (envSessionSecret.trim().length < 16) {
+    if (envSessionSecret.trim().length < MIN_SESSION_SECRET_CHARS) {
       throw new Error("SESSION_SECRET must be at least 16 characters.");
     }
     sessionSecret = envSessionSecret.trim();
   } else if (stored.sessionSecret) {
     sessionSecret = stored.sessionSecret;
   } else {
-    sessionSecret = crypto.randomBytes(48).toString("base64");
+    sessionSecret = crypto.randomBytes(SESSION_SECRET_BYTES).toString("base64");
     stored.sessionSecret = sessionSecret;
     dirty = true;
     generated.push("SESSION_SECRET");

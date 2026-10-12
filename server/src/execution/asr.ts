@@ -3,8 +3,17 @@ import { buildHeaders, transcriptionsUrl } from "../core/upstream/endpoints";
 import { extractUpstreamMessage } from "../core/proxy/errors";
 import { runSteps, type RunOutput } from "./steps";
 import type { ServiceSteps } from "./definition";
-import { MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
+import { constrainedErrorMessage, MEDIA_FAMILIES, type Catalog } from "../catalog/catalog";
 import type { Transport } from "../core/upstream/transport";
+import { HEADER, MIME } from "../util/httpHeaders";
+import { isSuccessStatus } from "../util/httpStatus";
+
+/** Container format assumed when the client names none, or names one unsafe to frame. */
+export const DEFAULT_AUDIO_FORMAT = "wav";
+/** A format hint safe to splice into a multipart header line: a short alphanumeric token. */
+const SAFE_AUDIO_FORMAT_PATTERN = /^[a-z0-9]{1,12}$/;
+/** Random bytes behind the multipart boundary. */
+const BOUNDARY_RANDOM_BYTES = 12;
 
 /**
  * ASR pre-pass transport: turn one audio attachment into text through an
@@ -39,13 +48,13 @@ export function audioHash(a: AudioInput): string {
  */
 export function safeAudioFormat(raw: string): string {
   const v = raw.trim().toLowerCase();
-  return /^[a-z0-9]{1,12}$/.test(v) ? v : "wav";
+  return SAFE_AUDIO_FORMAT_PATTERN.test(v) ? v : DEFAULT_AUDIO_FORMAT;
 }
 
 /** Frame a minimal multipart/form-data body: the model field + one audio file. */
 export function buildTranscriptionForm(model: string, audio: AudioInput): { body: Buffer; contentType: string } {
-  const boundary = "hydrogen-asr-" + crypto.randomBytes(12).toString("hex");
-  const format = safeAudioFormat(audio.format || "wav");
+  const boundary = "hydrogen-asr-" + crypto.randomBytes(BOUNDARY_RANDOM_BYTES).toString("hex");
+  const format = safeAudioFormat(audio.format);
   const nl = "\r\n";
   const head =
     `--${boundary}${nl}Content-Disposition: form-data; name="model"${nl}${nl}${model}${nl}` +
@@ -54,7 +63,7 @@ export function buildTranscriptionForm(model: string, audio: AudioInput): { body
   const tail = `${nl}--${boundary}--${nl}`;
   return {
     body: Buffer.concat([Buffer.from(head, "utf8"), Buffer.from(audio.data, "base64"), Buffer.from(tail, "utf8")]),
-    contentType: `multipart/form-data; boundary=${boundary}`,
+    contentType: `${MIME.MULTIPART_FORM_DATA}; boundary=${boundary}`,
   };
 }
 
@@ -71,10 +80,7 @@ export async function transcribeAudio(
     // a declared alternate.
     const res = deps.catalog.resolveWithin(step.model, step.provider, MEDIA_FAMILIES);
     if (!res.ok) {
-      const message =
-        res.error === "no_endpoint_in_family"
-          ? `audio transcription (ASR) requires an OpenAI-compatible endpoint: ${step.model}@${step.provider} has none enabled (add an OpenAI alternate endpoint to the provider and enable it on the mapping)`
-          : `mapping ${step.model}@${step.provider}: ${res.error}`;
+      const message = constrainedErrorMessage(step.model, step.provider, res.error, "audio transcription (ASR)");
       return { ok: false, status: 0, kind: "error", message };
     }
     if (!deps.transport.postRaw) {
@@ -82,13 +88,13 @@ export async function transcribeAudio(
     }
     const { body, contentType } = buildTranscriptionForm(res.target.upstreamModel, audio);
     const headers = buildHeaders(res.target.upstream);
-    headers["content-type"] = contentType;
+    headers[HEADER.CONTENT_TYPE] = contentType;
     const r = await deps.transport.postRaw(transcriptionsUrl(res.target.upstream), headers, body, {
       timeoutMs: opts.timeoutMs ?? def.timeoutMs,
       signal: opts.signal,
       proxy: res.target.upstream.proxy,
     });
-    if (r.status >= 200 && r.status < 300) {
+    if (isSuccessStatus(r.status)) {
       const json = r.json as { text?: unknown } | undefined;
       const text = typeof json?.text === "string" ? json.text : r.text;
       return { ok: true, value: text.trim() };

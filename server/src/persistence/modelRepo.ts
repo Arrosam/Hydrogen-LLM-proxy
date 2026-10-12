@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
 import type { DB } from "../db";
 import { models, type Model } from "../db/schema";
+import { pickDefined, TableRepo } from "./tableRepo";
 
 export interface ModelInput {
   name: string;
@@ -9,19 +9,13 @@ export interface ModelInput {
 }
 
 /** Internal model catalog. Models are served to clients only through services. */
-export class ModelRepo {
-  constructor(private readonly db: DB) {}
-
-  list(): Model[] {
-    return this.db.select().from(models).all();
-  }
-
-  get(id: number): Model | undefined {
-    return this.db.select().from(models).where(eq(models.id, id)).get();
+export class ModelRepo extends TableRepo<typeof models> {
+  constructor(db: DB) {
+    super(db, models);
   }
 
   getByName(name: string): Model | undefined {
-    return this.db.select().from(models).where(eq(models.name, name)).get();
+    return this.findBy(models.name, name);
   }
 
   create(input: ModelInput): Model {
@@ -33,15 +27,6 @@ export class ModelRepo {
   }
 
   update(id: number, input: Partial<ModelInput>): Model | undefined {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch.name = input.name;
-    if (input.description !== undefined) patch.description = input.description;
-    if (input.enabled !== undefined) patch.enabled = input.enabled;
-    if (Object.keys(patch).length === 0) return this.get(id);
-    return this.db.update(models).set(patch).where(eq(models.id, id)).returning().get();
-  }
-
-  delete(id: number): void {
-    this.db.delete(models).where(eq(models.id, id)).run();
+    return this.patch(id, pickDefined(input, ["name", "description", "enabled"]));
   }
 }

@@ -2,9 +2,13 @@ import { isTable, getTableName } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type Database from "better-sqlite3";
 import { STATS_CACHE_SETTINGS_KEY } from "../persistence/statsCache";
+import { SESSION_EPOCH_KEY } from "../persistence/settingsRepo";
+import { SENTINEL_KEY } from "../security/masterKey";
+import { RESPONSE_STATUS } from "../core/format/responsesWire";
 import { decryptSecret, encryptSecret } from "../security/crypto";
-import { decryptProviderKey, encryptProviderKey } from "../security/providerKeys";
 import { openWithPassphrase, sealWithPassphrase, type SealedPayload } from "../security/passphrase";
+import { errorMessage } from "../util/errors";
+import { ROLE } from "../auth/session";
 
 /**
  * Full-instance backup: export every row to one portable package, restore it to
@@ -138,7 +142,7 @@ const TOKEN_KEY_COLUMNS = ["key_ciphertext", "key_iv", "key_tag"] as const;
  * - `stats_cache`: incremental usage counters over THIS instance's request_logs
  *   (keyed by local row ids); foreign counters would describe a different log.
  */
-const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set(["master_key_check", "session_epoch", STATS_CACHE_SETTINGS_KEY]);
+const LOCAL_ONLY_SETTINGS: ReadonlySet<string> = new Set([SENTINEL_KEY, SESSION_EPOCH_KEY, STATS_CACHE_SETTINGS_KEY]);
 
 type Row = Record<string, unknown>;
 
@@ -169,6 +173,49 @@ interface SecretPayload {
   proxyPasswords?: { id: number; password: string }[];
 }
 
+type SecretList = "providerKeys" | "tokenKeys" | "proxyPasswords";
+
+/**
+ * A table whose rows carry one master-key-encrypted secret in three columns.
+ * Export decrypts it into the sealed payload (`list`, as `{ id, [field] }`) and
+ * drops the columns; restore re-encrypts it under the target's master key,
+ * which is what makes the package portable between installs.
+ */
+interface SecretTable {
+  /** Ciphertext, IV and tag, in that order. */
+  columns: readonly [string, string, string];
+  list: SecretList;
+  field: string;
+  /** Whether a sealed value is a secret to write back. No entry at all always
+   * restores three NULLs; an empty provider key does too, while an empty proxy
+   * password or token secret is re-encrypted as it stands. */
+  restores(plaintext: string | undefined): boolean;
+}
+
+const SECRET_TABLES: Partial<Record<TableName, SecretTable>> = {
+  providers: { columns: PROVIDER_KEY_COLUMNS, list: "providerKeys", field: "apiKey", restores: (v) => Boolean(v) },
+  proxies: { columns: PROXY_PASSWORD_COLUMNS, list: "proxyPasswords", field: "password", restores: (v) => v != null },
+  tokens: { columns: TOKEN_KEY_COLUMNS, list: "tokenKeys", field: "secret", restores: (v) => v != null },
+};
+
+/** The plaintext of a row's secret, or null unless all three columns are set. */
+function readSecret(row: Row, { columns }: SecretTable, masterKey: Buffer): string | null {
+  const [ciphertext, iv, tag] = columns.map((col) => (row[col] as string | null) ?? null);
+  if (!ciphertext || !iv || !tag) return null;
+  return decryptSecret({ ciphertext, iv, tag }, masterKey);
+}
+
+/** Set a row's three secret columns from `plaintext` (NULLs when there is
+ * none). Answers whether the row ended up with a secret. */
+function writeSecret(values: Row, spec: SecretTable, plaintext: string | undefined, masterKey: Buffer): boolean {
+  const blob = spec.restores(plaintext) ? encryptSecret(plaintext as string, masterKey) : null;
+  const [ciphertext, iv, tag] = spec.columns;
+  values[ciphertext] = blob?.ciphertext ?? null;
+  values[iv] = blob?.iv ?? null;
+  values[tag] = blob?.tag ?? null;
+  return blob !== null;
+}
+
 export class BackupError extends Error {
   constructor(message: string) {
     super(message);
@@ -188,9 +235,7 @@ export async function exportBackup(
 ): Promise<BackupPackage> {
   const tables: Record<string, Row[]> = {};
   const counts: Record<string, number> = {};
-  const providerKeys: SecretPayload["providerKeys"] = [];
-  const tokenKeys: NonNullable<SecretPayload["tokenKeys"]> = [];
-  const proxyPasswords: NonNullable<SecretPayload["proxyPasswords"]> = [];
+  const sealed: Record<SecretList, Array<{ id: number }>> = { providerKeys: [], tokenKeys: [], proxyPasswords: [] };
   const toolHeaders: NonNullable<SecretPayload["toolHeaders"]> = [];
 
   for (const table of TABLES) {
@@ -205,43 +250,12 @@ export async function exportBackup(
       }
     }
 
-    if (table === "providers") {
+    const secret = SECRET_TABLES[table];
+    if (secret) {
       for (const row of rows) {
-        const apiKey = decryptProviderKey(
-          {
-            keyCiphertext: (row.key_ciphertext as string | null) ?? null,
-            keyIv: (row.key_iv as string | null) ?? null,
-            keyTag: (row.key_tag as string | null) ?? null,
-          },
-          masterKey,
-        );
-        if (apiKey != null) providerKeys.push({ id: row.id as number, apiKey });
-        for (const col of PROVIDER_KEY_COLUMNS) delete row[col];
-      }
-    }
-
-    if (table === "proxies") {
-      for (const row of rows) {
-        const ciphertext = (row.password_ciphertext as string | null) ?? null;
-        const iv = (row.password_iv as string | null) ?? null;
-        const tag = (row.password_tag as string | null) ?? null;
-        if (ciphertext && iv && tag) {
-          proxyPasswords.push({ id: row.id as number, password: decryptSecret({ ciphertext, iv, tag }, masterKey) });
-        }
-        for (const col of PROXY_PASSWORD_COLUMNS) delete row[col];
-      }
-    }
-
-    if (table === "tokens") {
-      for (const row of rows) {
-        const ciphertext = (row.key_ciphertext as string | null) ?? null;
-        const iv = (row.key_iv as string | null) ?? null;
-        const tag = (row.key_tag as string | null) ?? null;
-        if (ciphertext && iv && tag) {
-          const secret = decryptSecret({ ciphertext, iv, tag }, masterKey);
-          tokenKeys.push({ id: row.id as number, secret });
-        }
-        for (const col of TOKEN_KEY_COLUMNS) delete row[col];
+        const plaintext = readSecret(row, secret, masterKey);
+        if (plaintext != null) sealed[secret.list].push({ id: row.id as number, [secret.field]: plaintext });
+        for (const col of secret.columns) delete row[col];
       }
     }
 
@@ -256,7 +270,7 @@ export async function exportBackup(
     counts[table] = rows.length;
   }
 
-  const secrets = await sealWithPassphrase(JSON.stringify({ providerKeys, tokenKeys, proxyPasswords, toolHeaders } satisfies SecretPayload), opts.passphrase);
+  const secrets = await sealWithPassphrase(JSON.stringify({ ...sealed, toolHeaders }), opts.passphrase);
 
   return {
     format: BACKUP_FORMAT,
@@ -290,6 +304,11 @@ function validate(pkg: unknown): asserts pkg is BackupPackage {
   for (const t of REQUIRED_TABLES) {
     if (!Array.isArray(p.tables[t])) throw new BackupError(`malformed backup: missing required table "${t}"`);
   }
+  // Present but with nobody who can administer the instance is the same
+  // lock-out as absent: the restore would delete every account and put back
+  // none that can sign in to fix it. `enabled` is the stored 0/1.
+  const hasAdmin = p.tables.users.some((u) => u?.role === ROLE.ADMIN && Boolean(u.enabled));
+  if (!hasAdmin) throw new BackupError("malformed backup: no enabled admin user (restoring it would lock everyone out)");
 }
 
 export interface RestoreReport {
@@ -298,6 +317,7 @@ export interface RestoreReport {
   /** True when the package carried an image cache, and so replaced the target's.
    * False leaves whatever the target had already cached exactly where it was. */
   includedImageCache: boolean;
+  /** Provider rows that came back with an API key. */
   providerKeysRestored: number;
 }
 
@@ -317,19 +337,18 @@ export async function restoreBackup(
   // Open the secrets first: a wrong passphrase must fail before we delete
   // anything, not after.
   const secrets = JSON.parse(await openWithPassphrase(pkg.secrets, passphrase)) as SecretPayload;
-  const keyById = new Map<number, string>();
-  for (const { id, apiKey } of secrets.providerKeys ?? []) keyById.set(id, apiKey);
-  // Absent in pre-v1.5.2 packages: their tokens restore hash-only, exactly as
-  // they were on the instance that wrote the package.
-  const tokenKeyById = new Map<number, string>();
-  for (const { id, secret } of secrets.tokenKeys ?? []) tokenKeyById.set(id, secret);
-  // Absent in packages written before egress proxies: those restore their
-  // proxies password-less, which is exactly what the source instance had.
-  const proxyPasswordById = new Map<number, string>();
-  for (const { id, password } of secrets.proxyPasswords ?? []) proxyPasswordById.set(id, password);
+  // A list absent from an older package (token secrets before v1.5.2, proxy
+  // passwords before egress proxies) restores those rows without a secret,
+  // exactly as they were on the instance that wrote the package.
+  const sealedById = (spec: SecretTable): Map<number, string> => {
+    const entries = (secrets[spec.list] ?? []) as unknown as Array<{ id: number } & Record<string, string>>;
+    return new Map(entries.map((entry) => [entry.id, entry[spec.field]]));
+  };
+  const secretsByTable = new Map(Object.entries(SECRET_TABLES).map(([table, spec]) => [table, { spec, byId: sealedById(spec) }]));
   const toolHeadersById = new Map((secrets.toolHeaders ?? []).map(value => [value.id, value.headers]));
 
   const restored: Record<string, number> = {};
+  let providerKeysRestored = 0;
 
   const run = sqlite.transaction(() => {
     // Children first, so nothing is ever orphaned mid-restore. Only clear tables
@@ -360,41 +379,18 @@ export async function restoreBackup(
           if (headers === undefined) throw new BackupError("Missing sealed tool headers");
           values.headers_secret = JSON.stringify(encryptSecret(headers, masterKey));
         }
-        if (table === "stored_responses" && (values.status === "queued" || values.status === "in_progress")) {
-          values.status = "failed";
-          values.response_json = JSON.stringify({ ...JSON.parse(values.response_json as string), status: "failed", error: { code: "backup_restored", message: "Execution was not replayed after restoring a backup" } });
+        if (table === "stored_responses" && (values.status === RESPONSE_STATUS.QUEUED || values.status === RESPONSE_STATUS.IN_PROGRESS)) {
+          values.status = RESPONSE_STATUS.FAILED;
+          values.response_json = JSON.stringify({ ...JSON.parse(values.response_json as string), status: RESPONSE_STATUS.FAILED, error: { code: "backup_restored", message: "Execution was not replayed after restoring a backup" } });
         }
 
         if (table === "settings" && LOCAL_ONLY_SETTINGS.has(String(values.key))) continue;
 
-        if (table === "providers") {
-          // Rebuild the key columns under THIS instance's master key, which is
-          // what makes the package portable between installs.
-          const apiKey = keyById.get(values.id as number);
-          const cols = apiKey
-            ? encryptProviderKey(apiKey, masterKey)
-            : { keyCiphertext: null, keyIv: null, keyTag: null };
-          values.key_ciphertext = cols.keyCiphertext;
-          values.key_iv = cols.keyIv;
-          values.key_tag = cols.keyTag;
-        }
-
-        if (table === "proxies") {
-          // Same rebuild for proxy passwords.
-          const password = proxyPasswordById.get(values.id as number);
-          const blob = password != null ? encryptSecret(password, masterKey) : null;
-          values.password_ciphertext = blob?.ciphertext ?? null;
-          values.password_iv = blob?.iv ?? null;
-          values.password_tag = blob?.tag ?? null;
-        }
-
-        if (table === "tokens") {
-          // Same rebuild for stored client-token secrets.
-          const secret = tokenKeyById.get(values.id as number);
-          const blob = secret != null ? encryptSecret(secret, masterKey) : null;
-          values.key_ciphertext = blob?.ciphertext ?? null;
-          values.key_iv = blob?.iv ?? null;
-          values.key_tag = blob?.tag ?? null;
+        // Rebuild the secret columns under THIS instance's master key.
+        const secret = secretsByTable.get(table);
+        if (secret) {
+          const wrote = writeSecret(values, secret.spec, secret.byId.get(values.id as number), masterKey);
+          if (wrote && table === "providers") providerKeysRestored++;
         }
 
         const columns = Object.keys(values);
@@ -404,7 +400,7 @@ export async function restoreBackup(
         try {
           sqlite.prepare(sql).run(columns.map((c) => values[c] as never));
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = errorMessage(e);
           throw new BackupError(`could not restore table "${table}": ${msg}`);
         }
         written++;
@@ -422,6 +418,6 @@ export async function restoreBackup(
     // rows without the metadata, and the caller has to re-check the budget
     // whenever rows actually landed.
     includedImageCache: Array.isArray(pkg.tables.image_cache),
-    providerKeysRestored: keyById.size,
+    providerKeysRestored,
   };
 }

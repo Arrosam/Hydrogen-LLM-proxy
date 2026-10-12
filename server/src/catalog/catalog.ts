@@ -9,6 +9,7 @@ import {
 import type { ModelRepo } from "../persistence/modelRepo";
 import type { ProviderRepo } from "../persistence/providerRepo";
 import type { MappingRepo } from "../persistence/mappingRepo";
+import { EgressProxyMissingError } from "../persistence/proxyRepo";
 import type { Model, ModelProvider as Mapping, Provider } from "../db/schema";
 
 /** A resolved upstream target: everything a send needs to reach one provider. */
@@ -37,6 +38,8 @@ export type MappingResolutionError =
   | "mapping_not_found"
   | "model_disabled"
   | "provider_disabled"
+  /** The provider names an egress proxy that no longer exists (see EgressProxyMissingError). */
+  | "proxy_not_found"
   | "mapping_disabled";
 
 export type MappingResolution =
@@ -50,6 +53,22 @@ export type ConstrainedResolutionError = MappingResolutionError | "no_endpoint_i
 export type ConstrainedResolution =
   | { ok: true; target: ResolvedTarget }
   | { ok: false; error: ConstrainedResolutionError };
+
+/** A step whose (model, provider) pair did not resolve, as every caller reports it. */
+export function mappingErrorMessage(model: string, provider: string, error: ConstrainedResolutionError): string {
+  return `mapping ${model}@${provider}: ${error}`;
+}
+
+/** What an operator does about a mapping with no OpenAI-shaped endpoint; closes every such diagnostic. */
+export const OPENAI_ENDPOINT_REMEDY = "(add an OpenAI alternate endpoint to the provider and enable it on the mapping)";
+
+/** Why {@link Catalog.resolveWithin} failed for `what`, a caller that needs an
+ * OpenAI-shaped endpoint: the mapping has none, or did not resolve at all. */
+export function constrainedErrorMessage(model: string, provider: string, error: ConstrainedResolutionError, what: string): string {
+  return error === "no_endpoint_in_family"
+    ? `${what} requires an OpenAI-compatible endpoint: ${model}@${provider} has none enabled ${OPENAI_ENDPOINT_REMEDY}`
+    : mappingErrorMessage(model, provider, error);
+}
 
 /**
  * The families whose providers expose the OpenAI media/passthrough surface.
@@ -91,7 +110,7 @@ export class Catalog {
     if (!looked.ok) return looked;
     const { model, provider, mapping } = looked;
     const chosen = pick(this.endpointPool(provider, mapping), preferredFamily);
-    return { ok: true, target: this.materialize(model, provider, mapping, chosen) };
+    return this.materialize(model, provider, mapping, chosen);
   }
 
   /**
@@ -121,7 +140,7 @@ export class Catalog {
     const { model, provider, mapping } = looked;
     const pool = this.endpointPool(provider, mapping).filter((e) => allowed.includes(familyForProviderType(e.type)));
     if (!pool.length) return { ok: false, error: "no_endpoint_in_family" };
-    return { ok: true, target: this.materialize(model, provider, mapping, pick(pool, preferredFamily)) };
+    return this.materialize(model, provider, mapping, pick(pool, preferredFamily));
   }
 
   /** Whether a (modelName, providerName) pair is a valid, enabled, mapped entry. */
@@ -165,23 +184,32 @@ export class Catalog {
     return usable.length ? usable : [endpoints[0]];
   }
 
-  private materialize(model: Model, provider: Provider, mapping: Mapping, chosen: ProviderEndpoint): ResolvedTarget {
-    const upstream: UpstreamProvider = {
-      ...this.providers.toUpstream(provider),
-      type: chosen.type,
-      baseUrl: chosen.baseUrl,
-    };
+  /** Build the target for the chosen endpoint. The one failure left at this
+   * point is a provider whose egress proxy row is gone: that provider is
+   * unusable, never quietly direct. */
+  private materialize(model: Model, provider: Provider, mapping: Mapping, chosen: ProviderEndpoint): MappingResolution {
+    let materialized: UpstreamProvider;
+    try {
+      materialized = this.providers.toUpstream(provider);
+    } catch (e) {
+      if (e instanceof EgressProxyMissingError) return { ok: false, error: "proxy_not_found" };
+      throw e;
+    }
+    const upstream: UpstreamProvider = { ...materialized, type: chosen.type, baseUrl: chosen.baseUrl };
     return {
-      family: familyForProviderType(chosen.type),
-      upstreamModel: mapping.upstreamModel,
-      url: chatUrl(upstream),
-      headers: buildHeaders(upstream),
-      providerMaxOutputTokens: provider.maxOutputTokens ?? undefined,
-      modelName: model.name,
-      providerName: provider.name,
-      providerId: provider.id,
-      endpointIndex: chosen.index,
-      upstream,
+      ok: true,
+      target: {
+        family: familyForProviderType(chosen.type),
+        upstreamModel: mapping.upstreamModel,
+        url: chatUrl(upstream),
+        headers: buildHeaders(upstream),
+        providerMaxOutputTokens: provider.maxOutputTokens ?? undefined,
+        modelName: model.name,
+        providerName: provider.name,
+        providerId: provider.id,
+        endpointIndex: chosen.index,
+        upstream,
+      },
     };
   }
 }

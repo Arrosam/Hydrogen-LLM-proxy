@@ -1,6 +1,6 @@
 import { chatReasoningDetails, parseChatReasoningDetails } from "./reasoningBridge";
-import type { ReasoningPart } from "../ir/content";
-import { Request, type RenderTarget } from "../ir/request";
+import type { ReasoningPart, ToolUsePart } from "../ir/content";
+import type { RenderTarget } from "../ir/request";
 import { Response, type RenderOptions } from "../ir/response";
 import {
   normalizeMessages,
@@ -10,44 +10,102 @@ import {
   type Message,
   type StopReason,
   type TextPart,
-  type Tool,
   type ToolChoice,
+  SYSTEM_SEPARATOR,
+  toolCallsOf,
 } from "../ir/content";
-import type { GenerationParams, ResponseFormat, ThinkingLevel } from "../ir/params";
-import { ThinkingPolicy } from "../ir/thinking";
-import { parseSSE, safeParseJson, type ResponseData, type StreamContext, type StreamEvent } from "../ir/stream";
-import { genId, nowSeconds } from "../../util/ids";
+import { isVerbosity, type GenerationParams, type ResponseFormat, type ThinkingLevel } from "../ir/params";
+import { effortToThinking, ThinkingPolicy } from "../ir/thinking";
+import type { ThinkingFormat } from "../ir/thinkingFormat";
+import { SSE_DONE, parseSSE, parseSseJson, sseFrame, type ResponseData, type StreamContext, type StreamEvent } from "../ir/stream";
+import { ID_PREFIX, genId, nowSeconds } from "../../util/ids";
 import {
   applyNonCanonical,
-  boolOrUndef,
-  capMaxTokens,
   collectPassthrough,
-  num,
-  numOrUndef,
+  dataUrlOf,
+  foreignFileIdError,
+  hasCacheHint,
+  imageUrlField,
+  imageUrlOf,
+  objectsIn,
   openAiCachedTokens,
+  openAiJsonSchemaFields,
+  OPENAI_ROLE as ROLE,
+  TOOL_RESULT_IMAGES_NOTE,
+  openAiUsageToWire,
+  paramSetter,
   parseDataUrl,
+  parseInlineFileData,
+  parseOpenAiResponseFormat,
+  parseOpenAiUsage,
   parseStop,
-  safeJsonParse,
-  strOrUndef,
+  stringContentParts,
+  type OpenAiUsageKeys,
 } from "./wire";
+import { boolOrUndef, numOrUndef, parseToolArguments, strOrUndef } from "../ir/coerce";
+import {
+  OPENAI_TOOL_TYPE_FUNCTION as TOOL_TYPE_FUNCTION,
+  parseOpenAiToolChoice,
+  parseToolList,
+  renderOpenAiToolChoice,
+  renderToolList,
+  type ToolWire,
+} from "./tools";
 import { FormatConversionError } from "./errors";
 import { registerFormat } from "./registry";
-import type { SendTarget, Transport } from "../upstream/transport";
-import type { RelayResult, SendResult } from "../upstream/outcome";
-import { relayStream, sendBuffered } from "../upstream/roundtrip";
+import { WireRequest } from "./wireRequest";
+
+// --- wire identifiers ----------------------------------------------------
+
+/** `finish_reason` values. */
+const FINISH_REASON = {
+  STOP: "stop",
+  LENGTH: "length",
+  TOOL_CALLS: "tool_calls",
+  FUNCTION_CALL: "function_call",
+  CONTENT_FILTER: "content_filter",
+} as const;
+
+/** Content part types this wire both reads and writes. */
+const PART = {
+  TEXT: "text",
+  IMAGE_URL: "image_url",
+  FILE: "file",
+} as const;
+
+/** Where this wire's `usage` object keeps its counters. */
+const USAGE_KEYS: OpenAiUsageKeys = {
+  prompt: "prompt_tokens",
+  completion: "completion_tokens",
+  promptDetails: "prompt_tokens_details",
+  completionDetails: "completion_tokens_details",
+};
+
+/** The provider name a conversion refusal reports. */
+const PROVIDER_LABEL = "an OpenAI Chat Completions";
+
+/** The OpenAI wire allows at most this many stop sequences. */
+const OPENAI_MAX_STOP_SEQUENCES = 4;
+
+/**
+ * Models that take `max_completion_tokens` and reject `max_tokens`. The id is
+ * matched at the start or after a vendor prefix (`openai/gpt-5`,
+ * `azure/openai/o3-mini`), which is how gateways and aggregators spell it.
+ */
+const MAX_COMPLETION_TOKENS_MODEL_RE = /(?:^|\/)(o[1-9](?:-|$)|gpt-5(?:[.-]|$))/i;
 
 // --- stop reason mapping -------------------------------------------------
 
 function finishReasonToStop(reason: string | null | undefined): StopReason {
   switch (reason) {
-    case "stop":
+    case FINISH_REASON.STOP:
       return "stop";
-    case "length":
+    case FINISH_REASON.LENGTH:
       return "length";
-    case "tool_calls":
-    case "function_call":
+    case FINISH_REASON.TOOL_CALLS:
+    case FINISH_REASON.FUNCTION_CALL:
       return "tool_use";
-    case "content_filter":
+    case FINISH_REASON.CONTENT_FILTER:
       return "content_filter";
     default:
       return reason ? "stop" : null;
@@ -57,13 +115,13 @@ function finishReasonToStop(reason: string | null | undefined): StopReason {
 function stopToFinishReason(reason: StopReason): string {
   switch (reason) {
     case "length":
-      return "length";
+      return FINISH_REASON.LENGTH;
     case "tool_use":
-      return "tool_calls";
+      return FINISH_REASON.TOOL_CALLS;
     case "content_filter":
-      return "content_filter";
+      return FINISH_REASON.CONTENT_FILTER;
     default:
-      return "stop";
+      return FINISH_REASON.STOP;
   }
 }
 
@@ -91,27 +149,24 @@ function firstReasoningField(source: Record<string, unknown>): string {
 // --- content coercion ----------------------------------------------------
 
 function coerceContentToParts(content: unknown): ContentPart[] {
-  if (content == null) return [];
-  if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
-  if (!Array.isArray(content)) return [];
+  const text = stringContentParts(content);
+  if (text) return text;
   const parts: ContentPart[] = [];
-  for (const item of content) {
-    if (!item || typeof item !== "object") continue;
-    const t = (item as Record<string, unknown>).type;
-    if (t === "text" || t === "input_text" || t === "output_text") {
-      parts.push({ type: "text", text: String((item as Record<string, unknown>).text ?? "") });
-    } else if (t === "image_url") {
-      const img = (item as Record<string, unknown>).image_url as Record<string, unknown> | string;
-      const url = typeof img === "string" ? img : String(img?.url ?? "");
-      parts.push({ type: "image", source: parseDataUrl(url) });
-    } else if (t === "file") {
-      const f = ((item as Record<string, unknown>).file ?? {}) as Record<string, unknown>;
+  for (const item of objectsIn(content)) {
+    const t = item.type;
+    if (t === PART.TEXT || t === "input_text" || t === "output_text") {
+      parts.push({ type: "text", text: String(item.text ?? "") });
+    } else if (t === PART.IMAGE_URL) {
+      // Unlike the Responses parser, an image with no URL is kept, not skipped.
+      parts.push({ type: "image", source: parseDataUrl(imageUrlField(item.image_url)) });
+    } else if (t === PART.FILE) {
+      const f = (item.file ?? {}) as Record<string, unknown>;
       const name = f.filename != null ? String(f.filename) : undefined;
+      // Coerced, not type-checked: a non-string `file_data` is read as its string form.
       const data = String(f.file_data ?? "");
       const fileId = strOrUndef(f.file_id);
       if (data) {
-        const src = data.startsWith("data:") ? parseDataUrl(data) : { kind: "base64" as const, mediaType: "application/pdf", data };
-        parts.push({ type: "file", source: src.kind === "url" ? src : { kind: "base64", mediaType: src.mediaType, data: src.data }, name });
+        parts.push({ type: "file", source: parseInlineFileData(data), name });
       } else if (fileId) {
         // Kept rather than dropped: a same-family replay restores the reference
         // exactly, and any other family now rejects it loudly instead of
@@ -126,8 +181,7 @@ function coerceContentToParts(content: unknown): ContentPart[] {
       // gateways that pass an Anthropic-shaped block through an OpenAI-shaped
       // body do this, and so does a local server whose content is typed `any`.
       // Dropping the part is how a response arrives with thinking and no answer.
-      const rec = item as Record<string, unknown>;
-      const text = String(rec.text ?? rec.thinking ?? "");
+      const text = String(item.text ?? item.thinking ?? "");
       if (text) parts.push({ type: "reasoning", text });
     }
   }
@@ -150,8 +204,7 @@ function* contentPartEvents(parts: ContentPart[]): Generator<StreamEvent> {
 }
 
 function imagePartToOpenAI(source: (ContentPart & { type: "image" })["source"]): unknown {
-  const url = source.kind === "base64" ? `data:${source.mediaType};base64,${source.data}` : source.url;
-  return { type: "image_url", image_url: { url } };
+  return { type: PART.IMAGE_URL, image_url: { url: imageUrlOf(source) } };
 }
 
 /**
@@ -174,18 +227,13 @@ function filePartToOpenAI(p: Extract<ContentPart, { type: "file" }>): unknown {
   const named = p.name ? { filename: p.name } : {};
   switch (p.source.kind) {
     case "base64":
-      return { type: "file", file: { ...named, file_data: `data:${p.source.mediaType};base64,${p.source.data}` } };
+      return { type: PART.FILE, file: { ...named, file_data: dataUrlOf(p.source.mediaType, p.source.data) } };
     case "file_id":
-      if (p.source.family !== "openai_completion") {
-        throw new FormatConversionError(
-          `cannot send a ${p.source.family} file_id ("${p.source.id}") to an OpenAI Chat Completions provider: ` +
-            `a file id only resolves in the API that issued it`,
-        );
-      }
-      return { type: "file", file: { ...named, file_id: p.source.id } };
+      if (p.source.family !== "openai_completion") throw foreignFileIdError(p.source, PROVIDER_LABEL);
+      return { type: PART.FILE, file: { ...named, file_id: p.source.id } };
     case "url":
       throw new FormatConversionError(
-        `cannot send a URL file attachment (${p.source.url}) to an OpenAI Chat Completions provider: ` +
+        `cannot send a URL file attachment (${p.source.url}) to ${PROVIDER_LABEL} provider: ` +
           `this format carries files inline (file_data) or by file_id, and a URL is neither`,
       );
   }
@@ -199,114 +247,104 @@ function openAiUserContent(parts: ContentPart[]): unknown {
     if (p.type === "image") out.push(imagePartToOpenAI(p.source));
     else if (p.type === "file") out.push(filePartToOpenAI(p));
     else if (p.type === "opaque") { if (p.family === "openai_completion") out.push(p.value); }
-    else if (p.type === "text") out.push({ type: "text", text: p.text });
+    else if (p.type === "text") out.push({ type: PART.TEXT, text: p.text });
   }
   return out;
 }
 
 // --- tools ---------------------------------------------------------------
 
-function parseTools(raw: unknown): Tool[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const tools: Tool[] = [];
-  for (const t of raw) {
-    if (!t || typeof t !== "object") continue;
-    const entry = t as Record<string, unknown>;
+/**
+ * A function tool nests its fields under `function`. An entry without a named
+ * function is a built-in / custom tool type this format cannot model: kept
+ * verbatim for same-family replay instead of silently dropped, under its
+ * `type` (this wire never reads a top-level `name` for it).
+ */
+const TOOL_WIRE: ToolWire = {
+  family: "openai_completion",
+  functionFields: (entry) => {
     const fn = (entry.function ?? {}) as Record<string, unknown>;
-    if (!fn.name) {
-      // Built-in / custom tool types this format cannot model: keep verbatim
-      // for same-family replay instead of silently dropping them.
-      if (entry.type) tools.push({ name: String(entry.type), parameters: {}, raw: { family: "openai_completion", value: entry } });
-      continue;
-    }
-    tools.push({
-      name: String(fn.name),
-      description: fn.description ? String(fn.description) : undefined,
-      parameters: (fn.parameters as Record<string, unknown>) ?? { type: "object", properties: {} },
-      ...(typeof fn.strict === "boolean" ? { strict: fn.strict } : {}),
-    });
-  }
-  return tools.length ? tools : undefined;
-}
+    return fn.name ? fn : undefined;
+  },
+  schemaKey: "parameters",
+  extras: (fn) => (typeof fn.strict === "boolean" ? { strict: fn.strict } : {}),
+  nativeName: (entry) => (entry.type ? String(entry.type) : undefined),
+  render: (t) => ({ type: TOOL_TYPE_FUNCTION, function: { name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }),
+};
 
+/** The object form nests the name under `function`; its `type` is not checked. */
 function parseToolChoice(raw: unknown): ToolChoice | undefined {
-  if (raw == null) return undefined;
-  if (raw === "auto") return { type: "auto" };
-  if (raw === "none") return { type: "none" };
-  if (raw === "required") return { type: "required" };
-  if (typeof raw === "object") {
-    const fn = ((raw as Record<string, unknown>).function ?? {}) as Record<string, unknown>;
-    if (fn.name) return { type: "tool", name: String(fn.name) };
-  }
-  return undefined;
+  return parseOpenAiToolChoice(raw, (c) => ((c.function ?? {}) as Record<string, unknown>).name);
 }
 
 function toolChoiceToOpenAI(choice: ToolChoice): unknown {
-  switch (choice.type) {
-    case "auto":
-      return "auto";
-    case "none":
-      return "none";
-    case "required":
-      return "required";
-    case "tool":
-      return { type: "function", function: { name: choice.name } };
+  return renderOpenAiToolChoice(choice, (name) => ({ type: TOOL_TYPE_FUNCTION, function: { name } }));
+}
+
+/** The tool calls of an assistant message, buffered (`message.tool_calls`). */
+function parseToolCalls(raw: unknown): ToolUsePart[] {
+  const calls: ToolUsePart[] = [];
+  for (const call of objectsIn(raw)) {
+    const fn = (call.function ?? {}) as Record<string, unknown>;
+    calls.push({ type: "tool_use", id: String(call.id ?? genId(ID_PREFIX.CALL)), name: String(fn.name ?? ""), input: parseToolArguments(fn.arguments) });
   }
+  return calls;
+}
+
+/** The `tool_calls` of an assistant message, or undefined when it made none. */
+function renderToolCalls(content: ContentPart[]): unknown[] | undefined {
+  const calls = toolCallsOf(content).map((tc) => ({ id: tc.id, type: TOOL_TYPE_FUNCTION, function: { name: tc.name, arguments: tc.args } }));
+  return calls.length ? calls : undefined;
+}
+
+/** The readable reasoning of a message. An Anthropic redacted_thinking block carries encrypted bytes and no
+ * readable text; this wire has no field for it, and its opaque payload must not be handed to another provider,
+ * so it is left out rather than replayed as an empty reasoning string. Undefined when there is no such part. */
+function visibleReasoning(content: ContentPart[]): string | undefined {
+  const parts = content.filter((p): p is ReasoningPart => p.type === "reasoning" && !p.redacted);
+  return parts.length ? parts.map((p) => p.text).join("") : undefined;
+}
+
+/**
+ * Reasoning text under the spelling(s) a CLIENT is sent.
+ *
+ * BOTH dialect spellings by default, so a DeepSeek-convention client sees the
+ * reasoning AND replays it — its absence is what broke the next turn against
+ * an Anthropic-family upstream (4028: thinking must be passed back), because
+ * the client had nothing to send.
+ *
+ * A service that names one spelling gets exactly that one and not the other: a
+ * client strict about its own dialect can reject the extra key, and one that
+ * reads both would count the thinking twice.
+ */
+function clientReasoningFields(text: string, format: ThinkingFormat | undefined): Record<string, unknown> {
+  return {
+    ...(format !== "reasoning_content" ? { reasoning: text } : {}),
+    ...(format !== "reasoning" ? { reasoning_content: text } : {}),
+  };
 }
 
 // --- response_format -----------------------------------------------------
 
+/** The json_schema fields sit one level down, under `json_schema`. */
 function parseResponseFormat(raw: unknown): ResponseFormat | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const rf = raw as Record<string, unknown>;
-  if (rf.type === "text") return { type: "text" };
-  if (rf.type === "json_object") return { type: "json_object" };
-  if (rf.type === "json_schema") {
-    const js = (rf.json_schema ?? {}) as Record<string, unknown>;
-    const schema = (js.schema as Record<string, unknown>) ?? {};
-    return {
-      type: "json_schema",
-      name: js.name ? String(js.name) : undefined,
-      schema,
-      strict: typeof js.strict === "boolean" ? js.strict : undefined,
-    };
-  }
-  return undefined;
+  return parseOpenAiResponseFormat(raw, (format) => (format.json_schema ?? {}) as Record<string, unknown>);
 }
 
 function responseFormatToOpenAI(rf: ResponseFormat): unknown {
-  if (rf.type === "json_schema") {
-    return {
-      type: "json_schema",
-      json_schema: {
-        name: rf.name ?? "schema",
-        schema: rf.schema,
-        ...(rf.strict != null ? { strict: rf.strict } : {}),
-      },
-    };
-  }
+  if (rf.type === "json_schema") return { type: rf.type, json_schema: openAiJsonSchemaFields(rf) };
   return { type: rf.type };
 }
 
 // --- thinking ------------------------------------------------------------
 
+/**
+ * An effort this proxy does not model sets no thinking level at all: the
+ * provider's default applies, and `max_completion_tokens` stays what the
+ * client said it is -- the output ceiling, never a thinking budget.
+ */
 function parseThinking(body: Record<string, unknown>): ThinkingLevel | undefined {
-  const effort = body.reasoning_effort;
-  if (effort === "none" || effort === "disabled") return "disabled";
-  if (
-    effort === "minimal" ||
-    effort === "low" ||
-    effort === "medium" ||
-    effort === "high" ||
-    effort === "xhigh" ||
-    effort === "max"
-  ) {
-    return effort;
-  }
-  if (typeof body.max_completion_tokens === "number" && body.reasoning_effort != null) {
-    return { budget: body.max_completion_tokens as number };
-  }
-  return undefined;
+  return effortToThinking(body.reasoning_effort);
 }
 
 // --- params --------------------------------------------------------------
@@ -342,11 +380,13 @@ const RESERVED = new Set([
   "reasoning_effort",
 ]);
 
+const RESPONSE_FORMAT_KEY = "response_format";
+/** {@link RESERVED} for a request whose `response_format` this proxy does not model. */
+const RESERVED_EXCEPT_RESPONSE_FORMAT = new Set([...RESERVED].filter((key) => key !== RESPONSE_FORMAT_KEY));
+
 function parseParams(body: Record<string, unknown>): GenerationParams {
   const params: GenerationParams = {};
-  const set = <K extends keyof GenerationParams>(k: K, v: GenerationParams[K] | undefined): void => {
-    if (v !== undefined) params[k] = v;
-  };
+  const set = paramSetter(params);
   set("temperature", numOrUndef(body.temperature));
   set("topP", numOrUndef(body.top_p));
   set("topK", numOrUndef(body.top_k));
@@ -369,15 +409,17 @@ function parseParams(body: Record<string, unknown>): GenerationParams {
   set("parallelToolCalls", boolOrUndef(body.parallel_tool_calls));
   set("serviceTier", strOrUndef(body.service_tier));
   set("user", strOrUndef(body.user));
-  if (body.verbosity === "low" || body.verbosity === "medium" || body.verbosity === "high") {
-    params.verbosity = body.verbosity;
-  }
+  if (isVerbosity(body.verbosity)) params.verbosity = body.verbosity;
   set("thinking", parseThinking(body));
   // OpenAI's caching is automatic; the presence of its tuning params is the
   // client saying "this conversation repeats" — enough to auto-plant an
   // Anthropic breakpoint on a cross-family hop.
-  if (body.prompt_cache_key != null || body.prompt_cache_options != null) params.cacheHint = true;
-  set("passthrough", collectPassthrough(body, RESERVED, "openai_completion"));
+  if (hasCacheHint(body)) params.cacheHint = true;
+  // A response_format of a type this proxy does not model (a server's own
+  // `grammar` / `regex` / ...) has no canonical form, so it travels as the
+  // client's other unrecognised params do: verbatim, to its own family only.
+  const unmodelledFormat = body.response_format != null && params.responseFormat === undefined;
+  set("passthrough", collectPassthrough(body, unmodelledFormat ? RESERVED_EXCEPT_RESPONSE_FORMAT : RESERVED, "openai_completion"));
   return params;
 }
 
@@ -389,7 +431,7 @@ function applyParams(out: Record<string, unknown>, p: GenerationParams): void {
   if (p.topP != null) out.top_p = p.topP;
   if (p.topK != null) out.top_k = p.topK;
   if (p.minP != null) out.min_p = p.minP;
-  if (p.stop && p.stop.length) out.stop = p.stop.slice(0, 4); // OpenAI wire allows at most 4
+  if (p.stop && p.stop.length) out.stop = p.stop.slice(0, OPENAI_MAX_STOP_SEQUENCES); // OpenAI wire allows at most 4
   if (p.frequencyPenalty != null) out.frequency_penalty = p.frequencyPenalty;
   if (p.presencePenalty != null) out.presence_penalty = p.presencePenalty;
   if (p.repetitionPenalty != null) out.repetition_penalty = p.repetitionPenalty;
@@ -407,53 +449,45 @@ function applyParams(out: Record<string, unknown>, p: GenerationParams): void {
 
 // --- request subclass ----------------------------------------------------
 
-export class OpenAICompletionRequest extends Request {
+export class OpenAICompletionRequest extends WireRequest {
   readonly family = "openai_completion" as const;
 
   static parse(body: Record<string, unknown>): OpenAICompletionRequest {
-    const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const systemChunks: string[] = [];
     const messages: Message[] = [];
+    /** A system or tool message is text-only here: a string as sent, or the text parts of an array. */
+    const plainText = (content: unknown): string =>
+      typeof content === "string" ? content : textOf(coerceContentToParts(content));
 
-    for (const raw of rawMessages) {
-      if (!raw || typeof raw !== "object") continue;
-      const msg = raw as Record<string, unknown>;
+    for (const msg of objectsIn(body.messages)) {
       const role = String(msg.role);
 
-      if (role === "system" || role === "developer") {
-        const text =
-          typeof msg.content === "string" ? msg.content : textOf(coerceContentToParts(msg.content));
+      if (role === ROLE.SYSTEM || role === ROLE.DEVELOPER) {
+        const text = plainText(msg.content);
         if (text) systemChunks.push(text);
         continue;
       }
 
-      if (role === "tool") {
-        const resultText =
-          typeof msg.content === "string" ? msg.content : textOf(coerceContentToParts(msg.content));
+      if (role === ROLE.TOOL) {
         messages.push({
           role: "user",
-          content: [{ type: "tool_result", toolUseId: String(msg.tool_call_id ?? ""), content: [{ type: "text", text: resultText }] }],
+          content: [{ type: "tool_result", toolUseId: String(msg.tool_call_id ?? ""), content: [{ type: "text", text: plainText(msg.content) }] }],
         });
         continue;
       }
 
       const name = typeof msg.name === "string" && msg.name ? msg.name : undefined;
-      if (role === "assistant") {
+      if (role === ROLE.ASSISTANT) {
         const content = coerceContentToParts(msg.content);
         // Providers disagree on the field name: DeepSeek says reasoning_content,
         // OpenRouter-style gateways say reasoning, some v4 gateways say
-        // reasoning_text. Accept them all.
-        const reasoning = String(msg.reasoning ?? msg.reasoning_content ?? msg.reasoning_text ?? "");
+        // reasoning_text. Accept them all, by the rule responses are read with:
+        // the first one that carries text.
+        const reasoning = firstReasoningField(msg);
         const replay = parseChatReasoningDetails(msg.reasoning_details);
         if (replay.length) content.unshift(...replay);
         else if (reasoning) content.push({ type: "reasoning", text: reasoning });
-        const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-        for (const tc of toolCalls) {
-          if (!tc || typeof tc !== "object") continue;
-          const call = tc as Record<string, unknown>;
-          const fn = (call.function ?? {}) as Record<string, unknown>;
-          content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: safeJsonParse(fn.arguments) });
-        }
+        content.push(...parseToolCalls(msg.tool_calls));
         messages.push({ role: "assistant", content, ...(name ? { name } : {}) });
         continue;
       }
@@ -463,11 +497,11 @@ export class OpenAICompletionRequest extends Request {
 
     return new OpenAICompletionRequest({
       requestedService: String(body.model ?? ""),
-      system: systemChunks.length ? systemChunks.join("\n\n") : undefined,
+      system: systemChunks.length ? systemChunks.join(SYSTEM_SEPARATOR) : undefined,
       // Reasoning is NOT stripped here: what a target may be sent back is the
       // egress family's rule, applied in render().
       messages: normalizeMessages(messages),
-      tools: parseTools(body.tools),
+      tools: parseToolList(body.tools, TOOL_WIRE),
       toolChoice: parseToolChoice(body.tool_choice),
       params: parseParams(body),
       stream: Boolean(body.stream),
@@ -476,7 +510,7 @@ export class OpenAICompletionRequest extends Request {
 
   render(target: RenderTarget): Record<string, unknown> {
     const messages: Record<string, unknown>[] = [];
-    if (this.system) messages.push({ role: "system", content: this.system });
+    if (this.system) messages.push({ role: ROLE.SYSTEM, content: this.system });
 
     // Prior turns' reasoning is dropped on the way out: DeepSeek's
     // OpenAI-compatible endpoint rejects reasoning_content sent back to it, and
@@ -484,32 +518,21 @@ export class OpenAICompletionRequest extends Request {
     for (const m of stripStaleReasoning(this.messages)) {
       if (m.role === "assistant") {
         const textParts = m.content.filter((p): p is TextPart => p.type === "text");
-        // An Anthropic redacted_thinking block carries encrypted bytes and no
-        // readable text. This wire has no field for it, and its opaque payload
-        // must not be handed to another provider, so it is dropped rather than
-        // replayed as an empty reasoning string.
-        const reasoningParts = m.content.filter((p) => p.type === "reasoning" && !p.redacted);
-        const toolUses = m.content.filter((p) => p.type === "tool_use");
-        const entry: Record<string, unknown> = { role: "assistant", ...(m.name ? { name: m.name } : {}) };
+        const reasoning = visibleReasoning(m.content);
+        const toolCalls = renderToolCalls(m.content);
+        const entry: Record<string, unknown> = { role: ROLE.ASSISTANT, ...(m.name ? { name: m.name } : {}) };
         entry.content = textParts.length ? textParts.map((p) => p.text).join("") : null;
-        if (reasoningParts.length) {
+        if (reasoning !== undefined) {
           // Every dialect spelling the DeepSeek-compatible world uses; each
           // upstream reads its own and ignores the rest. DeepSeek reads
           // `reasoning_content` (and its thinking-mode tool loop REQUIRES the
           // reasoning back), OpenRouter-style providers read `reasoning`, some
           // v4 gateways read `reasoning_text`.
-          const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
           entry.reasoning_content = reasoning;
           entry.reasoning = reasoning;
           entry.reasoning_text = reasoning;
         }
-        if (toolUses.length) {
-          entry.tool_calls = toolUses.map((tu) => ({
-            id: (tu as { id: string }).id,
-            type: "function",
-            function: { name: (tu as { name: string }).name, arguments: JSON.stringify((tu as { input: unknown }).input ?? {}) },
-          }));
-        }
+        if (toolCalls) entry.tool_calls = toolCalls;
         messages.push(entry);
         continue;
       }
@@ -518,59 +541,38 @@ export class OpenAICompletionRequest extends Request {
       const resultImages: ContentPart[] = [];
       for (const tr of toolResults) {
         const r = tr as Extract<ContentPart, { type: "tool_result" }>;
-        messages.push({ role: "tool", tool_call_id: r.toolUseId, content: textOf(r.content) });
+        messages.push({ role: ROLE.TOOL, tool_call_id: r.toolUseId, content: textOf(r.content) });
         // The tool role is text-only on this wire; carry the result's images in
         // a follow-up user message instead of dropping them (screenshot loops).
         for (const part of r.content) if (part.type === "image") resultImages.push(part);
       }
       if (resultImages.length) {
-        messages.push({ role: "user", content: openAiUserContent([{ type: "text", text: "(images returned by the tool results above)" }, ...resultImages]) });
+        messages.push({ role: ROLE.USER, content: openAiUserContent([{ type: "text", text: TOOL_RESULT_IMAGES_NOTE }, ...resultImages]) });
       }
-      if (others.length) messages.push({ role: "user", content: openAiUserContent(others), ...(m.name ? { name: m.name } : {}) });
+      if (others.length) messages.push({ role: ROLE.USER, content: openAiUserContent(others), ...(m.name ? { name: m.name } : {}) });
     }
 
     const out: Record<string, unknown> = { model: target.upstreamModel, messages };
-    if (this.tools) {
-      const rendered = this.tools
-        .filter((t) => !t.raw || t.raw.family === "openai_completion")
-        .map((t) => (t.raw ? t.raw.value : { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters, ...(t.strict != null ? { strict: t.strict } : {}) } }));
-      if (rendered.length) out.tools = rendered;
-    }
+    const tools = renderToolList(this.tools, TOOL_WIRE);
+    if (tools) out.tools = tools;
     if (this.toolChoice) out.tool_choice = toolChoiceToOpenAI(this.toolChoice);
     const cap = target.providerMaxOutputTokens;
     const p = this.params;
     applyParams(out, p);
-    const ceilingKey = /^(o[1-9](?:-|$)|gpt-5(?:[.-]|$))/i.test(target.upstreamModel)
+    const ceilingKey = MAX_COMPLETION_TOKENS_MODEL_RE.test(target.upstreamModel)
       ? "max_completion_tokens" : p.completionTokenKey ?? "max_tokens";
     if (this.stream) {
       out.stream = true;
       out.stream_options = { include_usage: true };
     }
-    if (p.thinking) {
-      // Reasoning is billed inside max_tokens on reasoning models, so the policy
-      // sizes the ceiling to hold the reasoning and still leave the answer room.
-      const tf = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap);
-      out.reasoning_effort = tf.effort;
-      if (tf.maxTokens != null) out[ceilingKey] = tf.maxTokens;
-    } else {
-      const maxTokens = capMaxTokens(p.maxTokens, cap);
-      if (maxTokens != null) out[ceilingKey] = maxTokens;
-    }
+    // Reasoning is billed inside max_tokens on reasoning models, so with a
+    // thinking level set the policy sizes the ceiling to hold the reasoning and
+    // still leave the answer room.
+    const ceiling = ThinkingPolicy.openai(p.thinking, p.maxTokens, cap);
+    if (ceiling.effort != null) out.reasoning_effort = ceiling.effort;
+    if (ceiling.maxTokens != null) out[ceilingKey] = ceiling.maxTokens;
     applyNonCanonical(out, p, this.family);
     return out;
-  }
-
-  /** Rebuild any canonical Request as an OpenAI Chat Completions request. */
-  static construct(base: Request): OpenAICompletionRequest {
-    return new OpenAICompletionRequest(base.data());
-  }
-
-  send(transport: Transport, target: SendTarget): Promise<SendResult> {
-    return sendBuffered(this, transport, target);
-  }
-
-  relay(transport: Transport, target: SendTarget): Promise<RelayResult> {
-    return relayStream(this, transport, target);
   }
 }
 
@@ -578,6 +580,11 @@ export class OpenAICompletionRequest extends Request {
 
 export class OpenAICompletionResponse extends Response {
   readonly family = "openai_completion" as const;
+
+  /** A completion always carries at least one choice. */
+  static isEnvelope(body: Record<string, unknown>): boolean {
+    return Array.isArray(body.choices) && body.choices.length > 0;
+  }
 
   static parse(body: Record<string, unknown>): OpenAICompletionResponse {
     const choices = Array.isArray(body.choices) ? body.choices : [];
@@ -594,77 +601,38 @@ export class OpenAICompletionResponse extends Response {
     } else if (Array.isArray(message.content)) {
       content.push(...coerceContentToParts(message.content));
     }
-    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    for (const tc of toolCalls) {
-      if (!tc || typeof tc !== "object") continue;
-      const call = tc as Record<string, unknown>;
-      const fn = (call.function ?? {}) as Record<string, unknown>;
-      content.push({ type: "tool_use", id: String(call.id ?? genId("call")), name: String(fn.name ?? ""), input: safeJsonParse(fn.arguments) });
-    }
+    content.push(...parseToolCalls(message.tool_calls));
 
     if (typeof message.refusal === "string" && message.refusal) {
       content.push({ type: "text", text: message.refusal });
     }
-    const usage = (body.usage ?? {}) as Record<string, unknown>;
-    const promptTokens = numOrUndef(usage.prompt_tokens) ?? 0;
-    const completionTokens = numOrUndef(usage.completion_tokens) ?? 0;
-    const completionDetails = (usage.completion_tokens_details ?? {}) as Record<string, unknown>;
-    const cachedInputTokens = openAiCachedTokens(usage);
-    const reasoningTokens = numOrUndef(completionDetails.reasoning_tokens);
     return new OpenAICompletionResponse({
-      id: String(body.id ?? genId("chatcmpl")),
+      id: String(body.id ?? genId(ID_PREFIX.CHAT_COMPLETION)),
       model: String(body.model ?? ""),
       created: numOrUndef(body.created) ?? nowSeconds(),
       content,
       stopReason: finishReasonToStop(choice.finish_reason as string | null),
-      usage: {
-        promptTokens, completionTokens, totalTokens: numOrUndef(usage.total_tokens) ?? promptTokens + completionTokens,
-        ...(cachedInputTokens != null ? { cachedInputTokens } : {}),
-        ...(reasoningTokens != null ? { reasoningTokens } : {}),
-      },
+      usage: parseOpenAiUsage((body.usage ?? {}) as Record<string, unknown>, USAGE_KEYS),
     });
   }
 
   renderSelf(model: string, opts?: RenderOptions): Record<string, unknown> {
     const text = this.text();
     // Visible reasoning is text; opaque blocks travel in client replay metadata.
-    const reasoningParts = this.content.filter((p) => p.type === "reasoning" && !p.redacted);
-    const toolUses = this.content.filter((p) => p.type === "tool_use");
-    const message: Record<string, unknown> = { role: "assistant", content: text || null };
+    const reasoning = visibleReasoning(this.content);
+    const toolCalls = renderToolCalls(this.content);
+    const message: Record<string, unknown> = { role: ROLE.ASSISTANT, content: text || null };
     const signed = this.content.filter((p): p is ReasoningPart => p.type === "reasoning");
     if (signed.some(p => p.signature || p.redacted)) message.reasoning_details = chatReasoningDetails(signed);
-    if (reasoningParts.length) {
-      const reasoning = reasoningParts.map((p) => (p as { text: string }).text).join("");
-      // BOTH dialect spellings by default, so a DeepSeek-convention client sees
-      // the reasoning AND replays it — its absence is what broke the next turn
-      // against an Anthropic-family upstream (4028: thinking must be passed
-      // back), because the client had nothing to send.
-      //
-      // A service that names one spelling gets exactly that one and not the
-      // other: a client strict about its own dialect can reject the extra key,
-      // and one that reads both would count the thinking twice.
-      const fmt = opts?.thinkingFormat;
-      if (fmt !== "reasoning_content") message.reasoning = reasoning;
-      if (fmt !== "reasoning") message.reasoning_content = reasoning;
-    }
-    if (toolUses.length) {
-      message.tool_calls = toolUses.map((tu) => ({
-        id: (tu as { id: string }).id,
-        type: "function",
-        function: { name: (tu as { name: string }).name, arguments: JSON.stringify((tu as { input: unknown }).input ?? {}) },
-      }));
-    }
+    if (reasoning !== undefined) Object.assign(message, clientReasoningFields(reasoning, opts?.thinkingFormat));
+    if (toolCalls) message.tool_calls = toolCalls;
     return {
       id: this.id,
       object: "chat.completion",
       created: this.created,
       model,
       choices: [{ index: 0, message, logprobs: null, finish_reason: stopToFinishReason(this.stopReason) }],
-      usage: {
-        prompt_tokens: this.usage.promptTokens, completion_tokens: this.usage.completionTokens, total_tokens: this.usage.totalTokens,
-        ...(this.usage.cachedInputTokens != null ? { prompt_tokens_details: { cached_tokens: this.usage.cachedInputTokens } } : {}),
-        ...(this.usage.reasoningTokens != null ? { completion_tokens_details: { reasoning_tokens: this.usage.reasoningTokens } } : {}),
-      },
+      usage: openAiUsageToWire(this.usage, USAGE_KEYS),
     };
   }
 
@@ -675,20 +643,22 @@ export class OpenAICompletionResponse extends Response {
     let usage: ResponseData["usage"] | undefined;
     let reasoningTextSeen = false;
     const seenTools = new Set<number>();
+    /** Argument text that arrived before the chunk naming its call, by call index. */
+    const earlyToolArgs = new Map<number, string>();
 
     for await (const frame of parseSSE(readable)) {
-      if (frame.data === "[DONE]") {
+      if (frame.data === SSE_DONE) {
         terminated = true;
         break;
       }
-      const chunk = safeParseJson(frame.data);
+      const chunk = parseSseJson(frame.data);
       if (!chunk) continue;
 
       if (!started) {
         started = true;
         yield {
           type: "start",
-          id: String(chunk.id ?? genId("chatcmpl")),
+          id: String(chunk.id ?? genId(ID_PREFIX.CHAT_COMPLETION)),
           model: String(chunk.model ?? ""),
           created: typeof chunk.created === "number" ? chunk.created : nowSeconds(),
         };
@@ -723,17 +693,25 @@ export class OpenAICompletionResponse extends Response {
         reasoningTextSeen = false;
       }
 
-      const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-      for (const tc of toolCalls) {
-        if (!tc || typeof tc !== "object") continue;
-        const call = tc as Record<string, unknown>;
+      for (const call of objectsIn(delta.tool_calls)) {
         const index = typeof call.index === "number" ? call.index : 0;
         const fn = (call.function ?? {}) as Record<string, unknown>;
-        if (!seenTools.has(index) && (call.id || fn.name)) {
+        const args = typeof fn.arguments === "string" ? fn.arguments : "";
+        if (!seenTools.has(index)) {
+          if (!(call.id || fn.name)) {
+            // Some servers send argument text ahead of the chunk that carries
+            // the call's id and name. A delta for a call that has not started
+            // belongs to nothing downstream, so it is held until the start.
+            if (args) earlyToolArgs.set(index, (earlyToolArgs.get(index) ?? "") + args);
+            continue;
+          }
           seenTools.add(index);
-          yield { type: "tool_start", index, id: String(call.id ?? genId("call")), name: String(fn.name ?? "") };
+          yield { type: "tool_start", index, id: String(call.id ?? genId(ID_PREFIX.CALL)), name: String(fn.name ?? "") };
+          const early = earlyToolArgs.get(index);
+          if (early) yield { type: "tool_args_delta", index, delta: early };
+          earlyToolArgs.delete(index);
         }
-        if (typeof fn.arguments === "string" && fn.arguments) yield { type: "tool_args_delta", index, delta: fn.arguments };
+        if (args) yield { type: "tool_args_delta", index, delta: args };
       }
 
       if (choice.finish_reason) {
@@ -756,7 +734,7 @@ export class OpenAICompletionResponse extends Response {
           totalTokens: total ?? (prompt == null && completion == null && usage ? usage.totalTokens :
             (prompt ?? usage?.promptTokens ?? 0) + (completion ?? usage?.completionTokens ?? 0)),
           ...(cached != null ? { cachedInputTokens: cached } : {}),
-          ...(numOrUndef(cd.reasoning_tokens) != null ? { reasoningTokens: num(cd.reasoning_tokens) } : {}),
+          ...(reasoning != null ? { reasoningTokens: reasoning } : {}),
         };
         yield { type: "usage", usage };
       }
@@ -770,24 +748,27 @@ export class OpenAICompletionResponse extends Response {
   }
 
   static async *serializeStream(events: AsyncGenerator<StreamEvent>, ctx: StreamContext): AsyncGenerator<string> {
-    let id = genId("chatcmpl");
+    let id = genId(ID_PREFIX.CHAT_COMPLETION);
     let created = nowSeconds();
     const model = ctx.model;
     let reasoningPart: ReasoningPart | undefined;
     let reasoningIndex = 0;
 
     const chunk = (payload: Record<string, unknown>): string =>
-      `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, ...payload })}\n\n`;
+      sseFrame(JSON.stringify({ id, object: "chat.completion.chunk", created, model, ...payload }));
+    /** A chunk carrying one delta on the single choice this proxy streams. */
+    const deltaChunk = (delta: Record<string, unknown>, finishReason: string | null = null): string =>
+      chunk({ choices: [{ index: 0, delta, finish_reason: finishReason }] });
 
     for await (const ev of events) {
       switch (ev.type) {
         case "start":
           id = ev.id || id;
           created = ev.created || created;
-          yield chunk({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+          yield deltaChunk({ role: ROLE.ASSISTANT });
           break;
         case "text_delta":
-          yield chunk({ choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }] });
+          yield deltaChunk({ content: ev.text });
           break;
         case "reasoning_start":
           reasoningPart = { type: "reasoning", text: "", origin: ev.origin, itemId: ev.id, signature: ev.signature, redacted: ev.redacted };
@@ -796,29 +777,21 @@ export class OpenAICompletionResponse extends Response {
           const p: ReasoningPart = { ...reasoningPart, type: "reasoning", text: reasoningPart?.text ?? "", origin: ev.origin ?? reasoningPart?.origin, signature: ev.signature ?? reasoningPart?.signature, itemId: ev.id ?? reasoningPart?.itemId, redacted: ev.redacted ?? reasoningPart?.redacted };
           if (p.text || p.signature || p.redacted) {
             const detail = chatReasoningDetails([p])[0] as Record<string, unknown>;
-            yield chunk({ choices: [{ index: 0, delta: { reasoning_details: [{ ...detail, index: reasoningIndex++ }] }, finish_reason: null }] });
+            yield deltaChunk({ reasoning_details: [{ ...detail, index: reasoningIndex++ }] });
           }
           reasoningPart = undefined;
           break;
         }
         case "reasoning_delta": {
           if (reasoningPart) reasoningPart.text += ev.text;
-          // Both dialect spellings unless the service named one (see renderSelf).
-          const delta: Record<string, unknown> = {};
-          if (ctx.thinkingFormat !== "reasoning_content") delta.reasoning = ev.text;
-          if (ctx.thinkingFormat !== "reasoning") delta.reasoning_content = ev.text;
-          yield chunk({ choices: [{ index: 0, delta, finish_reason: null }] });
+          yield deltaChunk(clientReasoningFields(ev.text, ctx.thinkingFormat));
           break;
         }
         case "tool_start":
-          yield chunk({
-            choices: [{ index: 0, delta: { tool_calls: [{ index: ev.index, id: ev.id, type: "function", function: { name: ev.name, arguments: "" } }] }, finish_reason: null }],
-          });
+          yield deltaChunk({ tool_calls: [{ index: ev.index, id: ev.id, type: TOOL_TYPE_FUNCTION, function: { name: ev.name, arguments: "" } }] });
           break;
         case "tool_args_delta":
-          yield chunk({
-            choices: [{ index: 0, delta: { tool_calls: [{ index: ev.index, function: { arguments: ev.delta } }] }, finish_reason: null }],
-          });
+          yield deltaChunk({ tool_calls: [{ index: ev.index, function: { arguments: ev.delta } }] });
           break;
         case "tool_stop":
           break;
@@ -828,18 +801,9 @@ export class OpenAICompletionResponse extends Response {
           // to tell a complete response from a cut-off one; relay() aborts the
           // connection instead, which every HTTP client surfaces as an error.
           if (ev.incomplete || ev.error) return;
-          yield chunk({ choices: [{ index: 0, delta: {}, finish_reason: stopToFinishReason(ev.stopReason) }] });
-          if (ev.usage) {
-            yield chunk({
-              choices: [],
-              usage: {
-                prompt_tokens: ev.usage.promptTokens, completion_tokens: ev.usage.completionTokens, total_tokens: ev.usage.totalTokens,
-                ...(ev.usage.cachedInputTokens != null ? { prompt_tokens_details: { cached_tokens: ev.usage.cachedInputTokens } } : {}),
-                ...(ev.usage.reasoningTokens != null ? { completion_tokens_details: { reasoning_tokens: ev.usage.reasoningTokens } } : {}),
-              },
-            });
-          }
-          yield "data: [DONE]\n\n";
+          yield deltaChunk({}, stopToFinishReason(ev.stopReason));
+          if (ev.usage) yield chunk({ choices: [], usage: openAiUsageToWire(ev.usage, USAGE_KEYS) });
+          yield sseFrame(SSE_DONE);
           break;
       }
     }
@@ -847,5 +811,3 @@ export class OpenAICompletionResponse extends Response {
 }
 
 registerFormat("openai_completion", { request: OpenAICompletionRequest, response: OpenAICompletionResponse });
-
-export { finishReasonToStop, stopToFinishReason };

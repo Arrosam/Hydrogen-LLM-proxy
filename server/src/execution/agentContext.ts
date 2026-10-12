@@ -10,8 +10,14 @@ import {
   type Tool,
   type ToolUsePart,
 } from "../core/ir/content";
-import { genId } from "../util/ids";
+import { genId, ID_PREFIX } from "../util/ids";
+import type { Family } from "../core/ir/params";
 import { ocrParams, type AgentCondition, type AgentOcr, type AgentStage } from "./definition";
+import { DEFAULT_AUDIO_FORMAT, type AudioInput } from "./asr";
+
+/** How an audio attachment is recognised: a Chat Completions `input_audio` part kept as a same-family opaque part. */
+const AUDIO_PART_FAMILY: Family = "openai_completion";
+const AUDIO_PART_TYPE = "input_audio";
 
 /**
  * Pure helpers for a Micro Agent's stage orchestration: assembling a stage's
@@ -88,7 +94,7 @@ function buildStageMessages(
         if (block.text) out.push({ role: block.role, content: [{ type: "text", text: block.text }] });
         break;
       case "tool_turn": {
-        const id = block.id || genId("toolu");
+        const id = block.id || genId(ID_PREFIX.TOOL_USE);
         let input: unknown = {};
         try {
           input = block.input ? JSON.parse(block.input) : {};
@@ -216,31 +222,45 @@ OUTPUT CONTRACT
 Example for two images:
 [{"index":1,"image":"..."},{"index":2,"image":"..."}]`;
 
+/** The wire value of an audio attachment part (a Chat Completions
+ * `input_audio`, carried as a same-family opaque part), or undefined for any
+ * other part. */
+function audioPartValue(p: ContentPart): { input_audio?: { data?: unknown; format?: unknown } } | undefined {
+  if (p.type !== "opaque" || p.family !== AUDIO_PART_FAMILY) return undefined;
+  const v = p.value as { type?: unknown; input_audio?: { data?: unknown; format?: unknown } };
+  return v?.type === AUDIO_PART_TYPE ? v : undefined;
+}
+
+/** The audio a part carries, when it can be transcribed: only an attachment
+ * that actually has data. Collecting and rewriting both ask this, so the
+ * transcripts stay aligned with the parts they replace. */
+function transcribableAudio(p: ContentPart): AudioInput | undefined {
+  const audio = audioPartValue(p)?.input_audio;
+  if (typeof audio?.data !== "string") return undefined;
+  return { data: audio.data, format: String(audio.format ?? DEFAULT_AUDIO_FORMAT) };
+}
+
 /** The audio attachments in a request: Chat Completions `input_audio` parts,
  * carried as same-family opaque parts by the canonical form. */
-export function collectAudio(request: Request): Array<{ data: string; format: string }> {
-  const out: Array<{ data: string; format: string }> = [];
+export function collectAudio(request: Request): AudioInput[] {
+  const out: AudioInput[] = [];
   for (const m of request.messages) {
     for (const p of m.content) {
-      if (p.type !== "opaque" || p.family !== "openai_completion") continue;
-      const v = p.value as { type?: unknown; input_audio?: { data?: unknown; format?: unknown } };
-      if (v?.type === "input_audio" && typeof v.input_audio?.data === "string") {
-        out.push({ data: v.input_audio.data, format: String(v.input_audio.format ?? "wav") });
-      }
+      const audio = transcribableAudio(p);
+      if (audio) out.push(audio);
     }
   }
   return out;
 }
 
-/** Replace each audio attachment with its transcript, in collection order. */
+/** Replace each collected audio attachment with its transcript, in collection
+ * order. A part {@link collectAudio} skipped is left as it is. */
 export function translateAudioInRequest(request: Request, transcripts: string[]): Request {
   let n = 0;
   const messages: Message[] = request.messages.map((m) => ({
     ...m,
     content: m.content.map((p) => {
-      if (p.type !== "opaque" || p.family !== "openai_completion") return p;
-      const v = p.value as { type?: unknown };
-      if (v?.type !== "input_audio") return p;
+      if (!transcribableAudio(p)) return p;
       const i = n++;
       return { type: "text", text: `\n[Audio ${i + 1} transcript]\n${transcripts[i] ?? ""}\n` } as TextPart;
     }),
@@ -343,8 +363,11 @@ export function translateImagesInRequest(request: Request, results: string[]): R
  * immunity to backtracking blowup would need re2 or a worker timeout; this
  * makes the practical window negligible instead.)
  */
-const MAX_CONDITION_PATTERN = 200;
+export const MAX_CONDITION_PATTERN = 200;
 const MAX_REGEX_TEXT = 10_000;
+
+/** The `goto` value of a transition that ends the run instead of naming a stage. */
+export const GOTO_END = "end";
 
 function safeRegex(pattern: string): RegExp {
   if (pattern.length > MAX_CONDITION_PATTERN) return /(?!)/; // never match
@@ -402,7 +425,7 @@ export function nextStep(
 ): { index: number } | { end: true; output?: string } {
   for (const t of stage.transitions ?? []) {
     if (conditionHolds(t.when, input, outputs, stage.name)) {
-      if (t.goto === "end") return { end: true, output: t.output };
+      if (t.goto === GOTO_END) return { end: true, output: t.output };
       const j = byName.get(t.goto);
       return j != null && j > idx ? { index: j } : { end: true };
     }
