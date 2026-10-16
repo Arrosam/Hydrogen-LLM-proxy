@@ -61,7 +61,9 @@ const INTERRUPTED = "Upstream thinking block was interrupted";
 const EXCESS_PADDING = "Upstream thinking prefix exceeds the 512-character padding limit";
 
 export const THINKING_QUOTE_LOOKAHEAD = 4096;
-const AMBIGUOUS = "Upstream thinking boundary is ambiguous: quotation lookahead exceeds the 4096-character limit; use native reasoning fields or an explicit custom delimiter";
+// The message names the limit, so it is built from the constant. Otherwise a
+// change to the lookahead would leave the error text describing the old value.
+const AMBIGUOUS = `Upstream thinking boundary is ambiguous: quotation lookahead exceeds the ${THINKING_QUOTE_LOOKAHEAD}-character limit; use native reasoning fields or an explicit custom delimiter`;
 
 type ActiveParser = { pair: ThinkingDelimiters; unterminated: "error" | "reasoning"; quoted: boolean };
 

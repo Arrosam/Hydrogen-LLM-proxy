@@ -1,4 +1,4 @@
-import { historyItems, historyMessages, privateHistoryMessages, publicHistoryItem, withHistoryMessages } from "./conversationHistory";
+import { historyItems, historyMessages, MAX_HISTORY_CONTEXT_BYTES, privateHistoryMessages, publicHistoryItem, withHistoryMessages } from "./conversationHistory";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { DB } from "../db";
@@ -149,7 +149,7 @@ export class ResponseRepo {
     if ((size?.bytes ?? 0) > 25 * 1024 * 1024) throw new ResponseStateError("Conversation exceeds the 25 MiB context limit", 413);
     const rows = this.db.select().from(conversationItems).where(eq(conversationItems.conversationId, id)).orderBy(asc(conversationItems.sequence)).all();
     const result = rows.map(row => row.item);
-    if (Buffer.byteLength(JSON.stringify(result)) > 25 * 1024 * 1024) throw new ResponseStateError("Conversation exceeds the 25 MiB context limit", 413);
+    if (Buffer.byteLength(JSON.stringify(result)) > MAX_HISTORY_CONTEXT_BYTES) throw new ResponseStateError("Conversation exceeds the 25 MiB context limit", 413);
     return result;
   }
 
@@ -244,7 +244,7 @@ export class ResponseRepo {
         if (result && includeResult && !next.some(message => message.content.some(part => part.type === "tool_result" && sameToolProvenance(part.hydrogenTool, marker)))) {
           next.push({ role: "user", content: [structuredClone(result)] });
         }
-        if (Buffer.byteLength(JSON.stringify(next)) > 25 * 1024 * 1024) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
+        if (Buffer.byteLength(JSON.stringify(next)) > MAX_HISTORY_CONTEXT_BYTES) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
         return next;
       };
       for (const row of rows) this.db.update(storedResponses).set({ history: update(row.history) })

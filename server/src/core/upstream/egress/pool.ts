@@ -1,6 +1,7 @@
 import { ProxyAgent, type Dispatcher } from "undici";
 import type { LookupAddress, LookupOptions } from "node:dns";
 import type { ResolvedAddress } from "../ssrf";
+import { PIN_TTL_MS } from "../pins";
 import { resolveProxyHost } from "./proxyHost";
 import { proxyKey, proxyLabel, proxyOrigin, type EgressProxy } from "./types";
 
@@ -40,9 +41,6 @@ import { proxyKey, proxyLabel, proxyOrigin, type EgressProxy } from "./types";
 /** Ceiling on cached dispatchers. The map is kept in least-recently-USED
  * order (see the re-insert in dispatcherFor), so eviction takes the coldest. */
 const MAX_DISPATCHERS = 32;
-
-/** How long a proxy-host resolution stays pinned. Matches the direct path. */
-const PIN_TTL_MS = 30_000;
 
 interface Entry {
   dispatcher: Dispatcher;

@@ -4,6 +4,16 @@ import { normalizeMessages, type Message } from "../core/ir/content";
 export type HistoryItem = Record<string, unknown>;
 const CANONICAL = "__hydrogenCanonicalMessages";
 
+/**
+ * Serialized-size ceiling for one conversation's replayed history, in bytes.
+ *
+ * This names the CONTEXT limit only. It is kept separate from the transport body
+ * cap (core/upstream/body.ts), the SSE frame cap and the tool-argument cap. Those
+ * are different rules that share the value 25 MiB today, so they keep their own
+ * names and a change to one does not silently change another.
+ */
+export const MAX_HISTORY_CONTEXT_BYTES = 25 * 1024 * 1024;
+
 /** Public wire items are a presentation, never the source of truth for replay.
  * The private snapshot retains opaque reasoning signatures and redacted parts. */
 export function historyItems(messages: Message[]): HistoryItem[] {

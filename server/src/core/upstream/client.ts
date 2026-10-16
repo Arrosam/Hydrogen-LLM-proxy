@@ -5,15 +5,8 @@ import type { Readable } from "node:stream";
 import type { SsrfGuard, ResolvedAddress } from "./ssrf";
 import type { Transport, TransportJsonResult, TransportOptions, TransportStreamResult } from "./transport";
 import type { EgressProxyPool } from "./egress/pool";
+import { PIN_TTL_MS } from "./pins";
 import { UpstreamUrlError } from "./ssrf";
-
-/**
- * How long a pinned resolution stays fresh. Pinning happens immediately
- * before each request, so the TTL only bounds how long a cached entry may be
- * reused by a pooled connection re-established on its own -- every request
- * re-pins, so an active stream's reconnects always re-validate first.
- */
-const PIN_TTL_MS = 30_000;
 
 /** Upper bound on remembered resolutions: the map is keyed by hostname, and
  * URLs arrive in request bodies (the file pre-pass), so a hostile client

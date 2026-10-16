@@ -1,4 +1,4 @@
-import { historyMessages, publicHistoryItem, hasPrivateHistoryField } from "../persistence/conversationHistory";
+import { historyMessages, publicHistoryItem, hasPrivateHistoryField, MAX_HISTORY_CONTEXT_BYTES } from "../persistence/conversationHistory";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
@@ -249,7 +249,7 @@ export class ResponsesController {
     request = buildRequest(family, { ...request.data(), messages: [...prefix, ...request.messages] });
     const retainedToolInstances = new Set(request.messages.flatMap(message => message.content)
       .flatMap(part => part.type === "tool_use" && part.hydrogenTool?.instanceId ? [part.hydrogenTool.instanceId] : []));
-    if (Buffer.byteLength(JSON.stringify(request.messages)) > 25 * 1024 * 1024) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
+    if (Buffer.byteLength(JSON.stringify(request.messages)) > MAX_HISTORY_CONTEXT_BYTES) throw new ResponseStateError("Response context exceeds 25 MiB", 413);
     const bound = service.tools;
     const serverToolNamePrefix = snapshot.serverToolNamePrefix;
     const executor = this.deps.factory.fromSnapshot(snapshot).executor;
@@ -325,7 +325,7 @@ export class ResponsesController {
         served = run.value;
         usage = run.value.response.usage; calls = run.calls; attempts = run.attempts;
         abort.signal.throwIfAborted();
-        if (Buffer.byteLength(JSON.stringify(run.history)) > 25 * 1024 * 1024) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
+        if (Buffer.byteLength(JSON.stringify(run.history)) > MAX_HISTORY_CONTEXT_BYTES) throw new ResponseStateError("Response history exceeds 25 MiB", 413);
         let final = run.value.response;
         // Give the client the provider-executed round trips it asked for. The
         // parts come from the run's UNTRUNCATED history, not the clipped trace,

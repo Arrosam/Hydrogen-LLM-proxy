@@ -75,8 +75,10 @@ function shortTrace(traceId: string): string {
   return `${traceId.slice(0, 10)}...${traceId.slice(-6)}`;
 }
 
+/** Auto-refresh cadence of the live list, in milliseconds. */
+const REFRESH_INTERVAL_MS = 500;
+
 export function ActiveRequests() {
-  const REFRESH_MS = 500;
   const [data, setData] = useState<ActiveRequestsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +121,7 @@ export function ActiveRequests() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
-    intervalRef.current = setInterval(() => load(true), REFRESH_MS);
+    intervalRef.current = setInterval(() => load(true), REFRESH_INTERVAL_MS);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
@@ -152,7 +154,7 @@ export function ActiveRequests() {
                 {t("activeRequests.blockedCount", { count: blockedCount })}
               </span>
             )}
-            <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("activeRequests.autoRefreshLabel", { ms: REFRESH_MS })} />
+            <Toggle checked={autoRefresh} onChange={setAutoRefresh} label={t("activeRequests.autoRefreshLabel", { ms: REFRESH_INTERVAL_MS })} />
             {autoRefresh && (
               <span className="badge-green">
                 <i className="bi bi-broadcast" />
